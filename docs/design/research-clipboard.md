@@ -1,0 +1,57 @@
+All research complete. Findings returned below as the final deliverable.
+
+# AgentClip Clipboard Strategy — Recommendation
+
+## 1. Library choice: copykitten (primary) + pyperclip (fallback) + a 10-line ctypes shim on Windows for change detection
+
+**Primary: `copykitten` 2.0.0** (Sept 2025, actively maintained) — Rust `arboard` 3.6.1 wrapped in a pyo3 abi3 extension. Verified from its Cargo.toml: `arboard = "3.6.1"` with **default features (no `wayland-data-control`)**, `daemonize` on Linux. Prebuilt wheels: Windows x64, Linux x64/ARM64, macOS x64/ARM64; Python >= 3.8; zero external binaries.
+
+Why it wins for a 250–500ms poller: it holds a persistent in-process connection (Win32 / X11 via x11rb / NSPasteboard), so each read is an IPC round-trip, **not a subprocess fork**. pyperclip on Linux spawns `xclip`/`wl-paste` per call — at 300ms polling that is ~3 process spawns/sec forever. PyInstaller-friendly: one abi3 `.pyd`/`.so` auto-collected by PyInstaller's binary analysis, no hooks, no console-window flash from subprocess spawns on Windows.
+
+**Fallback: `pyperclip` 1.11.0** (Sept 2025 — actively maintained again; the `pyperclipfix`/`pyclip` forks are now unnecessary; `pyclip` is flagged inactive by Snyk). Pure Python, trivially bundled. Backends: Windows ctypes (has a built-in ~500ms `OpenClipboard` retry loop), macOS `pbcopy`/`pbpaste`, Linux `xclip`/`xsel`/`wl-copy`/`gpaste`.
+
+**Rejected:** `pyclip` (unmaintained, needs wl-clipboard binaries anyway); `pywin32` (Windows-only, heavy, needs PyInstaller hooks, and its `OpenClipboard` raises the same Access-denied races you must retry manually); `tkinter` (needs a pumped hidden Tk root inside a TUI, X11-only on Linux, ~10MB PyInstaller bloat, flaky `TclError` on non-text clipboard); Textual OSC 52 (write-only by design, many terminals cap it ~8KB–1MB — keep only as a last-ditch copy path over SSH).
+
+**Exact failure modes of copykitten per platform:**
+- **Windows 10/11:** works natively. Transient failures when another process holds the clipboard (Win+V history indexer, Ditto, OneDrive, RDP `rdpclip`) — arboard's `clipboard-win` retries internally; treat residual failures as "skip tick". No win-arm64 wheel as of 2.0.0 (x64 only).
+- **Linux X11:** native, no `xclip` needed. Gotcha: X11 clipboard contents are *served* by the owning process — if AgentClip exits before the user pastes, clipboard goes empty unless a clipboard manager runs. Mitigation: `copykitten.copy(text, detach=True)` (Linux-only daemon hand-off) for the final write before exit. INCR receive is implemented in arboard's x11 backend; sends of hundreds of KB fit in a single transfer (X11 big-requests ≈16MB), so size is a non-issue at AgentClip scale.
+- **Linux Wayland:** because the wheel does **not** enable `wayland-data-control`, copykitten runs its X11 backend **through XWayland**. This is a feature, not a bug: GNOME/KDE/wlroots continuously sync the Wayland clipboard with XWayland selections, so AgentClip can read the clipboard **without focus** even on GNOME (which rejected wlr-data-control for privacy and only recently grew ext-data-control). Hard failure mode: no XWayland / no `$DISPLAY` (pure-Wayland kiosk, XWayland disabled) → copykitten init fails → fall back to pyperclip + `wl-clipboard` (user installs `wl-clipboard`; on X11 fallback, `xclip` — document `sudo apt install wl-clipboard xclip`).
+- **macOS:** NSPasteboard via arboard, works, no binaries.
+
+Implement a small `ClipboardProvider` protocol (`read_text()`, `write_text()`, `name`, `healthcheck()`), chosen at startup: Windows → copykitten+seqnum shim; Linux → copykitten, else pyperclip, else manual-hotkey-only mode; show active provider in the status bar.
+
+## 2. Polling pattern
+
+- **Interval: 300ms default**, configurable 200–500ms. Detection latency is human-imperceptible next to the copy-paste loop itself.
+- **Windows — don't read at all to detect change:** poll `ctypes.windll.user32.GetClipboardSequenceNumber()` each tick. It's a single user32 call, requires no `OpenClipboard`, can't race, costs nanoseconds. Only when the DWORD changes do a real `copykitten.paste()`. This makes large-clipboard polling free on the primary platform.
+- **Linux/macOS — read + hash:** no portable cheap counter (XFixes/changeCount aren't exposed by these libs). Read full text each tick; compare `len(text)` first, then `hashlib.blake2b(text.encode())` (~100µs for 200KB) against the last hash. Don't keep/compare the full previous string. CPU at 300ms with a 200KB clipboard ≈ <1% of one core; negligible.
+- **Self-write suppression:** record the hash of every payload AgentClip writes; the watcher ignores reads matching it (otherwise you re-detect your own results payload).
+- **Cheap pre-filter:** only run the protocol parser if the text contains `===CLIP:`; otherwise just update the hash.
+- **Windows access-denied races:** when the post-change read fails (`Access is denied` / `CLIPBRD_E_CANT_OPEN` — classic with Win+V history and clipboard managers), retry 3–5× with 50–100ms backoff; if still failing, drop it and let the next tick retry (the sequence number stays changed, so nothing is lost). Never hold the clipboard open between ticks — both libs open-read-close atomically.
+- **Non-text clipboard** (files, images, empty): `copykitten.paste()` raises, pyperclip returns `''` — catch and treat as "no text this tick".
+
+## 3. Textual integration: thread worker, not set_interval
+
+Use `self.run_worker(self._clipboard_loop, thread=True, exclusive=True, group="clipwatch")`. The loop: check `get_current_worker().is_cancelled` each iteration, `time.sleep(interval)`, and on detection `self.post_message(ClipboardProtocolDetected(...))` (thread-safe; or `app.call_from_thread`).
+
+Reasoning: `set_interval` callbacks run on the asyncio event loop. Clipboard reads are blocking I/O with bad tail latencies — Windows lock retries (up to ~500ms in pyperclip), X11 selection conversion can stall seconds on a hung selection owner, and the pyperclip fallback forks a subprocess per read. Any of those freezes rendering and keystrokes in the TUI. A thread worker isolates all of it, and Textual workers give you cancellation, state events for the status bar ("watcher: running/paused/error"), and `exclusive=True` for clean restart on settings change. Bonus: route **writes** through the same single thread (a small queue) so reads and large writes never interleave — one dedicated clipboard thread sidesteps Win32 threading quirks entirely.
+
+## 4. Large writes (tens–hundreds of KB)
+
+- **Windows:** GlobalAlloc-backed; multi-MB is fine. Only known flake: with Clipboard History enabled, very large/rapid writes occasionally throw transiently (pyperclip issue #231) — same 3×/100ms retry-on-write fixes it.
+- **X11:** size fine at this scale (single transfer well under the ~16MB big-request limit; arboard handles INCR receive). The real gotcha is ownership lifetime (see §1) — app must stay alive until pasted, or `detach=True`. If ever on the pyperclip fallback, prefer `xclip` over `xsel` (xsel has historic large-content bugs).
+- **Wayland:** `wl-copy` self-daemonizes and serves via pipes — no practical limit; via copykitten/XWayland the compositor bridges the selection to Wayland apps including browsers — works for large data.
+- **macOS:** NSPasteboard/pbcopy, MBs fine.
+- The practical ceiling is the **browser chat input**, not the OS clipboard — pasting ~1MB into ChatGPT's contenteditable is slow/droppy. The already-planned per-service paste budget + chunking keeps payloads in the safe zone; OS-side, nothing more is needed.
+
+## 5. Wayland-specific gotchas
+
+- **Focus requirement:** the core Wayland protocol (`wl_data_device`) only lets a client read the clipboard while it has keyboard focus — fatal for a background watcher whose user is focused on the browser. Focusless access needs the clipboard-manager protocols `zwlr_data_control_v1` (wlroots/Sway/Hyprland, KDE) or `ext-data-control-v1` (the standardized successor; GNOME only adopted this path recently, having refused wlr-data-control on privacy grounds). `wl-paste` uses data-control when present; without it, wl-clipboard resorts to a transient invisible-surface focus hack (flicker, occasional failure on GNOME).
+- **Why the recommendation dodges all of this:** copykitten's X11-via-XWayland path reads/writes the XWayland selection, which GNOME/KDE/wlroots keep synced with the Wayland clipboard *in the compositor* — no focus needed, no wl-clipboard install, works on GNOME today. This is the most reliable Wayland read path for a TUI in 2026.
+- **Ownership:** same as X11 — contents die with the owning process; `wl-copy` daemonizes, copykitten offers `detach=True`.
+- **Requirements to document for the fallback path only:** `wl-clipboard` package; expect possible focus-flicker on older GNOME without data-control.
+- **Flatpak/Snap sandboxes** block data-control without portals — irrelevant for a pip/PyInstaller distribution, but don't ship AgentClip as a Flatpak.
+
+**Bottom line:** `copykitten` as the single bundled backend on all platforms, a ctypes `GetClipboardSequenceNumber` pre-check on Windows, `pyperclip` (+ documented `wl-clipboard`/`xclip` install) as the Linux fallback when `$DISPLAY` is absent, polling at 300ms from a Textual thread worker that compares length+blake2b and posts messages to the app.
+
+Sources: [copykitten GitHub](https://github.com/Klavionik/copykitten), [copykitten PyPI](https://pypi.org/project/copykitten/), [copykitten Cargo.toml](https://github.com/Klavionik/copykitten/blob/main/Cargo.toml), [arboard](https://github.com/1Password/arboard), [arboard Clipboard docs (ownership/wait)](https://docs.rs/arboard/latest/arboard/struct.Clipboard.html), [arboard x11.rs (INCR)](https://docs.rs/arboard/latest/src/arboard/platform/linux/x11.rs.html), [pyperclip PyPI 1.11.0](https://pypi.org/project/pyperclip/), [pyperclip source (wl-clipboard/gpaste backends)](https://github.com/asweigart/pyperclip/blob/master/src/pyperclip/__init__.py), [pyperclip #231 clipboard-history/long-string error](https://github.com/asweigart/pyperclip/issues/231), [pyperclip #119 OpenClipboard Access denied](https://github.com/asweigart/pyperclip/issues/119), [pywin32 #2060 OpenClipboard vs Ditto](https://github.com/mhammond/pywin32/issues/2060), [OpenClipboard docs](https://learn.microsoft.com/en-us/windows/desktop/api/winuser/nf-winuser-openclipboard), [pyclip (inactive per Snyk)](https://snyk.io/advisor/python/pyclip), [wl-clipboard](https://github.com/bugaevc/wl-clipboard), [wl-clipboard #242 ext-data-control](https://github.com/bugaevc/wl-clipboard/issues/242), [wl-clipboard-rs](https://github.com/YaLTeR/wl-clipboard-rs), [wl-clipboard-rs #39 missing wlr-data-control workaround](https://github.com/YaLTeR/wl-clipboard-rs/issues/39), [Mutter #524 wlr-data-control refusal](https://gitlab.gnome.org/GNOME/mutter/-/work_items/524), [GNOME Discourse: intercepting clipboard on Mutter](https://discourse.gnome.org/t/how-to-intercept-clipboard-operations-on-linux-wayland-mutter-gnome/19315), [wlr-data-control protocol](https://wayland.app/protocols/wlr-data-control-unstable-v1), [rainfrog #83 X11 clipboard timeout](https://github.com/achristmascarl/rainfrog/issues/83), [FLTK #459 INCR/large-data limits](https://github.com/fltk/fltk/issues/459)

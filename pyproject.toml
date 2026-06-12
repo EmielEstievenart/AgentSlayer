@@ -1,0 +1,53 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentclip"
+version = "0.1.0"
+description = "Use any web-chat LLM as a coding agent over the clipboard"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "textual>=8.2,<9",
+    "copykitten>=2.0,<3",
+    "pyperclip>=1.11,<2",
+    "platformdirs>=4",
+]
+
+[project.scripts]
+agentclip = "agentclip.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.25",
+    "pytest-textual-snapshot",
+    "textual-dev",
+    "ruff",
+    "mypy",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentclip"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501", "SIM108"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+mypy_path = "src"

@@ -1,0 +1,46 @@
+{
+  "kind": "reply",
+  "calls": [
+    {
+      "id": 1,
+      "tool": "write_file",
+      "params": {
+        "path": "src/new_module.py"
+      },
+      "original_id": null,
+      "issues": [
+        {
+          "kind": "unterminated_heredoc",
+          "line": 3,
+          "detail": "heredoc 'content' (tag EOT) never terminated; re-parsing from CALL header swallowed at line 6"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "tool": "run_command",
+      "params": {
+        "command": "pytest -q"
+      },
+      "original_id": null,
+      "issues": []
+    }
+  ],
+  "prose": [],
+  "warnings": [
+    {
+      "kind": "unterminated_heredoc",
+      "line": 3,
+      "detail": "heredoc 'content' (tag EOT) never terminated; re-parsing from CALL header swallowed at line 6"
+    }
+  ],
+  "eom": {
+    "present": true,
+    "calls": 2,
+    "turn": null
+  },
+  "truncated": false,
+  "ack_part": null,
+  "ack_total": null,
+  "nack_reason": null
+}

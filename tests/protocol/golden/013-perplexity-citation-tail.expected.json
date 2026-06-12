@@ -1,0 +1,28 @@
+{
+  "kind": "reply",
+  "calls": [
+    {
+      "id": 1,
+      "tool": "grep",
+      "params": {
+        "pattern": "parse_date",
+        "path": "src"
+      },
+      "original_id": null,
+      "issues": []
+    }
+  ],
+  "prose": [
+    "Sources\n[1] https://docs.python.org/3/library/datetime.html\n[2] https://example.com/datetime-formats"
+  ],
+  "warnings": [],
+  "eom": {
+    "present": true,
+    "calls": 1,
+    "turn": null
+  },
+  "truncated": false,
+  "ack_part": null,
+  "ack_total": null,
+  "nack_reason": null
+}

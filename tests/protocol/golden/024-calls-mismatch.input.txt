@@ -1,0 +1,7 @@
+===CLIP:CALL id=1 tool=read_file===
+path: src/a.py
+===CLIP:END===
+===CLIP:CALL id=2 tool=read_file===
+path: src/b.py
+===CLIP:END===
+===CLIP:EOM calls=3===

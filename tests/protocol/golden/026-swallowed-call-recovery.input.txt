@@ -1,0 +1,9 @@
+===CLIP:CALL id=1 tool=write_file===
+path: src/new_module.py
+content <<EOT
+def helper():
+    return 42
+===CLIP:CALL id=2 tool=run_command===
+command: pytest -q
+===CLIP:END===
+===CLIP:EOM calls=2===

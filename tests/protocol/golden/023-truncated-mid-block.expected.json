@@ -1,0 +1,39 @@
+{
+  "kind": "reply",
+  "calls": [
+    {
+      "id": 1,
+      "tool": "edit_file",
+      "params": {
+        "path": "src/uti"
+      },
+      "original_id": null,
+      "issues": [
+        {
+          "kind": "missing_end",
+          "line": 3,
+          "detail": "input ended inside this CALL block (no ===CLIP:END===)"
+        }
+      ]
+    }
+  ],
+  "prose": [
+    "I'll update the helper now."
+  ],
+  "warnings": [
+    {
+      "kind": "truncation_suspected",
+      "line": 0,
+      "detail": "missing ===CLIP:EOM==="
+    }
+  ],
+  "eom": {
+    "present": false,
+    "calls": null,
+    "turn": null
+  },
+  "truncated": true,
+  "ack_part": null,
+  "ack_total": null,
+  "nack_reason": null
+}

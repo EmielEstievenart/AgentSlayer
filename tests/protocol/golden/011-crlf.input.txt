@@ -1,0 +1,9 @@
+===CLIP:CALL id=1 tool=write_file===
+path: notes.txt
+mode: create
+content <<EOT
+line one
+line two
+EOT
+===CLIP:END===
+===CLIP:EOM calls=1===

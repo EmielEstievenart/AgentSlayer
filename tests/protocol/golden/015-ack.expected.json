@@ -1,0 +1,17 @@
+{
+  "kind": "ack",
+  "calls": [],
+  "prose": [
+    "Got it."
+  ],
+  "warnings": [],
+  "eom": {
+    "present": false,
+    "calls": null,
+    "turn": null
+  },
+  "truncated": false,
+  "ack_part": 2,
+  "ack_total": 3,
+  "nack_reason": null
+}

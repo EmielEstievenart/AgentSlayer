@@ -1,0 +1,9 @@
+===CLIP:CALL id=1 tool=grep===
+pattern: parse_date
+path: src
+===CLIP:END===
+===CLIP:EOM calls=1===
+
+Sources
+[1] https://docs.python.org/3/library/datetime.html
+[2] https://example.com/datetime-formats

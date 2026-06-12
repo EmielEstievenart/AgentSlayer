@@ -1,0 +1,8 @@
+```text
+===CLIP:CALL id=1 tool=read_file===
+path: src/utils.py
+start: 80
+end: 140
+===CLIP:END===
+===CLIP:EOM calls=1===
+```

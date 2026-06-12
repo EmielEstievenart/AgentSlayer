@@ -1,0 +1,15 @@
+{
+  "kind": "nack",
+  "calls": [],
+  "prose": [],
+  "warnings": [],
+  "eom": {
+    "present": false,
+    "calls": null,
+    "turn": null
+  },
+  "truncated": false,
+  "ack_part": null,
+  "ack_total": null,
+  "nack_reason": "truncated"
+}

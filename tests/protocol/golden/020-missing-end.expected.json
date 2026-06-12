@@ -1,0 +1,40 @@
+{
+  "kind": "reply",
+  "calls": [
+    {
+      "id": 1,
+      "tool": "read_file",
+      "params": {
+        "path": "src/a.py"
+      },
+      "original_id": null,
+      "issues": []
+    },
+    {
+      "id": 2,
+      "tool": "read_file",
+      "params": {
+        "path": "src/b.py"
+      },
+      "original_id": null,
+      "issues": []
+    }
+  ],
+  "prose": [],
+  "warnings": [
+    {
+      "kind": "missing_end",
+      "line": 1,
+      "detail": "===CLIP:END=== missing for call id=1; auto-closed at line 3"
+    }
+  ],
+  "eom": {
+    "present": true,
+    "calls": 2,
+    "turn": null
+  },
+  "truncated": false,
+  "ack_part": null,
+  "ack_total": null,
+  "nack_reason": null
+}

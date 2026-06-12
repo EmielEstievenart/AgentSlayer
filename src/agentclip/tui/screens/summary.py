@@ -1,0 +1,42 @@
+"""SummaryScreen: shown on task_done or via the e key (tui.md section 1.5).
+
+Dismisses with one of "undo" | "new" | "close".
+"""
+
+from __future__ import annotations
+
+from rich.table import Table
+from textual.app import ComposeResult
+from textual.binding import Binding
+from textual.containers import Vertical
+from textual.screen import ModalScreen
+from textual.widgets import Markdown, Static
+
+
+class SummaryScreen(ModalScreen[str]):
+    BINDINGS = [
+        Binding("u", "undo", "undo last turn"),
+        Binding("t", "new", "new session"),
+        Binding("escape", "close", "close"),
+    ]
+
+    def __init__(self, stats: Table, summary: str) -> None:
+        super().__init__()
+        self._stats = stats
+        self._summary = summary
+
+    def compose(self) -> ComposeResult:
+        with Vertical(classes="modal-box"):
+            yield Static("SESSION SUMMARY", classes="title")
+            yield Static(self._stats)
+            yield Markdown(self._summary or "*(the model sent no summary)*")
+            yield Static("u undo last turn · t new session · escape close", classes="hint")
+
+    def action_undo(self) -> None:
+        self.dismiss("undo")
+
+    def action_new(self) -> None:
+        self.dismiss("new")
+
+    def action_close(self) -> None:
+        self.dismiss("close")

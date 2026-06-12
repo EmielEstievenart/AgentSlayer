@@ -1,0 +1,40 @@
+{
+  "kind": "reply",
+  "calls": [
+    {
+      "id": 1,
+      "tool": "read_file",
+      "params": {
+        "path": "src/a.py"
+      },
+      "original_id": null,
+      "issues": []
+    },
+    {
+      "id": 2,
+      "tool": "read_file",
+      "params": {
+        "path": "src/b.py"
+      },
+      "original_id": "1",
+      "issues": []
+    }
+  ],
+  "prose": [],
+  "warnings": [
+    {
+      "kind": "renumbered",
+      "line": 4,
+      "detail": "call id=1 renumbered to id=2"
+    }
+  ],
+  "eom": {
+    "present": true,
+    "calls": 2,
+    "turn": null
+  },
+  "truncated": false,
+  "ack_part": null,
+  "ack_total": null,
+  "nack_reason": null
+}

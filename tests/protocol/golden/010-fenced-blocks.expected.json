@@ -1,0 +1,27 @@
+{
+  "kind": "reply",
+  "calls": [
+    {
+      "id": 1,
+      "tool": "read_file",
+      "params": {
+        "path": "src/utils.py",
+        "start": "80",
+        "end": "140"
+      },
+      "original_id": null,
+      "issues": []
+    }
+  ],
+  "prose": [],
+  "warnings": [],
+  "eom": {
+    "present": true,
+    "calls": 1,
+    "turn": null
+  },
+  "truncated": false,
+  "ack_part": null,
+  "ack_total": null,
+  "nack_reason": null
+}

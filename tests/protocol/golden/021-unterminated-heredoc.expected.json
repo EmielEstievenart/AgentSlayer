@@ -1,0 +1,42 @@
+{
+  "kind": "reply",
+  "calls": [
+    {
+      "id": 1,
+      "tool": "write_file",
+      "params": {
+        "path": "src/big.py"
+      },
+      "original_id": null,
+      "issues": [
+        {
+          "kind": "unterminated_heredoc",
+          "line": 3,
+          "detail": "heredoc 'content' (tag EOT) still open at end of input"
+        }
+      ]
+    }
+  ],
+  "prose": [],
+  "warnings": [
+    {
+      "kind": "unterminated_heredoc",
+      "line": 3,
+      "detail": "heredoc 'content' (tag EOT) still open at end of input"
+    },
+    {
+      "kind": "truncation_suspected",
+      "line": 0,
+      "detail": "missing ===CLIP:EOM==="
+    }
+  ],
+  "eom": {
+    "present": false,
+    "calls": null,
+    "turn": null
+  },
+  "truncated": true,
+  "ack_part": null,
+  "ack_total": null,
+  "nack_reason": null
+}

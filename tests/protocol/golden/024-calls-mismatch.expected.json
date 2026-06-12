@@ -1,0 +1,40 @@
+{
+  "kind": "reply",
+  "calls": [
+    {
+      "id": 1,
+      "tool": "read_file",
+      "params": {
+        "path": "src/a.py"
+      },
+      "original_id": null,
+      "issues": []
+    },
+    {
+      "id": 2,
+      "tool": "read_file",
+      "params": {
+        "path": "src/b.py"
+      },
+      "original_id": null,
+      "issues": []
+    }
+  ],
+  "prose": [],
+  "warnings": [
+    {
+      "kind": "calls_count_mismatch",
+      "line": 7,
+      "detail": "EOM declares calls=3 but 2 CALL block(s) parsed"
+    }
+  ],
+  "eom": {
+    "present": true,
+    "calls": 3,
+    "turn": null
+  },
+  "truncated": true,
+  "ack_part": null,
+  "ack_total": null,
+  "nack_reason": null
+}

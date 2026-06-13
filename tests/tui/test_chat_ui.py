@@ -138,6 +138,46 @@ async def test_gate_focus_lets_y_approve(tmp_path: Path) -> None:
         await _wait_for(pilot, lambda: not main.composer.disabled, "composer re-enabled")
 
 
+async def test_export_chat_log(tmp_path: Path) -> None:
+    app, fake, project = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        # Run a full turn so the log has the model's prose, a tool call (with its
+        # raw block) and the outbound payload - the "together with AI" content.
+        main.post_message(ClipboardCaptured(REPLY_WITH_EDIT))
+        await _wait_for(pilot, lambda: main.pending_approval, "approval gate")
+        await pilot.press("y")
+        await _wait_for(pilot, lambda: main.phase_name == "AWAITING_REPLY", "re-armed")
+        await _wait_for(pilot, lambda: not main.busy, "turn settled")
+
+        # Esc blurs the chat box so the bare-letter `l` reaches the screen binding.
+        assert main.composer.disabled is False
+        await pilot.press("escape")
+        await pilot.press("l")
+
+        assert main._snap is not None
+        session_dir = main._snap.session_dir
+        await _wait_for(
+            pilot,
+            lambda: any(session_dir.glob("chat-log-*.md")),
+            "chat log written",
+        )
+        log_path = next(iter(session_dir.glob("chat-log-*.md")))
+        text = log_path.read_text(encoding="utf-8")
+        assert text.startswith("# AgentClip chat log")
+        assert "Tidy up src/utils.py." in text  # the user's task
+        assert "I'll fix it." in text  # the model's prose
+        assert "tool call 1 - edit_file src/utils.py" in text  # the tool call headline
+        assert "===CLIP:CALL id=1 tool=edit_file===" in text  # the verbatim raw block
+        # The outbound payload (results pasted back to the model) is captured too.
+        assert "===CLIP:RESULT" in text and "outbound turn" in text
+        # And the export left a breadcrumb in the transcript.
+        assert any("chat log exported" in e for e in main.transcript.entries)
+
+
 async def test_reject_button_opens_reason(tmp_path: Path) -> None:
     app, fake, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 40)) as pilot:

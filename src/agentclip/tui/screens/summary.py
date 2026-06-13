@@ -1,6 +1,7 @@
 """SummaryScreen: shown on task_done or via the e key (tui.md section 1.5).
 
-Dismisses with one of "undo" | "new" | "close".
+Dismisses with one of "undo" | "new" | "close" | "export". The caller treats
+"export" specially: it writes the chat log and re-shows this screen.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ class SummaryScreen(ModalScreen[str]):
     BINDINGS = [
         Binding("u", "undo", "undo last turn"),
         Binding("t", "new", "new session"),
+        Binding("l", "export", "export chat log"),
         Binding("escape", "close", "close"),
     ]
 
@@ -30,13 +32,19 @@ class SummaryScreen(ModalScreen[str]):
             yield Static("SESSION SUMMARY", classes="title")
             yield Static(self._stats)
             yield Markdown(self._summary or "*(the model sent no summary)*")
-            yield Static("u undo last turn · t new session · escape close", classes="hint")
+            yield Static(
+                "u undo last turn · t new session · l export chat log · escape close",
+                classes="hint",
+            )
 
     def action_undo(self) -> None:
         self.dismiss("undo")
 
     def action_new(self) -> None:
         self.dismiss("new")
+
+    def action_export(self) -> None:
+        self.dismiss("export")
 
     def action_close(self) -> None:
         self.dismiss("close")

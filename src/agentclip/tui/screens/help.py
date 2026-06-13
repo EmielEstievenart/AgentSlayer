@@ -24,6 +24,7 @@ Session  (press Esc first if the chat box has focus)
   c  re-copy the last outbound payload    i  force-ingest the clipboard now
   w  pause/resume the clipboard watcher   t  jump to the chat box
   e  end session / show the summary       x  expand the last collapsed output
+  l  export the full chat log to a file (raw blocks + payloads, for debugging)
 
 App
   F1 or ?  this help        F2  settings (lands in M3 - edit .agentclip.toml)

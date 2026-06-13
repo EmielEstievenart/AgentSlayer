@@ -23,6 +23,7 @@ import contextlib
 from collections import Counter
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, TypeVar
 
@@ -102,6 +103,7 @@ class MainScreen(Screen[None]):
         Binding("w", "toggle_watch", "watcher"),
         Binding("t", "follow_up", "type message"),
         Binding("e", "end_session", "summary"),
+        Binding("l", "export_log", "export log"),
         Binding("x", "toggle_last", "expand last", show=False),
         Binding("ctrl+s", "submit_composer", "send", priority=True, show=False),
         Binding("ctrl+enter", "submit_composer", "send", priority=True, show=False),
@@ -201,6 +203,8 @@ class MainScreen(Screen[None]):
         if action == "toggle_watch":
             if self._provider.name == "manual":
                 return False
+            return True if self.session_active else None
+        if action == "export_log":
             return True if self.session_active else None
         if action == "submit_composer":
             if self.awaiting_answer:
@@ -485,9 +489,14 @@ class MainScreen(Screen[None]):
     # -- summary / reset --------------------------------------------------------------------------
 
     async def _show_summary(self) -> None:
-        action = await self.app.push_screen_wait(
-            SummaryScreen(self._stats_table(), self._stats.summary)
-        )
+        while True:
+            action = await self.app.push_screen_wait(
+                SummaryScreen(self._stats_table(), self._stats.summary)
+            )
+            if action == "export":  # export, then return to the summary
+                await self._export_log_flow()
+                continue
+            break
         if action == "undo":
             await self._undo_flow()
         elif action == "new":
@@ -726,6 +735,55 @@ class MainScreen(Screen[None]):
         if self.busy or not self.session_active:
             return
         self._spawn_flow(self._show_summary())
+
+    def action_export_log(self) -> None:
+        if not self.session_active:
+            return
+        # Read-only snapshot of in-memory state - runs outside the flow worker so
+        # it never sets busy or touches the engine, and is safe mid-turn.
+        self.run_worker(self._export_log_flow(), group="export")
+
+    async def _export_log_flow(self) -> None:
+        transcript = self.transcript
+        if not transcript.event_log:
+            self.notify("nothing to export yet")
+            return
+        text = transcript.render_log(self._log_meta())
+        snap = self._snap
+        target_dir = snap.session_dir if snap is not None else self._project_root / ".agentclip"
+        path = target_dir / f"chat-log-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+        try:
+            await asyncio.to_thread(self._write_log, path, text)
+        except OSError as exc:
+            self.notify(f"could not write the chat log: {exc}", severity="error")
+            return
+        await transcript.add_note(f"⤓ chat log exported → {path}")
+        self.notify(f"chat log exported ({len(text):,} chars) → {path}", timeout=8)
+
+    @staticmethod
+    def _write_log(path: Path, text: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+    def _log_meta(self) -> list[str]:
+        meta = [f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
+        preset = self._preset
+        if preset is not None:
+            meta.append(f"Service: {preset.label} ({_fmt_k(preset.max_paste_chars)} budget)")
+        try:
+            root = str(Path("~") / self._project_root.relative_to(Path.home()))
+        except ValueError:
+            root = str(self._project_root)
+        meta.append(f"Project: {root}")
+        snap = self._snap
+        if snap is not None:
+            meta.append(f"Session dir: {snap.session_dir}")
+            meta.append(f"Turn: {snap.turn}")
+        stats = self._stats
+        meta.append(f"Replies ingested: {stats.replies}")
+        calls = ", ".join(f"{tool}×{n}" for tool, n in sorted(stats.calls.items()))
+        meta.append(f"Tool calls: {calls or 'none'}")
+        return meta
 
     def action_toggle_last(self) -> None:
         try:

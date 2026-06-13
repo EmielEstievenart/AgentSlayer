@@ -67,40 +67,78 @@ class AgentClipApp(App[None]):
     TranscriptPanel .call-summary {
         text-style: bold;
     }
+    TranscriptPanel .msg-head {
+        text-style: bold;
+    }
+    TranscriptPanel .msg-you {
+        color: $success;
+    }
+    TranscriptPanel .msg-assistant {
+        color: $primary;
+    }
 
     ActionPanel {
         height: auto;
         max-height: 60%;
-        border-top: heavy $warning;
+        border: heavy $warning;
         background: $surface;
         padding: 0 1;
+        margin: 0 1;
     }
     #action-title {
         text-style: bold;
-        color: $warning;
+        color: $text;
+        background: $warning;
+        padding: 0 1;
     }
     #action-queue {
         color: $text-muted;
     }
     #action-body {
         height: auto;
-        max-height: 24;
+        max-height: 20;
         margin-top: 1;
+    }
+    #action-buttons {
+        height: auto;
+        margin-top: 1;
+    }
+    #action-buttons Button {
+        margin-right: 2;
     }
     #action-footer {
         height: auto;
         margin-top: 1;
     }
     #action-hints {
-        width: auto;
+        width: 1fr;
         color: $text-muted;
         padding: 0 1;
     }
     #reject-reason {
         width: 1fr;
     }
-    #answer {
-        height: 6;
+
+    #running {
+        height: 1;
+        color: $warning;
+        text-style: bold;
+        padding: 0 1;
+        margin: 0 1;
+    }
+    #composer {
+        height: 5;
+        border: round $primary;
+        background: $surface;
+        margin: 0 1;
+        padding: 0 1;
+    }
+    #composer:focus {
+        border: round $accent;
+    }
+    #composer:disabled {
+        color: $text-muted;
+        border: round $panel;
     }
 
     StatusBar {

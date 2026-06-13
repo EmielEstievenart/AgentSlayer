@@ -10,14 +10,19 @@ from textual.screen import ModalScreen
 from textual.widgets import Static
 
 HELP_TEXT = """\
-Approval gate
-  y  approve the pending call          n  reject (optional reason, enter sends)
-  a  approve + auto-accept all further edits this session (never commands)
+Chat box (bottom of the screen)
+  Type a message and press Enter to send it to the model.
+  Ctrl+J inserts a newline; pasting keeps its newlines.
+  Esc frees the single-key shortcuts below; press t (or click) to type again.
 
-Session
+Approval (the bordered box above the chat)
+  y  approve      n  reject (optional reason)      a  approve + auto-accept edits
+  ...or click the Approve / Reject buttons. (a / auto-accept never runs commands.)
+
+Session  (press Esc first if the chat box has focus)
   u  undo last turn (confirm; copies a revert notice for the model)
   c  re-copy the last outbound payload    i  force-ingest the clipboard now
-  w  pause/resume the clipboard watcher   t  send a follow-up message
+  w  pause/resume the clipboard watcher   t  jump to the chat box
   e  end session / show the summary       x  expand the last collapsed output
 
 App
@@ -25,8 +30,8 @@ App
   ctrl+p   command palette  ctrl+q  quit (confirms when a turn is mid-flight)
 
 The loop: AgentClip copies a payload - paste it into your chat and send.
-Click the reply's Copy button; AgentClip detects it, gates edits/commands,
-executes everything, and copies the combined results - paste them back.
+Click the reply's Copy button; AgentClip detects it, shows what's running,
+gates edits/commands, then copies the combined results - paste them back.
 Repeat until the model sends task_done."""
 
 

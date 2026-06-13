@@ -34,10 +34,20 @@ class TranscriptPanel(VerticalScroll):
             await self.children[0].remove()
 
     async def add_user(self, text: str) -> None:
-        await self._add(Markdown(text, classes="ev-user"), f"you: {text}")
+        block = Vertical(
+            Static(Text("you"), classes="msg-head msg-you"),
+            Markdown(text),
+            classes="ev-user",
+        )
+        await self._add(block, f"you: {text}")
 
     async def add_prose(self, text: str) -> None:
-        await self._add(Markdown(text, classes="ev-prose"), f"llm: {text}")
+        block = Vertical(
+            Static(Text("assistant"), classes="msg-head msg-assistant"),
+            Markdown(text),
+            classes="ev-prose",
+        )
+        await self._add(block, f"llm: {text}")
 
     async def add_call(self, call: ToolCall) -> None:
         target = (

@@ -1,4 +1,8 @@
-"""TextEntryScreen: a multi-line text modal (follow-up messages, manual paste)."""
+"""TextEntryScreen: a multi-line text modal (manual paste fallback for force-ingest).
+
+Follow-up messages and ask_user answers now go through the persistent ChatComposer
+on MainScreen; this modal remains only for the empty-clipboard manual-paste path.
+"""
 
 from __future__ import annotations
 
@@ -21,7 +25,9 @@ class TextEntryScreen(ModalScreen["str | None"]):
         Binding("escape", "cancel", "cancel"),
     ]
 
-    def __init__(self, title: str, hint: str = "ctrl+s (or ctrl+enter) submit · escape cancel") -> None:
+    def __init__(
+        self, title: str, hint: str = "ctrl+s (or ctrl+enter) submit · escape cancel"
+    ) -> None:
         super().__init__()
         self._title = title
         self._hint = hint

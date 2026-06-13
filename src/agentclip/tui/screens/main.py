@@ -19,6 +19,7 @@ Threading model (tui.md section 3 / architecture.md section 11):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import Counter
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import Any, Literal, TypeVar
 
 from rich.table import Table
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.css.query import NoMatches
@@ -60,6 +62,8 @@ from agentclip.tui.screens.new_session import NewSessionScreen
 from agentclip.tui.screens.summary import SummaryScreen
 from agentclip.tui.screens.text_entry import TextEntryScreen
 from agentclip.tui.widgets.action_panel import ActionPanel
+from agentclip.tui.widgets.composer import ChatComposer
+from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.statusbar import StatusBar
 from agentclip.tui.widgets.transcript import TranscriptPanel
 
@@ -96,11 +100,11 @@ class MainScreen(Screen[None]):
         Binding("c", "recopy", "re-copy"),
         Binding("i", "force_ingest", "ingest"),
         Binding("w", "toggle_watch", "watcher"),
-        Binding("t", "follow_up", "follow-up"),
+        Binding("t", "follow_up", "type message"),
         Binding("e", "end_session", "summary"),
         Binding("x", "toggle_last", "expand last", show=False),
-        Binding("ctrl+s", "submit_answer", "send answer", priority=True, show=False),
-        Binding("ctrl+enter", "submit_answer", "send answer", priority=True, show=False),
+        Binding("ctrl+s", "submit_composer", "send", priority=True, show=False),
+        Binding("ctrl+enter", "submit_composer", "send", priority=True, show=False),
         Binding("escape", "cancel_entry", "cancel", show=False),
     ]
 
@@ -138,6 +142,7 @@ class MainScreen(Screen[None]):
         self._last_outbound: str | None = None
         self._stats = SessionStats()
         self._turn_glyphs: dict[int, list[str]] = {}  # call id -> [glyph, tool]
+        self._executing = False  # True only while engine.execute()/answer_user() runs
 
     # -- layout ------------------------------------------------------------------
 
@@ -145,6 +150,8 @@ class MainScreen(Screen[None]):
         yield TranscriptPanel(id="transcript")
         yield ActionPanel(id="action")
         yield StatusBar(id="statusbar")
+        yield RunningBar(id="running")
+        yield ChatComposer(id="composer")
         yield Footer()
 
     @property
@@ -159,8 +166,17 @@ class MainScreen(Screen[None]):
     def status_bar(self) -> StatusBar:
         return self.query_one(StatusBar)
 
+    @property
+    def composer(self) -> ChatComposer:
+        return self.query_one(ChatComposer)
+
+    @property
+    def running_bar(self) -> RunningBar:
+        return self.query_one(RunningBar)
+
     def on_mount(self) -> None:
         self._paint_status()
+        self._update_composer()
         self._spawn_flow(self._session_flow())
 
     # -- dynamic bindings ----------------------------------------------------------
@@ -186,8 +202,10 @@ class MainScreen(Screen[None]):
             if self._provider.name == "manual":
                 return False
             return True if self.session_active else None
-        if action == "submit_answer":
-            return self.awaiting_answer
+        if action == "submit_composer":
+            if self.awaiting_answer:
+                return True
+            return self.session_active and not self.busy and self.phase_name == "AWAITING_REPLY"
         if action == "cancel_entry":
             return self.reject_open
         return True
@@ -223,8 +241,11 @@ class MainScreen(Screen[None]):
             self.pending_approval = False
             self.awaiting_answer = False
             self.reject_open = False
+            self._set_executing(False)
             if self.is_mounted:
-                self.action_panel.hide_panel()
+                # torn down mid-flight (quit / cancel during a gate) is fine
+                with contextlib.suppress(NoMatches):
+                    self.action_panel.hide_panel()
         await self._refresh_status()
         queued, self._queued_capture = self._queued_capture, None
         if queued is not None and self.session_active and self._engine is not None:
@@ -277,6 +298,7 @@ class MainScreen(Screen[None]):
         else:
             self._start_watcher()
         await self._refresh_status()
+        self._focus_composer()
         self.notify(
             f"bootstrap copied ({out.total_chars:,} chars) - paste into {self._preset.label}",
             timeout=8,
@@ -394,7 +416,7 @@ class MainScreen(Screen[None]):
                 await self.transcript.add_note(f"✓ {label} {action.call.tool} {target}".rstrip())
         self.action_panel.hide_panel()
         await self._refresh_status()  # EXECUTING (status segment driven by busy)
-        step = await self._engine_call(engine.execute)
+        step = await self._run_engine_step(engine.execute)
         await self._handle_step(step)
 
     def _set_glyph(self, call_id: int, glyph: str) -> None:
@@ -409,7 +431,8 @@ class MainScreen(Screen[None]):
     async def _gate(self, action: PendingAction, position: str) -> tuple[Decision, str | None]:
         self._gate_kind = action.kind
         self.action_panel.show_approval(action, position, self._queue_strip())
-        self.pending_approval = True
+        self.pending_approval = True  # watcher disables the composer
+        self.action_panel.focus_default()  # focus Approve so y/n/a bubble to the screen
         self.alert(f"approval needed: {action.call.tool}", severity="warning")
         self._gate_future = asyncio.get_running_loop().create_future()
         try:
@@ -427,13 +450,15 @@ class MainScreen(Screen[None]):
             await self.transcript.add_note(f"? {step.question}")
             answer = await self._ask(step.question)
             await self.transcript.add_user(answer)
-            step = await self._engine_call(engine.answer_user, answer)
+            step = await self._run_engine_step(engine.answer_user, answer)
         if isinstance(step, Send):
             await self._copy_outbound(step.outbound)
             await self.transcript.add_outbound(step.outbound, "results copied")
             self.alert(
                 f"results copied ({step.outbound.total_chars:,} chars) - paste into the chat"
             )
+            await self._refresh_status()
+            self._focus_composer()
             return
         assert isinstance(step, Done)
         if step.outbound is not None:
@@ -447,16 +472,15 @@ class MainScreen(Screen[None]):
         await self._show_summary()
 
     async def _ask(self, question: str) -> str:
-        self.action_panel.show_question(question)
-        self.awaiting_answer = True
-        self.alert("the model asks you a question", severity="warning")
+        self.awaiting_answer = True  # watcher switches the composer into answer mode
+        self._focus_composer()
+        self.alert("the model asks you a question - type your answer below", severity="warning")
         self._answer_future = asyncio.get_running_loop().create_future()
         try:
             return await self._answer_future
         finally:
             self._answer_future = None
             self.awaiting_answer = False
-            self.action_panel.hide_panel()
 
     # -- summary / reset --------------------------------------------------------------------------
 
@@ -536,20 +560,15 @@ class MainScreen(Screen[None]):
                 f"→ revert notice copied ({notice.total_chars:,} chars) - paste it into the chat"
             )
 
-    async def _follow_up_flow(self) -> None:
+    async def _follow_up_flow(self, text: str) -> None:
         engine = self._engine
         if engine is None:
-            return
-        text = await self.app.push_screen_wait(
-            TextEntryScreen(
-                "Follow-up message to the model", "ctrl+s (or ctrl+enter) send · escape cancel"
-            )
-        )
-        if not text:
             return
         out = await self._engine_call(engine.follow_up, text)
         await self.transcript.add_user(text)
         await self._copy_outbound(out)
+        await self._refresh_status()
+        self._focus_composer()
         self.notify(f"follow-up copied ({out.total_chars:,} chars) - paste into the chat")
 
     async def _force_ingest_flow(self) -> None:
@@ -623,10 +642,48 @@ class MainScreen(Screen[None]):
             self.reject_open = False
             self.action_panel.close_reject_input()
 
-    def action_submit_answer(self) -> None:
-        future = self._answer_future
-        if future is not None and not future.done():
-            future.set_result(self.action_panel.answer_text())
+    @on(ChatComposer.Submitted)
+    def _on_composer_submitted(self, message: ChatComposer.Submitted) -> None:
+        message.stop()
+        self._submit_composer(message.text)
+
+    def action_submit_composer(self) -> None:
+        try:
+            composer = self.composer
+        except NoMatches:
+            return
+        self._submit_composer(composer.text)
+
+    def _submit_composer(self, text: str) -> None:
+        """Route a composer send: an ask_user answer, or a follow-up message."""
+        text = text.strip()
+        if not text:
+            return
+        if self.awaiting_answer:
+            future = self._answer_future
+            if future is not None and not future.done():
+                self.composer.reset()
+                future.set_result(text)
+            else:  # a previous Enter already sent this answer (sub-frame double-tap)
+                self.notify("answer already sent - please wait", severity="warning")
+            return
+        if self.session_active and not self.busy and self.phase_name == "AWAITING_REPLY":
+            self.composer.reset()
+            self._spawn_flow(self._follow_up_flow(text))
+            return
+        self.notify(
+            "can't send right now - wait for the current step to finish", severity="warning"
+        )
+
+    @on(ActionPanel.Decision)
+    def _on_action_decision(self, message: ActionPanel.Decision) -> None:
+        message.stop()
+        if message.choice == "approve":
+            self.action_approve()
+        elif message.choice == "approve_edits":
+            self.action_auto_edits()
+        elif message.choice == "reject":
+            self.action_reject()
 
     def action_undo(self) -> None:
         if self.busy or not self.session_active:
@@ -661,9 +718,9 @@ class MainScreen(Screen[None]):
             self.notify("clipboard watcher resumed")
 
     def action_follow_up(self) -> None:
-        if self.busy or not self.session_active:
+        if not self.session_active:
             return
-        self._spawn_flow(self._follow_up_flow())
+        self._focus_composer()
 
     def action_end_session(self) -> None:
         if self.busy or not self.session_active:
@@ -688,38 +745,119 @@ class MainScreen(Screen[None]):
 
     def watch_pending_approval(self) -> None:
         self._paint_status()
+        self._update_composer()
 
     def watch_awaiting_answer(self) -> None:
         self._paint_status()
+        self._update_composer()
 
     def watch_busy(self) -> None:
         self._paint_status()
+        self._update_composer()
+        # The composer is disabled while a flow runs; the moment the flow ends
+        # (busy clears) is the only point it becomes typable, so focus it here.
+        # In-flow _focus_composer() calls all no-op because busy is still True.
+        if not self.busy:
+            self._focus_composer()
 
     def watch_watch_paused(self) -> None:
         self._paint_status()
 
     def watch_session_active(self) -> None:
         self._paint_status()
+        self._update_composer()
 
     def watch_phase_name(self) -> None:
         self._paint_status()
+        self._update_composer()
+
+    # -- chat composer + running indicator -----------------------------------------------------------
+
+    def _update_composer(self) -> None:
+        """Enable/disable the chat box and set its prompt to match the phase."""
+        if not self.is_mounted:
+            return
+        try:
+            composer = self.composer
+        except NoMatches:
+            return
+        if self.awaiting_answer:
+            composer.disabled = False
+            composer.border_title = "Answer the model  ·  Enter sends · Ctrl+J newline"
+        elif (
+            self.session_active
+            and not self.busy
+            and not self.pending_approval
+            and self.phase_name == "AWAITING_REPLY"
+        ):  # armed and idle: ready for a follow-up
+            composer.disabled = False
+            composer.border_title = (
+                "Message the model  ·  Enter sends · Ctrl+J newline · Esc for shortcuts"
+            )
+        else:  # no session, executing, at a gate, DONE, etc.
+            composer.disabled = True
+            composer.border_title = self._composer_idle_title()
+
+    def _composer_idle_title(self) -> str:
+        if not self.session_active:
+            return "no session"
+        if self.busy:
+            return "working - the chat box is paused"
+        if self.pending_approval:
+            return "approve or reject the action above first"
+        return ""
+
+    def _focus_composer(self) -> None:
+        if not self.is_mounted or self.app.screen is not self:
+            return  # a modal (summary, confirm, new-session) owns focus right now
+        try:
+            composer = self.composer
+        except NoMatches:
+            return
+        if not composer.disabled:
+            composer.focus()
+
+    async def _run_engine_step(self, fn: Callable[..., _T], /, *args: object) -> _T:
+        """Run execute()/answer_user() with the 'working' spinner showing meanwhile."""
+        self._set_executing(True)
+        try:
+            return await self._engine_call(fn, *args)
+        finally:
+            self._set_executing(False)
+
+    def _set_executing(self, on: bool) -> None:
+        self._executing = on
+        if not self.is_mounted:
+            return
+        try:
+            bar = self.running_bar
+        except NoMatches:
+            return
+        if on:
+            n = len(self._turn_glyphs)
+            label = (
+                f"Working - running {n} tool call{'' if n == 1 else 's'}..." if n else "Working..."
+            )
+            bar.start(label)
+        else:
+            bar.stop()
 
     def _watch_segment(self) -> tuple[str, str]:
         if self.phase_name == "DONE":
-            return "✓ DONE", "st-done"
+            return "✓ done", "st-done"
         if self.pending_approval:
-            return "◍ APPROVAL?", "st-attn"
+            return "■ APPROVE NEEDED", "st-attn"
         if self.awaiting_answer:
-            return "◍ ASK USER", "st-attn"
+            return "■ ANSWER NEEDED", "st-attn"
         if self.busy:
-            return "◍ EXECUTING", "st-busy"
+            return "● working...", "st-busy"
         if self._provider.name == "manual":
-            return "✗ MANUAL", "st-err"
+            return "✗ manual paste", "st-err"
         if self.watch_paused:
-            return "○ PAUSED", "st-dim"
+            return "○ paused", "st-dim"
         if self.session_active and self.phase_name == "AWAITING_REPLY":
-            return "● ARMED", "st-armed"
-        return "○ IDLE", "st-dim"
+            return "● ready - paste the reply", "st-armed"
+        return "○ idle", "st-dim"
 
     def _paint_status(self) -> None:
         if not self.is_mounted:

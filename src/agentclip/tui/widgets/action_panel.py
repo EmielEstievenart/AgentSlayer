@@ -91,7 +91,9 @@ class ActionPanel(Vertical):
         self.query_one("#action-title", Static).update(Text("ANSWER · the model asks:"))
         self.query_one("#action-queue", Static).update("")
         self.query_one("#action-content", Static).update(Text(question))
-        self.query_one("#action-hints", Static).update("type your answer · ctrl+enter send")
+        self.query_one("#action-hints", Static).update(
+            "type your answer · ctrl+s (or ctrl+enter) send"
+        )
         self.query_one("#reject-reason").display = False
         answer = self.query_one("#answer", TextArea)
         answer.load_text("")

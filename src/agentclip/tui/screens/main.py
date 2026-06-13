@@ -99,7 +99,8 @@ class MainScreen(Screen[None]):
         Binding("t", "follow_up", "follow-up"),
         Binding("e", "end_session", "summary"),
         Binding("x", "toggle_last", "expand last", show=False),
-        Binding("ctrl+enter", "submit_answer", "send answer", show=False),
+        Binding("ctrl+s", "submit_answer", "send answer", priority=True, show=False),
+        Binding("ctrl+enter", "submit_answer", "send answer", priority=True, show=False),
         Binding("escape", "cancel_entry", "cancel", show=False),
     ]
 
@@ -540,7 +541,9 @@ class MainScreen(Screen[None]):
         if engine is None:
             return
         text = await self.app.push_screen_wait(
-            TextEntryScreen("Follow-up message to the model", "ctrl+enter send · escape cancel")
+            TextEntryScreen(
+                "Follow-up message to the model", "ctrl+s (or ctrl+enter) send · escape cancel"
+            )
         )
         if not text:
             return
@@ -555,7 +558,7 @@ class MainScreen(Screen[None]):
             text = await self.app.push_screen_wait(
                 TextEntryScreen(
                     "Paste the model's reply",
-                    "the clipboard had no text - paste the reply here; ctrl+enter ingests",
+                    "the clipboard had no text - paste the reply here; ctrl+s ingests",
                 )
             )
             if not text:

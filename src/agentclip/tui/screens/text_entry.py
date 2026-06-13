@@ -14,11 +14,14 @@ class TextEntryScreen(ModalScreen["str | None"]):
     """Dismisses with the entered text, or None on cancel/empty."""
 
     BINDINGS = [
-        Binding("ctrl+enter", "submit", "submit"),
+        # ctrl+s is the reliable submit key; ctrl+enter works only on terminals
+        # that deliver it distinctly. priority=True so the TextArea can't eat it.
+        Binding("ctrl+s", "submit", "submit", priority=True),
+        Binding("ctrl+enter", "submit", "submit", priority=True, show=False),
         Binding("escape", "cancel", "cancel"),
     ]
 
-    def __init__(self, title: str, hint: str = "ctrl+enter submit · escape cancel") -> None:
+    def __init__(self, title: str, hint: str = "ctrl+s (or ctrl+enter) submit · escape cancel") -> None:
         super().__init__()
         self._title = title
         self._hint = hint

@@ -25,7 +25,11 @@ class NewSessionScreen(ModalScreen["SessionSpec | None"]):
     """Dismisses with a SessionSpec, or None when the user wants to quit."""
 
     BINDINGS = [
-        Binding("ctrl+enter", "submit", "start session"),
+        # ctrl+enter is not delivered distinctly by every terminal, so ctrl+s is
+        # the reliable alternate. priority=True keeps the focused TextArea from
+        # swallowing either key. Enter cannot submit: the task box is multi-line.
+        Binding("ctrl+s", "submit", "start session", priority=True),
+        Binding("ctrl+enter", "submit", "start session", priority=True, show=False),
         Binding("escape", "cancel", "quit"),
     ]
 
@@ -47,7 +51,7 @@ class NewSessionScreen(ModalScreen["SessionSpec | None"]):
             )
             yield TextArea(id="task")
             yield Static(
-                "describe the task above · ctrl+enter start · escape quit",
+                "describe the task above · ctrl+s (or ctrl+enter) start · escape quit",
                 classes="hint",
             )
 

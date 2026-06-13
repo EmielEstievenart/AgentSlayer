@@ -76,12 +76,13 @@ async def test_smoke_full_loop(tmp_path: Path) -> None:
     )
 
     async with app.run_test(size=(110, 40)) as pilot:
-        # -- NewSessionScreen: type the task, ctrl+enter starts ------------------
+        # -- NewSessionScreen: type the task, ctrl+s starts ----------------------
+        # ctrl+s (not ctrl+enter) is the reliable cross-terminal submit key.
         await _wait_for(pilot, lambda: isinstance(app.screen, NewSessionScreen), "session modal")
         app.screen.query_one("#task", TextArea).load_text(
             "Fix the date parsing bug in src/utils.py: use ISO dates."
         )
-        await pilot.press("ctrl+enter")
+        await pilot.press("ctrl+s")
 
         # -- the bootstrap payload was written to the (fake) clipboard ----------
         await _wait_for(pilot, lambda: bool(fake.written), "bootstrap on the clipboard")

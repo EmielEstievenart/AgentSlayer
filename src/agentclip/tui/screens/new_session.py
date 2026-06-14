@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from pathlib import Path
 
 from rich.text import Text
@@ -12,13 +11,10 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Select, Static, TextArea
 
+from agentclip.app.types import SessionSpec
 from agentclip.config import Config
 
-
-@dataclass(frozen=True, slots=True)
-class SessionSpec:
-    task: str
-    service: str
+__all__ = ["NewSessionScreen", "SessionSpec"]
 
 
 class NewSessionScreen(ModalScreen["SessionSpec | None"]):

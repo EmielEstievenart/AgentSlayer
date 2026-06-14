@@ -44,6 +44,21 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
+    # app: UI-agnostic orchestration layer. Drives the engine through the ChatView
+    # port; imports engine/protocol/store/config but NOT textual, clip, or tui.
+    (
+        "agentclip.app",
+        frozenset(
+            {
+                "agentclip",
+                "agentclip.app",
+                "agentclip.config",
+                "agentclip.engine",
+                "agentclip.protocol",
+                "agentclip.store",
+            }
+        ),
+    ),
 ]
 
 # Modules allowed to import agentclip.clip / textual.
@@ -127,6 +142,18 @@ def test_engine_never_imports_ui_or_clipboard() -> None:
     engine_files = sorted((SRC / "engine").glob("*.py"))
     assert engine_files
     for path in engine_files:
+        for imported in module_level_imports(path):
+            root = imported.split(".")[0]
+            assert root != "textual", f"{path.name} imports textual"
+            assert not _matches(imported, "agentclip.clip"), f"{path.name} imports agentclip.clip"
+            assert not _matches(imported, "agentclip.tui"), f"{path.name} imports agentclip.tui"
+
+
+def test_app_never_imports_clip_textual_or_tui() -> None:
+    """The orchestration layer must stay UI-agnostic: no Textual, no clipboard, no tui."""
+    app_files = sorted((SRC / "app").glob("*.py"))
+    assert app_files
+    for path in app_files:
         for imported in module_level_imports(path):
             root = imported.split(".")[0]
             assert root != "textual", f"{path.name} imports textual"

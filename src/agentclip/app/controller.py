@@ -128,7 +128,7 @@ class SessionController:
             else:  # a previous send already resolved it (sub-frame double-tap)
                 self._view.notify("answer already sent - please wait", severity="warning")
             return
-        if self._session_active and not self._busy and self._is_awaiting_reply():
+        if self._session_active and not self._busy and self._can_follow_up():
             self._view.reset_composer()
             self._spawn_flow(self._follow_up_flow(text))
             return
@@ -371,11 +371,18 @@ class SessionController:
             await self._copy_outbound(step.outbound)
             await self._view.add_outbound(step.outbound, "final results copied")
         self._stats.summary = step.summary
-        first_line = step.summary.strip().splitlines()[0] if step.summary.strip() else ""
-        await self._view.add_note(f"✓ task done {('- ' + first_line) if first_line else ''}")
+        await self._view.add_note("✓ task done")
+        if step.summary.strip():
+            await self._view.add_prose(step.summary)
+        await self._view.add_note(
+            "session complete - type a follow-up to keep going, or press e for the summary"
+        )
         self._view.alert("task done", severity="information")
         await self._refresh_status()
-        await self._show_summary()
+        # NB: do NOT push the summary modal here. task_done completes the session
+        # but the user may continue (protocol.md section 8): the composer stays
+        # enabled in DONE so a follow-up reopens the session, and the summary +
+        # stats are one keypress away (the e / end_session action).
 
     async def _ask(self, question: str) -> str:
         self._awaiting_answer = True  # the view switches the composer into answer mode
@@ -570,5 +577,8 @@ class SessionController:
             )
         )
 
-    def _is_awaiting_reply(self) -> bool:
-        return self._snap is not None and self._snap.phase is Phase.AWAITING_REPLY
+    def _can_follow_up(self) -> bool:
+        # A follow-up is legal while armed for a reply AND after task_done:
+        # task_done completes the session but the user may continue (protocol.md
+        # section 8). A DONE follow-up reopens the session into AWAITING_REPLY.
+        return self._snap is not None and self._snap.phase in (Phase.AWAITING_REPLY, Phase.DONE)

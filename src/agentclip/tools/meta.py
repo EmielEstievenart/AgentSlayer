@@ -2,7 +2,8 @@
 
 These have no filesystem effect. The engine intercepts them BY NAME before
 invoking handlers (ask_user pauses payload assembly for the user's answer;
-task_done ends the session). The handlers below exist so the registry stays
+task_done completes the session - though the user may still continue with a
+follow-up, which reopens it). The handlers below exist so the registry stays
 total - if the engine ever fails to intercept, they are harmless no-ops.
 Their catalog_docs still teach the LLM how to use them.
 """

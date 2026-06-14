@@ -21,6 +21,7 @@ from agentclip.config import load_config
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.messages import ClipboardCaptured
 from agentclip.tui.screens.new_session import NewSessionScreen
+from agentclip.tui.screens.summary import SummaryScreen
 
 UTILS_PY = '''"""Utility helpers."""
 
@@ -42,6 +43,36 @@ replace <<EOT
 EOT
 ===CLIP:END===
 ===CLIP:EOM calls=1 turn=1===
+~~~~
+"""
+
+REPLY_TASK_DONE = """All set - nothing else to change.
+
+~~~~
+===CLIP:CALL id=1 tool=task_done===
+summary <<EOT
+Tidied up src/utils.py; nothing else to do.
+EOT
+===CLIP:END===
+===CLIP:EOM calls=1 turn=1===
+~~~~
+"""
+
+# An edit reply for the turn AFTER a post-task_done follow-up reopens the session
+# (the follow-up TASK is turn 2, so its reply echoes turn=2).
+REPLY_EDIT_TURN2 = """On it.
+
+~~~~
+===CLIP:CALL id=1 tool=edit_file===
+path: src/utils.py
+find <<EOT
+    return s
+EOT
+replace <<EOT
+    return s.strip()
+EOT
+===CLIP:END===
+===CLIP:EOM calls=1 turn=2===
 ~~~~
 """
 
@@ -108,6 +139,81 @@ async def test_followup_via_composer(tmp_path: Path) -> None:
         assert any("you: Also add a docstring." in e for e in main.transcript.entries)
         # Composer is cleared after sending.
         assert main.composer.text == ""
+
+
+async def test_followup_after_task_done(tmp_path: Path) -> None:
+    """task_done completes the session but must not trap the user: no summary
+    modal pops, the composer stays enabled, a follow-up reopens the session, and
+    a full (gated) edit turn then runs end to end in the reopened session."""
+    app, fake, project = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        main.post_message(ClipboardCaptured(REPLY_TASK_DONE))
+        await _wait_for(pilot, lambda: main.phase_name == "DONE", "task marked done")
+        await _wait_for(pilot, lambda: not main.busy, "done flow settled")
+
+        # The summary modal must NOT auto-open - the user stays in the chat.
+        assert not isinstance(app.screen, SummaryScreen)
+        assert app.screen is main
+        # The model's summary made it into the transcript (not lost behind a modal).
+        assert any("Tidied up src/utils.py" in e for e in main.transcript.entries)
+
+        # The chat box stays enabled and auto-focused so a follow-up is possible.
+        await _wait_for(pilot, lambda: not main.composer.disabled, "composer usable after done")
+        await _wait_for(pilot, lambda: app.focused is main.composer, "composer focused after done")
+
+        writes_before = len(fake.written)
+        main.composer.load_text("One more thing: add a README note.")
+        await pilot.press("enter")
+
+        await _wait_for(pilot, lambda: len(fake.written) > writes_before, "follow-up copied")
+        assert "One more thing: add a README note." in fake.written[-1]
+        # The follow-up reopened the session: armed for the next reply again.
+        await _wait_for(pilot, lambda: main.phase_name == "AWAITING_REPLY", "session reopened")
+        await _wait_for(pilot, lambda: not main.busy, "follow-up flow settled")
+        assert any("you: One more thing: add a README note." in e for e in main.transcript.entries)
+
+        # A full gated edit turn now works in the reopened session, end to end.
+        main.post_message(ClipboardCaptured(REPLY_EDIT_TURN2))
+        await _wait_for(pilot, lambda: main.pending_approval, "approval gate after reopen")
+        await pilot.press("y")
+        await _wait_for(pilot, lambda: main.phase_name == "AWAITING_REPLY", "re-armed after reopen turn")
+        on_disk = (project / "src" / "utils.py").read_text(encoding="utf-8")
+        assert "s.strip()" in on_disk  # the post-reopen edit landed on disk
+
+
+async def test_summary_reachable_after_done(tmp_path: Path) -> None:
+    """task_done does not force-open the summary, but it must stay one keypress
+    away: pressing e in DONE opens the SummaryScreen with the model's summary."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        main.post_message(ClipboardCaptured(REPLY_TASK_DONE))
+        await _wait_for(pilot, lambda: main.phase_name == "DONE", "task marked done")
+        await _wait_for(pilot, lambda: not main.busy, "done flow settled")
+
+        # Esc blurs the chat box so the bare-letter `e` reaches the screen binding.
+        await _wait_for(pilot, lambda: app.focused is main.composer, "composer focused after done")
+        await pilot.press("escape")
+        await pilot.press("e")
+        await _wait_for(
+            pilot, lambda: isinstance(app.screen, SummaryScreen), "summary opened on demand"
+        )
+        summary_screen = app.screen
+        assert isinstance(summary_screen, SummaryScreen)
+        assert "Tidied up src/utils.py" in summary_screen._summary
+
+        # Closing it returns to the chat, still completed and still continuable.
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "back to the chat")
+        assert main.phase_name == "DONE"
+        assert not main.composer.disabled
 
 
 async def test_gate_focus_lets_y_approve(tmp_path: Path) -> None:

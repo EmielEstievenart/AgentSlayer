@@ -322,6 +322,48 @@ def test_undo_without_notice(project: Path, engine: Engine) -> None:
     assert engine.status().turn == 2  # no notice payload, turn unchanged
 
 
+DONE_AFTER_EDIT_REPLY = """===CLIP:CALL id=1 tool=task_done===
+summary <<EOT
+Edit applied; done.
+EOT
+===CLIP:END===
+===CLIP:EOM calls=1 turn=2===
+"""
+
+
+def test_undo_after_done_reopens_session(project: Path, engine: Engine) -> None:
+    """Undo from a completed session composes a revert notice the model must
+    answer, so it must reopen the session - otherwise the model's reply to that
+    notice would ingest as Noise('wrong-phase') and be silently dropped."""
+    original = _utils_py(project)
+    engine.start_task("t")
+    assert isinstance(engine.ingest(EDIT_FOR_UNDO_REPLY), NewTurn)
+    engine.decide(1, Decision.APPROVE)
+    assert isinstance(engine.execute(), Send)  # turn 2; the edit is on disk
+    assert '"%Y-%m-%d"' in _utils_py(project)
+
+    # Finish the session, then undo from DONE.
+    assert isinstance(engine.ingest(DONE_AFTER_EDIT_REPLY), NewTurn)
+    assert isinstance(engine.execute(), Done)
+    assert engine.status().phase is Phase.DONE
+
+    report, notice = engine.undo_last_turn(compose_notice=True)
+    assert report.restored == ("src/utils.py",)
+    assert _utils_py(project) == original  # the edit was rolled back
+    assert notice is not None
+    assert notice.turn == 3  # bootstrap=1, results=2, revert notice=3
+    assert engine.status().phase is Phase.AWAITING_REPLY  # the session reopened
+
+    # The model's reply to the revert notice (turn=3) is accepted, not dropped.
+    reply_to_notice = (
+        "===CLIP:CALL id=1 tool=read_file===\n"
+        "path: src/utils.py\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1 turn=3===\n"
+    )
+    assert isinstance(engine.ingest(reply_to_notice), NewTurn)
+
+
 def test_duplicate_ingest_is_noise(engine: Engine) -> None:
     engine.start_task("t")
     assert isinstance(engine.ingest(EDIT_FOR_UNDO_REPLY), NewTurn)

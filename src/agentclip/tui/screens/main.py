@@ -152,8 +152,15 @@ class MainScreen(Screen[None]):
             return True if ok else None
         if action == "recopy":
             return True if self.has_outbound else None
-        if action in ("force_ingest", "follow_up"):
+        if action == "force_ingest":  # ingest only parses in AWAITING_REPLY
             ok = self.session_active and not self.busy and self.phase_name == "AWAITING_REPLY"
+            return True if ok else None
+        if action == "follow_up":  # also after task_done: a follow-up reopens the session
+            ok = (
+                self.session_active
+                and not self.busy
+                and self.phase_name in ("AWAITING_REPLY", "DONE")
+            )
             return True if ok else None
         if action == "toggle_watch":
             if self._provider.name == "manual":
@@ -164,7 +171,11 @@ class MainScreen(Screen[None]):
         if action == "submit_composer":
             if self.awaiting_answer:
                 return True
-            return self.session_active and not self.busy and self.phase_name == "AWAITING_REPLY"
+            return (
+                self.session_active
+                and not self.busy
+                and self.phase_name in ("AWAITING_REPLY", "DONE")
+            )
         if action == "cancel_entry":
             return self.reject_open
         return True
@@ -467,13 +478,15 @@ class MainScreen(Screen[None]):
             self.session_active
             and not self.busy
             and not self.pending_approval
-            and self.phase_name == "AWAITING_REPLY"
-        ):  # armed and idle: ready for a follow-up
+            and self.phase_name in ("AWAITING_REPLY", "DONE")
+        ):  # armed and idle, or completed: ready for a follow-up (DONE reopens it)
             composer.disabled = False
             composer.border_title = (
-                "Message the model  ·  Enter sends · Ctrl+J newline · Esc for shortcuts"
+                "Task done · type a follow-up to continue · Esc for shortcuts"
+                if self.phase_name == "DONE"
+                else "Message the model  ·  Enter sends · Ctrl+J newline · Esc for shortcuts"
             )
-        else:  # no session, executing, at a gate, DONE, etc.
+        else:  # no session, executing, at a gate, etc.
             composer.disabled = True
             composer.border_title = self._composer_idle_title()
 
@@ -500,7 +513,7 @@ class MainScreen(Screen[None]):
 
     def _watch_segment(self) -> tuple[str, str]:
         if self.phase_name == "DONE":
-            return "✓ done", "st-done"
+            return "✓ done - reply to continue", "st-done"
         if self.pending_approval:
             return "■ APPROVE NEEDED", "st-attn"
         if self.awaiting_answer:

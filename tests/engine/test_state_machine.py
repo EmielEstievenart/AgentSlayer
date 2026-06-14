@@ -210,11 +210,67 @@ def test_task_done_alone_no_outbound(engine: Engine) -> None:
     assert step.summary.strip() == "All done."
     assert step.outbound is None
     assert engine.status().phase is Phase.DONE
-    assert isinstance(engine.ingest(READ_REPLY), Noise)
+    assert isinstance(engine.ingest(READ_REPLY), Noise)  # ingest stays inert until reopened
     with pytest.raises(EngineStateError):
-        engine.start_task("next")
-    with pytest.raises(EngineStateError):
-        engine.follow_up("wait")
+        engine.start_task("next")  # the bootstrap is one-shot; continue via follow_up
+    # task_done completes the session, but the user may continue: a follow-up reopens it.
+    reopened = engine.follow_up("one more thing")
+    assert reopened.kind == "user_answer"
+    assert "one more thing" in reopened.chunks[0]
+    assert engine.status().phase is Phase.AWAITING_REPLY
+
+
+def test_follow_up_reopens_completed_session(engine: Engine) -> None:
+    engine.start_task("t")
+    assert isinstance(engine.ingest(DONE_REPLY), NewTurn)
+    assert isinstance(engine.execute(), Done)
+    assert engine.status().phase is Phase.DONE
+
+    # A follow-up after task_done reopens the session (DONE -> AWAITING_REPLY).
+    out = engine.follow_up("actually, also add a test")
+    assert out.kind == "user_answer"
+    assert out.turn == 2  # bootstrap=1; task_done had no sibling results; follow-up=2
+    assert "===CLIP:TASK===" in out.chunks[0]
+    assert "also add a test" in out.chunks[0]
+    assert engine.status().phase is Phase.AWAITING_REPLY
+
+    # ...and the reopened session ingests and runs another turn normally.
+    next_reply = (
+        "===CLIP:CALL id=1 tool=read_file===\n"
+        "path: README.md\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1 turn=2===\n"
+    )
+    assert isinstance(engine.ingest(next_reply), NewTurn)
+    assert isinstance(engine.execute(), Send)
+    assert engine.status().turn == 3  # follow-up=2, its results=3
+
+
+def _done_reply(turn: int) -> str:
+    return (
+        "===CLIP:CALL id=1 tool=task_done===\n"
+        "summary <<EOT\n"
+        f"done at turn {turn}\n"  # distinct text per turn so the dedup guard never fires
+        "EOT\n"
+        "===CLIP:END===\n"
+        f"===CLIP:EOM calls=1 turn={turn}===\n"
+    )
+
+
+def test_repeated_done_reopen_cycle(engine: Engine) -> None:
+    """The DONE <-> AWAITING_REPLY loop is stable across iterations: complete,
+    continue, complete again, continue again, with a monotonically rising turn."""
+    engine.start_task("t")
+    expected_turn = 1  # the bootstrap is turn 1; each done reply must echo the live turn
+    for follow_up_text in ("keep going", "and again"):
+        assert isinstance(engine.ingest(_done_reply(expected_turn)), NewTurn)
+        assert isinstance(engine.execute(), Done)
+        assert engine.status().phase is Phase.DONE
+        out = engine.follow_up(follow_up_text)
+        expected_turn += 1
+        assert out.turn == expected_turn
+        assert engine.status().phase is Phase.AWAITING_REPLY
+        assert engine.status().turn == expected_turn
 
 
 def test_task_done_with_sibling_results(engine: Engine) -> None:
@@ -227,6 +283,22 @@ def test_task_done_with_sibling_results(engine: Engine) -> None:
     assert "===CLIP:RESULT id=1 status=ok===" in payload
     assert "task_done" not in payload  # task_done itself produces no RESULT block
     assert engine.status().phase is Phase.DONE
+    assert engine.status().turn == 2  # bootstrap=1; the sibling RESULTS advanced it to 2
+
+    # Reopening from a DONE that already sent sibling results: the follow-up is
+    # turn 3 (not 2), and the reopened session round-trips a turn=3 reply.
+    out = engine.follow_up("one more change")
+    assert out.turn == 3
+    assert engine.status().phase is Phase.AWAITING_REPLY
+    next_reply = (
+        "===CLIP:CALL id=1 tool=read_file===\n"
+        "path: README.md\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1 turn=3===\n"
+    )
+    assert isinstance(engine.ingest(next_reply), NewTurn)
+    assert isinstance(engine.execute(), Send)
+    assert engine.status().turn == 4
 
 
 def test_call_less_reply_gets_nudge(engine: Engine) -> None:

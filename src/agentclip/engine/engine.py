@@ -190,12 +190,20 @@ class Engine:
         return outbound
 
     def follow_up(self, text: str) -> Outbound:
-        """An extra TASK payload while AWAITING_REPLY (user steers mid-session)."""
-        self._require_phase(Phase.AWAITING_REPLY, "follow_up")
+        """An extra TASK payload from the user. Legal while AWAITING_REPLY (the
+        user steers mid-session) and after DONE (task_done completes the session
+        but the user may continue - protocol.md section 8). From DONE this
+        reopens the session, transitioning back to AWAITING_REPLY for the reply."""
+        if self._phase not in (Phase.AWAITING_REPLY, Phase.DONE):
+            raise EngineStateError(
+                f"follow_up() requires phase AWAITING_REPLY or DONE, but engine is {self._phase.name}"
+            )
         outbound = self._composer.task(self._turn + 1, text)
         self._turn += 1
         self._session.append_event("task", text=text, turn=self._turn)
         self._register_outbound(outbound)
+        if self._phase is Phase.DONE:
+            self._set_phase(Phase.AWAITING_REPLY)  # reopen the completed session
         return outbound
 
     # -- inbound -------------------------------------------------------------
@@ -323,6 +331,11 @@ class Engine:
             outbound = self._composer.note(self._turn + 1, _undo_notice(report))
             self._turn += 1
             self._register_outbound(outbound)
+            if self._phase is Phase.DONE:
+                # The revert notice is a payload the model must answer, so an undo
+                # from a completed session must reopen it (symmetric with follow_up;
+                # otherwise the model's reply ingests as Noise("wrong-phase")).
+                self._set_phase(Phase.AWAITING_REPLY)
         return report, outbound
 
     # -- status ----------------------------------------------------------------

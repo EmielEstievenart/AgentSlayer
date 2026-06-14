@@ -183,7 +183,7 @@ Common rules: all `path`/`root` params resolve inside the working directory; abs
 | `grep` | `pattern`\* (regex), `path`, `glob` (filename filter), `ignore_case: yes`, `context: N` (default 0), `max` | `path:lineno: text` per hit (context lines `path:lineno- text`); capped + truncation note. This is the line-number oracle for ranged reads. |
 | `run_command` | `command`\*, `timeout` (secs, default 60), `cwd` | Line 1: `exit 0 (2.1s)` then merged stdout+stderr heredoc, tail-capped per budget tier (tail, because test/build verdicts live at the end). Allowlist match ⇒ runs silently; else approval gate; user "no" ⇒ `status=denied`. Timeout ⇒ `error code=exec_timeout` with partial tail. |
 | `ask_user` | `question`\* (inline or heredoc) | The user's typed answer, verbatim. The turn payload is not sent until the user answers (TUI contract). |
-| `task_done` | `summary` (heredoc, optional) | Tool acknowledges, stops expecting calls, shows summary + session stats to user. Bootstrap: "after task_done, the session is over; do not emit further calls." |
+| `task_done` | `summary` (heredoc, optional) | Tool acknowledges and stops expecting calls; the session is marked complete but the user may continue (§8). The model's summary is shown inline in the transcript; full summary + session stats are available on demand (the `e` / SummaryScreen action), not force-pushed. Bootstrap: "after task_done, the session is over; do not emit further calls." |
 
 ---
 
@@ -356,7 +356,7 @@ EOT
 ===CLIP:EOM calls=1===
 ~~~~
 
-*(AgentClip shows the summary, marks the session complete, stops the expectation loop. No further paste required; the TUI offers "undo turn" against the backup store.)*
+*(AgentClip marks the session complete and renders the model's summary inline in the transcript — full stats one keypress away via `e` — and stops the expectation loop. No further paste required; the user may type a follow-up to continue, or undo turns against the backup store.)*
 
 ---
 

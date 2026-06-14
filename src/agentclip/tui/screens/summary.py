@@ -1,4 +1,8 @@
-"""SummaryScreen: shown on task_done or via the e key (tui.md section 1.5).
+"""SummaryScreen: the session summary + stats, shown on demand via the e key.
+
+It is NOT auto-pushed on task_done: task_done completes the session but the
+user may continue (protocol.md section 8), so the controller leaves them in the
+chat and the summary is one keypress away instead of a wall.
 
 Dismisses with one of "undo" | "new" | "close" | "export". The caller treats
 "export" specially: it writes the chat log and re-shows this screen.

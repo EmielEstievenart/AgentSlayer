@@ -36,7 +36,9 @@ TRANSITIONS: dict[Phase, frozenset[Phase]] = {
     Phase.REVIEW: frozenset({Phase.AWAITING_REPLY, Phase.AWAITING_USER, Phase.DONE}),
     Phase.SENDING_CHUNKS: frozenset(),  # M3
     Phase.AWAITING_USER: frozenset({Phase.AWAITING_REPLY, Phase.DONE}),
-    Phase.DONE: frozenset(),
+    # DONE is not a dead end: task_done completes the session, but the user may
+    # continue (protocol.md section 8), and a follow_up reopens it for a reply.
+    Phase.DONE: frozenset({Phase.AWAITING_REPLY}),
 }
 
 

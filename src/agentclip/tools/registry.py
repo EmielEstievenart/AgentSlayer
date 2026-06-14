@@ -12,14 +12,17 @@ and meta cannot drift apart in how they report failures:
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from agentclip.config import BudgetCaps, LimitsConfig
 from agentclip.protocol.types import ToolCall, ToolResult
 from agentclip.tools.sandbox import SandboxViolation, Workspace
+
+if TYPE_CHECKING:
+    from agentclip.tools.skills import Skill
 
 
 @dataclass(slots=True)
@@ -65,25 +68,36 @@ class ToolRegistry:
         return "\n\n".join(spec.catalog_doc for spec in self._specs.values())
 
 
-def default_registry() -> ToolRegistry:
-    """All 10 tools, in catalog order."""
-    # Local imports: fs_tools/shell/meta import helpers from this module.
-    from agentclip.tools import fs_tools, meta, shell
+def default_registry(
+    skills: Sequence[Skill] = (), *, max_skill_listing_chars: int | None = None
+) -> ToolRegistry:
+    """The built-in tools, in catalog order. When any model-invocable skills are
+    discovered, a `skill` tool is inserted (after run_command, before the meta
+    tools) so the catalog advertises them and the model can load one on demand.
 
-    return ToolRegistry(
-        (
-            fs_tools.READ_FILE_SPEC,
-            fs_tools.WRITE_FILE_SPEC,
-            fs_tools.EDIT_FILE_SPEC,
-            fs_tools.DELETE_FILE_SPEC,
-            fs_tools.LIST_DIR_SPEC,
-            fs_tools.GLOB_SPEC,
-            fs_tools.GREP_SPEC,
-            shell.RUN_COMMAND_SPEC,
-            meta.ASK_USER_SPEC,
-            meta.TASK_DONE_SPEC,
-        )
-    )
+    `max_skill_listing_chars` bounds the total skill listing so a large skills
+    library cannot push the bootstrap past the paste budget (the bootstrap has
+    no truncation fallback); callers derive it from the active preset budget.
+    """
+    # Local imports: fs_tools/shell/meta/skills import helpers from this module.
+    from agentclip.tools import fs_tools, meta, shell
+    from agentclip.tools.skills import make_skill_spec
+
+    specs: list[ToolSpec] = [
+        fs_tools.READ_FILE_SPEC,
+        fs_tools.WRITE_FILE_SPEC,
+        fs_tools.EDIT_FILE_SPEC,
+        fs_tools.DELETE_FILE_SPEC,
+        fs_tools.LIST_DIR_SPEC,
+        fs_tools.GLOB_SPEC,
+        fs_tools.GREP_SPEC,
+        shell.RUN_COMMAND_SPEC,
+    ]
+    listable = [s for s in skills if s.model_invocable]
+    if listable:
+        specs.append(make_skill_spec(listable, max_listing_chars=max_skill_listing_chars))
+    specs.extend((meta.ASK_USER_SPEC, meta.TASK_DONE_SPEC))
+    return ToolRegistry(specs)
 
 
 # -- shared handler plumbing -------------------------------------------------

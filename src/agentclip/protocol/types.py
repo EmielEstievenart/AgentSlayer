@@ -50,6 +50,7 @@ ERROR_CODES = frozenset(
         "too_large",
         "unterminated_heredoc",
         "reply_truncated",
+        "unknown_skill",
     }
 )
 

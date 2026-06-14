@@ -168,7 +168,7 @@ SECTION 6 — THE TASK (~variable)
 
 ## 3. Tool catalog
 
-Exactly 10 tools. Slot justification for the non-obvious one: **`delete_file` takes the last slot** because deletions routed through `run_command rm` would bypass the per-turn backup system and break "undo turn" — deletion *must* be a first-class, backed-up, approval-gated tool. Rejected for slots: `read_files` (batching already comes free from multi-call replies), `append_file` (folded into `write_file mode: append` — and it's the recovery path for writing files larger than one reply, §5.2), `stat` (`list_dir` shows sizes), `move_file` (write+delete or an approved `run_command`; rare enough).
+Exactly 10 built-in tools, plus an **optional 11th `skill` tool** that appears only when Agent Skills are discovered on disk (see `docs/design/skills.md`). Slot justification for the non-obvious one: **`delete_file` takes the last slot** because deletions routed through `run_command rm` would bypass the per-turn backup system and break "undo turn" — deletion *must* be a first-class, backed-up, approval-gated tool. Rejected for slots: `read_files` (batching already comes free from multi-call replies), `append_file` (folded into `write_file mode: append` — and it's the recovery path for writing files larger than one reply, §5.2), `stat` (`list_dir` shows sizes), `move_file` (write+delete or an approved `run_command`; rare enough).
 
 Common rules: all `path`/`root` params resolve inside the working directory; absolute paths and `..`-escapes ⇒ `error code=path_outside_workspace`. All results are delivered in the §4 envelope; bodies are heredoc-framed with tool-chosen tags.
 
@@ -184,6 +184,7 @@ Common rules: all `path`/`root` params resolve inside the working directory; abs
 | `run_command` | `command`\*, `timeout` (secs, default 60), `cwd` | Line 1: `exit 0 (2.1s)` then merged stdout+stderr heredoc, tail-capped per budget tier (tail, because test/build verdicts live at the end). Allowlist match ⇒ runs silently; else approval gate; user "no" ⇒ `status=denied`. Timeout ⇒ `error code=exec_timeout` with partial tail. |
 | `ask_user` | `question`\* (inline or heredoc) | The user's typed answer, verbatim. The turn payload is not sent until the user answers (TUI contract). |
 | `task_done` | `summary` (heredoc, optional) | Tool acknowledges and stops expecting calls; the session is marked complete but the user may continue (§8). The model's summary is shown inline in the transcript; full summary + session stats are available on demand (the `e` / SummaryScreen action), not force-pushed. Bootstrap: "after task_done, the session is over; do not emit further calls." |
+| `skill` | `name`\* | The full body of the named Agent Skill (a reusable procedure/reference), verbatim. Read-only, auto (no gate). Only present when ≥1 model-invocable skill is discovered; the catalog lists each skill's name + description so the model picks one and loads it on demand (progressive disclosure). Unknown name ⇒ `error code=unknown_skill` listing the available skills. See `docs/design/skills.md`. |
 
 ---
 
@@ -212,7 +213,7 @@ R2
 ```
 
 - **status:** `ok` | `error` (with `code=`) | `denied` (user rejected at approval gate) | `skipped` (user aborted the rest of the turn; bootstrap: "skipped calls did not run — resend them if still wanted").
-- **Error codes (closed set):** `parse_error, unknown_tool, missing_param, bad_param, file_not_found, binary_file, path_outside_workspace, match_not_found, multiple_matches, exec_timeout, too_large, unterminated_heredoc, reply_truncated`. Every error body ends with a `hint:` line containing the recommended next action.
+- **Error codes (closed set):** `parse_error, unknown_tool, missing_param, bad_param, file_not_found, binary_file, path_outside_workspace, match_not_found, multiple_matches, exec_timeout, too_large, unterminated_heredoc, reply_truncated, unknown_skill`. Every error body ends with a `hint:` line containing the recommended next action.
 - **Truncation annotations** are in-band, first or last line of the body: `[truncated: showing last 120 of 2341 lines - rerun with a filter, or read_file specific ranges]`.
 - **Parse errors** that prevent a call from executing become a RESULT with the id the parser assigned (or `id=0` if no header was recoverable), `code=parse_error`, body quoting ≤10 lines around the offending region plus a one-line grammar reminder. Well-formed sibling calls in the same reply still execute — one bad block never wastes the whole round trip.
 - Hallucinated tool ⇒ `code=unknown_tool`, body lists the 10 valid names.

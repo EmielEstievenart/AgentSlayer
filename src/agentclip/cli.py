@@ -18,6 +18,7 @@ from agentclip.store.backups import BackupStore
 from agentclip.store.session import SessionStore, prune_sessions
 from agentclip.tools.registry import default_registry
 from agentclip.tools.sandbox import Workspace
+from agentclip.tools.skills import discover_skills
 from agentclip.tui.app import AgentClipApp
 
 
@@ -28,12 +29,17 @@ def make_engine_factory(config: Config, project_root: Path) -> Callable[[str], E
     default, so the factory rebuilds a Config with that service active - the
     engine reads its budget/caps from config.preset().
     """
-    registry = default_registry()
+    # Skills are discovered once per process from the same folders Claude Code
+    # and OpenCode use. The registry is rebuilt per session so the skill listing
+    # is bounded to the chosen preset's budget (the bootstrap has no truncation
+    # fallback - a big skills library must not be able to overflow it).
+    skills = discover_skills(project_root)
 
     def build(service_key: str) -> Engine:
         cfg = config
         if service_key != cfg.general.service and service_key in cfg.services:
             cfg = replace(cfg, general=replace(cfg.general, service=service_key))
+        registry = default_registry(skills, max_skill_listing_chars=cfg.preset().max_paste_chars // 4)
         workspace = Workspace(project_root, cfg.excluded_names())
         session = SessionStore(project_root, service=cfg.general.service)
         backups = BackupStore(session.session_dir)

@@ -24,6 +24,7 @@ class StatusBar(Horizontal):
         out: str,
         turn: str,
         edits: str,
+        edits_class: str = "",
         root: str,
     ) -> None:
         seg = self.query_one("#seg-watch", Static)
@@ -32,5 +33,7 @@ class StatusBar(Horizontal):
         self.query_one("#seg-service", Static).update(Text(service))
         self.query_one("#seg-out", Static).update(Text(out))
         self.query_one("#seg-turn", Static).update(Text(turn))
-        self.query_one("#seg-edits", Static).update(Text(edits))
+        edits_seg = self.query_one("#seg-edits", Static)
+        edits_seg.update(Text(edits))
+        edits_seg.set_classes(f"seg {edits_class}".rstrip())
         self.query_one("#seg-root", Static).update(Text(root))

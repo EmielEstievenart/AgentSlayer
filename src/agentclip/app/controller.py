@@ -63,6 +63,19 @@ def _fmt_k(chars: int) -> str:
     return f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
 
 
+def _parse_onoff(arg: str, *, current: bool) -> bool | None:
+    """Parse a /yolo argument: empty toggles, on/off variants set explicitly,
+    anything else is unrecognized (None)."""
+    if not arg:
+        return not current
+    low = arg.strip().lower()
+    if low in ("on", "true", "1", "yes", "y", "enable"):
+        return True
+    if low in ("off", "false", "0", "no", "n", "disable"):
+        return False
+    return None
+
+
 class SessionController:
     """Synchronous-at-heart session driver; UI-agnostic via the ChatView port."""
 
@@ -96,6 +109,7 @@ class SessionController:
         self._pending_approval = False
         self._awaiting_answer = False
         self._has_outbound = False
+        self._yolo = config.approval.yolo  # auto-approve everything; /yolo toggles it
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -116,10 +130,13 @@ class SessionController:
         self._spawn_flow(self._ingest_flow(text))
 
     def submit_message(self, text: str) -> None:
-        """Composer send: an ask_user answer, or a follow-up message."""
+        """Composer send: an ask_user answer, a slash command, or a follow-up."""
         text = text.strip()
         if not text:
             return
+        # An ask_user answer ALWAYS wins. While the flow is parked on the answer
+        # future the composer's text IS the answer, verbatim - so a legitimate
+        # answer like "/etc/hosts" or "/no" is delivered, never eaten as a command.
         if self._awaiting_answer:
             future = self._answer_future
             if future is not None and not future.done():
@@ -128,12 +145,116 @@ class SessionController:
             else:  # a previous send already resolved it (sub-frame double-tap)
                 self._view.notify("answer already sent - please wait", severity="warning")
             return
+        if text.startswith("/"):
+            self._handle_command(text)
+            return
+        self._send_follow_up(text)
+
+    def _send_follow_up(self, text: str) -> None:
         if self._session_active and not self._busy and self._can_follow_up():
             self._view.reset_composer()
             self._spawn_flow(self._follow_up_flow(text))
             return
         self._view.notify(
             "can't send right now - wait for the current step to finish", severity="warning"
+        )
+
+    # -- chat slash commands --------------------------------------------------
+    # Parsed here (not in the view) so any front-end that forwards composer text
+    # gets the commands for free - the controller owns session lifecycle and the
+    # engine. Parsing is plain string work: no Textual/clip import (layering OK).
+    # Only reached when NOT answering a question (submit_message gates that first),
+    # so a slash-leading answer is never mistaken for a command.
+
+    def _handle_command(self, raw: str) -> None:
+        """Dispatch a leading-slash composer line. `//text` is an escape hatch that
+        sends a follow-up message beginning with a literal slash. The box is cleared
+        first so a typo or command never lingers; unknown commands are reported, not
+        sent."""
+        self._view.reset_composer()
+        if raw.startswith("//"):
+            self._send_follow_up(raw[1:])  # literal-slash message escape
+            return
+        name, _, arg = raw[1:].partition(" ")
+        name = name.strip().lower()
+        arg = arg.strip()
+        if name == "yolo":
+            self._cmd_yolo(arg)
+        elif name == "new":
+            self._cmd_new()
+        elif name in ("help", "commands", "?"):
+            self._cmd_help()
+        else:
+            shown = f"/{name}" if name else "/"
+            self._view.notify(
+                f"unknown command: {shown} - try /yolo, /new, or /help", severity="warning"
+            )
+
+    def _cmd_yolo(self, arg: str) -> None:
+        """Toggle (or set on/off) YOLO auto-approve-everything. Only reachable while
+        armed/idle (an ask_user answer wins over commands), so the toggle itself runs
+        off-loop via _engine_call - set_yolo writes one session audit line."""
+        if not self._session_active or self._engine is None:
+            self._view.notify("start a session before using /yolo", severity="warning")
+            return
+        target = _parse_onoff(arg, current=self._yolo)
+        if target is None:
+            self._view.notify("usage: /yolo [on|off] - bare /yolo toggles", severity="warning")
+            return
+        self._view.spawn(self._apply_yolo(target))
+
+    async def _apply_yolo(self, target: bool) -> None:
+        # Spawned off the flow machinery (not _wrap_flow), so it owns its error
+        # handling. set_yolo flips the policy flag THEN writes an audit line; if
+        # that write fails we resync the mirror from the engine's real state
+        # (re-read by _refresh_status) so a later bare /yolo toggles the right way.
+        engine = self._engine
+        if engine is None:
+            return
+        try:
+            await self._engine_call(engine.set_yolo, target)  # flips policy + audits, off-loop
+        except Exception as exc:  # keep the mirror honest, then surface it
+            await self._refresh_status()
+            if self._snap is not None:
+                self._yolo = self._snap.yolo
+            await self._view.add_error(f"could not record the YOLO toggle: {exc}")
+            self._view.alert("YOLO toggle failed - see transcript", severity="error")
+            return
+        self._yolo = target
+        await self._refresh_status()  # repaint the status bar (YOLO badge)
+        if target:
+            await self._view.add_note(
+                "YOLO mode ON - every tool call (edits AND commands) auto-approves, "
+                "bypassing the allowlist and deny tokens. /yolo off to disarm."
+            )
+            self._view.alert("YOLO mode ON - approvals are off", severity="warning")
+            self._view.notify("YOLO mode ON - every tool call auto-approves", severity="warning")
+        else:
+            await self._view.add_note(
+                "YOLO mode OFF - edits and non-allowlisted commands gate again."
+            )
+            self._view.alert("YOLO mode OFF", severity="information")
+            self._view.notify("YOLO mode OFF - approvals restored", severity="information")
+
+    def _cmd_new(self) -> None:
+        """Clear the chat and start a fresh session (re-prompts for a task)."""
+        if not self._session_active:
+            self._view.notify("no active session to replace", severity="warning")
+            return
+        if self._busy:
+            self._view.notify(
+                "can't start a new session mid-turn - answer or finish the current step first",
+                severity="warning",
+            )
+            return
+        self._spawn_flow(self._reset_session())
+
+    def _cmd_help(self) -> None:
+        self._view.spawn(
+            self._view.add_note(
+                "commands:  /yolo [on|off] - toggle auto-approve-everything  ·  "
+                "/new - clear the chat and start a new session  ·  /help - this list"
+            )
         )
 
     def submit_decision(self, decision: Decision, note: str | None) -> None:
@@ -433,6 +554,7 @@ class SessionController:
         self._last_outbound = None
         self._has_outbound = False
         self._queued_capture = None
+        self._yolo = self._config.approval.yolo  # back to the configured default
         self._stats = SessionStats()
         await self._view.clear_transcript()
         self._push_state()  # phase -> IDLE (snap is None)

@@ -544,7 +544,12 @@ class MainScreen(Screen[None]):
             else "out -"
         )
         turn = f"turn {snap.turn}" if snap else "turn -"
-        edits = "EDITS:auto" if snap and snap.auto_accept_edits else "EDITS:ask"
+        if snap and snap.yolo:
+            edits, edits_class = "⚡ YOLO", "st-yolo"
+        elif snap and snap.auto_accept_edits:
+            edits, edits_class = "EDITS:auto", ""
+        else:
+            edits, edits_class = "EDITS:ask", ""
         try:
             root = str(Path("~") / self._project_root.relative_to(Path.home()))
         except ValueError:
@@ -556,6 +561,7 @@ class MainScreen(Screen[None]):
             out=out,
             turn=turn,
             edits=edits,
+            edits_class=edits_class,
             root=root,
         )
 

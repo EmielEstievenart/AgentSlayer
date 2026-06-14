@@ -21,10 +21,13 @@ Verdict = Literal["auto", "needs_approval"]
 class ApprovalPolicy:
     """Per-session approval state. auto_accept_edits is flipped (and sticks)
     when the user chooses Decision.APPROVE_ALL_EDITS; it never affects
-    run_command."""
+    run_command. yolo is the bigger hammer: when set, EVERYTHING auto-approves
+    (edits AND commands), bypassing the allowlist and the deny tokens - the
+    /yolo chat command toggles it live."""
 
     def __init__(self, config: ApprovalConfig) -> None:
         self.auto_accept_edits: bool = config.auto_accept_edits
+        self.yolo: bool = config.yolo
         self._allowlist: tuple[str, ...] = config.command_allowlist
         self._deny_tokens: tuple[str, ...] = config.command_deny_tokens
 
@@ -45,6 +48,8 @@ class ApprovalPolicy:
     def verdict(self, spec: ToolSpec, call: ToolCall) -> Verdict:
         if spec.approval_kind == "auto":
             return "auto"
+        if self.yolo:
+            return "auto"  # YOLO: nothing gates - edits AND commands run unattended
         if spec.approval_kind == "edit":
             return "auto" if self.auto_accept_edits else "needs_approval"
         # approval_kind == "command"

@@ -178,6 +178,7 @@ class Workspace:
 # engine/approval.py -----------------------------------------------------
 class ApprovalPolicy:
     auto_accept_edits: bool = False          # flipped by Decision.APPROVE_ALL_EDITS
+    yolo: bool = False                       # auto-approve EVERYTHING; toggled live by /yolo
     def verdict(self, spec: ToolSpec, call: ToolCall) -> Literal["auto", "needs_approval"]
     def command_auto_allowed(self, command: str) -> bool   # glob allowlist + deny-token check
 
@@ -238,6 +239,7 @@ poll_interval_ms = 300         # 200–500 sensible range
 
 [approval]
 auto_accept_edits = false      # session escalation always starts off
+yolo = false                   # auto-approve EVERYTHING (edits + commands); /yolo toggles live
 command_allowlist = [
   "pytest*", "python -m pytest*", "python -m unittest*",
   "ruff check*", "ruff format --check*", "mypy*",

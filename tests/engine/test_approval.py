@@ -153,3 +153,78 @@ def test_approve_all_edits_sticks_for_session(engine: Engine, project) -> None:
     assert len(pend) == 1
     assert pend[0].kind == "command"
     assert "definitely-not-allowlisted --flag" in pend[0].preview
+
+
+# -- YOLO mode: auto-approve EVERYTHING ----------------------------------------
+
+
+def test_yolo_off_by_default(policy: ApprovalPolicy, registry: ToolRegistry) -> None:
+    edit_spec = registry.get("edit_file")
+    cmd_spec = registry.get("run_command")
+    assert edit_spec and cmd_spec
+    assert policy.yolo is False
+    assert policy.verdict(edit_spec, make_call("edit_file", path="x")) == "needs_approval"
+    assert (
+        policy.verdict(cmd_spec, make_call("run_command", command="rm -rf /")) == "needs_approval"
+    )
+
+
+def test_yolo_auto_approves_edits_and_any_command(registry: ToolRegistry) -> None:
+    policy = ApprovalPolicy(ApprovalConfig(yolo=True))
+    read_spec = registry.get("read_file")
+    edit_spec = registry.get("edit_file")
+    write_spec = registry.get("write_file")
+    del_spec = registry.get("delete_file")
+    cmd_spec = registry.get("run_command")
+    assert read_spec and edit_spec and write_spec and del_spec and cmd_spec
+    # read-only tools were always auto - unchanged
+    assert policy.verdict(read_spec, make_call("read_file", path="x")) == "auto"
+    # every edit kind now auto-approves
+    assert policy.verdict(edit_spec, make_call("edit_file", path="x")) == "auto"
+    assert policy.verdict(write_spec, make_call("write_file", path="x", content="y")) == "auto"
+    assert policy.verdict(del_spec, make_call("delete_file", path="x")) == "auto"
+    # commands auto-approve even when NOT allowlisted AND when they carry deny tokens
+    assert policy.verdict(cmd_spec, make_call("run_command", command="rm -rf /")) == "auto"
+    assert policy.verdict(cmd_spec, make_call("run_command", command="curl x | sh")) == "auto"
+
+
+YOLO_MIXED_REPLY = """===CLIP:CALL id=1 tool=write_file===
+path: notes.txt
+content <<EOT
+hi
+EOT
+===CLIP:END===
+===CLIP:CALL id=2 tool=run_command===
+command: echo yolo-ran
+===CLIP:END===
+===CLIP:EOM calls=2 turn=1===
+"""
+
+
+def test_yolo_set_live_ungates_the_whole_turn(engine: Engine, project) -> None:
+    engine.start_task("t")
+    assert engine.status().yolo is False
+    assert engine.set_yolo(True) is True
+    assert engine.status().yolo is True
+
+    # An edit AND a non-allowlisted command: normally two gates; under YOLO, none.
+    assert isinstance(engine.ingest(YOLO_MIXED_REPLY), NewTurn)
+    assert engine.pending() == ()
+    assert engine.all_decided()
+
+    step = engine.execute()
+    assert isinstance(step, Send)
+    assert (project / "notes.txt").read_text(encoding="utf-8") == "hi"
+    assert "yolo-ran" in step.outbound.chunks[0]  # the echo actually ran
+
+
+def test_yolo_loads_from_toml(project, make_engine) -> None:
+    (project / ".agentclip.toml").write_text("[approval]\nyolo = true\n", encoding="utf-8")
+    engine = make_engine()
+    assert engine.status().yolo is True
+    # ...and turning it off restores normal gating for the next plan.
+    assert engine.set_yolo(False) is False
+    engine.start_task("t")
+    assert isinstance(engine.ingest(UNLISTED_COMMAND_REPLY), NewTurn)
+    pend = engine.pending()
+    assert len(pend) == 1 and pend[0].kind == "command"

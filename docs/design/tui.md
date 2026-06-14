@@ -107,6 +107,8 @@ IDLE ──copy bootstrap──▶ ARMED ──reply parsed──▶ EXECUTING �
 | `ask_user` | pauses for typed answer (not an approval; §9) |
 | `task_done` | auto-runs; ends the turn and marks the session complete (the user may still follow up to reopen it) |
 
+YOLO mode (§2.6) overrides the whole table for the gated rows: when ON, `run_command`, `write_file`, and `edit_file` all auto-run regardless of allowlist/deny tokens.
+
 ### 2.3 The gate
 
 When the executor hits a gated call it builds the renderable (diff for edits, the literal command line for commands), shows the ActionPanel, focuses `#action-body` (so arrows scroll the diff immediately), bells/notifies (§8), sets `pending_approval: reactive[bool] = reactive(False, bindings=True)`, and awaits an `asyncio.Future[Approval]`:
@@ -142,6 +144,17 @@ call 3 run_command → skipped (turn aborted after rejection of call 2)
 ```
 
 Exact wire grammar is the protocol designer's lane; the status enum + `user_note` field is a contract (§11). Errors during auto-run calls (file not found, command exit≠0) do **not** gate or abort: the result entry carries the error/output and execution continues — the LLM is the error handler.
+
+### 2.6 YOLO mode (auto-approve everything)
+
+`/yolo` (typed in the chat box) flips a session-scoped policy flag that makes **every** tool call auto-run — edits *and* commands — bypassing the allowlist **and** the deny tokens. It is the bigger hammer above auto-accept-edits (`a`), which only covers edits. Use it for trusted/throwaway projects where the round-trip approval cost outweighs the risk.
+
+- Toggle: bare `/yolo` flips it; `/yolo on` / `/yolo off` set it explicitly.
+- Scope: the session. A new session (`/new`, or the summary's "new") resets it to the configured default (`[approval] yolo`, default `false`).
+- Mechanics: `ApprovalPolicy.verdict()` short-circuits to `auto` for edit/command kinds when `yolo` is set (read-only tools were already auto). The engine never builds a pending gate, so the turn runs unattended end-to-end. Audited per call as `auto: YOLO mode (auto-approve all)` and as a `yolo` session event on toggle.
+- Indicator: the status bar `EDITS` segment becomes a red `⚡ YOLO` badge (`.st-yolo`) so the disarmed state is unmissable while the user is staring at the browser.
+
+This is deliberately a **runtime** toggle (not gated behind a confirm): it is opt-in by typing, reversible with `/yolo off`, and every change still lands in the per-turn backup store, so `undo` works as usual.
 
 ---
 
@@ -189,6 +202,18 @@ Six `Static` segments, words not emoji, colored via CSS classes, driven by react
 ```
 
 Watcher segment states: `● ARMED` (green, polling), `◍ EXECUTING` (yellow), `◍ APPROVAL?` (yellow, blinking class), `◍ PART 2/3` (chunk mode), `○ PAUSED` (dim), `✗ CLIP ERR` (red — provider fault, manual mode active), `○ IDLE`, `✓ DONE`.
+
+The `EDITS` segment shows `EDITS:ask` (default), `EDITS:auto` (auto-accept-edits ON), or a red `⚡ YOLO` badge (`.st-yolo`) when YOLO mode (§2.6) is armed — YOLO takes display priority over `EDITS:auto`.
+
+### 3.3a Chat commands
+
+The chat box also accepts slash commands (parsed in `SessionController.submit_message`, so any future front-end inherits them; an unknown `/command` is reported, not sent to the model):
+
+- `/yolo [on|off]` — toggle YOLO mode (§2.6).
+- `/new` — clear the transcript and start a fresh session (re-opens the NewSessionScreen). Refused mid-turn (answer/finish the current step first); reachable while armed/idle or after `task_done`.
+- `/help` — list the commands in the transcript.
+
+Precedence: while answering an `ask_user` question, the typed text is **always** the answer (commands are not parsed) — so a slash-leading answer like `/etc/hosts` is delivered verbatim, never eaten. A follow-up message that must begin with a literal slash is escaped as `//…` (one slash is stripped and the rest sent as a message).
 
 ### 3.4 Manual fallback and copy-again
 

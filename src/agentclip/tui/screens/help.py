@@ -15,6 +15,12 @@ Chat box (bottom of the screen)
   Ctrl+J inserts a newline; pasting keeps its newlines.
   Esc frees the single-key shortcuts below; press t (or click) to type again.
 
+Chat commands (type in the chat box, leading slash)
+  /yolo [on|off]  auto-approve EVERY edit and command (bypasses allowlist).
+                  Bare /yolo toggles. The status bar shows a red YOLO badge.
+  /new            clear the chat and start a fresh session
+  /help           list these commands
+
 Approval (the bordered box above the chat)
   y  approve      n  reject (optional reason)      a  approve + auto-accept edits
   ...or click the Approve / Reject buttons. (a / auto-accept never runs commands.)

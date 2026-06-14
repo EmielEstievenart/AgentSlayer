@@ -128,6 +128,10 @@ class ClipboardConfig:
 @dataclass(frozen=True, slots=True)
 class ApprovalConfig:
     auto_accept_edits: bool = False
+    # YOLO mode: auto-approve EVERY tool call - edits AND commands - bypassing the
+    # allowlist and the deny tokens entirely. Off by default; the /yolo chat command
+    # toggles it live for the session. Setting it true here arms a session in YOLO.
+    yolo: bool = False
     command_allowlist: tuple[str, ...] = DEFAULT_ALLOWLIST
     command_deny_tokens: tuple[str, ...] = DEFAULT_DENY_TOKENS
 
@@ -304,6 +308,7 @@ def load_config(
         ),
         approval=ApprovalConfig(
             auto_accept_edits=_take_bool(approval_t, "auto_accept_edits", False, "approval", warnings),
+            yolo=_take_bool(approval_t, "yolo", False, "approval", warnings),
             command_allowlist=_take_str_list(
                 approval_t, "command_allowlist", DEFAULT_ALLOWLIST, "approval", warnings
             ),

@@ -177,6 +177,11 @@ class AgentClipApp(App[None]):
         color: $success;
         text-style: bold;
     }
+    .st-yolo {
+        color: $text;
+        background: $error;
+        text-style: bold;
+    }
 
     NewSessionScreen, ConfirmScreen, SummaryScreen, HelpScreen, TextEntryScreen {
         align: center middle;

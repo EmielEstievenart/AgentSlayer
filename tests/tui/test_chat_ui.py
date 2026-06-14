@@ -58,6 +58,18 @@ EOT
 ~~~~
 """
 
+REPLY_ASK_USER = """I need to know where to write.
+
+~~~~
+===CLIP:CALL id=1 tool=ask_user===
+question <<EOT
+Which absolute path should I write to?
+EOT
+===CLIP:END===
+===CLIP:EOM calls=1 turn=1===
+~~~~
+"""
+
 # An edit reply for the turn AFTER a post-task_done follow-up reopens the session
 # (the follow-up TASK is turn 2, so its reply echoes turn=2).
 REPLY_EDIT_TURN2 = """On it.
@@ -282,6 +294,103 @@ async def test_export_chat_log(tmp_path: Path) -> None:
         assert "===CLIP:RESULT" in text and "outbound turn" in text
         # And the export left a breadcrumb in the transcript.
         assert any("chat log exported" in e for e in main.transcript.entries)
+
+
+async def test_yolo_command_auto_approves_every_call(tmp_path: Path) -> None:
+    """Typing /yolo in the chat box flips YOLO on: an edit that normally opens
+    the approval gate now runs unattended - results are copied back WITHOUT any
+    approval keypress, and the status bar shows the YOLO badge."""
+    app, fake, project = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        composer = main.composer
+        composer.load_text("/yolo")
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: main._snap is not None and main._snap.yolo, "yolo armed")
+        assert main.composer.text == ""  # the command cleared the box
+        # The status bar shows the YOLO badge (st-yolo class) in the edits segment.
+        assert main.status_bar.query_one("#seg-edits").has_class("st-yolo")
+
+        # The edit would normally gate; reaching "results copied" with no `y` press
+        # proves it ran unattended (a gate would block here until a decision).
+        writes_before = len(fake.written)
+        main.post_message(ClipboardCaptured(REPLY_WITH_EDIT))
+        await _wait_for(
+            pilot, lambda: len(fake.written) > writes_before, "results copied unattended"
+        )
+        assert not main.pending_approval  # the gate never opened
+        on_disk = (project / "src" / "utils.py").read_text(encoding="utf-8")
+        assert "s.strip()" in on_disk
+        await _wait_for(pilot, lambda: main.phase_name == "AWAITING_REPLY", "re-armed")
+
+
+async def test_new_command_clears_and_restarts(tmp_path: Path) -> None:
+    """Typing /new clears the chat window and re-opens the new-session modal."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+        assert main.session_active
+        assert main.transcript.entries  # the bootstrap left content in the window
+
+        main.composer.load_text("/new")
+        await pilot.press("enter")
+
+        await _wait_for(
+            pilot, lambda: isinstance(app.screen, NewSessionScreen), "new-session modal returns"
+        )
+        assert not main.session_active
+        assert not main.transcript.entries  # the window was cleared
+
+
+async def test_slash_leading_answer_is_delivered_not_hijacked(tmp_path: Path) -> None:
+    """Regression: an ask_user answer beginning with '/' (e.g. an absolute path)
+    must be delivered to the model verbatim, NOT intercepted as a chat command -
+    otherwise the answer is dropped and the session wedges on the answer future."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        main.post_message(ClipboardCaptured(REPLY_ASK_USER))
+        await _wait_for(pilot, lambda: main.awaiting_answer, "model asked a question")
+
+        writes_before = len(fake.written)
+        main.composer.load_text("/etc/hosts")
+        await pilot.press("enter")
+
+        # The flow resumes (no longer awaiting), the answer rides into the results
+        # payload verbatim, and YOLO did NOT toggle (it was not parsed as a command).
+        await _wait_for(pilot, lambda: not main.awaiting_answer, "answer accepted")
+        await _wait_for(
+            pilot, lambda: len(fake.written) > writes_before, "results copied after answering"
+        )
+        assert "/etc/hosts" in fake.written[-1]
+        assert any("you: /etc/hosts" in e for e in main.transcript.entries)
+        assert main._snap is not None and not main._snap.yolo
+
+
+async def test_unknown_slash_command_is_reported(tmp_path: Path) -> None:
+    """An unknown /command is rejected, not sent to the model as a message."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        writes_before = len(fake.written)
+        main.composer.load_text("/bogus")
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        # Nothing was copied (no follow-up went out) and the box was cleared.
+        assert len(fake.written) == writes_before
+        assert main.composer.text == ""
+        assert not any("you: /bogus" in e for e in main.transcript.entries)
 
 
 async def test_reject_button_opens_reason(tmp_path: Path) -> None:

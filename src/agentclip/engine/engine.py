@@ -66,6 +66,7 @@ class StatusSnapshot:
     service_key: str
     budget_chars: int
     auto_accept_edits: bool
+    yolo: bool  # auto-approve everything (edits + commands) - bypasses every gate
     session_dir: Path
     last_outbound_chars: int
 
@@ -347,9 +348,20 @@ class Engine:
             service_key=self._config.general.service,
             budget_chars=self._config.preset().max_paste_chars,
             auto_accept_edits=self._policy.auto_accept_edits,
+            yolo=self._policy.yolo,
             session_dir=self._session.session_dir,
             last_outbound_chars=self._last_outbound_chars,
         )
+
+    def set_yolo(self, enabled: bool) -> bool:
+        """Toggle YOLO mode: auto-approve EVERY tool call (edits and commands),
+        bypassing the allowlist and the deny tokens. Session-scoped and legal in
+        any phase - it only flips the policy flag, so it never races the state
+        machine. It does not revisit decisions already made this turn; it governs
+        every plan built afterwards. Returns the new state."""
+        self._policy.yolo = enabled
+        self._session.append_event("yolo", enabled=enabled)
+        return enabled
 
     # -- planning ----------------------------------------------------------------
 
@@ -406,12 +418,15 @@ class Engine:
         return plan
 
     def _auto_reason(self, spec: ToolSpec, call: ToolCall) -> tuple[str, str]:
+        if spec.approval_kind == "auto":
+            return "read-only tool", "auto"
+        # Edits and commands only reach here when something auto-approved them.
+        if self._policy.yolo:
+            return "YOLO mode (auto-approve all)", "yolo"
         if spec.approval_kind == "command":
             matched = self._policy.command_auto_allowed(call.params.get("command", ""))
             return f'matched "{matched}"', "allowlist"
-        if spec.approval_kind == "edit":
-            return "auto-accept edits enabled", "auto_edits"
-        return "read-only tool", "auto"
+        return "auto-accept edits enabled", "auto_edits"
 
     def _parse_issue_result(self, call: ToolCall) -> ToolResult:
         fatal = [i for i in call.issues if i.kind in _FATAL_ISSUES]

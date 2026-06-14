@@ -11,6 +11,20 @@ Use any web-chat LLM (ChatGPT, Microsoft 365 Copilot, Claude.ai, Gemini, ...) as
 
 Every file change is backed up per turn — `undo turn` restores it without git.
 
+## Approving actions
+
+By default AgentClip **gates** every file edit and every command that isn't on the allowlist, so you review before it runs. At the gate: `y` approve · `n` reject (with an optional reason) · `a` approve **and** auto-accept edits for the rest of the session (commands still gate).
+
+For trusted or throwaway projects you can skip the gate entirely with **YOLO mode** — type `/yolo` in the chat box to auto-approve *everything* (edits **and** commands, bypassing the allowlist and deny tokens). The status bar shows a red `⚡ YOLO` badge while it's armed; `/yolo off` turns it back off. It can also be armed from config with `[approval] yolo = true`.
+
+Chat-box commands (type with a leading slash):
+
+| Command | Effect |
+|---|---|
+| `/yolo [on\|off]` | Toggle auto-approve-everything (bare `/yolo` toggles). |
+| `/new` | Clear the chat and start a fresh session. |
+| `/help` | List the commands. |
+
 ## Install / run
 
 Requires Python 3.11+.

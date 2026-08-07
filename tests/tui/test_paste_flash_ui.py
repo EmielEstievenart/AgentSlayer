@@ -99,14 +99,16 @@ async def test_copy_outbound_turns_the_flash_on(tmp_path: Path) -> None:
 async def test_no_click_region_shows_ctrl_v_and_never_pastes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No click/chat region drawn means no focus click, so the paste is never
-    attempted - focus could be on any window, and blind-pasting is unsafe."""
+    """No chatbox calibrated and no chat region drawn means no focus click, so
+    the paste is never attempted - focus could be on any window, and
+    blind-pasting is unsafe."""
     paste_calls: list[None] = []
     monkeypatch.setattr(main_mod, "send_paste", lambda: paste_calls.append(None) or True)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
-        assert main._click_region is None
+        assert main._chatbox_ongoing is None
+        assert main._chatbox_initial is None
         assert main._chat_region is None
 
         await main.copy_outbound("the payload")
@@ -118,15 +120,15 @@ async def test_no_click_region_shows_ctrl_v_and_never_pastes(
 async def test_landed_click_pastes_and_shows_enter(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A drawn region + a click that lands means AgentClip pastes the payload
-    itself - the banner then only has to ask for Enter."""
+    """A known click target + a click that lands means AgentClip pastes the
+    payload itself - the banner then only has to ask for Enter."""
     paste_calls: list[None] = []
     monkeypatch.setattr(main_mod, "click_region", lambda region: True)
     monkeypatch.setattr(main_mod, "send_paste", lambda: paste_calls.append(None) or True)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
-        main._click_region = ScreenRegion(0, 0, 100, 20)
+        main._chat_region = ScreenRegion(0, 0, 100, 20)
 
         await main.copy_outbound("the payload")
         await pilot.pause()

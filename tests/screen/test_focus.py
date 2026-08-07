@@ -13,8 +13,10 @@ from agentclip.screen.focus import (
     click_region,
     focus_window,
     foreground_window,
+    move_cursor,
     scroll_region,
     send_paste,
+    virtual_screen_bounds,
 )
 from agentclip.screen.region import ScreenRegion
 
@@ -59,6 +61,40 @@ def test_a_settling_click_is_unavailable_off_windows() -> None:
 @off_windows_only
 def test_paste_is_unavailable_off_windows() -> None:
     assert send_paste() is False
+
+
+@off_windows_only
+def test_cursor_moves_are_unavailable_off_windows() -> None:
+    """The hover scan gives up on the first refused move rather than sleeping
+    its way through a scan that can never see anything."""
+    assert move_cursor(100, 200) is False
+
+
+@off_windows_only
+def test_virtual_screen_bounds_are_windows_only() -> None:
+    assert virtual_screen_bounds() is None
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="needs the Windows desktop metrics")
+def test_virtual_screen_bounds_describe_a_real_desktop() -> None:
+    bounds = virtual_screen_bounds()
+    assert bounds is not None
+    _left, _top, width, height = bounds
+    assert width > 0 and height > 0
+
+
+def test_move_cursor_refuses_a_degenerate_desktop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 1-pixel-wide desktop would divide by zero while normalizing - refused
+    instead, on every platform."""
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("agentclip.screen.focus.virtual_screen_bounds", lambda: (0, 0, 1, 1))
+    assert move_cursor(0, 0) is False
+
+
+def test_move_cursor_refuses_without_desktop_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr("agentclip.screen.focus.virtual_screen_bounds", lambda: None)
+    assert move_cursor(10, 10) is False
 
 
 def test_focus_refuses_a_null_handle() -> None:

@@ -17,12 +17,26 @@ the summary screen's "new session" choice, so there is exactly one way to start.
 Threading: the clipboard watcher is a ``run_worker(thread=True)`` that bridges
 captures via the thread-safe ``post_message(ClipboardCaptured)`` -> the controller.
 The controller's flow coroutines run via ``spawn`` (also ``run_worker``), so Textual
-cancels everything on unmount. The busy-region poller (sidebar's "Set busy
-region...") is the same shape: a thread worker bridging ``BusyProbed`` to the
-sidebar. Its verdict now drives the copy-button auto-click too: two consecutive
-CHANGED probes after a MATCH (armed by ``on_busy_probed``) fire
-``_auto_copy_flow`` - scroll to the bottom, find the newest (lowest) copy-button
-icon in a vertical band, click it, and let the clipboard watcher ingest the copy.
+cancels everything on unmount. The finish detectors (sidebar's "Set busy
+region..." / "Set idle button...") are the same shape: one thread worker polling
+whichever elements are calibrated and bridging ``BusyProbed`` / ``IdleProbed``
+to the sidebar.
+
+Their combined verdict drives the copy-button auto-click (``_evaluate_finish``):
+the busy element was calibrated mid-generation so MATCH there means "still
+generating", the idle element was calibrated while idle so MATCH there means
+"finished". Either element saying "generating" arms the trigger; the trigger
+fires only once EVERY calibrated element says "finished" on two consecutive
+polls - with both calibrated that agreement is the whole point of the second
+detector. Firing runs ``_auto_copy_flow``: click the live chat input box, scroll
+to the bottom, find the newest (lowest) copy-button icon in a vertical band -
+falling back to a hover scan for chats that only render the icon under the
+pointer - click it, and let the clipboard watcher ingest the copy.
+
+Three calibrations are ``CalibratedElement``s (region + snapshot) rather than
+bare regions, because their whole job is "is this still the thing I was pointed
+at?": the two chat input boxes (a fresh chat centres its box, an ongoing one
+docks it at the bottom) and the browser's new-chat button.
 """
 
 from __future__ import annotations
@@ -31,6 +45,7 @@ import asyncio
 import time
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
+from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -55,17 +70,21 @@ from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.busy import BusyProbe, BusyState, probe_busy
 from agentclip.screen.capture import CaptureError, RegionImage, capture_region
+from agentclip.screen.element import CalibratedElement, probe_element
 from agentclip.screen.focus import (
     click_region,
     focus_window,
     foreground_window,
+    move_cursor,
     scroll_region,
     send_paste,
 )
+from agentclip.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
+from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.picker import ScreenPickError, pick_region
 from agentclip.screen.region import ScreenRegion
-from agentclip.screen.template import find_lowest_match
-from agentclip.tui.messages import BusyProbed, ClipboardCaptured
+from agentclip.screen.template import TemplateMatch, find_lowest_match
+from agentclip.tui.messages import BusyProbed, ClipboardCaptured, IdleProbed
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.summary import SummaryScreen
 from agentclip.tui.screens.text_entry import TextEntryScreen
@@ -74,8 +93,12 @@ from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
     BUSY_UNSET,
+    CHATBOX_INITIAL,
+    CHATBOX_ONGOING,
     COPY_UNSET,
     ENTER_FLASH_TEXT,
+    IDLE_UNSET,
+    NEWCHAT_UNSET,
     PASTE_FLASH_TEXT,
     Sidebar,
 )
@@ -85,8 +108,24 @@ from agentclip.tui.widgets.transcript import TranscriptPanel
 if TYPE_CHECKING:  # only for the action_settings hand-off; importing it for real would cycle
     from agentclip.tui.app import AgentClipApp
 
-# Busy-region poll cadence (tests monkeypatch this to something tiny).
+# Finish-detector poll cadence (tests monkeypatch this to something tiny).
 _BUSY_POLL_S = 0.5
+# Hover pause before clicking a calibrated element, for the same reason the copy
+# click settles: web UIs paint their buttons on hover.
+_ELEMENT_CLICK_SETTLE_S = 0.05
+
+
+class ElementClick(Enum):
+    """Outcome of the verify-then-click primitive (``_click_calibrated_element``).
+
+    Three states, not a bool: "the element no longer looks like its snapshot"
+    (nothing was clicked - the user must recalibrate) is a different story to
+    tell than "we clicked and the OS refused" (Windows-only input).
+    """
+
+    CLICKED = "clicked"
+    MISMATCH = "mismatch"  # verified against the snapshot and refused to click
+    NOT_CLICKED = "not_clicked"  # verified fine, but the click did not land
 
 
 def _fmt_k(chars: int) -> str:
@@ -101,6 +140,40 @@ def _format_busy_probe(probe: BusyProbe) -> str:
     if probe.state is BusyState.MATCH:
         return f"● GENERATING · match (diff {pct})"
     return f"○ response ready · changed (diff {pct})"
+
+
+def _format_idle_probe(probe: BusyProbe) -> str:
+    """Same readout for the idle element, with the polarity flipped: it was
+    calibrated while the chat was idle, so MATCH is the *finished* verdict."""
+    if probe.state is BusyState.ERROR:
+        return "✗ capture failed"
+    pct = f"{(probe.diff or 0.0) * 100:.1f}%"
+    if probe.state is BusyState.MATCH:
+        return f"○ response ready · match (diff {pct})"
+    return f"● GENERATING · changed (diff {pct})"
+
+
+def _busy_verdict(probe: BusyProbe) -> bool | None:
+    """The busy element's probe as a finish verdict: True = finished,
+    False = generating, None = no verdict (capture error).
+
+    It was calibrated WHILE the model was generating, so a MATCH means the
+    generation is still going.
+    """
+    if probe.state is BusyState.ERROR:
+        return None
+    return probe.state is BusyState.CHANGED
+
+
+def _idle_verdict(probe: BusyProbe) -> bool | None:
+    """The idle element's probe as a finish verdict, same three values.
+
+    It was calibrated while the chat was IDLE, so a MATCH means the response
+    has finished - the exact inverse of the busy element.
+    """
+    if probe.state is BusyState.ERROR:
+        return None
+    return probe.state is BusyState.MATCH
 
 
 class MainScreen(Screen[None]):
@@ -150,22 +223,37 @@ class MainScreen(Screen[None]):
         self._gate_kind: str | None = None  # the in-flight gate's kind, for a/check_action
         # Resolved by the first composer send while waiting for a new session.
         self._new_session_future: asyncio.Future[SessionSpec | None] | None = None
-        # Two user-drawn regions (sidebar): the chat region is the window that
-        # hosts the chatbot ("Set chat region..."), the click region is where
-        # AgentClip pokes once a response is fully handled ("Set click
-        # region..."). Every outbound copy clicks the click region's center, or
-        # the chat region's when no click region was drawn, so the browser
-        # regains focus. Both are session-scoped by request - windows move
-        # around - so /new resets them.
+        # The user-drawn chat region (sidebar's "Set chat region..."): the whole
+        # window that hosts the chatbot. It is the last-resort click target and
+        # the vertical span of the copy-button search band.
         self._chat_region: ScreenRegion | None = None
-        self._click_region: ScreenRegion | None = None
+        # The chat's input box, calibrated TWICE ("Set initial chatbox..." /
+        # "Set ongoing chatbox..."): a fresh chat centres the box, an ongoing
+        # one docks it at the bottom, so a single click point is wrong half the
+        # time. Each is a region plus its calibration snapshot, and the click
+        # goes to whichever still looks like its snapshot right now.
+        self._chatbox_initial: CalibratedElement | None = None
+        self._chatbox_ongoing: CalibratedElement | None = None
         self._region_click_warned = False
-        # The user-drawn busy/stop-indicator region + its calibration snapshot
-        # (sidebar's "Set busy region..."): display-only detector, session-scoped
-        # for the same reason as the chat region - windows move around.
+        # The two finish detectors, both region + calibration snapshot, both
+        # polled by one worker. The busy element ("Set busy region...") is
+        # calibrated WHILE the model generates, the idle element ("Set idle
+        # button...") while the chat is idle; ``_evaluate_finish`` folds
+        # whichever are live into one verdict. Session-scoped for the same
+        # reason as the chat region - windows move around.
         self._busy_region: ScreenRegion | None = None
         self._busy_baseline: RegionImage | None = None
-        self._busy_worker: Worker[None] | None = None
+        self._idle_region: ScreenRegion | None = None
+        self._idle_baseline: RegionImage | None = None
+        self._detector_worker: Worker[None] | None = None
+        # Latest verdict per detector: True = finished, False = generating,
+        # None = capture error. ``_seen`` is what makes a detector count toward
+        # the combined verdict, so a detector that has never reported cannot
+        # veto (or fake) a finish.
+        self._busy_seen = False
+        self._idle_seen = False
+        self._busy_finished: bool | None = None
+        self._idle_finished: bool | None = None
         # The user-drawn copy-button icon (sidebar's "Set copy button..."): the
         # drawn region doubles as the click target and the source of the
         # template pixels the auto-copy flow searches a vertical band for.
@@ -176,6 +264,11 @@ class MainScreen(Screen[None]):
         self._copy_template: RegionImage | None = None
         self._copy_armed = False
         self._copy_changed_streak = 0
+        # The browser's "new chat" control (sidebar's "Set new-chat button..."),
+        # driven by the "New browser chat" action button. Verified against its
+        # snapshot before every click, so a moved/re-laid-out page is refused
+        # instead of clicking whatever now sits there.
+        self._newchat: CalibratedElement | None = None
         # Our own terminal window, refreshed while the user is demonstrably
         # typing here - the auto-copy flow snaps focus back to it after
         # clicking the browser's copy button. Not session-scoped: the terminal
@@ -322,25 +415,35 @@ class MainScreen(Screen[None]):
 
     async def clear_transcript(self) -> None:
         # Only the session-reset path (/new, the summary's "new session") clears
-        # the transcript, so this doubles as the session teardown hook: the chat
-        # region, the click region, the busy region and the copy-button region
-        # are all session-scoped and die with it.
+        # the transcript, so this doubles as the session teardown hook: every
+        # calibration is session-scoped (windows move around) and dies with it.
         self._chat_region = None
-        self._click_region = None
+        self._chatbox_initial = None
+        self._chatbox_ongoing = None
         with suppress(NoMatches):
             self.sidebar.update_region(None)
-            self.sidebar.update_click(None)
-        self._stop_busy_worker()
+            self.sidebar.update_chatbox(CHATBOX_INITIAL, None)
+            self.sidebar.update_chatbox(CHATBOX_ONGOING, None)
+        self._stop_detector_worker()
         self._busy_region = None
         self._busy_baseline = None
+        self._idle_region = None
+        self._idle_baseline = None
+        self._busy_seen = False
+        self._idle_seen = False
+        self._busy_finished = None
+        self._idle_finished = None
         with suppress(NoMatches):
             self.sidebar.update_busy(BUSY_UNSET)
+            self.sidebar.update_idle(IDLE_UNSET)
         self._copy_region = None
         self._copy_template = None
         self._copy_armed = False
         self._copy_changed_streak = 0
+        self._newchat = None
         with suppress(NoMatches):
             self.sidebar.update_copy(COPY_UNSET)
+            self.sidebar.update_newchat(NEWCHAT_UNSET)
             self.sidebar.hide_paste_flash()
         with suppress(NoMatches):
             await self.transcript.clear_events()
@@ -447,15 +550,35 @@ class MainScreen(Screen[None]):
         with suppress(NoMatches):
             self.sidebar.show_paste_flash(ENTER_FLASH_TEXT if pasted else PASTE_FLASH_TEXT)
 
-    async def _click_after_response(self) -> bool:
-        """The payload is on the clipboard - poke the chat (when a region is
-        drawn) so the browser has focus and the paste lands without alt-tab.
-        Returns True only when a region was drawn AND the click landed - the
-        signal callers use to decide whether it is safe to also send Ctrl+V.
+    async def _chatbox_region(self) -> ScreenRegion | None:
+        """Which chat input box to poke right now, or None if none is known.
 
-        The click region wins; the chat region is the fallback for users who
-        only drew the window. Neither drawn means no click at all."""
-        region = self._click_region or self._chat_region
+        A fresh chat centres its input box and an ongoing one docks it at the
+        bottom, so the two calibrations are asked which of them is actually on
+        screen: capture each region and compare it against its own snapshot.
+        Ongoing goes first - mid-session it is the common case, and asking it
+        first means the usual path costs exactly one capture.
+
+        When neither matches (the page is mid-transition, or a dialog covers
+        it) we still return a target rather than giving up: the ongoing box if
+        calibrated, else the initial one, else the whole chat window. Clicking
+        a stale-looking chatbox is recoverable; not clicking at all means the
+        paste never lands.
+        """
+        for element in (self._chatbox_ongoing, self._chatbox_initial):
+            if element is not None and await asyncio.to_thread(probe_element, element):
+                return element.region
+        fallback = self._chatbox_ongoing or self._chatbox_initial
+        if fallback is not None:
+            return fallback.region
+        return self._chat_region
+
+    async def _click_after_response(self) -> bool:
+        """The payload is on the clipboard - poke the chat (when something is
+        calibrated) so the browser has focus and the paste lands without
+        alt-tab. Returns True only when a target was known AND the click landed
+        - the signal callers use to decide whether it is safe to send Ctrl+V."""
+        region = await self._chatbox_region()
         if region is None:
             return False
         clicked = await asyncio.to_thread(click_region, region)
@@ -686,37 +809,69 @@ class MainScreen(Screen[None]):
             self.sidebar.update_region(region)
         self.notify(
             f"chat region set ({region.describe()}) - the chatbot window; "
-            "outbound copies click it until a click region is drawn"
+            "outbound copies click it until a chatbox is calibrated"
         )
 
-    @on(Button.Pressed, "#set-click-btn")
-    def _on_set_click_region(self, event: Button.Pressed) -> None:
+    # -- the two chat input boxes ----------------------------------------------
+
+    @on(Button.Pressed, "#set-chatbox-initial-btn")
+    def _on_set_chatbox_initial(self, event: Button.Pressed) -> None:
         event.stop()
         if self._refuse_second_picker():
             return
-        self.run_worker(self._pick_click_region(), group="regionpick", exclusive=True)
+        self.run_worker(
+            self._pick_chatbox(
+                CHATBOX_INITIAL,
+                "Drag a box around the chat input box AS IT SITS IN A FRESH CHAT "
+                "(centred, no messages yet) · Esc cancels",
+            ),
+            group="regionpick",
+            exclusive=True,
+        )
 
-    async def _pick_click_region(self) -> None:
-        """Draw-a-box overlay around the spot AgentClip should click once a model
-        response is fully handled (typically the chat's input box)."""
+    @on(Button.Pressed, "#set-chatbox-ongoing-btn")
+    def _on_set_chatbox_ongoing(self, event: Button.Pressed) -> None:
+        event.stop()
+        if self._refuse_second_picker():
+            return
+        self.run_worker(
+            self._pick_chatbox(
+                CHATBOX_ONGOING,
+                "Drag a box around the chat input box AS IT SITS IN AN ONGOING CHAT "
+                "(docked at the bottom) · Esc cancels",
+            ),
+            group="regionpick",
+            exclusive=True,
+        )
+
+    async def _pick_chatbox(self, kind: str, prompt: str) -> None:
+        """Draw-a-box overlay around one of the two chat input box layouts, then
+        snapshot it: the pixels are how the click resolver later recognises
+        which layout is actually on screen (``_chatbox_region``)."""
         try:
-            region = await asyncio.to_thread(
-                pick_region,
-                prompt="Drag a box around the spot to click after each response · Esc cancels",
-            )
+            region = await asyncio.to_thread(pick_region, prompt=prompt)
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
             return
         finally:
             self._picker_open = False
         if region is None:
-            self.notify("click region unchanged (selection cancelled)")
+            self.notify(f"{kind} chatbox unchanged (selection cancelled)")
             return
-        self._click_region = region
+        try:
+            template = await asyncio.to_thread(capture_region, region)
+        except CaptureError as exc:
+            self.notify(f"could not capture the {kind} chatbox: {exc}", severity="error")
+            return
+        element = CalibratedElement(region, template)
+        if kind == CHATBOX_ONGOING:
+            self._chatbox_ongoing = element
+        else:
+            self._chatbox_initial = element
         self._region_click_warned = False
         with suppress(NoMatches):
-            self.sidebar.update_click(region)
-        self.notify(f"click region set ({region.describe()}) - every outbound copy now clicks it")
+            self.sidebar.update_chatbox(kind, region)
+        self.notify(f"{kind} chatbox calibrated ({region.describe()})")
 
     @on(Button.Pressed, "#set-busy-btn")
     def _on_set_busy_region(self, event: Button.Pressed) -> None:
@@ -750,28 +905,79 @@ class MainScreen(Screen[None]):
             return
         self._busy_region = region
         self._busy_baseline = baseline
+        self._busy_seen = False
+        self._busy_finished = None
         with suppress(NoMatches):
             self.sidebar.update_busy("calibrated - watching")
         self.notify(f"busy region calibrated ({region.describe()})")
-        self._start_busy_worker()
+        self._start_detector_worker()
 
-    # -- busy-region polling ---------------------------------------------------
+    @on(Button.Pressed, "#set-idle-btn")
+    def _on_set_idle_region(self, event: Button.Pressed) -> None:
+        event.stop()
+        if self._refuse_second_picker():
+            return
+        self.run_worker(self._pick_idle_region(), group="busyregionpick", exclusive=True)
 
-    def _start_busy_worker(self) -> None:
-        """Mirrors ``_start_watcher``: a thread worker bridging polls back to the
-        UI via ``post_message``, replacing any previous run (a redraw mid-session
-        must not leave two loops polling different regions)."""
-        self._stop_busy_worker()
-        region = self._busy_region
-        baseline = self._busy_baseline
-        if region is None or baseline is None:
+    async def _pick_idle_region(self) -> None:
+        """Draw-a-box overlay around an element that looks DIFFERENT while the
+        model generates (the send/voice button is the usual one), calibrated
+        while the chat is IDLE - so a later match means "finished".
+
+        The mirror image of the busy region, and useful on its own for chats
+        that have no visible stop indicator. Calibrating both is the point of
+        the feature: the auto-copy only fires when they agree."""
+        try:
+            region = await asyncio.to_thread(
+                pick_region,
+                prompt="Drag a box around an element that CHANGES while generating "
+                "(e.g. the send button), WHILE the chat is idle · Esc cancels",
+            )
+        except ScreenPickError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        finally:
+            self._picker_open = False
+        if region is None:
+            self.notify("idle element unchanged (cancelled)")
+            return
+        try:
+            baseline = await asyncio.to_thread(capture_region, region)
+        except CaptureError as exc:
+            self.notify(f"could not capture the idle element: {exc}", severity="error")
+            return
+        self._idle_region = region
+        self._idle_baseline = baseline
+        self._idle_seen = False
+        self._idle_finished = None
+        with suppress(NoMatches):
+            self.sidebar.update_idle("calibrated - watching")
+        self.notify(f"idle element calibrated ({region.describe()})")
+        self._start_detector_worker()
+
+    # -- finish-detector polling -----------------------------------------------
+
+    def _start_detector_worker(self) -> None:
+        """Mirrors ``_start_watcher``: one thread worker polling whichever
+        detectors are calibrated and bridging each verdict back to the UI via
+        ``post_message``. It replaces any previous run, so a recalibration
+        mid-session cannot leave two loops polling different regions.
+
+        Busy is probed first and idle second within a tick, which is what makes
+        ``IdleProbed`` the tick's closing message (see ``_evaluate_finish``)."""
+        self._stop_detector_worker()
+        busy_region, busy_baseline = self._busy_region, self._busy_baseline
+        idle_region, idle_baseline = self._idle_region, self._idle_baseline
+        if busy_baseline is None and idle_baseline is None:
             return
 
         def loop() -> None:
             worker = get_current_worker()
             while not worker.is_cancelled:
-                probe = probe_busy(baseline, region)
-                self.post_message(BusyProbed(probe))  # thread-safe bridge to the UI
+                if busy_region is not None and busy_baseline is not None:
+                    self.post_message(BusyProbed(probe_busy(busy_baseline, busy_region)))
+                if idle_region is not None and idle_baseline is not None:
+                    self.post_message(IdleProbed(probe_busy(idle_baseline, idle_region)))
                 # Sleep in short increments so cancellation lands promptly.
                 remaining = _BUSY_POLL_S
                 while remaining > 0 and not worker.is_cancelled:
@@ -779,40 +985,66 @@ class MainScreen(Screen[None]):
                     time.sleep(step)
                     remaining -= step
 
-        self._busy_worker = self.run_worker(
+        self._detector_worker = self.run_worker(
             loop, thread=True, group="busyprobe", exit_on_error=False
         )
 
-    def _stop_busy_worker(self) -> None:
-        if self._busy_worker is not None:
-            self._busy_worker.cancel()
-            self._busy_worker = None
+    def _stop_detector_worker(self) -> None:
+        if self._detector_worker is not None:
+            self._detector_worker.cancel()
+            self._detector_worker = None
 
     def on_busy_probed(self, message: BusyProbed) -> None:
         message.stop()
         with suppress(NoMatches):
             self.sidebar.update_busy(_format_busy_probe(message.probe))
-        self._track_copy_trigger(message.probe)
+        self._busy_seen = True
+        self._busy_finished = _busy_verdict(message.probe)
+        # With an idle element calibrated the tick is closed by IdleProbed, so
+        # the combined verdict is evaluated exactly once per poll.
+        if self._idle_baseline is None:
+            self._evaluate_finish()
 
-    def _track_copy_trigger(self, probe: BusyProbe) -> None:
-        """Arm on MATCH (a generation is in progress); once armed, two
-        consecutive CHANGED probes with a calibrated template fire the
-        auto-copy flow exactly once and disarm, so it cannot refire until the
-        next MATCH. ERROR probes reset the CHANGED streak but not the armed
-        flag - a blip mid-poll should not silently cancel an in-flight finish.
+    def on_idle_probed(self, message: IdleProbed) -> None:
+        message.stop()
+        with suppress(NoMatches):
+            self.sidebar.update_idle(_format_idle_probe(message.probe))
+        self._idle_seen = True
+        self._idle_finished = _idle_verdict(message.probe)
+        self._evaluate_finish()
+
+    def _evaluate_finish(self) -> None:
+        """Fold every live detector's latest verdict into one "the model
+        stopped" decision, once per poll tick.
+
+        * ANY detector saying "generating" arms the auto-copy trigger and stops
+          the paste nag - the payload demonstrably went in.
+        * The trigger fires only when EVERY live detector says "finished" on
+          two consecutive ticks. With one detector that is today's
+          MATCH-then-two-CHANGED rule; with both it is the agreement the second
+          detector exists for.
+        * A capture error (no verdict) breaks the streak but leaves the arm
+          alone: one bad frame must not silently cancel an in-flight finish.
+
+        Firing disarms, so the flow cannot repeat until the model generates
+        again. A detector that has never reported is ignored entirely - it can
+        neither veto nor fake a finish.
         """
-        if probe.state is BusyState.MATCH:
+        verdicts: list[bool | None] = []
+        if self._busy_seen:
+            verdicts.append(self._busy_finished)
+        if self._idle_seen:
+            verdicts.append(self._idle_finished)
+        if not verdicts:
+            return
+        if any(verdict is False for verdict in verdicts):
             self._copy_armed = True
             self._copy_changed_streak = 0
             # The model is generating again - the Ctrl+V landed, stop nagging.
             with suppress(NoMatches):
                 self.sidebar.hide_paste_flash()
             return
-        if probe.state is BusyState.ERROR:
-            self._copy_changed_streak = 0
-            return
-        # CHANGED
-        if not self._copy_armed:
+        if not all(verdict is True for verdict in verdicts) or not self._copy_armed:
             self._copy_changed_streak = 0
             return
         self._copy_changed_streak += 1
@@ -881,20 +1113,51 @@ class MainScreen(Screen[None]):
             return copy_region
         return ScreenRegion(copy_region.left, top, copy_region.width, height)
 
+    def _hover_scan_for_copy(
+        self, band: ScreenRegion, template: RegionImage
+    ) -> TemplateMatch | None:
+        """Walk the real cursor up ``band`` and stop at the FIRST place the copy
+        icon appears, or None if it never does.
+
+        Claude's chat only renders a response's copy button while the pointer is
+        over that response, so the cheap static capture finds nothing there no
+        matter how well calibrated it is. Bottom-up (screen.hover picks the
+        stops) because the newest response - the one we want - is at the bottom,
+        so the usual answer is one or two stops in.
+
+        Blocking by design: a cursor move, a settle pause and a capture + band
+        scan per stop. Runs in a worker thread, never on the UI thread. Any
+        failure (unsupported platform, a capture that fails, a band that stops
+        fitting the template) ends the scan, which the caller reports the same
+        way as "not found" - a scan that cannot see is not a scan that found
+        nothing.
+        """
+        for x, y in hover_scan_points(band):
+            if not move_cursor(x, y):
+                return None
+            time.sleep(_HOVER_STEP_DELAY_S)
+            try:
+                match = find_lowest_match(template, capture_region(band))
+            except (CaptureError, ValueError):
+                return None
+            if match is not None:
+                return match
+        return None
+
     async def _auto_copy_flow(self) -> None:
-        """Fired once by ``_track_copy_trigger`` when reasoning finishes: focus
-        the browser, snap the transcript to the bottom, then hunt a vertical
-        band for the newest (lowest) copy-button icon and click it - the
-        clipboard watcher ingests the resulting copy on its own."""
+        """Fired once by ``_evaluate_finish`` when the detectors agree reasoning
+        finished: focus the browser, snap the transcript to the bottom, then hunt
+        a vertical band for the newest (lowest) copy-button icon and click it -
+        the clipboard watcher ingests the resulting copy on its own."""
         copy_region = self._copy_region
         template = self._copy_template
         if copy_region is None or template is None:
             return
 
-        await self._click_after_response()  # click region wins, else chat region
+        await self._click_after_response()  # the live chatbox, else the chat region
         await asyncio.sleep(0.15)
 
-        scroll_target = self._chat_region or self._click_region or copy_region
+        scroll_target = self._chat_region or await self._chatbox_region() or copy_region
         await asyncio.to_thread(scroll_region, scroll_target, -40)
         await asyncio.sleep(0.4)  # let the page settle/render after the flick
 
@@ -913,6 +1176,12 @@ class MainScreen(Screen[None]):
             with suppress(NoMatches):
                 self.sidebar.update_copy(f"{copy_region.describe()} · search failed")
             return
+        if match is None:
+            # Nothing in the static frame: the chat may only paint the icon
+            # under the pointer, so try again while hovering up the band.
+            with suppress(NoMatches):
+                self.sidebar.update_copy(f"{copy_region.describe()} · hover-scanning")
+            match = await asyncio.to_thread(self._hover_scan_for_copy, band, template)
         if match is None:
             self.notify("copy button not found on screen", severity="warning")
             with suppress(NoMatches):
@@ -983,6 +1252,105 @@ class MainScreen(Screen[None]):
                 if after != before:
                     return True
         return False
+
+    # -- calibrated elements: the reusable verify-then-click -------------------
+
+    async def _click_calibrated_element(
+        self, element: CalibratedElement, *, settle_s: float = _ELEMENT_CLICK_SETTLE_S
+    ) -> ElementClick:
+        """Check the element still looks like its calibration snapshot, and only
+        then click its centre.
+
+        The primitive every programmatic click on a ``CalibratedElement`` goes
+        through (the new-chat button today, the sub-agent slots later): a
+        browser that re-laid itself out, scrolled, or opened a dialog would
+        otherwise get a click wherever those pixels used to be. Refusing is
+        always the safe answer - the user can click it themselves.
+        """
+        if not await asyncio.to_thread(probe_element, element):
+            return ElementClick.MISMATCH
+        clicked = await asyncio.to_thread(click_region, element.region, settle_s=settle_s)
+        return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
+
+    # -- the browser's new-chat button ------------------------------------------
+
+    @on(Button.Pressed, "#set-newchat-btn")
+    def _on_set_newchat(self, event: Button.Pressed) -> None:
+        event.stop()
+        if self._refuse_second_picker():
+            return
+        self.run_worker(self._pick_newchat(), group="regionpick", exclusive=True)
+
+    async def _pick_newchat(self) -> None:
+        """Draw-a-box overlay around the browser's "new chat" control, snapshotted
+        so every later click can verify it is still that control."""
+        try:
+            region = await asyncio.to_thread(
+                pick_region,
+                prompt="Drag a TIGHT box around the browser's NEW CHAT button · Esc cancels",
+            )
+        except ScreenPickError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        finally:
+            self._picker_open = False
+        if region is None:
+            self.notify("new-chat button unchanged (selection cancelled)")
+            return
+        try:
+            template = await asyncio.to_thread(capture_region, region)
+        except CaptureError as exc:
+            self.notify(f"could not capture the new-chat button: {exc}", severity="error")
+            return
+        self._newchat = CalibratedElement(region, template)
+        with suppress(NoMatches):
+            self.sidebar.update_newchat(f"{region.describe()} · set")
+        self.notify(f"new-chat button calibrated ({region.describe()})")
+
+    @on(Button.Pressed, "#newchat-btn")
+    def _on_newchat(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.run_worker(self._new_browser_chat(), group="newchat", exclusive=True)
+
+    async def _new_browser_chat(self) -> None:
+        """Click the browser's new-chat button, then hand focus back here.
+
+        Verified first: on a mismatch nothing is clicked and the user is told to
+        recalibrate, because the alternative is a blind click somewhere in a
+        browser window."""
+        element = self._newchat
+        if element is None:
+            self.notify(
+                'calibrate the browser\'s new-chat button first ("Set new-chat button...")',
+                severity="warning",
+            )
+            return
+        outcome = await self._click_calibrated_element(element)
+        if outcome is ElementClick.MISMATCH:
+            self.notify(
+                "the new-chat button no longer looks like its calibration - nothing "
+                "was clicked; redraw it",
+                severity="warning",
+            )
+            with suppress(NoMatches):
+                self.sidebar.update_newchat(f"{element.describe()} · mismatch - not clicked")
+            return
+        if outcome is ElementClick.NOT_CLICKED:
+            self.notify(
+                "the new-chat click did not land (it is Windows-only) - start the chat yourself",
+                severity="warning",
+            )
+            with suppress(NoMatches):
+                self.sidebar.update_newchat(f"{element.describe()} · click did not land")
+            return
+        with suppress(NoMatches):
+            self.sidebar.update_newchat(f"{element.describe()} · clicked")
+        self.notify("new browser chat opened")
+        # Same beat as the auto-copy flow: let the click register before focus
+        # moves away, then bring the user back to AgentClip.
+        if self._own_window is not None:
+            await asyncio.sleep(0.15)
+            await asyncio.to_thread(focus_window, self._own_window)
 
     @on(Button.Pressed, "#edit-services-btn")
     def _on_edit_services(self, event: Button.Pressed) -> None:

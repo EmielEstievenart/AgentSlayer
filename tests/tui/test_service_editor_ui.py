@@ -170,14 +170,18 @@ async def test_max_exceeding_total_blocks_the_save(tmp_path: Path) -> None:
 
         # Escaping with an invalid pending edit asks for confirmation via ConfirmScreen.
         await pilot.press("escape")
-        await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen), "discard confirm shown")
+        await _wait_for(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), "discard confirm shown"
+        )
         # Deny: stays on the editor, nothing was saved.
         await pilot.press("n")
         await _wait_for(pilot, lambda: app.screen is editor, "back on the editor")
 
         # Confirm discard this time.
         await pilot.press("escape")
-        await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen), "discard confirm shown again")
+        await _wait_for(
+            pilot, lambda: isinstance(app.screen, ConfirmScreen), "discard confirm shown again"
+        )
         await pilot.press("y")
         await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
 

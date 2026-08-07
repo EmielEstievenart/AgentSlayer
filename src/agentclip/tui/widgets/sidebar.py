@@ -9,13 +9,22 @@ unlocks again whenever the app is waiting for a new session's first message.
 
 The widget is dumb on purpose: it holds no session state, exposes ``service``
 (the chosen preset key), ``set_locked``, ``refresh_services``, ``update_region``,
-``update_click``, ``update_busy``, ``update_copy`` and the
-``show_paste_flash``/``hide_paste_flash`` pair; MainScreen owns every bit
-of routing, including the "Edit services..." button, the "Set busy region..."
-polling loop and the "Set copy button..." picker + auto-copy-click flow. The
-paste flash is the one animated thing here - a deliberately obnoxious blinking
-banner that nags the user to Ctrl+V the outbound payload into the chat; the
-blink timer is pure presentation, so the dumb widget may own it.
+``update_chatbox``, ``update_busy``, ``update_idle``, ``update_copy``,
+``update_newchat`` and the ``show_paste_flash``/``hide_paste_flash`` pair;
+MainScreen owns every bit of routing, including the "Edit services..." button,
+the busy/idle polling loop, the "Set copy button..." picker + auto-copy-click
+flow and the "New browser chat" action. The paste flash is the one animated
+thing here - a deliberately obnoxious blinking banner that nags the user to
+Ctrl+V the outbound payload into the chat; the blink timer is pure
+presentation, so the dumb widget may own it.
+
+Calibration buttons come in pairs that mirror each other deliberately: the chat
+input box is calibrated TWICE (a fresh chat centres it, an ongoing one docks it
+at the bottom, and one fixed click point would be wrong half the time), and the
+finish detector is calibrated from either end (an element that changes while
+generating, an element that changes while idle, or both for a reinforced
+verdict). Every calibration status label carries the ``side-status`` class so
+the column reads as one list rather than a pile of one-off ids.
 """
 
 from __future__ import annotations
@@ -37,9 +46,21 @@ PASTE_FLASH_TEXT = ">>> PRESS CTRL+V <<<\nin the chat, then send"
 ENTER_FLASH_TEXT = ">>> PRESS ENTER <<<\nreply pasted - just send it"
 _FLASH_BLINK_S = 0.4
 _REGION_UNSET = "not set - alt-tab to the chat yourself"
-_CLICK_UNSET = "not set - clicks fall back to the chat region"
-BUSY_UNSET = "not calibrated - set while the model is generating"  # MainScreen's teardown default
-COPY_UNSET = "not set - auto-copy-click disabled"  # MainScreen's teardown default
+_CHATBOX_UNSET = "not set - clicks fall back to the chat region"
+# The teardown defaults MainScreen restores on /new.
+BUSY_UNSET = "not calibrated - set while the model is generating"
+IDLE_UNSET = "not calibrated - set while the chat is idle"
+COPY_UNSET = "not set - auto-copy-click disabled"
+NEWCHAT_UNSET = "not set - calibrate the browser's new-chat button"
+
+# Which chat input box a calibration describes: a fresh chat centres the box,
+# an ongoing one docks it at the bottom. Keys of the ``#side-chatbox-*`` labels.
+CHATBOX_INITIAL = "initial"
+CHATBOX_ONGOING = "ongoing"
+_CHATBOX_CAPTION = {
+    CHATBOX_INITIAL: "fresh-chat input box",
+    CHATBOX_ONGOING: "ongoing-chat input box",
+}
 
 
 def _short_root(project_root: Path) -> str:
@@ -63,6 +84,16 @@ def _service_options(config: Config) -> list[tuple[str, str]]:
 class Sidebar(Vertical):
     """Project root + service picker + the door to the service editor."""
 
+    # Only what the app-level CSS (AgentClipApp.CSS, which wins on specificity)
+    # does not already say. The column is a stack of calibration rows now, so
+    # the muted status line is a class instead of an id list that has to grow
+    # every time a detector is added.
+    DEFAULT_CSS = """
+    Sidebar .side-status {
+        color: $text-muted;
+    }
+    """
+
     def __init__(self, config: Config, project_root: Path, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
         super().__init__(id=id)
         self._config = config
@@ -84,15 +115,23 @@ class Sidebar(Vertical):
         yield Button("Edit services...", id="edit-services-btn", variant="primary")
         yield Static(Text("CHAT WINDOW"), classes="side-title")
         yield Button("Set chat region...", id="set-region-btn")
-        yield Static(Text(_REGION_UNSET), id="side-region")
-        yield Button("Set click region...", id="set-click-btn")
-        yield Static(Text(_CLICK_UNSET), id="side-click")
+        yield Static(Text(_REGION_UNSET), id="side-region", classes="side-status")
+        yield Button("Set initial chatbox...", id="set-chatbox-initial-btn")
+        yield Static(Text(_CHATBOX_UNSET), id="side-chatbox-initial", classes="side-status")
+        yield Button("Set ongoing chatbox...", id="set-chatbox-ongoing-btn")
+        yield Static(Text(_CHATBOX_UNSET), id="side-chatbox-ongoing", classes="side-status")
         yield Static(Text("REASONING"), classes="side-title")
         yield Button("Set busy region...", id="set-busy-btn")
-        yield Static(Text(BUSY_UNSET), id="side-busy")
+        yield Static(Text(BUSY_UNSET), id="side-busy", classes="side-status")
+        yield Button("Set idle button...", id="set-idle-btn")
+        yield Static(Text(IDLE_UNSET), id="side-idle", classes="side-status")
         yield Static(Text("COPY BUTTON"), classes="side-title")
         yield Button("Set copy button...", id="set-copy-btn")
-        yield Static(Text(COPY_UNSET), id="side-copy")
+        yield Static(Text(COPY_UNSET), id="side-copy", classes="side-status")
+        yield Static(Text("NEW CHAT"), classes="side-title")
+        yield Button("Set new-chat button...", id="set-newchat-btn")
+        yield Static(Text(NEWCHAT_UNSET), id="side-newchat", classes="side-status")
+        yield Button("New browser chat", id="newchat-btn")
         yield Static(Text(_HINT), classes="side-hint")
 
     def _preset_caption(self, key: str | None = None) -> str:
@@ -144,25 +183,30 @@ class Sidebar(Vertical):
         text = f"{region.describe()} · chatbot window" if region is not None else _REGION_UNSET
         self.query_one("#side-region", Static).update(Text(text))
 
-    # -- the click region -----------------------------------------------------
+    # -- the two chat input boxes ---------------------------------------------
 
-    def update_click(self, region: ScreenRegion | None) -> None:
-        """Show the session's drawn click region - where AgentClip clicks once a
-        model response is fully handled (display only; MainScreen owns it)."""
-        text = (
-            f"{region.describe()} · outbound copies click it"
-            if region is not None
-            else _CLICK_UNSET
-        )
-        self.query_one("#side-click", Static).update(Text(text))
+    def update_chatbox(self, kind: str, region: ScreenRegion | None) -> None:
+        """Show one of the session's calibrated chat input boxes - ``kind`` is
+        ``CHATBOX_INITIAL`` (fresh chat, box centred) or ``CHATBOX_ONGOING``
+        (box docked at the bottom). Display only: MainScreen owns the
+        calibration snapshots and decides which one is live at click time."""
+        caption = _CHATBOX_CAPTION[kind]
+        text = f"{region.describe()} · {caption}" if region is not None else _CHATBOX_UNSET
+        self.query_one(f"#side-chatbox-{kind}", Static).update(Text(text))
 
-    # -- the busy region --------------------------------------------------------
+    # -- the two finish detectors -----------------------------------------------
 
     def update_busy(self, text: str) -> None:
-        """Repaint the live busy-probe readout (display only; MainScreen owns the
+        """Repaint the live busy-element readout (display only; MainScreen owns the
         detector loop and formats the text - MATCH/CHANGED/ERROR, or the
         not-calibrated default)."""
         self.query_one("#side-busy", Static).update(Text(text))
+
+    def update_idle(self, text: str) -> None:
+        """Repaint the live idle-element readout. Same loop, opposite polarity:
+        this element was calibrated while the chat was idle, so MATCH means the
+        response has finished (display only; MainScreen formats the text)."""
+        self.query_one("#side-idle", Static).update(Text(text))
 
     # -- the paste flash --------------------------------------------------------
 
@@ -198,6 +242,14 @@ class Sidebar(Vertical):
         region/template state and the auto-copy-click flow - formats the text
         as "set", "clicked", "not found", or the not-set default)."""
         self.query_one("#side-copy", Static).update(Text(text))
+
+    # -- the new-chat button ------------------------------------------------------
+
+    def update_newchat(self, text: str) -> None:
+        """Repaint the new-chat readout (display only; MainScreen owns the
+        calibrated element and the "New browser chat" action - formats the text
+        as "set", "clicked", "mismatch", or the not-set default)."""
+        self.query_one("#side-newchat", Static).update(Text(text))
 
     def refresh_services(self, config: Config | None = None) -> None:
         """Rebuild the options after the services table changed (service editor hook).

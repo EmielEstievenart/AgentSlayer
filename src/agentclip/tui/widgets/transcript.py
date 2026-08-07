@@ -71,9 +71,7 @@ class TranscriptPanel(VerticalScroll):
         self._reading = False
 
     def _record(self, headline: str, body: str = "", *, fenced: bool = False) -> None:
-        self.event_log.append(
-            LogEvent(datetime.now().strftime("%H:%M:%S"), headline, body, fenced)
-        )
+        self.event_log.append(LogEvent(datetime.now().strftime("%H:%M:%S"), headline, body, fenced))
 
     async def _add(
         self,

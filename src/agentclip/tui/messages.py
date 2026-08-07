@@ -4,8 +4,21 @@
 to the MainScreen is equivalent to the watcher thread capturing protocol text
 from the OS clipboard.
 
-``BusyProbed`` is the same shape for the busy-region poller: posting it is
-equivalent to a poll of ``agentclip.screen.busy.probe_busy`` completing.
+``BusyProbed`` and ``IdleProbed`` are the same shape for the two finish
+detectors the poller thread runs (one poll of each per tick, busy first):
+
+* ``BusyProbed`` carries the *busy* element's verdict. That element was
+  calibrated WHILE the model was generating, so MATCH means "still generating"
+  and CHANGED means "finished".
+* ``IdleProbed`` carries the *idle* element's verdict. That element was
+  calibrated while the chat was IDLE, so the reading is inverted: MATCH means
+  "finished", CHANGED means "generating".
+
+Posting either directly is equivalent to that detector's poll completing, and
+is how the tests drive MainScreen's combined finish logic. When both detectors
+are calibrated the tick is *closed* by ``IdleProbed`` - MainScreen evaluates
+the combined verdict once per tick, on the closing message - so a test
+exercising the dual-detector path must post both, busy first.
 """
 
 from __future__ import annotations
@@ -24,7 +37,15 @@ class ClipboardCaptured(Message):
 
 
 class BusyProbed(Message):
-    """One poll's verdict from the busy-region detector (or injected by tests)."""
+    """One poll of the busy element (MATCH = generating), or injected by tests."""
+
+    def __init__(self, probe: BusyProbe) -> None:
+        self.probe = probe
+        super().__init__()
+
+
+class IdleProbed(Message):
+    """One poll of the idle element (MATCH = finished), or injected by tests."""
 
     def __init__(self, probe: BusyProbe) -> None:
         self.probe = probe

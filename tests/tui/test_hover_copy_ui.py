@@ -1,0 +1,253 @@
+"""Pilot tests for the hover-scan fallback in the auto-copy flow.
+
+Claude's chat only renders a response's copy button while the pointer is over
+that response, so the cheap static capture of the copy-button band finds
+nothing. The flow then walks the real cursor up the band, re-capturing after
+each stop, and stops at the FIRST appearance of the icon.
+
+Everything that touches the OS - picker, capture, cursor move, click, focus -
+is monkeypatched at its use site (agentclip.tui.screens.main), including the
+per-step settle so the tests do not sleep their way up a band. ``BusyProbed``
+is the documented injectable path for the poller (tui/messages.py), used here
+to fire the flow.
+"""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+from textual.pilot import Pilot
+from textual.widgets import Button, Static
+
+import agentclip.tui.screens.main as main_mod
+from agentclip.cli import make_engine_factory
+from agentclip.clip.fake import FakeClipboard
+from agentclip.config import load_config
+from agentclip.screen.busy import BusyProbe, BusyState
+from agentclip.screen.capture import RegionImage
+from agentclip.screen.hover import hover_scan_points
+from agentclip.screen.region import ScreenRegion
+from agentclip.screen.template import TemplateMatch
+from agentclip.tui.app import AgentClipApp
+from agentclip.tui.messages import BusyProbed
+from agentclip.tui.screens.main import MainScreen
+
+CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
+COPY_REGION = ScreenRegion(1830, 612, 24, 24)
+TEMPLATE = RegionImage(width=24, height=24, pixels=b"\x00" * (24 * 24 * 4))
+# What _copy_search_band builds from the two above: the copy button's column,
+# spanning the union of the chat and copy regions.
+BAND = ScreenRegion(1830, 340, 24, 540)
+
+SIZE = (110, 100)
+
+
+async def _wait_for(
+    pilot: Pilot, predicate: Callable[[], bool], what: str, timeout: float = 10.0
+) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await pilot.pause(0.05)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard]:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = load_config(project, global_config_path=project / "no-such-global.toml")
+    fake = FakeClipboard()
+    app = AgentClipApp(
+        config=config,
+        provider=fake,
+        engine_factory=make_engine_factory(lambda: app.app_config, project),
+        project_root=project,
+    )
+    return app, fake
+
+
+def _copy_label(app: AgentClipApp) -> str:
+    assert app.main_screen is not None
+    return str(app.main_screen.query_one("#side-copy", Static).render())
+
+
+async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
+    assert app.main_screen is not None
+    button = app.main_screen.query_one(button_id, Button)
+    await _wait_for(pilot, lambda: button.region.width > 0, "sidebar button laid out")
+    await pilot.click(button_id)
+
+
+def _frame(region: ScreenRegion) -> RegionImage:
+    return RegionImage(region.width, region.height, b"\x00" * (region.width * region.height * 4))
+
+
+async def _fire(main: MainScreen, pilot: Pilot) -> None:
+    """MATCH then two CHANGED: the busy detector's finish sequence."""
+    for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
+        main.post_message(BusyProbed(BusyProbe(state, 0.2)))
+        await pilot.pause()
+
+
+async def _calibrate(
+    app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatch
+) -> MainScreen:
+    """Draw the chat region (so the band spans the transcript) and the copy button."""
+    main = app.main_screen
+    assert main is not None
+    await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+    picked = [CHAT_REGION, COPY_REGION]
+    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: picked.pop(0))
+    monkeypatch.setattr(main_mod, "capture_region", lambda region: _frame(region))
+    await _press(app, pilot, "#set-region-btn")
+    await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
+    await _press(app, pilot, "#set-copy-btn")
+    await _wait_for(pilot, lambda: main._copy_template is not None, "template captured")
+    return main
+
+
+def _patch_flow_io(
+    monkeypatch: pytest.MonkeyPatch, fake: FakeClipboard
+) -> tuple[list[ScreenRegion], list[tuple[int, int]], list[ScreenRegion]]:
+    """Record clicks, cursor moves and captured bands; make clicks "take"."""
+    clicks: list[ScreenRegion] = []
+    moves: list[tuple[int, int]] = []
+    captures: list[ScreenRegion] = []
+
+    def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
+        clicks.append(region)
+        # A real click lands a copy; the verification step needs the change.
+        fake.write_text(f"copied {len(clicks)}")
+        return True
+
+    def fake_capture(region: ScreenRegion) -> RegionImage:
+        captures.append(region)
+        return _frame(region)
+
+    monkeypatch.setattr(main_mod, "click_region", fake_click)
+    monkeypatch.setattr(main_mod, "capture_region", fake_capture)
+    monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: bool(moves.append((x, y))) or True)
+    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
+    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "_HOVER_STEP_DELAY_S", 0.0)
+    return clicks, moves, captures
+
+
+async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The icon only renders once the pointer has climbed three stops - the
+    scan must stop right there, not carry on to the top of the band."""
+    match = TemplateMatch(y_offset=180, diff=0.04)
+    app, fake = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrate(app, pilot, monkeypatch)
+        clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
+
+        looks = {"n": 0}
+
+        def fake_find(template: RegionImage, band: RegionImage) -> TemplateMatch | None:
+            # Look 1 is the cheap static pass; then one look per hover stop.
+            looks["n"] += 1
+            return match if looks["n"] > 3 else None
+
+        monkeypatch.setattr(main_mod, "find_lowest_match", fake_find)
+
+        await _fire(main, pilot)
+        await _wait_for(pilot, lambda: "clicked (diff 0.04)" in _copy_label(app), "copy clicked")
+
+        assert moves == hover_scan_points(BAND)[:3], "scanned exactly up to the first appearance"
+        expected = ScreenRegion(COPY_REGION.left, BAND.top + 180, COPY_REGION.width, 24)
+        assert clicks[-1] == expected  # band-local offset translated back to the screen
+
+
+async def test_a_static_hit_never_moves_the_cursor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cheap path stays cheap: chats that render the icon unconditionally
+    must not pay for a hover scan."""
+    app, fake = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrate(app, pilot, monkeypatch)
+        clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
+        monkeypatch.setattr(
+            main_mod,
+            "find_lowest_match",
+            lambda template, band: TemplateMatch(y_offset=7, diff=0.01),
+        )
+
+        await _fire(main, pilot)
+        await _wait_for(pilot, lambda: "clicked (diff 0.01)" in _copy_label(app), "copy clicked")
+        assert moves == []
+        assert clicks[-1].top == BAND.top + 7
+
+
+async def test_an_exhausted_scan_reports_not_found_and_never_clicks_the_icon(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same outcome as today's not-found path - a toast and a sidebar note -
+    after the whole band has been hovered."""
+    app, fake = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrate(app, pilot, monkeypatch)
+        clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
+        monkeypatch.setattr(main_mod, "find_lowest_match", lambda template, band: None)
+
+        await _fire(main, pilot)
+        await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
+
+        assert moves == hover_scan_points(BAND)  # the whole band, bottom to top
+        # The only click was the focus poke at the chat region, never the icon.
+        assert clicks == [CHAT_REGION]
+
+
+async def test_a_refused_cursor_move_ends_the_scan_immediately(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Off Windows every move is refused - the scan must bail out rather than
+    sleep its way up a band it can never influence."""
+    app, fake = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrate(app, pilot, monkeypatch)
+        _clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
+        monkeypatch.setattr(main_mod, "find_lowest_match", lambda template, band: None)
+        monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: bool(moves.append((x, y))))
+
+        await _fire(main, pilot)
+        await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
+        assert len(moves) == 1
+
+
+async def test_the_scan_runs_off_the_ui_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every stop blocks on a settle pause and a capture, so the scan must
+    never execute on the thread painting the TUI."""
+    import threading
+
+    ui_thread = threading.get_ident()
+    scan_threads: list[int] = []
+    app, fake = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrate(app, pilot, monkeypatch)
+        _patch_flow_io(monkeypatch, fake)
+
+        looks = {"n": 0}
+
+        def fake_find(template: RegionImage, band: RegionImage) -> TemplateMatch | None:
+            looks["n"] += 1
+            if looks["n"] == 1:
+                return None  # the static pass, still on the flow's worker
+            scan_threads.append(threading.get_ident())
+            return TemplateMatch(y_offset=12, diff=0.02)
+
+        monkeypatch.setattr(main_mod, "find_lowest_match", fake_find)
+
+        await _fire(main, pilot)
+        await _wait_for(pilot, lambda: "clicked (diff 0.02)" in _copy_label(app), "copy clicked")
+        assert scan_threads and all(ident != ui_thread for ident in scan_threads)

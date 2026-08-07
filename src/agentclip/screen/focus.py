@@ -12,6 +12,15 @@ Region-aimed input, both "point at the region and act":
   newest copy button (see screen.template), since the copy-button band only
   shows the latest response when the transcript is scrolled down.
 
+Point-aimed input:
+
+* ``move_cursor`` - park the real pointer on a virtual-screen point. Claude's
+  chat only *renders* a response's copy button while the pointer hovers that
+  response, so the copy hunt has to drag the cursor up the transcript and
+  re-look after every stop (screen.hover picks the stops). This has to be a
+  synthetic mouse MOVE, not ``SetCursorPos``: a teleported pointer does not
+  reliably make the browser fire its ``:hover``.
+
 Keyboard input, aimed at whatever has focus rather than at a region:
 
 * ``send_paste`` - a synthetic Ctrl+V, so the TUI can drop the outbound payload
@@ -44,9 +53,17 @@ _dpi_aware = False
 
 _INPUT_MOUSE = 0
 _INPUT_KEYBOARD = 1
+_MOUSEEVENTF_MOVE = 0x0001
 _MOUSEEVENTF_LEFTDOWN = 0x0002
 _MOUSEEVENTF_LEFTUP = 0x0004
 _MOUSEEVENTF_WHEEL = 0x0800
+# ABSOLUTE makes dx/dy a 0..65535 normalized point instead of a delta;
+# VIRTUALDESK spreads that range over the WHOLE multi-monitor desktop rather
+# than the primary screen, which is the only way to aim at a monitor sitting
+# left of / above the primary (negative coordinates).
+_MOUSEEVENTF_ABSOLUTE = 0x8000
+_MOUSEEVENTF_VIRTUALDESK = 0x4000
+_ABSOLUTE_RANGE = 65535
 _KEYEVENTF_KEYUP = 0x0002
 _VK_MENU = 0x12  # the ALT key
 _VK_CONTROL = 0x11
@@ -76,6 +93,63 @@ def make_dpi_aware() -> None:
         with contextlib.suppress(AttributeError, OSError):
             ctypes.windll.user32.SetProcessDPIAware()
     _dpi_aware = True
+
+
+def virtual_screen_bounds() -> tuple[int, int, int, int] | None:
+    """``(left, top, width, height)`` of the whole multi-monitor desktop
+    (Windows), or None where the caller has to fall back to primary-screen
+    metrics of its own.
+
+    ``left``/``top`` are negative when a monitor sits left of / above the
+    primary one, which is exactly the case ``move_cursor`` and the overlay both
+    have to normalize against.
+    """
+    if sys.platform != "win32":
+        return None
+    import ctypes
+
+    make_dpi_aware()  # metrics must come back in the same physical pixels
+    metrics = ctypes.windll.user32.GetSystemMetrics
+    # SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN
+    return (metrics(76), metrics(77), metrics(78), metrics(79))
+
+
+def move_cursor(x: int, y: int) -> bool:
+    """Park the real pointer on the virtual-screen point ``(x, y)``. False =
+    nothing moved (unsupported platform, no desktop metrics, or SendInput
+    swallowed the event).
+
+    Deliberately a SendInput MOVE rather than ``SetCursorPos``: the hover scan
+    exists to make a browser render its hover-only copy button, and only a real
+    input event reliably drives the WM_MOUSEMOVE -> ``:hover`` chain. Absolute
+    coordinates are normalized 0..``_ABSOLUTE_RANGE`` across the virtual
+    desktop, so monitors at negative coordinates work like any other.
+    """
+    if sys.platform != "win32":
+        return False
+    bounds = virtual_screen_bounds()
+    if bounds is None:
+        return False
+    left, top, width, height = bounds
+    if width <= 1 or height <= 1:
+        return False
+    import ctypes
+
+    # Windows maps the normalized range onto (metric - 1) pixels, and clamping
+    # keeps a point just outside the desktop on the nearest edge instead of
+    # wrapping to the far one.
+    def _normalize(value: int, origin: int, span: int) -> int:
+        scaled = round((int(value) - origin) * _ABSOLUTE_RANGE / (span - 1))
+        return max(0, min(_ABSOLUTE_RANGE, scaled))
+
+    input_struct = _input_struct()
+    burst = (input_struct * 1)()
+    burst[0].type = _INPUT_MOUSE
+    burst[0].union.mi.dx = _normalize(x, left, width)
+    burst[0].union.mi.dy = _normalize(y, top, height)
+    burst[0].union.mi.dwFlags = _MOUSEEVENTF_MOVE | _MOUSEEVENTF_ABSOLUTE | _MOUSEEVENTF_VIRTUALDESK
+    sent = ctypes.windll.user32.SendInput(1, burst, ctypes.sizeof(input_struct))
+    return int(sent) == 1
 
 
 def _input_struct() -> Any:

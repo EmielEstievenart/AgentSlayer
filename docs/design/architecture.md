@@ -22,7 +22,7 @@ protocol (parser, composer)   ──►  (nothing but stdlib)
 config (leaf, stdlib-only)  ◄── imported by everyone
 ```
 
-`clip` is imported **only** by `tui` and `cli`. `protocol` and `config` are leaves. `tools` never imports `engine`. Anything violating this is a bug.
+`clip` and `screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `tui` and `cli`. `protocol` and `config` are leaves. `tools` never imports `engine`. Anything violating this is a bug.
 
 ---
 
@@ -65,6 +65,15 @@ src/agentclip/
 │   ├── winseq.py          # ctypes GetClipboardSequenceNumber shim (≤15 lines)
 │   ├── watcher.py         # poll loop (plain function, thread-agnostic), self-write suppression
 │   └── fake.py            # FakeClipboard + ScriptedClipboard for tests
+│
+├── screen/                # OS screen layer (like clip: imported ONLY by tui/cli; stdlib-only)
+│   ├── region.py          # ScreenRegion dataclass + the "left top width height" wire format
+│   ├── overlay.py         # draw-a-box tkinter overlay; runs in a CHILD process (--pick-region)
+│   ├── picker.py          # spawns the child (works frozen and from source), parses its stdout
+│   ├── capture.py         # GDI BitBlt/GetDIBits screen-region grab (ctypes) -> RegionImage
+│   ├── focus.py           # Windows SetCursorPos+SendInput click/scroll into a region (ctypes)
+│   ├── busy.py            # baseline-vs-fresh-capture diff -> BusyState (MATCH/CHANGED/ERROR)
+│   └── template.py        # bottom-up vertical-band scan for a captured icon -> lowest match
 │
 └── tui/
     ├── app.py             # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
@@ -271,6 +280,10 @@ keep_sessions = 5              # prune older session dirs (incl. their backups) 
 
 # ── Service presets ─────────────────────────────────────────────────────
 # max_paste_chars: outbound budget per single paste (chunking splits above it).
+# total_context_chars: the service's whole conversation window, ~chars (roughly
+#   tokens × 4 chars/token, kept conservative) - bounds the service editor's
+#   validation (max_paste_chars must fit inside it) and informs preset choice;
+#   the engine itself only ever enforces max_paste_chars per turn.
 # wrap_blocks_in_fence: bootstrap instructs LLM to emit all CLIP blocks inside ONE
 #   ``` fence → the per-code-block copy button is lossless on services whose
 #   reply-copy strips markdown (Copilot, Gemini).
@@ -280,77 +293,91 @@ keep_sessions = 5              # prune older session dirs (incl. their backups) 
 [services.chatgpt]
 label = "ChatGPT web (inline-safe)"
 max_paste_chars = 4000          # stays under ~5k paste-to-attachment threshold
+total_context_chars = 500000    # ~128k-token context
 wrap_blocks_in_fence = false
 attachment_note = true
 
 [services.chatgpt-attach]
 label = "ChatGPT web (attachment OK)"
 max_paste_chars = 12000
+total_context_chars = 500000
 wrap_blocks_in_fence = false
 attachment_note = true
 
 [services.copilot-work]
 label = "M365 Copilot Chat — work tab (licensed)"
 max_paste_chars = 96000         # 128k counter with headroom; counter hard-stops (truncation risk)
+total_context_chars = 400000
 wrap_blocks_in_fence = true     # Copilot reply-copy plain flavor strips markdown
 attachment_note = true
 
 [services.copilot-web]
 label = "M365 Copilot Chat — web tab"
 max_paste_chars = 12000         # 16k reported, 25% headroom
+total_context_chars = 150000
 wrap_blocks_in_fence = true
 attachment_note = true
 
 [services.copilot-free]
 label = "Copilot (unlicensed / consumer)"
 max_paste_chars = 6000          # ~8k floor with headroom
+total_context_chars = 128000
 wrap_blocks_in_fence = true
 attachment_note = true
 
 [services.claude]
 label = "Claude.ai"
 max_paste_chars = 24000         # attachment conversion is safe (full-context pasted text)
+total_context_chars = 700000    # ~200k-token context
 wrap_blocks_in_fence = false
 attachment_note = true
 
 [services.gemini]
 label = "Gemini"
 max_paste_chars = 24000         # ~30k hard limit with headroom
+total_context_chars = 800000    # large (~1M-token) context, kept conservative
 wrap_blocks_in_fence = true     # Gemini reply-copy is lossy like Copilot
 attachment_note = true
 
 [services.perplexity]
 label = "Perplexity"
 max_paste_chars = 6000          # ~8k-token paste.txt conversion; also appends citation tail
+total_context_chars = 100000
 wrap_blocks_in_fence = false
 attachment_note = true
 
 [services.deepseek]
 label = "DeepSeek"
 max_paste_chars = 12000
+total_context_chars = 250000
 wrap_blocks_in_fence = false
 attachment_note = true
 
 [services.grok]
 label = "Grok"
 max_paste_chars = 100000
+total_context_chars = 400000
 wrap_blocks_in_fence = false
 attachment_note = true
 
 [services.unknown]
 label = "Unknown service (conservative)"
 max_paste_chars = 6000
+total_context_chars = 100000
 wrap_blocks_in_fence = true
 attachment_note = true
 
 [services.paranoid]
 label = "Unknown service (paranoid)"
 max_paste_chars = 4000
+total_context_chars = 50000
 wrap_blocks_in_fence = true
 attachment_note = true
 ```
 
 Config is loaded into frozen dataclasses with manual validation (type + range checks, unknown-key warnings). Unknown `[services.*]` tables are accepted as user-defined presets.
+
+**Writing services back** (the service editor, M3): `config.save_services(services: dict[str, ServicePreset], path: Path | None = None) -> None` persists the *complete* desired services table into the global `config.toml` (default path: `default_global_config_path()`). It reads the existing file with `tomllib` first, then replaces only the `[services.*]` tables in memory - a preset equal to its built-in default (`config.default_services()`) is omitted so an untouched or reset-to-default built-in never gets written, keeping the file minimal and future built-in tweaks still apply to it. Every other top-level table (`[general]`, `[approval]`, …) is preserved verbatim (comments are not - `tomllib` doesn't retain them). The write is atomic: a temp file in the same directory, then `os.replace`. `BUILTIN_SERVICE_KEYS` (a module-level `frozenset` of the twelve shipped keys) is the source of truth the editor uses to decide what can be deleted (only non-built-in keys) versus only edited/reset.
 
 ---
 
@@ -426,6 +453,7 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
 | `copykitten` | `>=2.0,<3` | primary clipboard (Rust/arboard, abi3 wheel, no subprocess at 300 ms polling) |
 | `pyperclip` | `>=1.11,<2` | fallback provider (pure Python, Wayland-without-XWayland path) |
 | `platformdirs` | `>=4` | config dir resolution — declared explicitly even though textual carries it (don't depend on transitive deps) |
+| `tomli-w` | `>=1.0` | TOML *writing* for the service editor's `config.save_services` (M3, landed with it — see below); tiny, pure-Python, no longer deferred |
 
 **Dev (PEP 735 `[dependency-groups]`, uv-native):** `pytest`, `pytest-asyncio`, `pytest-textual-snapshot`, `textual-dev`, `ruff`, `mypy`.
 
@@ -434,7 +462,6 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
 - **pydantic** — config is ~40 keys; frozen dataclasses + 50 lines of validation beat a 10 MB PyInstaller payload and a Rust core dep.
 - **click/typer** — one entry point, three flags; `argparse` suffices.
 - **`textual[syntax]`** — diff coloring uses pygments via `rich.Syntax`; tree-sitter native libs complicate onefile builds.
-- **tomli-w** — deferred to M3 (settings screen needs TOML *writing*; until then config is hand-edited). Tiny and pure-Python when it arrives.
 - **GitPython / dulwich** — undo is explicitly non-git (user decision).
 - **watchdog, requests, ripgrep bindings** — no FS watching (we poll the clipboard, not files), no network, `grep` is a pure-Python `re` scan with excludes and match caps.
 

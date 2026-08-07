@@ -10,72 +10,119 @@ Prime directive honored throughout: the steady-state loop costs the user **one k
 
 ```
 AgentClipApp(App[None])            # CSS embedded in App.CSS (avoids PyInstaller --add-data)
-├── MainScreen(Screen)             # default, always installed
-├── NewSessionScreen(ModalScreen[SessionSpec])
-├── ConfigScreen(Screen)           # pushed full-screen (forms want room)
+├── MainScreen(Screen)             # default, always installed; also *starts* sessions (§1.3)
+├── ServiceEditorScreen(ModalScreen[dict[str, ServicePreset] | None])   # F2 (§1.4)
 ├── SummaryScreen(ModalScreen[SummaryAction])
-├── ConfirmScreen(ModalScreen[bool])   # generic y/n confirm (undo, end-session, quit-mid-turn)
-└── HelpScreen(ModalScreen[None])      # static key/flow cheatsheet
+├── ConfirmScreen(ModalScreen[bool])   # generic y/n confirm (undo, end-session, quit-mid-turn, discard-edit)
+├── HelpScreen(ModalScreen[None])      # static key/flow cheatsheet
+└── TextEntryScreen(ModalScreen[str | None])   # manual paste fallback for force-ingest
 ```
 
 ### 1.2 MainScreen widget tree
 
 ```
 MainScreen
-├── TranscriptPanel(VerticalScroll)  id=transcript        # 1fr height, full width
-│   ├── Markdown                     .ev-user             # user task / follow-ups
-│   ├── Markdown                     .ev-prose            # LLM prose between blocks
-│   ├── Vertical                     .ev-call             # one per tool call
-│   │   ├── Static                                        # "▶ edit_file src/utils.py · 1 hunk · ✓ ok"
-│   │   └── Collapsible(collapsed=True)                    # long payloads only
-│   │       └── Static                                     # Rich Syntax / plain text
-│   ├── Static                       .ev-note / .ev-error / .ev-approval
-│   └── ...
-├── ActionPanel(Vertical)            id=action            # display:none when idle; max-height:60%
-│   ├── Static                       id=action-title      # "APPROVE · call 2/5 · edit_file src/utils.py"
-│   ├── Static                       id=queue-strip       # "✓ read_file  ▶ edit_file  • run_command  • task_done"
-│   ├── VerticalScroll               id=action-body       # diff / question / chunk wizard; focused on show
-│   │   └── Static                                        # Rich renderable
-│   └── Horizontal                   id=action-footer
-│       ├── Static                   id=action-hints      # "[y] approve  [n] reject  [a] auto-accept edits"
-│       ├── Input                    id=reject-reason     # hidden until 'n'
-│       └── TextArea                 id=answer            # hidden; ask_user only
-├── StatusBar(Horizontal)            id=statusbar         # dock: bottom; height: 1 (sits above Footer)
+├── Horizontal                       id=body              # 1fr height
+│   ├── Vertical                     id=main-col          # width 1fr: the chat column
+│   │   ├── TranscriptPanel(VerticalScroll)  id=transcript        # 1fr height
+│   │   │   ├── Markdown                     .ev-user             # user task / follow-ups
+│   │   │   ├── Markdown                     .ev-prose            # LLM prose between blocks
+│   │   │   ├── Vertical                     .ev-call             # one per tool call
+│   │   │   │   ├── Static                                        # "▶ edit_file src/utils.py · 1 hunk · ✓ ok"
+│   │   │   │   └── Collapsible(collapsed=True)                    # long payloads only
+│   │   │   │       └── Static                                     # Rich Syntax / plain text
+│   │   │   ├── Static                       .ev-note / .ev-error / .ev-approval
+│   │   │   └── ...
+│   │   ├── ActionPanel(Vertical)    id=action            # display:none when idle; max-height:60%
+│   │   │   ├── Static               id=action-title      # "APPROVE · call 2/5 · edit_file src/utils.py"
+│   │   │   ├── Static               id=queue-strip       # "✓ read_file  ▶ edit_file  • run_command  • task_done"
+│   │   │   ├── VerticalScroll       id=action-body       # diff / question / chunk wizard; focused on show
+│   │   │   │   └── Static                                # Rich renderable
+│   │   │   └── Horizontal           id=action-footer
+│   │   │       ├── Static           id=action-hints      # "[y] approve  [n] reject  [a] auto-accept edits"
+│   │   │       └── Input            id=reject-reason     # hidden until 'n'
+│   │   ├── RunningBar(Static)       id=running           # spinner while a turn executes
+│   │   └── ChatComposer(TextArea)   id=composer          # the one text box: task, answers, follow-ups
+│   └── Sidebar(Vertical)            id=sidebar           # width 32; F3 hides it (§1.3)
+├── StatusBar(Horizontal)            id=statusbar         # full width, height 1 (sits above Footer)
 │   └── Static ×6                    .seg                 # see §3.3
 └── Footer()                                              # key hints, auto-dimmed via check_action
 ```
 
-Layout reasoning: transcript on top at full width, ActionPanel as a bottom drawer. A side-by-side split was rejected because diffs and command output need horizontal room; a 40%-wide column truncates code lines constantly. The drawer keeps the last few transcript events visible above the diff, which is enough context to approve.
+Layout reasoning: the chat column is transcript on top with the ActionPanel as a bottom drawer — a side-by-side split for the *diff* was rejected because diffs and command output need horizontal room, and the drawer keeps the last few transcript events visible above the diff, which is enough context to approve. The sidebar is the exception: it is narrow, static settings chrome (not content), and `F3` collapses it whenever a diff wants the full width back.
 
 Transcript is pinned with `widget.anchor()` on every newly mounted event widget (Textual ≥4 semantics: stays bottom-anchored, releases when the user scrolls up). Transcript children are pruned beyond 500 events (oldest unmounted) to bound layout cost.
 
-### 1.3 Session start flow (NewSessionScreen)
+### 1.3 Session start flow (inline — no modal) and the Sidebar
 
-Shown automatically at launch (over MainScreen). Contents:
+There is **no launch dialog**. At startup the user sees the finished app: an empty transcript, the docked `ChatComposer` enabled and focused, and the settings sidebar on the right. Typing a task and pressing `Enter` starts the session.
+
+Mechanics: `ChatView.prompt_new_session()` (the port the controller awaits, unchanged) is implemented on MainScreen *inline* — it flips `awaiting_new_session`, switches the composer's border title to `Describe the task · Enter starts the session · Ctrl+J newline`, unlocks the sidebar's service `Select`, focuses the composer and parks on an `asyncio.Future`. The first non-empty send resolves it with `SessionSpec(task, service=<sidebar selection>)`; an empty send just warns. While waiting, the composer text is taken **verbatim** (no slash-command parsing — the same rule as an `ask_user` answer), so a task may start with `/`.
+
+Every "new session" moment reuses that one path: the launch, the budget-exceeded retry, `/new`, and the summary screen's *new session* choice all call `prompt_new_session()` again, which re-arms the same inline surface. There is no second way to start a session.
+
+The controller then composes the bootstrap prompt (protocol layer), copies it, mounts the task as `.ev-user`, arms the watcher, and toasts `bootstrap copied (5.2k chars) — paste into ChatGPT`. If the bootstrap exceeds the preset budget the flow loops back to the inline prompt with an error toast (chunk-walk, §6, lands in M3).
 
 ```
-NewSessionScreen(ModalScreen[SessionSpec])
-├── Static                 # "New session — working dir: C:\...\AgentClip"
-├── Select[str]            # service preset; (label, key) pairs; default from config; uses Select.NULL guard
-├── TextArea(soft_wrap=True, tab_behavior="focus")  id=task   # autofocused
-└── Static                 # hint line: "ctrl+enter start · F2 settings · F3 calibrate · esc quit"
+Sidebar(Vertical)          id=sidebar        # width 32; F3 toggles display
+├── Static "PROJECT" / Static id=side-root          # ~\Dev\AgentClip
+├── Static "SERVICE"
+├── Select[str]            id=service-select        # "key · 12k" rows; value = config.general.service
+├── Static                 id=side-service-label    # "ChatGPT web (attachment OK) · 12,000 chars per paste · 500,000 chars context"
+├── Button                 id=edit-services-btn     # "Edit services..." → App.action_settings() (F2)
+├── Static "CHAT WINDOW"
+├── Button                 id=set-region-btn        # "Set chat region..." → draw-a-box overlay (§3.4a)
+├── Static                 id=side-region           # "not set - ..." / "812×540 at (1050, 340) · chatbot window"
+├── Button                 id=set-click-btn         # "Set click region..." → draw-a-box overlay (§3.4a)
+├── Static                 id=side-click            # "not set - ..." / "400×90 at (1200, 800) · outbound copies click it"
+├── Static "REASONING"
+├── Button                 id=set-busy-btn          # "Set busy region..." → draw-a-box overlay, calibrated live
+├── Static                 id=side-busy             # "not calibrated - ..." / "● GENERATING · match (diff 1.2%)"
+├── Static "COPY BUTTON"
+├── Button                 id=set-copy-btn          # "Set copy button..." → draw-a-box overlay (§3.4b)
+├── Static                 id=side-copy             # "not set - ..." / "24×24 at (1830, 612) · set" / "... · clicked (diff 0.03)"
+└── Static .side-hint                               # "F3 hides this column · F2 settings · F1 help"
 ```
 
-`ctrl+enter` → `dismiss(SessionSpec(task, preset))`. MainScreen then: composes bootstrap prompt (protocol layer), copies it, mounts the task as `.ev-user`, arms the watcher, status flashes `copied bootstrap (1/1, 5.2k chars) — paste into ChatGPT`. If the bootstrap exceeds the preset budget it immediately enters chunk-walk mode (§6).
+The REASONING block is a live "is the model still generating?" readout, independent of the chat region above it. The user presses "Set busy region...", draws a box around the chat UI's busy/stop indicator **while the model is generating**, and that drawn region's pixels are captured as a calibration baseline (`agentclip.screen.capture.capture_region`). MainScreen then polls the same region every `_BUSY_POLL_S` seconds (`agentclip.screen.busy.probe_busy`) and compares each fresh capture against the baseline: still matching means the model is still reasoning, a changed region means the response finished, and a capture failure is reported as an error. Each poll repaints `#side-busy` via `Sidebar.update_busy` with an unmistakable state string (`● GENERATING · match (diff 1.2%)` / `○ response ready · changed (diff 34.0%)` / `✗ capture failed`) — and, since the copy-button feature landed, also drives the auto-copy-click trigger described in §3.4b: nothing else consumes the verdict. Session-scoped like the chat region: `/new` and the summary's *new session* stop the poller, drop the region and baseline, and reset the label to its not-calibrated default.
 
-Rejected alternative: a one-line `Input` for the task — coding tasks are multi-line (pasted tracebacks); `TextArea` with `ctrl+enter` submit (TextArea has no Submitted message, per digest) is the right call.
+The `Select` is the session's service ("profile") picker and the only place it is chosen; its value flows into `SessionSpec.service` and from there into the engine and the status bar's service segment. It is **disabled while a session is active** (a session's paste budget is baked into its engine) and re-enabled whenever `prompt_new_session` is waiting. After the services table itself changes (service editor), the sidebar rebuilds its options via `Sidebar.refresh_services(config)`, preserving the current selection when that preset survived.
 
-### 1.4 ConfigScreen
+Rejected alternatives: a one-line `Input` for the task — coding tasks are multi-line (pasted tracebacks), so `ChatComposer` (Enter sends, `ctrl+j` newline, paste keeps newlines) is the right widget. And the original launch modal — it forced a decision (which service?) before the user had seen anything, and duplicated a text box the main screen already owns.
 
-Full `Screen` with a `VerticalScroll > Grid` form; `escape` saves-and-pops (explicit Save button rejected — every field validates on change, nothing to batch):
+### 1.4 ServiceEditorScreen (shipped M3; scope narrowed from the original ConfigScreen sketch)
 
-- `Select[str]` default service preset
-- `Input(validators=[Number(minimum=500)])` paste budget override (chars); blank = preset value
-- `Input(validators=[Number(minimum=200, maximum=2000)])` watcher poll interval ms (default 300)
-- `TextArea` command allowlist, one glob/regex pattern per line (e.g. `pytest *`, `ruff *`, `git status`)
-- `Switch` terminal bell on events; `Switch` toasts (`notify`) on events
-- `Switch` "wrap protocol blocks in one code fence" (forced ON for Copilot/Gemini presets — see contracts)
-- `Input` backup retention (turns to keep, default 50)
+The original ConfigScreen sketch covered the whole config surface (allowlist, poll interval, bell/toast switches, backup retention); what actually shipped is narrower and sharper: a `ModalScreen["dict[str, ServicePreset] | None"]` (`src/agentclip/tui/screens/service_editor.py`) dedicated to the one thing users actually need to tune per chat service — its name and the two size numbers (`max_paste_chars`, `total_context_chars`). The rest of the config surface is still hand-edited TOML; nothing else needed a form badly enough to justify one yet.
+
+Opened via `F2` (`AgentClipApp.action_settings`) or the sidebar's "Edit services..." button. Both routes are synchronous entry points into an async flow (`push_screen_wait` needs a worker), so `action_settings` is a plain `def` that hands off to `self.run_worker(self._open_service_editor(), group="settings", exclusive=True)` — the same shape as `AgentClipApp._confirm_quit`. Re-entrant guard: if the editor is already the active screen, F2/the button are no-ops.
+
+```
+ServiceEditorScreen(ModalScreen)  .modal-box, id=service-editor-box (width 112)
+├── Static "SERVICE EDITOR"                     .title
+├── Horizontal                    id=svc-body
+│   ├── Vertical                  id=svc-list-col   (width 36)
+│   │   ├── Static "Services"                   .side-title
+│   │   └── Select[str]           id=svc-select      # "key (builtin|custom)" rows + "+ Add new service..."
+│   └── Vertical                  id=svc-form-col   (1fr)
+│       ├── Input                 id=svc-key         # disabled unless in "add new" mode
+│       ├── Input                 id=svc-label
+│       ├── Input                 id=svc-max         # max input size (chars per paste)
+│       ├── Input                 id=svc-total       # total context size (chars)
+│       ├── Static                id=svc-error       # inline validation message, styled $error
+│       └── Horizontal            id=svc-actions
+│           ├── Button "Add service"    id=svc-add-btn     # visible only in "add new" mode
+│           ├── Button "Reset to default" id=svc-reset-btn # visible only for a built-in key
+│           └── Button "Delete"         id=svc-delete-btn  # visible only for a non-built-in key
+└── Static "escape closes (applies valid edits) · ..."     .hint
+```
+
+**Model:** the screen works on an in-memory *working copy* of `config.services`. Selecting an existing preset and editing its name/sizes applies **live** — every keystroke revalidates the whole candidate (key + label + both sizes together, since "max ≤ total" is a cross-field rule) and, only while the candidate is fully valid, writes it straight into the working copy; an invalid candidate is never applied, it just leaves `#svc-error` showing why. Adding a new preset is the one *discrete* action instead of a continuous one: fill in a unique lowercase-hyphen key (validated against `^[a-z0-9]+(-[a-z0-9]+)*$`, immutable once created) plus the other fields, then press "Add service" (enabled only once the candidate validates) — creation is a one-time event best gated behind an explicit action rather than silently committing a half-typed key on every keystroke.
+
+**Escape** (`action_close`, same worker hand-off shape as `action_settings` since it awaits a modal): if the currently displayed fields are valid, the screen dismisses with the working `services` dict if it differs from what it opened with, or `None` if nothing changed (so the caller has nothing to persist). If the currently displayed fields are invalid, nothing was ever written to the working copy (invalid values are never committed) — so there's no real edit to lose — but the visible text would still vanish, which is surprising, so escape instead asks via the shared `ConfirmScreen`: *"The current field values are invalid (\<reason\>) and were never applied. Close the service editor anyway?"* Denying returns focus to the editor; confirming closes as if the field had never been touched.
+
+**Delete vs. reset:** the twelve built-in keys (`config.BUILTIN_SERVICE_KEYS`) can be edited and reset but never deleted — `#svc-delete-btn` only appears for a non-built-in key. `#svc-reset-btn` only appears for a built-in key and restores its shipped values (`config.default_services()[key]`) regardless of whether it currently differs (idempotent no-op if it's already default).
+
+**Wiring on close** (`AgentClipApp._open_service_editor`): a non-`None` result is persisted via `config.save_services(result, self._global_config_path)`, folded into a fresh `Config` via `dataclasses.replace(self.app_config, services=result)`, and propagated to `self.app_config`, `MainScreen.update_config` (which also updates the `SessionController`'s config so the *next* session and any `/new` see it), and `Sidebar.refresh_services`. Engine construction reads `Config` fresh per session start (`cli.make_engine_factory` takes a `get_config: Callable[[], Config]`, called on every `build()`, not once) — so a saved edit takes effect for the next session in this process without restarting the app, while a session already in flight keeps the `Config` snapshot its `Engine` was built from. Opening/using the editor mid-session never touches `awaiting_new_session`, so the sidebar's service `Select` stays exactly as locked/unlocked as it was before.
 
 ### 1.5 End-of-session summary (SummaryScreen)
 
@@ -210,10 +257,39 @@ The `EDITS` segment shows `EDITS:ask` (default), `EDITS:auto` (auto-accept-edits
 The chat box also accepts slash commands (parsed in `SessionController.submit_message`, so any future front-end inherits them; an unknown `/command` is reported, not sent to the model):
 
 - `/yolo [on|off]` — toggle YOLO mode (§2.6).
-- `/new` — clear the transcript and start a fresh session (re-opens the NewSessionScreen). Refused mid-turn (answer/finish the current step first); reachable while armed/idle or after `task_done`.
+- `/new` — clear the transcript and start a fresh session (re-arms the inline start flow of §1.3; the service picker unlocks so the next session can use a different preset). Refused mid-turn (answer/finish the current step first); reachable while armed/idle or after `task_done`.
 - `/help` — list the commands in the transcript.
 
 Precedence: while answering an `ask_user` question, the typed text is **always** the answer (commands are not parsed) — so a slash-leading answer like `/etc/hosts` is delivered verbatim, never eaten. A follow-up message that must begin with a literal slash is escaped as `//…` (one slash is stripped and the rest sent as a message).
+
+### 3.4a Screen regions and the focus click (the "hand me back to the browser" nudge)
+
+The user can draw **two** boxes on their physical screen, both from the sidebar's CHAT WINDOW block, both the same overlay with a different instruction:
+
+- **Chat region** (`#set-region-btn` → `#side-region`) — the *window that hosts the AI chatbot*. It describes where the conversation lives; it is not primarily a click target.
+- **Click region** (`#set-click-btn` → `#side-click`) — *where AgentClip clicks once it has fully handled a model response*, i.e. after each outbound clipboard copy. Typically the chat's input box.
+
+After **every outbound clipboard copy** — bootstrap, results, user answers, revert notices, re-copies — MainScreen clicks the center of the **click region if one is drawn, otherwise the chat region's** (`self._click_region or self._chat_region` in `_click_after_response`), so the browser regains OS focus and the paste lands without alt-tabbing. Neither drawn means no click at all. The fallback keeps the original one-box behaviour intact for users who only draw the window. Click only, deliberately: no auto-paste/auto-send (a misdrawn box must never submit keystrokes into the wrong window).
+
+- **Drawing**: each button spawns the tkinter overlay as a *child process* (`agentclip --pick-region`, hidden flag) — tkinter cannot share the Textual process (both want an event loop; tkinter wants the main thread). A `_picker_open` flag on MainScreen refuses (with a toast) any picker button press — chat, click, or busy — while an overlay is already up, so only one overlay is ever on screen; an exclusive worker group alone cannot guarantee this, because cancelling the worker does not kill the blocking child overlay process. The overlay is a translucent topmost fullscreen window spanning the whole virtual desktop (multi-monitor, Windows metrics); drag draws a rectangle, `Esc` cancels, a sub-8-px drag is treated as a stray click and ignored. The child prints `left top width height` on stdout; cancel prints nothing. Each caller passes its own prompt ("the window that hosts the AI chatbot" / "the spot to click after each response").
+- **Clicking**: `screen.focus.click_region` — Windows-only `SetCursorPos` + `SendInput` via ctypes (stdlib, no new dependency). Both processes force DPI awareness first so overlay coordinates and click coordinates share the physical-pixel space. On non-Windows the click returns False and the user is told once (not per copy) that focus clicks are unsupported.
+- **Scope**: session-only by design (windows move around). Both regions live on MainScreen (`_chat_region`, `_click_region` — same `ScreenRegion` dataclass), show in the sidebar's `#side-region` / `#side-click` labels, can be redrawn mid-session (window moved), and reset on `/new` / the summary's *new session*. Nothing is persisted to config.
+- **Layering**: all of it lives in `agentclip.screen` (region/overlay/picker/focus), an OS side-effect leaf like `clip` that only `tui`/`cli` may import (enforced in test_layering). The controller never knows the feature exists — the click rides inside the view's `copy_outbound`.
+
+### 3.4b The copy button and auto-copy-click
+
+Most chat sites need a click to get a response onto the clipboard at all — there is no keyboard shortcut, only a small icon under each response. This block automates that click once the busy detector (§1.3's REASONING block) says a response has finished, so the user never has to alt-tab and click it themselves.
+
+- **Calibrating**: "Set copy button..." (`#set-copy-btn`) spawns the same draw-a-box overlay as the other regions, prompting for a **tight** box around **one** copy-button icon — "pick the one under the last response, while the page is idle." The drawn region is dual-purpose: it is later the click target, and its pixels are captured immediately (`capture_region`) as a template (`_copy_template`) the auto-flow searches for. A capture failure at calibration time is reported and adopts neither the region nor the template — mirrors the busy region's calibration-capture handling. `#side-copy` shows `"<region> · set"` (not-set default otherwise); if no chat region is drawn yet the toast adds a nudge that one enables a full-height scan.
+- **Arming and firing**: `on_busy_probed` feeds every probe into `_track_copy_trigger`. A `MATCH` probe arms the trigger (a generation is in progress) and resets the CHANGED streak; two **consecutive** `CHANGED` probes while armed *and* a template is calibrated fire `_auto_copy_flow` exactly once and disarm, so it cannot refire until the next `MATCH`. An `ERROR` probe resets the streak but leaves the armed flag alone — a single capture blip must not cancel an in-flight finish. Requiring two consecutive `CHANGED` probes (not one) absorbs a single noisy poll; requiring `MATCH` first means the flow never fires before a generation was ever observed.
+- **The flow** (`_auto_copy_flow`, all OS calls off the event loop via `asyncio.to_thread`):
+  1. Focus the browser exactly like `copy_outbound` does after every copy — `_click_after_response` (click region wins, chat region is the fallback) — then a 0.15 s settle.
+  2. Scroll the transcript to the bottom fast: `scroll_region(target, -40)` where `target` is the chat region if drawn, else the click region, else the copy region itself. A 0.4 s pause lets the page render after the flick.
+  3. Build a same-width vertical search band at the copy region's `left`/`width`: when a chat region is drawn, the band spans the union of the chat and copy regions' vertical extents (the whole transcript column, so any response's icon is in view); otherwise it is just the copy region. If that union would still be shorter than the template, the flow falls back to the copy region alone rather than handing `screen.template` a band it would reject.
+  4. Capture the band and hand it to `agentclip.screen.template.find_lowest_match(template, band)`, which scans bottom-up and returns the first (i.e. lowest, i.e. newest) match — the icon appears once per response, so multiple matches are normal and only the bottom-most one matters. A capture failure or a defensive `ValueError` from the matcher is reported and the flow aborts.
+  5. No match: toast "copy button not found on screen" (warning) and stop — nothing is clicked. A match: `click_region` the matched rectangle (`copy_region.left`, `band.top + match.y_offset`, `copy_region.width`, `template.height`), toast the diff, and stop — the click lands the newest response on the clipboard, and the existing clipboard watcher ingests it exactly like a manual copy would.
+- Every branch also repaints `#side-copy` with a short ASCII status (`set` / `clicked (diff 0.03)` / `not found` / `capture failed` / `search failed`).
+- **Scope and layering**: session-scoped (`_copy_region`, `_copy_template`, `_copy_armed`, `_copy_changed_streak`), reset by `clear_transcript()` like the other three regions; nothing persisted to config. Lives entirely on MainScreen, like the focus click — the controller never knows the feature exists.
 
 ### 3.4 Manual fallback and copy-again
 
@@ -251,7 +327,7 @@ All diffs render as `rich.syntax.Syntax(..., theme="ansi_dark", word_wrap=False)
 - **`edit_file` (find/replace)**: compute the post-edit file in memory, `difflib.unified_diff(old, new, n=3)` restricted to affected hunks, render with the `diff` lexer. Title line: `edit_file src/utils.py · 1 hunk · −1/+1`. If `find` matches zero or >1 locations, that is an executor *error result*, never a gate — nothing to approve.
 - **`write_file`, file exists**: same unified-diff path, title `write_file (overwrite) src/config.py · −12/+40`.
 - **`write_file`, new file**: full content as `Syntax(content, lexer_from_extension, line_numbers=True)` under a green banner `NEW FILE src/cli.py (84 lines)`. An all-`+` unified diff was rejected: `+` gutters add noise and lose language highlighting on brand-new code.
-- **`run_command` gate**: body is the command line in a bordered `Static` plus the cwd and the note `not on allowlist`; hint line adds *"edit allowlist in F2 settings"*.
+- **`run_command` gate**: body is the command line in a bordered `Static` plus the cwd and the note `not on allowlist`; hint line adds *"edit .agentclip.toml's [approval] command_allowlist"* (the allowlist itself has no form yet - F2 only edits services, §1.4).
 
 ---
 
@@ -273,7 +349,7 @@ When an outbound payload exceeds the preset budget, the protocol layer splits it
 
 `space` exists because ACK round-trips cost a copy per chunk and some users will trust their service; it advances without verification. Inbound chunking (model output too big) is the protocol designer's problem; the TUI just renders however many ingests arrive against one turn.
 
-**Calibration** (`F3` from NewSessionScreen, or palette `calibrate paste budget`): copies a numbered marker payload sized to the preset max; user pastes it; model reports the last marker seen; user copies that reply; TUI parses it and toasts a suggested budget with one-key accept (`y`).
+**Calibration** (palette `calibrate paste budget`, or from the service editor): copies a numbered marker payload sized to the preset max; user pastes it; model reports the last marker seen; user copies that reply; TUI parses it and toasts a suggested budget with one-key accept (`y`).
 
 ---
 
@@ -332,9 +408,10 @@ The user is staring at the browser; the terminal must call them back:
 | arrows / `pgup`/`pgdn` | scroll focused panel (diff body autofocused at gate) | native |
 | `escape` | cancel reject-reason / abort chunk send / dismiss modal | contextual |
 | `F1` / `?` | HelpScreen | global (App) |
-| `F2` | ConfigScreen | global (App) |
-| `F3` | calibrate paste budget | NewSessionScreen / palette |
-| `ctrl+enter` | submit TextArea (task / answer / follow-up) | on the TextArea's screen |
+| `F2` | ServiceEditorScreen | global (App) |
+| `F3` | show/hide the settings sidebar | MainScreen (priority: works while the composer has focus) |
+| `enter` | send the composer (task at start, answer, follow-up) | composer focused |
+| `ctrl+s` / `ctrl+enter` | send the composer without focusing it | MainScreen (priority) |
 | `ctrl+p` | command palette (every action mirrored here) | global, Textual default |
 | `ctrl+q` | quit (Confirm if mid-turn) | global, Textual default |
 | SummaryScreen: `u` undo session, `t` new session, `esc` close | | modal-local BINDINGS |

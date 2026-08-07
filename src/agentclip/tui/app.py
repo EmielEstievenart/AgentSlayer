@@ -7,17 +7,19 @@ the screen stack, the F1/F2 global keys, and the quit-mid-turn confirmation.
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from textual.app import App
 from textual.binding import Binding
 
 from agentclip.clip.base import ClipboardProvider
-from agentclip.config import Config
+from agentclip.config import Config, default_global_config_path, save_services
 from agentclip.engine.engine import Engine
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.help import HelpScreen
 from agentclip.tui.screens.main import MainScreen
+from agentclip.tui.screens.service_editor import ServiceEditorScreen
 
 
 class AgentClipApp(App[None]):
@@ -33,6 +35,13 @@ class AgentClipApp(App[None]):
     CSS = """
     MainScreen {
         layout: vertical;
+    }
+    #body {
+        height: 1fr;
+    }
+    #main-col {
+        width: 1fr;
+        height: 1fr;
     }
     TranscriptPanel {
         height: 1fr;
@@ -141,6 +150,40 @@ class AgentClipApp(App[None]):
         border: round $panel;
     }
 
+    Sidebar {
+        width: 32;
+        height: 1fr;
+        background: $panel;
+        border-left: solid $primary;
+        padding: 0 1;
+    }
+    Sidebar .side-title {
+        text-style: bold;
+        color: $text;
+        margin-top: 1;
+    }
+    Sidebar #side-root {
+        color: $text-muted;
+        text-overflow: ellipsis;
+    }
+    Sidebar Select {
+        width: 1fr;
+    }
+    Sidebar #side-service-label {
+        color: $text-muted;
+    }
+    Sidebar Button {
+        width: 1fr;
+        margin-top: 1;
+    }
+    Sidebar #side-region, Sidebar #side-click, Sidebar #side-copy {
+        color: $text-muted;
+    }
+    Sidebar .side-hint {
+        color: $text-muted;
+        margin-top: 1;
+    }
+
     StatusBar {
         height: 1;
         background: $panel;
@@ -183,7 +226,7 @@ class AgentClipApp(App[None]):
         text-style: bold;
     }
 
-    NewSessionScreen, ConfirmScreen, SummaryScreen, HelpScreen, TextEntryScreen {
+    ConfirmScreen, SummaryScreen, HelpScreen, TextEntryScreen, ServiceEditorScreen {
         align: center middle;
     }
     .modal-box {
@@ -210,6 +253,44 @@ class AgentClipApp(App[None]):
     .modal-box Select {
         margin-top: 1;
     }
+
+    #service-editor-box {
+        width: 112;
+    }
+    #svc-body {
+        height: auto;
+    }
+    #svc-list-col {
+        width: 36;
+        margin-right: 2;
+    }
+    #svc-list-col Select {
+        width: 1fr;
+        margin-top: 0;
+    }
+    #svc-form-col {
+        width: 1fr;
+    }
+    #svc-form-col .side-title {
+        margin-top: 1;
+    }
+    #svc-form-col .side-title:first-of-type {
+        margin-top: 0;
+    }
+    #svc-error {
+        color: $error;
+        height: auto;
+        min-height: 1;
+        margin-top: 1;
+    }
+    #svc-actions {
+        height: auto;
+        margin-top: 1;
+    }
+    #svc-actions Button {
+        margin-right: 2;
+        width: auto;
+    }
     """
 
     def __init__(
@@ -219,12 +300,19 @@ class AgentClipApp(App[None]):
         provider: ClipboardProvider,
         engine_factory: Callable[[str], Engine],
         project_root: Path,
+        global_config_path: Path | None = None,
     ) -> None:
         super().__init__()
         self.app_config = config
         self.provider = provider
         self.engine_factory = engine_factory
         self.project_root = project_root
+        # Where the service editor persists edits. Defaults to the real global
+        # config.toml; tests override it to a tmp path so they never touch the
+        # user's actual config.
+        self._global_config_path = (
+            global_config_path if global_config_path is not None else default_global_config_path()
+        )
         self.main_screen: MainScreen | None = None
 
     def on_mount(self) -> None:
@@ -241,11 +329,36 @@ class AgentClipApp(App[None]):
         self.push_screen(HelpScreen())
 
     def action_settings(self) -> None:
-        self.notify("the settings screen lands in M3 - edit .agentclip.toml in your project root")
+        # Also the target of the sidebar's "Edit services..." button. Bound directly
+        # to the F2 key, so Textual dispatches it OUTSIDE a worker - push_screen_wait
+        # requires one, hence the run_worker hand-off (same pattern as _confirm_quit).
+        if isinstance(self.screen, ServiceEditorScreen):
+            return  # already open
+        self.run_worker(self._open_service_editor(), group="settings", exclusive=True)
+
+    async def _open_service_editor(self) -> None:
+        result = await self.push_screen_wait(ServiceEditorScreen(self.app_config))
+        if result is None:
+            return  # closed with no changes - nothing to persist or propagate
+        save_services(result, self._global_config_path)
+        new_config = replace(self.app_config, services=result)
+        self.app_config = new_config
+        main = self.main_screen
+        if main is not None:
+            main.update_config(new_config)
+            main.sidebar.refresh_services(new_config)
+        self.notify("service presets saved", timeout=4)
 
     async def action_quit(self) -> None:
         main = self.main_screen
-        mid_turn = main is not None and (main.busy or main.pending_approval or main.awaiting_answer)
+        # NB: while the inline start flow waits for the first message the session
+        # worker is technically "busy" - but there is no turn to lose, so quitting
+        # from the empty start screen must not raise the mid-turn warning.
+        mid_turn = (
+            main is not None
+            and not main.awaiting_new_session
+            and (main.busy or main.pending_approval or main.awaiting_answer)
+        )
         if mid_turn and not isinstance(self.screen, ConfirmScreen):
             self.run_worker(self._confirm_quit(), group="quit", exclusive=True)
             return

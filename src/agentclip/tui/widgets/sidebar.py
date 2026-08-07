@@ -10,13 +10,22 @@ unlocks again whenever the app is waiting for a new session's first message.
 The widget is dumb on purpose: it holds no session state, exposes ``service``
 (the chosen preset key), ``set_locked``, ``refresh_services``, ``update_region``,
 ``update_chatbox``, ``update_busy``, ``update_idle``, ``update_copy``,
-``update_newchat`` and the ``show_paste_flash``/``hide_paste_flash`` pair;
-MainScreen owns every bit of routing, including the "Edit services..." button,
-the busy/idle polling loop, the "Set copy button..." picker + auto-copy-click
-flow and the "New browser chat" action. The paste flash is the one animated
-thing here - a deliberately obnoxious blinking banner that nags the user to
-Ctrl+V the outbound payload into the chat; the blink timer is pure
+``update_newchat``, ``show_slot`` and the ``show_paste_flash``/``hide_paste_flash``
+pair; MainScreen owns every bit of routing, including the "Edit services..."
+button, the busy/idle polling loop, the "Set copy button..." picker +
+auto-copy-click flow and the "New browser chat" action. The paste flash is the
+one animated thing here - a deliberately obnoxious blinking banner that nags the
+user to Ctrl+V the outbound payload into the chat; the blink timer is pure
 presentation, so the dumb widget may own it.
+
+Every calibration below the AGENT SLOT picker belongs to *one* slot: the master
+chat, or the sub-agent chat a delegated run gets its own window in. The picker
+chooses which slot the buttons underneath write into, and ``show_slot``
+repaints the whole column from that slot's ``SlotCalibration`` in one go (the
+per-field ``update_*`` methods stay the primitives - a live probe readout has no
+business being re-derived from stored state). Unlike the service picker it is
+never locked: calibrating the sub-agent window mid-session is the normal way to
+use it.
 
 Calibration buttons come in pairs that mirror each other deliberately: the chat
 input box is calibrated TWICE (a fresh chat centres it, an ongoing one docks it
@@ -35,11 +44,13 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.message import Message
 from textual.timer import Timer
 from textual.widgets import Button, Select, Static
 
 from agentclip.config import Config
 from agentclip.screen.region import ScreenRegion
+from agentclip.screen.slot import AgentSlot, SlotCalibration
 
 _HINT = "F3 hides this column · F2 settings · F1 help"
 PASTE_FLASH_TEXT = ">>> PRESS CTRL+V <<<\nin the chat, then send"
@@ -52,6 +63,10 @@ BUSY_UNSET = "not calibrated - set while the model is generating"
 IDLE_UNSET = "not calibrated - set while the chat is idle"
 COPY_UNSET = "not set - auto-copy-click disabled"
 NEWCHAT_UNSET = "not set - calibrate the browser's new-chat button"
+# What a detector reads before (or instead of) a live probe verdict: fresh from
+# the picker, and after a slot switch repaints from stored state.
+BUSY_CALIBRATED = "calibrated - watching"
+IDLE_CALIBRATED = "calibrated - watching"
 
 # Which chat input box a calibration describes: a fresh chat centres the box,
 # an ongoing one docks it at the bottom. Keys of the ``#side-chatbox-*`` labels.
@@ -61,6 +76,26 @@ _CHATBOX_CAPTION = {
     CHATBOX_INITIAL: "fresh-chat input box",
     CHATBOX_ONGOING: "ongoing-chat input box",
 }
+
+# The AGENT SLOT note, one line per state. The master slot has nothing to be
+# "ready" for - it is simply the chat the session runs in - so only the
+# sub-agent slot reports readiness, and it reports the gaps by name.
+SLOT_NOTE_MASTER = "the main agent's chat window"
+SLOT_NOTE_READY = "delegation ON"
+SLOT_NOTE_MISSING = "delegation off · need: "
+
+
+def _slot_options() -> list[tuple[str, str]]:
+    return [(slot.label, str(slot)) for slot in AgentSlot]
+
+
+def slot_note(cal: SlotCalibration) -> str:
+    """The one-line readiness readout under the slot picker."""
+    if cal.slot is AgentSlot.MASTER:
+        return SLOT_NOTE_MASTER
+    if cal.can_delegate:
+        return SLOT_NOTE_READY
+    return SLOT_NOTE_MISSING + ", ".join(cal.missing())
 
 
 def _short_root(project_root: Path) -> str:
@@ -92,7 +127,22 @@ class Sidebar(Vertical):
     Sidebar .side-status {
         color: $text-muted;
     }
+    Sidebar #side-slot-note {
+        /* Fixed height: the note grows and shrinks as pieces are calibrated,
+           and every button below it must keep its screen position. */
+        height: 3;
+    }
     """
+
+    class SlotChanged(Message):
+        """The user picked a different agent slot for the calibration buttons.
+
+        MainScreen owns the slot pointers; the sidebar only reports the choice.
+        """
+
+        def __init__(self, slot: AgentSlot) -> None:
+            self.slot = slot
+            super().__init__()
 
     def __init__(self, config: Config, project_root: Path, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
         super().__init__(id=id)
@@ -113,6 +163,14 @@ class Sidebar(Vertical):
         )
         yield Static(Text(self._preset_caption()), id="side-service-label")
         yield Button("Edit services...", id="edit-services-btn", variant="primary")
+        yield Static(Text("AGENT SLOT"), classes="side-title")
+        yield Select(
+            _slot_options(),
+            value=str(AgentSlot.MASTER),
+            allow_blank=False,
+            id="slot-select",
+        )
+        yield Static(Text(SLOT_NOTE_MASTER), id="side-slot-note", classes="side-status")
         yield Static(Text("CHAT WINDOW"), classes="side-title")
         yield Button("Set chat region...", id="set-region-btn")
         yield Static(Text(_REGION_UNSET), id="side-region", classes="side-status")
@@ -171,8 +229,68 @@ class Sidebar(Vertical):
         return self._default_service() if value is Select.NULL else str(value)
 
     def set_locked(self, locked: bool) -> None:
-        """Lock the picker while a session owns the service; unlock between sessions."""
+        """Lock the picker while a session owns the service; unlock between sessions.
+
+        Only the *service* picker: the slot picker stays live for the whole
+        session, because calibrating the sub-agent window mid-session is the
+        normal way to reach delegation.
+        """
         self.service_select.disabled = locked
+
+    # -- the agent slot picker -------------------------------------------------
+
+    @property
+    def slot_select(self) -> Select[str]:
+        return self.query_one("#slot-select", Select)
+
+    @property
+    def slot(self) -> AgentSlot:
+        """The slot the calibration buttons currently write into."""
+        value = self.slot_select.value
+        return AgentSlot.MASTER if value is Select.NULL else AgentSlot(str(value))
+
+    @on(Select.Changed, "#slot-select")
+    def _on_slot_changed(self, event: Select.Changed) -> None:
+        # Stop the raw Select event and re-post the domain one: MainScreen owns
+        # the slot pointers and repaints the column via show_slot().
+        event.stop()
+        if event.value is Select.NULL:
+            return
+        self.post_message(self.SlotChanged(AgentSlot(str(event.value))))
+
+    def show_slot(self, cal: SlotCalibration) -> None:
+        """Repaint every calibration readout from one slot's stored state.
+
+        Called when the slot picker moves and on session teardown - the whole
+        column is a view of ``cal`` and nothing else. The live detector
+        readouts (``update_busy``/``update_idle``) fall back to a static
+        "calibrated" line here: a probe verdict belongs to whichever slot the
+        automation is actually driving, and re-deriving one from stored pixels
+        would be a lie.
+        """
+        select = self.slot_select
+        if select.value != str(cal.slot):
+            select.value = str(cal.slot)
+        self.query_one("#side-slot-note", Static).update(Text(slot_note(cal)))
+        self.update_region(cal.chat_region)
+        self.update_chatbox(
+            CHATBOX_INITIAL, cal.chatbox_initial.region if cal.chatbox_initial else None
+        )
+        self.update_chatbox(
+            CHATBOX_ONGOING, cal.chatbox_ongoing.region if cal.chatbox_ongoing else None
+        )
+        self.update_busy(BUSY_CALIBRATED if cal.busy_baseline is not None else BUSY_UNSET)
+        self.update_idle(IDLE_CALIBRATED if cal.idle_baseline is not None else IDLE_UNSET)
+        self.update_copy(
+            f"{cal.copy_region.describe()} · set" if cal.copy_region is not None else COPY_UNSET
+        )
+        self.update_newchat(
+            f"{cal.new_chat.describe()} · set" if cal.new_chat is not None else NEWCHAT_UNSET
+        )
+
+    def update_slot_note(self, cal: SlotCalibration) -> None:
+        """Repaint just the readiness line (after a single calibration landed)."""
+        self.query_one("#side-slot-note", Static).update(Text(slot_note(cal)))
 
     # -- the chat region ------------------------------------------------------
 

@@ -37,6 +37,19 @@ Three calibrations are ``CalibratedElement``s (region + snapshot) rather than
 bare regions, because their whole job is "is this still the thing I was pointed
 at?": the two chat input boxes (a fresh chat centres its box, an ongoing one
 docks it at the bottom) and the browser's new-chat button.
+
+Every one of those calibrations belongs to an *agent slot*
+(:mod:`agentclip.screen.slot`), not to the screen: MASTER is the chat the
+session runs in, SUBAGENT the second window a delegated sub-agent gets. Two
+independent pointers say what happens to which slot - ``_calibrating`` is what
+the sidebar's pickers write into, ``_live`` is what the automation drives right
+now - because the user must be able to calibrate the sub-agent window while the
+master chat is mid-turn. ``start_browser_chat``/``end_browser_chat`` are the
+only things that move ``_live``, and ``start_browser_chat`` is all-or-nothing on
+purpose: it retargets the automation *only* after a verified click landed, so a
+False return guarantees nothing was clicked and nothing was retargeted - a
+sub-agent bootstrap pasted into the master chat would corrupt that conversation
+irrecoverably.
 """
 
 from __future__ import annotations
@@ -83,6 +96,7 @@ from agentclip.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
 from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.picker import ScreenPickError, pick_region
 from agentclip.screen.region import ScreenRegion
+from agentclip.screen.slot import AgentSlot, SlotCalibration, new_slots
 from agentclip.screen.template import TemplateMatch, find_lowest_match
 from agentclip.tui.messages import BusyProbed, ClipboardCaptured, IdleProbed
 from agentclip.tui.screens.confirm import ConfirmScreen
@@ -92,13 +106,11 @@ from agentclip.tui.widgets.action_panel import ActionPanel
 from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
-    BUSY_UNSET,
+    BUSY_CALIBRATED,
     CHATBOX_INITIAL,
     CHATBOX_ONGOING,
-    COPY_UNSET,
     ENTER_FLASH_TEXT,
-    IDLE_UNSET,
-    NEWCHAT_UNSET,
+    IDLE_CALIBRATED,
     PASTE_FLASH_TEXT,
     Sidebar,
 )
@@ -113,6 +125,9 @@ _BUSY_POLL_S = 0.5
 # Hover pause before clicking a calibrated element, for the same reason the copy
 # click settles: web UIs paint their buttons on hover.
 _ELEMENT_CLICK_SETTLE_S = 0.05
+# Beat between opening a fresh browser chat and treating it as the live slot -
+# the page still has to render its (centred) input box. Tests shrink this.
+_NEW_CHAT_SETTLE_S = 0.4
 
 
 class ElementClick(Enum):
@@ -229,28 +244,23 @@ class MainScreen(Screen[None]):
         self._gate_kind: str | None = None  # the in-flight gate's kind, for a/check_action
         # Resolved by the first composer send while waiting for a new session.
         self._new_session_future: asyncio.Future[SessionSpec | None] | None = None
-        # The user-drawn chat region (sidebar's "Set chat region..."): the whole
-        # window that hosts the chatbot. It is the last-resort click target and
-        # the vertical span of the copy-button search band.
-        self._chat_region: ScreenRegion | None = None
-        # The chat's input box, calibrated TWICE ("Set initial chatbox..." /
-        # "Set ongoing chatbox..."): a fresh chat centres the box, an ongoing
-        # one docks it at the bottom, so a single click point is wrong half the
-        # time. Each is a region plus its calibration snapshot, and the click
-        # goes to whichever still looks like its snapshot right now.
-        self._chatbox_initial: CalibratedElement | None = None
-        self._chatbox_ongoing: CalibratedElement | None = None
+        # Every user-drawn calibration, one set per agent slot: the chat window
+        # itself (last-resort click target, and the vertical span of the
+        # copy-button search band), the input box calibrated TWICE ("Set initial
+        # chatbox..." / "Set ongoing chatbox...", because a fresh chat centres
+        # the box and an ongoing one docks it at the bottom), the two finish
+        # detectors, the copy button and the new-chat button. All session-scoped:
+        # windows move around, so nothing outlives a /new.
+        #
+        # ``_calibrating`` is the slot the sidebar's pickers write into;
+        # ``_live`` is the slot the automation (paste click, detector poller,
+        # auto-copy) drives. They move independently: the sub-agent window is
+        # calibrated while the master chat is mid-session.
+        self._slots: dict[AgentSlot, SlotCalibration] = new_slots()
+        self._calibrating: AgentSlot = AgentSlot.MASTER
+        self._live: AgentSlot = AgentSlot.MASTER
+        self._delegation_ready = False  # last-seen SUBAGENT can_delegate, for the one-shot toast
         self._region_click_warned = False
-        # The two finish detectors, both region + calibration snapshot, both
-        # polled by one worker. The busy element ("Set busy region...") is
-        # calibrated WHILE the model generates, the idle element ("Set idle
-        # button...") while the chat is idle; ``_evaluate_finish`` folds
-        # whichever are live into one verdict. Session-scoped for the same
-        # reason as the chat region - windows move around.
-        self._busy_region: ScreenRegion | None = None
-        self._busy_baseline: RegionImage | None = None
-        self._idle_region: ScreenRegion | None = None
-        self._idle_baseline: RegionImage | None = None
         self._detector_worker: Worker[None] | None = None
         # Latest verdict per detector: True = finished, False = generating,
         # None = capture error. ``_seen`` is what makes a detector count toward
@@ -260,21 +270,12 @@ class MainScreen(Screen[None]):
         self._idle_seen = False
         self._busy_finished: bool | None = None
         self._idle_finished: bool | None = None
-        # The user-drawn copy-button icon (sidebar's "Set copy button..."): the
-        # drawn region doubles as the click target and the source of the
-        # template pixels the auto-copy flow searches a vertical band for.
         # ``_copy_armed``/``_copy_changed_streak`` track the busy-probe sequence
-        # that fires the flow - see ``on_busy_probed``. Session-scoped like the
-        # other regions.
-        self._copy_region: ScreenRegion | None = None
-        self._copy_template: RegionImage | None = None
+        # that fires the auto-copy flow - see ``_evaluate_finish``. Trigger
+        # state, not calibration, so it lives on the screen and is reset
+        # whenever the live slot moves.
         self._copy_armed = False
         self._copy_changed_streak = 0
-        # The browser's "new chat" control (sidebar's "Set new-chat button..."),
-        # driven by the "New browser chat" action button. Verified against its
-        # snapshot before every click, so a moved/re-laid-out page is refused
-        # instead of clicking whatever now sits there.
-        self._newchat: CalibratedElement | None = None
         # Our own terminal window, refreshed while the user is demonstrably
         # typing here - the auto-copy flow snaps focus back to it after
         # clicking the browser's copy button. Not session-scoped: the terminal
@@ -285,6 +286,104 @@ class MainScreen(Screen[None]):
         # extra button presses are refused up front instead.
         self._picker_open = False
         self._controller = SessionController(config, engine_factory, project_root, view=self)
+
+    # -- slots ----------------------------------------------------------------
+
+    @property
+    def calibrating(self) -> SlotCalibration:
+        """The slot the sidebar's calibration buttons write into."""
+        return self._slots[self._calibrating]
+
+    @property
+    def live(self) -> SlotCalibration:
+        """The slot the automation drives right now (paste click, finish
+        detector, auto-copy). Only ``start_browser_chat``/``end_browser_chat``
+        move it - everything else reads it."""
+        return self._slots[self._live]
+
+    # Compatibility proxies onto the MASTER slot. The single-window vocabulary
+    # (``_chat_region``, ``_copy_template``, ...) predates slots and is what the
+    # region/chatbox/copy/newchat Pilot tests poke; keeping it as read/write
+    # views of MASTER means the migration to slots changed no test at all.
+    @property
+    def _chat_region(self) -> ScreenRegion | None:
+        return self._slots[AgentSlot.MASTER].chat_region
+
+    @_chat_region.setter
+    def _chat_region(self, value: ScreenRegion | None) -> None:
+        self._slots[AgentSlot.MASTER].chat_region = value
+
+    @property
+    def _chatbox_initial(self) -> CalibratedElement | None:
+        return self._slots[AgentSlot.MASTER].chatbox_initial
+
+    @_chatbox_initial.setter
+    def _chatbox_initial(self, value: CalibratedElement | None) -> None:
+        self._slots[AgentSlot.MASTER].chatbox_initial = value
+
+    @property
+    def _chatbox_ongoing(self) -> CalibratedElement | None:
+        return self._slots[AgentSlot.MASTER].chatbox_ongoing
+
+    @_chatbox_ongoing.setter
+    def _chatbox_ongoing(self, value: CalibratedElement | None) -> None:
+        self._slots[AgentSlot.MASTER].chatbox_ongoing = value
+
+    @property
+    def _busy_region(self) -> ScreenRegion | None:
+        return self._slots[AgentSlot.MASTER].busy_region
+
+    @_busy_region.setter
+    def _busy_region(self, value: ScreenRegion | None) -> None:
+        self._slots[AgentSlot.MASTER].busy_region = value
+
+    @property
+    def _busy_baseline(self) -> RegionImage | None:
+        return self._slots[AgentSlot.MASTER].busy_baseline
+
+    @_busy_baseline.setter
+    def _busy_baseline(self, value: RegionImage | None) -> None:
+        self._slots[AgentSlot.MASTER].busy_baseline = value
+
+    @property
+    def _idle_region(self) -> ScreenRegion | None:
+        return self._slots[AgentSlot.MASTER].idle_region
+
+    @_idle_region.setter
+    def _idle_region(self, value: ScreenRegion | None) -> None:
+        self._slots[AgentSlot.MASTER].idle_region = value
+
+    @property
+    def _idle_baseline(self) -> RegionImage | None:
+        return self._slots[AgentSlot.MASTER].idle_baseline
+
+    @_idle_baseline.setter
+    def _idle_baseline(self, value: RegionImage | None) -> None:
+        self._slots[AgentSlot.MASTER].idle_baseline = value
+
+    @property
+    def _copy_region(self) -> ScreenRegion | None:
+        return self._slots[AgentSlot.MASTER].copy_region
+
+    @_copy_region.setter
+    def _copy_region(self, value: ScreenRegion | None) -> None:
+        self._slots[AgentSlot.MASTER].copy_region = value
+
+    @property
+    def _copy_template(self) -> RegionImage | None:
+        return self._slots[AgentSlot.MASTER].copy_template
+
+    @_copy_template.setter
+    def _copy_template(self, value: RegionImage | None) -> None:
+        self._slots[AgentSlot.MASTER].copy_template = value
+
+    @property
+    def _newchat(self) -> CalibratedElement | None:
+        return self._slots[AgentSlot.MASTER].new_chat
+
+    @_newchat.setter
+    def _newchat(self, value: CalibratedElement | None) -> None:
+        self._slots[AgentSlot.MASTER].new_chat = value
 
     # -- layout ---------------------------------------------------------------
 
@@ -424,34 +523,18 @@ class MainScreen(Screen[None]):
     async def clear_transcript(self) -> None:
         # Only the session-reset path (/new, the summary's "new session") clears
         # the transcript, so this doubles as the session teardown hook: every
-        # calibration is session-scoped (windows move around) and dies with it.
-        self._chat_region = None
-        self._chatbox_initial = None
-        self._chatbox_ongoing = None
-        with suppress(NoMatches):
-            self.sidebar.update_region(None)
-            self.sidebar.update_chatbox(CHATBOX_INITIAL, None)
-            self.sidebar.update_chatbox(CHATBOX_ONGOING, None)
+        # calibration is session-scoped (windows move around) and dies with it -
+        # BOTH slots, and the pointers go home to MASTER, because the next
+        # session's sub-agent chat is a different window in a different place.
         self._stop_detector_worker()
-        self._busy_region = None
-        self._busy_baseline = None
-        self._idle_region = None
-        self._idle_baseline = None
-        self._busy_seen = False
-        self._idle_seen = False
-        self._busy_finished = None
-        self._idle_finished = None
+        for calibration in self._slots.values():
+            calibration.clear()
+        self._calibrating = AgentSlot.MASTER
+        self._live = AgentSlot.MASTER
+        self._delegation_ready = False
+        self._reset_finish_trigger()
         with suppress(NoMatches):
-            self.sidebar.update_busy(BUSY_UNSET)
-            self.sidebar.update_idle(IDLE_UNSET)
-        self._copy_region = None
-        self._copy_template = None
-        self._copy_armed = False
-        self._copy_changed_streak = 0
-        self._newchat = None
-        with suppress(NoMatches):
-            self.sidebar.update_copy(COPY_UNSET)
-            self.sidebar.update_newchat(NEWCHAT_UNSET)
+            self.sidebar.show_slot(self.calibrating)
             self.sidebar.hide_paste_flash()
         with suppress(NoMatches):
             await self.transcript.clear_events()
@@ -576,14 +659,17 @@ class MainScreen(Screen[None]):
         calibrated, else the initial one, else the whole chat window. Clicking
         a stale-looking chatbox is recoverable; not clicking at all means the
         paste never lands.
+
+        Always the LIVE slot: mid-delegation this is the sub-agent's window.
         """
-        for element in (self._chatbox_ongoing, self._chatbox_initial):
+        live = self.live
+        for element in (live.chatbox_ongoing, live.chatbox_initial):
             if element is not None and await asyncio.to_thread(probe_element, element):
                 return element.region
-        fallback = self._chatbox_ongoing or self._chatbox_initial
+        fallback = live.chatbox_ongoing or live.chatbox_initial
         if fallback is not None:
             return fallback.region
-        return self._chat_region
+        return live.chat_region
 
     async def _click_after_response(self) -> bool:
         """The payload is on the clipboard - poke the chat (when something is
@@ -776,6 +862,35 @@ class MainScreen(Screen[None]):
 
     # -- sidebar --------------------------------------------------------------
 
+    @on(Sidebar.SlotChanged)
+    def _on_slot_changed(self, message: Sidebar.SlotChanged) -> None:
+        """Point the calibration buttons at another slot and repaint the column
+        from that slot's stored state. The *live* slot is untouched: switching
+        the picker mid-run must not retarget a click at a different window."""
+        message.stop()
+        self._calibrating = message.slot
+        with suppress(NoMatches):
+            self.sidebar.show_slot(self.calibrating)
+
+    def _slot_prompt(self, prompt: str) -> str:
+        """Both slots share the picker code, so the sub-agent's prompts have to
+        say out loud which window the user is being asked to draw on."""
+        if self._calibrating is AgentSlot.SUBAGENT:
+            return f"SUB-AGENT window · {prompt}"
+        return prompt
+
+    def _after_calibration(self) -> None:
+        """Repaint the slot readiness line after any single calibration landed,
+        and tell the user once when the sub-agent slot becomes usable - the
+        delegate tool is baked into the bootstrap, so it only reaches the model
+        on the next /new."""
+        ready = self._slots[AgentSlot.SUBAGENT].can_delegate
+        with suppress(NoMatches):
+            self.sidebar.update_slot_note(self.calibrating)
+        if ready and not self._delegation_ready:
+            self.notify("sub-agent slot ready - /new to give the model the delegate tool")
+        self._delegation_ready = ready
+
     def action_toggle_sidebar(self) -> None:
         """Hide/show the settings column - diffs and command output want the room."""
         with suppress(NoMatches):
@@ -805,7 +920,9 @@ class MainScreen(Screen[None]):
         try:
             region = await asyncio.to_thread(
                 pick_region,
-                prompt="Drag a box around the window that hosts the AI chatbot · Esc cancels",
+                prompt=self._slot_prompt(
+                    "Drag a box around the window that hosts the AI chatbot · Esc cancels"
+                ),
             )
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
@@ -815,10 +932,11 @@ class MainScreen(Screen[None]):
         if region is None:
             self.notify("chat region unchanged (selection cancelled)")
             return
-        self._chat_region = region
+        self.calibrating.chat_region = region
         self._region_click_warned = False
         with suppress(NoMatches):
             self.sidebar.update_region(region)
+        self._after_calibration()
         self.notify(
             f"chat region set ({region.describe()}) - the chatbot window; "
             "outbound copies click it until a chatbox is calibrated"
@@ -861,7 +979,7 @@ class MainScreen(Screen[None]):
         snapshot it: the pixels are how the click resolver later recognises
         which layout is actually on screen (``_chatbox_region``)."""
         try:
-            region = await asyncio.to_thread(pick_region, prompt=prompt)
+            region = await asyncio.to_thread(pick_region, prompt=self._slot_prompt(prompt))
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
             return
@@ -877,13 +995,14 @@ class MainScreen(Screen[None]):
             return
         element = CalibratedElement(region, template)
         if kind == CHATBOX_ONGOING:
-            self._chatbox_ongoing = element
+            self.calibrating.chatbox_ongoing = element
         else:
-            self._chatbox_initial = element
+            self.calibrating.chatbox_initial = element
         self._region_click_warned = False
         with suppress(NoMatches):
             self.sidebar.update_chatbox(kind, region)
         self.notify(f"{kind} chatbox calibrated ({region.describe()})")
+        self._after_calibration()
 
     @on(Button.Pressed, "#set-busy-btn")
     def _on_set_busy_region(self, event: Button.Pressed) -> None:
@@ -899,8 +1018,10 @@ class MainScreen(Screen[None]):
         try:
             region = await asyncio.to_thread(
                 pick_region,
-                prompt="Drag a box around the busy/stop indicator WHILE the model "
-                "is generating · Esc cancels",
+                prompt=self._slot_prompt(
+                    "Drag a box around the busy/stop indicator WHILE the model "
+                    "is generating · Esc cancels"
+                ),
             )
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
@@ -915,13 +1036,14 @@ class MainScreen(Screen[None]):
         except CaptureError as exc:
             self.notify(f"could not capture the busy region: {exc}", severity="error")
             return
-        self._busy_region = region
-        self._busy_baseline = baseline
+        self.calibrating.busy_region = region
+        self.calibrating.busy_baseline = baseline
         self._busy_seen = False
         self._busy_finished = None
         with suppress(NoMatches):
-            self.sidebar.update_busy("calibrated - watching")
+            self.sidebar.update_busy(BUSY_CALIBRATED)
         self.notify(f"busy region calibrated ({region.describe()})")
+        self._after_calibration()
         self._start_detector_worker()
 
     @on(Button.Pressed, "#set-idle-btn")
@@ -942,8 +1064,10 @@ class MainScreen(Screen[None]):
         try:
             region = await asyncio.to_thread(
                 pick_region,
-                prompt="Drag a box around an element that CHANGES while generating "
-                "(e.g. the send button), WHILE the chat is idle · Esc cancels",
+                prompt=self._slot_prompt(
+                    "Drag a box around an element that CHANGES while generating "
+                    "(e.g. the send button), WHILE the chat is idle · Esc cancels"
+                ),
             )
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
@@ -958,13 +1082,14 @@ class MainScreen(Screen[None]):
         except CaptureError as exc:
             self.notify(f"could not capture the idle element: {exc}", severity="error")
             return
-        self._idle_region = region
-        self._idle_baseline = baseline
+        self.calibrating.idle_region = region
+        self.calibrating.idle_baseline = baseline
         self._idle_seen = False
         self._idle_finished = None
         with suppress(NoMatches):
-            self.sidebar.update_idle("calibrated - watching")
+            self.sidebar.update_idle(IDLE_CALIBRATED)
         self.notify(f"idle element calibrated ({region.describe()})")
+        self._after_calibration()
         self._start_detector_worker()
 
     # -- finish-detector polling -----------------------------------------------
@@ -976,10 +1101,16 @@ class MainScreen(Screen[None]):
         mid-session cannot leave two loops polling different regions.
 
         Busy is probed first and idle second within a tick, which is what makes
-        ``IdleProbed`` the tick's closing message (see ``_evaluate_finish``)."""
+        ``IdleProbed`` the tick's closing message (see ``_evaluate_finish``).
+
+        It always polls the LIVE slot, and the regions are read once here rather
+        than per tick: restarting the worker is how the poller follows the live
+        slot across a delegation, so an in-flight loop must keep watching the
+        window it was started for."""
         self._stop_detector_worker()
-        busy_region, busy_baseline = self._busy_region, self._busy_baseline
-        idle_region, idle_baseline = self._idle_region, self._idle_baseline
+        live = self.live
+        busy_region, busy_baseline = live.busy_region, live.busy_baseline
+        idle_region, idle_baseline = live.idle_region, live.idle_baseline
         if busy_baseline is None and idle_baseline is None:
             return
 
@@ -1014,7 +1145,7 @@ class MainScreen(Screen[None]):
         self._busy_finished = _busy_verdict(message.probe)
         # With an idle element calibrated the tick is closed by IdleProbed, so
         # the combined verdict is evaluated exactly once per poll.
-        if self._idle_baseline is None:
+        if self.live.idle_baseline is None:
             self._evaluate_finish()
 
     def on_idle_probed(self, message: IdleProbed) -> None:
@@ -1060,11 +1191,24 @@ class MainScreen(Screen[None]):
             self._copy_changed_streak = 0
             return
         self._copy_changed_streak += 1
-        if self._copy_changed_streak < 2 or self._copy_template is None:
+        if self._copy_changed_streak < 2 or self.live.copy_template is None:
             return
         self._copy_armed = False
         self._copy_changed_streak = 0
         self.run_worker(self._auto_copy_flow(), group="copyflow", exclusive=True)
+
+    def _reset_finish_trigger(self) -> None:
+        """Forget every detector verdict and the auto-copy arm.
+
+        Called whenever the live slot moves (a delegation starting or ending)
+        and on session teardown: verdicts describe a window, so carrying them
+        across a retarget could fire the auto-copy against the wrong chat."""
+        self._busy_seen = False
+        self._idle_seen = False
+        self._busy_finished = None
+        self._idle_finished = None
+        self._copy_armed = False
+        self._copy_changed_streak = 0
 
     # -- the copy-button region + auto-copy-click ------------------------------
 
@@ -1082,8 +1226,10 @@ class MainScreen(Screen[None]):
         try:
             region = await asyncio.to_thread(
                 pick_region,
-                prompt="Drag a TIGHT box around ONE copy button icon (pick the "
-                "one under the last response, while the page is idle) · Esc cancels",
+                prompt=self._slot_prompt(
+                    "Drag a TIGHT box around ONE copy button icon (pick the "
+                    "one under the last response, while the page is idle) · Esc cancels"
+                ),
             )
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
@@ -1098,16 +1244,17 @@ class MainScreen(Screen[None]):
         except CaptureError as exc:
             self.notify(f"could not capture the copy button: {exc}", severity="error")
             return
-        self._copy_region = region
-        self._copy_template = template
+        self.calibrating.copy_region = region
+        self.calibrating.copy_template = template
         with suppress(NoMatches):
             self.sidebar.update_copy(f"{region.describe()} · set")
         hint = (
             ""
-            if self._chat_region is not None
+            if self.calibrating.chat_region is not None
             else " - set a chat region too for a full-height scan"
         )
         self.notify(f"copy button set ({region.describe()}){hint}")
+        self._after_calibration()
 
     def _copy_search_band(self, copy_region: ScreenRegion, template: RegionImage) -> ScreenRegion:
         """Same left/width as the copy region; the vertical span is the union
@@ -1115,7 +1262,7 @@ class MainScreen(Screen[None]):
         transcript column), else just the copy region itself. Falls back to
         the copy region alone if the union would still be shorter than the
         template (a same-width band can never be narrower)."""
-        chat = self._chat_region
+        chat = self.live.chat_region
         if chat is None:
             return copy_region
         top = min(chat.top, copy_region.top)
@@ -1161,15 +1308,16 @@ class MainScreen(Screen[None]):
         finished: focus the browser, snap the transcript to the bottom, then hunt
         a vertical band for the newest (lowest) copy-button icon and click it -
         the clipboard watcher ingests the resulting copy on its own."""
-        copy_region = self._copy_region
-        template = self._copy_template
+        live = self.live
+        copy_region = live.copy_region
+        template = live.copy_template
         if copy_region is None or template is None:
             return
 
         await self._click_after_response()  # the live chatbox, else the chat region
         await asyncio.sleep(0.15)
 
-        scroll_target = self._chat_region or await self._chatbox_region() or copy_region
+        scroll_target = live.chat_region or await self._chatbox_region() or copy_region
         await asyncio.to_thread(scroll_region, scroll_target, -40)
         await asyncio.sleep(0.4)  # let the page settle/render after the flick
 
@@ -1299,7 +1447,9 @@ class MainScreen(Screen[None]):
         try:
             region = await asyncio.to_thread(
                 pick_region,
-                prompt="Drag a TIGHT box around the browser's NEW CHAT button · Esc cancels",
+                prompt=self._slot_prompt(
+                    "Drag a TIGHT box around the browser's NEW CHAT button · Esc cancels"
+                ),
             )
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
@@ -1314,10 +1464,11 @@ class MainScreen(Screen[None]):
         except CaptureError as exc:
             self.notify(f"could not capture the new-chat button: {exc}", severity="error")
             return
-        self._newchat = CalibratedElement(region, template)
+        self.calibrating.new_chat = CalibratedElement(region, template)
         with suppress(NoMatches):
             self.sidebar.update_newchat(f"{region.describe()} · set")
         self.notify(f"new-chat button calibrated ({region.describe()})")
+        self._after_calibration()
 
     @on(Button.Pressed, "#newchat-btn")
     def _on_newchat(self, event: Button.Pressed) -> None:
@@ -1327,10 +1478,14 @@ class MainScreen(Screen[None]):
     async def _new_browser_chat(self) -> None:
         """Click the browser's new-chat button, then hand focus back here.
 
+        The *calibrating* slot's button, so the user can test either window's
+        control from the same place the sidebar is pointed at. It never moves
+        the live slot - that is ``start_browser_chat``'s job alone.
+
         Verified first: on a mismatch nothing is clicked and the user is told to
         recalibrate, because the alternative is a blind click somewhere in a
         browser window."""
-        element = self._newchat
+        element = self.calibrating.new_chat
         if element is None:
             self.notify(
                 'calibrate the browser\'s new-chat button first ("Set new-chat button...")',
@@ -1363,6 +1518,71 @@ class MainScreen(Screen[None]):
         if self._own_window is not None:
             await asyncio.sleep(0.15)
             await asyncio.to_thread(focus_window, self._own_window)
+
+    # -- sub-agent transport: opening a chat and retargeting the automation ----
+
+    def delegation_available(self) -> bool:
+        """Is the sub-agent slot calibrated well enough to run a delegation?
+
+        The single source of truth the controller asks before it even builds a
+        sub-agent engine. Deliberately strict (see ``SlotCalibration``): a
+        half-calibrated slot must read as unavailable rather than strand a
+        sub-run halfway through.
+        """
+        return self._slots[AgentSlot.SUBAGENT].can_delegate
+
+    async def start_browser_chat(self, slot: AgentSlot) -> bool:
+        """Open a fresh browser chat in ``slot`` and make it the live one.
+
+        All-or-nothing, and that is the whole point. A True return means the
+        new-chat button verified against its snapshot, the click landed, and the
+        automation (paste click, finish detector, auto-copy) now targets that
+        window. A False return means **nothing happened at all**: no click, no
+        retarget, no trigger reset - so the caller can abort the delegation
+        before anything is pasted. Pasting a sub-agent's bootstrap into the
+        master chat would corrupt that conversation irrecoverably, so every
+        failure here is a refusal rather than a best effort.
+        """
+        element = self._slots[slot].new_chat
+        if element is None:
+            self.notify(
+                f"the {slot.label} chat's new-chat button is not calibrated - "
+                "nothing was clicked",
+                severity="error",
+            )
+            return False
+        outcome = await self._click_calibrated_element(element)
+        if outcome is not ElementClick.CLICKED:
+            reason = (
+                "no longer looks like its calibration"
+                if outcome is ElementClick.MISMATCH
+                else "could not be clicked (it is Windows-only)"
+            )
+            self.notify(
+                f"the {slot.label} chat's new-chat button {reason} - nothing was "
+                "clicked and nothing was pasted",
+                severity="error",
+            )
+            return False
+        self._live = slot
+        self._reset_finish_trigger()
+        with suppress(NoMatches):
+            self.sidebar.hide_paste_flash()
+        self._start_detector_worker()  # baseline + regions from the new live slot
+        await asyncio.sleep(_NEW_CHAT_SETTLE_S)  # let the fresh chat render its input box
+        return True
+
+    def end_browser_chat(self) -> None:
+        """Hand the automation back to the master chat when a delegation ends.
+
+        Unconditional and never fails: the master window is where the session
+        lives, so returning to it must work even after the sub-run blew up.
+        """
+        self._live = AgentSlot.MASTER
+        self._reset_finish_trigger()
+        with suppress(NoMatches):
+            self.sidebar.hide_paste_flash()
+        self._start_detector_worker()
 
     @on(Button.Pressed, "#edit-services-btn")
     def _on_edit_services(self, event: Button.Pressed) -> None:

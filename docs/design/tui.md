@@ -51,7 +51,7 @@ MainScreen
 
 Layout reasoning: the chat column is transcript on top with the ActionPanel as a bottom drawer — a side-by-side split for the *diff* was rejected because diffs and command output need horizontal room, and the drawer keeps the last few transcript events visible above the diff, which is enough context to approve. The sidebar is the exception: it is narrow, static settings chrome (not content), and `F3` collapses it whenever a diff wants the full width back.
 
-Transcript is pinned with `widget.anchor()` on every newly mounted event widget (Textual ≥4 semantics: stays bottom-anchored, releases when the user scrolls up). Transcript children are pruned beyond 500 events (oldest unmounted) to bound layout cost.
+Transcript auto-scroll is fit-or-park (`TranscriptPanel._autoscroll`, decided per event after its layout settles — Markdown events are awaited via `Markdown.update` so their real height is known): an event that **fits** the visible area pins the panel to the bottom with the container-level `anchor()` (which releases when the user scrolls up and re-engages when they return to the bottom — NB: anchoring the event widgets themselves, the original approach here, is a silent no-op in Textual 8); an event **taller** than the visible area is parked with its top at the top of the view so the user reads the response from its first line. While parked, follow-up noise (tool calls, notes, outbound) mounts below without moving the view; a new conversational beat (user or assistant message) always re-applies the fit rule, and pinning also resumes once the scroll returns to the bottom. Transcript children are pruned beyond 500 events (oldest unmounted) to bound layout cost.
 
 ### 1.3 Session start flow (inline — no modal) and the Sidebar
 

@@ -1,10 +1,19 @@
 """TranscriptPanel: one mounted widget per session event (tui.md section 4).
 
-Every newly mounted event widget is ``anchor()``-ed so the panel stays pinned
-to the bottom while content streams in (Textual >= 4 semantics) and releases
-when the user scrolls up. Children are pruned beyond MAX_EVENTS to bound
-layout cost. ``entries`` mirrors every event as plain text - it is the
-assertion surface for the Pilot smoke test and a cheap in-memory postmortem.
+Auto-scroll: after each event lands, the panel either pins itself to the
+bottom (the event fits in the visible area - Textual's container-level
+``anchor()``, which releases when the user scrolls up and re-engages when they
+return to the bottom) or, when the event is TALLER than the visible area,
+scrolls the event's top to the top of the view and releases the pin so the
+user reads the response from its first line instead of its last. While parked
+like that, later small events (tool calls, notes) mount below without moving
+the view; pinning resumes once the scroll position is back at the bottom.
+NB: ``anchor()`` belongs on the scroll container - anchoring the event widgets
+themselves (this file's original approach) is a silent no-op in Textual 8.
+
+Children are pruned beyond MAX_EVENTS to bound layout cost. ``entries``
+mirrors every event as plain text - it is the assertion surface for the Pilot
+smoke test and a cheap in-memory postmortem.
 
 ``log`` is a richer, *unpruned* record of the same events (timestamp, full raw
 protocol block, full outbound payload). ``render_log`` turns it into an
@@ -57,38 +66,76 @@ class TranscriptPanel(VerticalScroll):
         self.entries: list[str] = []
         # NB: not ``log`` - Textual's Widget.log is the built-in logging helper.
         self.event_log: list[LogEvent] = []
+        # True while the view is parked at the top of a response too tall to
+        # fit - small follow-up events must not yank the scroll to the bottom.
+        self._reading = False
 
     def _record(self, headline: str, body: str = "", *, fenced: bool = False) -> None:
         self.event_log.append(
             LogEvent(datetime.now().strftime("%H:%M:%S"), headline, body, fenced)
         )
 
-    async def _add(self, widget: Widget, entry: str) -> None:
+    async def _add(
+        self,
+        widget: Widget,
+        entry: str,
+        *,
+        markdown: tuple[Markdown, str] | None = None,
+        beat: bool = False,
+    ) -> None:
         self.entries.append(entry)
         if len(self.entries) > self.MAX_EVENTS:
             del self.entries[: len(self.entries) - self.MAX_EVENTS]
         await self.mount(widget)
-        widget.anchor()
+        if markdown is not None:
+            # Markdown mounts its blocks asynchronously; await it so the
+            # widget has its real height before the fit-or-park decision.
+            md, text = markdown
+            await md.update(text)
         while len(self.children) > self.MAX_EVENTS:
             await self.children[0].remove()
+        self.call_after_refresh(self._autoscroll, widget, beat)
+
+    def _autoscroll(self, widget: Widget, beat: bool) -> None:
+        """Fits in the view: pin the panel to the bottom. Taller than the
+        view: park the event's top at the top of the view (release the pin) so
+        reading starts at the first line. Parked: follow-up noise (calls,
+        notes, outbound) holds the position until the scroll is back at the
+        bottom, but a new conversational ``beat`` (user or assistant message)
+        always re-applies the fit rule - a fresh response the user has not
+        read yet outranks a stale reading position."""
+        if not widget.is_mounted:  # pruned/cleared before the refresh landed
+            return
+        viewport = self.scrollable_content_region.height
+        if viewport > 0 and widget.outer_size.height > viewport:
+            self._reading = True
+            self.release_anchor()  # compositor must stop chasing the bottom
+            self.scroll_to_widget(widget, top=True, animate=False)
+            return
+        if self._reading and not beat and self.scroll_y < self.max_scroll_y - 1:
+            return  # still parked on a tall response - hold the position
+        self._reading = False
+        self.anchor()
 
     async def add_user(self, text: str) -> None:
         self._record("you", text)
+        md = Markdown()
         block = Vertical(
             Static(Text("you"), classes="msg-head msg-you"),
-            Markdown(text),
+            md,
             classes="ev-user",
         )
-        await self._add(block, f"you: {text}")
+        await self._add(block, f"you: {text}", markdown=(md, text), beat=True)
 
     async def add_prose(self, text: str) -> None:
         self._record("assistant", text)
+        md = Markdown()
         block = Vertical(
             Static(Text("assistant"), classes="msg-head msg-assistant"),
-            Markdown(text),
+            md,
             classes="ev-prose",
         )
-        await self._add(block, f"llm: {text}")
+        await self._add(block, f"llm: {text}", markdown=(md, text), beat=True)
 
     async def add_call(self, call: ToolCall) -> None:
         target = (
@@ -155,4 +202,6 @@ class TranscriptPanel(VerticalScroll):
     async def clear_events(self) -> None:
         self.entries.clear()
         self.event_log.clear()
+        self._reading = False
+        self.anchor(False)
         await self.remove_children()

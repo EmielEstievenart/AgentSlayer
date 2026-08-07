@@ -81,7 +81,11 @@ class ToolRegistry:
 
 
 def default_registry(
-    skills: Sequence[Skill] = (), *, max_skill_listing_chars: int | None = None
+    skills: Sequence[Skill] = (),
+    *,
+    max_skill_listing_chars: int | None = None,
+    role: Literal["master", "subagent"] = "master",
+    allow_delegate: bool = False,
 ) -> ToolRegistry:
     """The built-in tools, in catalog order. When any model-invocable skills are
     discovered, a `skill` tool is inserted (after run_command, before the meta
@@ -90,6 +94,13 @@ def default_registry(
     `max_skill_listing_chars` bounds the total skill listing so a large skills
     library cannot push the bootstrap past the paste budget (the bootstrap has
     no truncation fallback); callers derive it from the active preset budget.
+
+    `role` and `allow_delegate` gate sub-agent delegation. `delegate` is added
+    only for a master whose sub-agent chat is fully calibrated: a sub-agent's
+    registry never contains it, so a nested delegation resolves as the ordinary
+    unknown_tool error listing the valid tools - nesting is excluded by
+    construction rather than by a special case. `role` also selects the
+    `task_done` catalog doc (sub-agents are taught the `result` param).
     """
     # Local imports: fs_tools/shell/meta/skills import helpers from this module.
     from agentclip.tools import fs_tools, meta, shell
@@ -108,7 +119,9 @@ def default_registry(
     listable = [s for s in skills if s.model_invocable]
     if listable:
         specs.append(make_skill_spec(listable, max_listing_chars=max_skill_listing_chars))
-    specs.extend((meta.ASK_USER_SPEC, meta.TASK_DONE_SPEC))
+    if role == "master" and allow_delegate:
+        specs.append(meta.DELEGATE_SPEC)
+    specs.extend((meta.ASK_USER_SPEC, meta.task_done_spec(role)))
     return ToolRegistry(specs)
 
 

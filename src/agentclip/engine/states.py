@@ -16,6 +16,7 @@ class Phase(Enum):
     REVIEW = auto()  # reply parsed; approval decisions outstanding or execute() due
     SENDING_CHUNKS = auto()  # M3: reserved for the PART/ACK chunked send
     AWAITING_USER = auto()  # ask_user hit mid-turn; waiting for answer_user()
+    AWAITING_SUBAGENT = auto()  # delegate hit mid-turn; waiting for deliver_delegate_result()
     DONE = auto()  # task_done received; session complete
 
 
@@ -33,9 +34,18 @@ class EngineStateError(RuntimeError):
 TRANSITIONS: dict[Phase, frozenset[Phase]] = {
     Phase.IDLE: frozenset({Phase.AWAITING_REPLY}),
     Phase.AWAITING_REPLY: frozenset({Phase.REVIEW}),
-    Phase.REVIEW: frozenset({Phase.AWAITING_REPLY, Phase.AWAITING_USER, Phase.DONE}),
+    Phase.REVIEW: frozenset(
+        {Phase.AWAITING_REPLY, Phase.AWAITING_USER, Phase.AWAITING_SUBAGENT, Phase.DONE}
+    ),
     Phase.SENDING_CHUNKS: frozenset(),  # M3
-    Phase.AWAITING_USER: frozenset({Phase.AWAITING_REPLY, Phase.DONE}),
+    # ask_user and delegate can both appear in one reply, in either order, so
+    # each parked phase must be able to hand over to the other.
+    Phase.AWAITING_USER: frozenset(
+        {Phase.AWAITING_REPLY, Phase.AWAITING_SUBAGENT, Phase.DONE}
+    ),
+    Phase.AWAITING_SUBAGENT: frozenset(
+        {Phase.AWAITING_REPLY, Phase.AWAITING_USER, Phase.DONE}
+    ),
     # DONE is not a dead end: task_done completes the session, but the user may
     # continue (protocol.md section 8), and a follow_up reopens it for a reply.
     Phase.DONE: frozenset({Phase.AWAITING_REPLY}),

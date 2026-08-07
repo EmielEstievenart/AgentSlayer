@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from agentclip import __version__
+from agentclip.app.types import EngineRequest
 from agentclip.clip.base import select_provider
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import Engine
@@ -27,7 +28,7 @@ def make_engine_factory(
     get_config: Callable[[], Config],
     project_root: Path,
     chat_name: str | None = None,
-) -> Callable[[str], Engine]:
+) -> Callable[[EngineRequest | str], Engine]:
     """Build one fresh Engine (and session directory) per started session.
 
     ``get_config`` is called fresh on every session start (not once) so that a
@@ -44,6 +45,10 @@ def make_engine_factory(
     and every reply must echo back. ``chat_name`` pins it (tests need a fixed
     name to write canned replies against); the default draws a new one per
     session, so two sessions never accept each other's pastes.
+
+    The returned callable takes an ``EngineRequest`` - service plus role,
+    delegation gating and chat naming - or, for the plain master case, just the
+    service key, which is coerced to the equivalent default request.
     """
     # Skills are discovered once per process from the same folders Claude Code
     # and OpenCode use. The registry is rebuilt per session so the skill listing
@@ -54,14 +59,29 @@ def make_engine_factory(
     # quarter leaves no headroom and a full skills library tips it over.
     skills = discover_skills(project_root)
 
-    def build(service_key: str) -> Engine:
-        session_chat_name = chat_name or generate_chat_name()
+    def build(request: EngineRequest | str) -> Engine:
+        req = EngineRequest(service=request) if isinstance(request, str) else request
+        session_chat_name = req.chat_name or chat_name or generate_chat_name()
         cfg = get_config()
-        if service_key != cfg.general.service and service_key in cfg.services:
-            cfg = replace(cfg, general=replace(cfg.general, service=service_key))
-        registry = default_registry(skills, max_skill_listing_chars=cfg.preset().max_paste_chars // 6)
+        if req.service != cfg.general.service and req.service in cfg.services:
+            cfg = replace(cfg, general=replace(cfg.general, service=req.service))
+        registry = default_registry(
+            skills,
+            max_skill_listing_chars=cfg.preset().max_paste_chars // 6,
+            role=req.role,
+            allow_delegate=req.allow_delegate,
+        )
         workspace = Workspace(project_root, cfg.excluded_names())
         session = SessionStore(project_root, service=cfg.general.service)
+        # Recorded up front so a sub-agent's session directory can be tied back
+        # to the run that spawned it when reading the audit log later.
+        session.append_event(
+            "session",
+            role=req.role,
+            chat_name=session_chat_name,
+            parent_chat_name=req.parent_chat_name,
+            allow_delegate=req.allow_delegate,
+        )
         backups = BackupStore(session.session_dir)
         composer = Composer(
             cfg.preset(),
@@ -70,8 +90,18 @@ def make_engine_factory(
             project_root.name,
             platform.system() or "unknown OS",
             session_chat_name,
+            role=req.role,
         )
-        return Engine(cfg, registry, workspace, session, backups, composer, session_chat_name)
+        return Engine(
+            cfg,
+            registry,
+            workspace,
+            session,
+            backups,
+            composer,
+            session_chat_name,
+            role=req.role,
+        )
 
     return build
 

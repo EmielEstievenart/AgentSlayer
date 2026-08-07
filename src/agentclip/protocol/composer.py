@@ -122,6 +122,7 @@ class Composer:
         workdir_name: str,
         os_name: str,
         chat_name: str,
+        role: Literal["master", "subagent"] = "master",
     ) -> None:
         self._preset = preset
         self._caps = caps
@@ -129,6 +130,7 @@ class Composer:
         self._workdir_name = workdir_name
         self._os_name = os_name
         self._chat_name = chat_name
+        self._role = role
 
     # -- public API ---------------------------------------------------------
 
@@ -136,6 +138,11 @@ class Composer:
     def chat_name(self) -> str:
         """The chat name stamped on every payload this composer renders."""
         return self._chat_name
+
+    @property
+    def role(self) -> Literal["master", "subagent"]:
+        """Which bootstrap brief this composer renders (see spec.render_spec)."""
+        return self._role
 
     def bootstrap(self, task: str) -> Outbound:
         """The full protocol spec + tool catalog + initial task. Always turn 1."""
@@ -146,6 +153,7 @@ class Composer:
             self._workdir_name,
             self._os_name,
             self._chat_name,
+            role=self._role,
         )
         body = task.rstrip("\n")
         payload = (

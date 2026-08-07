@@ -86,6 +86,35 @@ def normalized_hash(text: str) -> str:
     return hashlib.blake2b("\n".join(lines).encode("utf-8"), digest_size=16).hexdigest()
 
 
+# Sentinel keywords the model stamps the chat name on (see spec section 2/3).
+_CHAT_STAMPED_KEYWORDS = frozenset({"EOM", "ACK", "NACK"})
+
+
+def peek_chat_name(text: str) -> str | None:
+    """The chat name a pasted reply claims to come from, or None.
+
+    A cheap reverse scan for the LAST chat-stamped sentinel line (EOM, ACK or
+    NACK) - the host uses it to route a paste to the right session while a
+    sub-agent run is in flight, BEFORE any engine is asked to parse it. Last
+    wins because that line is the one the model actually ended its reply with;
+    an earlier one is quoted text or an echo of an older message.
+
+    Returns None when no such line carries a `chat=` attribute at all; callers
+    treat that as "unknown, route to the active session" and let the engine's
+    own chat gate be the backstop. Being a scan rather than a parse, this is
+    deliberately approximate: it does not know about heredocs, so a `chat=`
+    line quoted inside file content could win. That costs a misroute warning
+    at worst, never a wrong execution.
+    """
+    for line in reversed(normalize(text).split("\n")):
+        match = _SENTINEL_RE.match(line.strip())
+        if match is None or match.group(1).upper() not in _CHAT_STAMPED_KEYWORDS:
+            continue
+        attrs, _ = _parse_attrs(match.group(2))
+        return normalize_chat_name(attrs.get("chat"))
+    return None
+
+
 def _to_int(value: str | None) -> int | None:
     if value is None:
         return None

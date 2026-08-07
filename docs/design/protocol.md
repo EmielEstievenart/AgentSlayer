@@ -82,6 +82,8 @@ Matching is tolerant on the way in — case-insensitive, surrounding whitespace,
 
 **Outbound** payloads AgentClip composes end with `===CLIP:EOM turn=N chat=amber-falcon===`. `turn=N` is AgentClip's own ordering stamp and is no longer something the model is asked to echo (it remains parseable on the way in for tolerance); `chat=` is what the model reads and copies back.
 
+The chat name is also the **routing key** while a sub-agent run is in flight (§2.1): two chats then exist, both stamping their own name, and the host picks the destination *before* any engine parses the text (`parser.peek_chat_name` — a cheap reverse scan for the last `chat=`-carrying EOM/ACK/NACK line). A paste that names the other chat is dropped with a warning rather than queued; a paste carrying no name at all falls through to the active session, where the engine's own gate is the backstop.
+
 Rejected alternative: **turn echo** (`===CLIP:EOM calls=N turn=T===`, reply dropped when `T < current turn`). It only orders replies *within* one correctly-paired chat, so it caught stale re-pastes and nothing else: a fresh reply from the wrong chat carries a plausible turn number and sails through. The chat name subsumes it — and the turn number was one more thing for the model to get wrong.
 
 ### 1.4 Parser tolerances (decided, exhaustive)
@@ -201,11 +203,39 @@ SECTION 6 — THE TASK (~variable)
 ===CLIP:EOM turn=1 chat={chat_name}===
 ```
 
+### 2.1 Sub-agent bootstrap variant
+
+A chat opened to serve a `delegate` call gets the same bootstrap with **sections 1 and 5 swapped for sub-agent variants**. Sections 2–4 are byte-identical: a sub-agent talks to AgentClip over exactly the same wire, with its own chat name, and section 4 is generated from its own registry (which simply has no `delegate` entry — see §3).
+
+Section 1 keeps beats 1–4 **verbatim** — the provenance/oversight/judgment framing is what stops a model reading the pasted spec as a prompt-injection attempt and stalling on turn 1, and a sub-agent's turn 1 is exactly as vulnerable — and appends a fifth beat:
+
+```
+You are a sub-agent. Another AgentClip agent delegated one bounded task to
+you; you cannot see its conversation and it cannot see yours, and you have no
+way to ask it anything - the task below is everything you get, so make
+reasonable assumptions and state them. When the task is done, call task_done
+with a `result` heredoc containing the complete deliverable: that text is the
+only thing handed back to the agent that delegated to you. You cannot hand
+work to a further sub-agent of your own; do this task yourself.
+```
+
+Section 5's last bullet becomes:
+
+```
+- When the task is complete and verified, send task_done with `result`
+  carrying the full deliverable. Until then every reply must contain at least
+  one tool call.
+```
+
+(The "after task_done the session is over" clause is dropped: a sub-agent's `task_done` *is* its hand-off, and the delegating agent's follow-up work happens in the master chat, not here.)
+
+Section 6 carries the delegated task rather than the user's: the `task` param of the `delegate` call, plus its `context` param under a "Context from the delegating agent:" heading. The user is still the transport and still the approval authority for every gated call the sub-agent makes — delegation adds an agent, never an unsupervised one.
+
 ---
 
 ## 3. Tool catalog
 
-Exactly 10 built-in tools, plus an **optional 11th `skill` tool** that appears only when Agent Skills are discovered on disk (see `docs/design/skills.md`). Slot justification for the non-obvious one: **`delete_file` takes the last slot** because deletions routed through `run_command rm` would bypass the per-turn backup system and break "undo turn" — deletion *must* be a first-class, backed-up, approval-gated tool. Rejected for slots: `read_files` (batching already comes free from multi-call replies), `append_file` (folded into `write_file mode: append` — and it's the recovery path for writing files larger than one reply, §5.2), `stat` (`list_dir` shows sizes), `move_file` (write+delete or an approved `run_command`; rare enough).
+Exactly 10 built-in tools, plus two conditional ones: an **optional `skill` tool** that appears only when Agent Skills are discovered on disk (see `docs/design/skills.md`), and an **optional `delegate` tool** that appears only for a master agent whose sub-agent chat window is calibrated. Both are catalog-gated at bootstrap time, so a model is never offered a tool the host cannot honour. Slot justification for the non-obvious one: **`delete_file` takes the last slot** because deletions routed through `run_command rm` would bypass the per-turn backup system and break "undo turn" — deletion *must* be a first-class, backed-up, approval-gated tool. Rejected for slots: `read_files` (batching already comes free from multi-call replies), `append_file` (folded into `write_file mode: append` — and it's the recovery path for writing files larger than one reply, §5.2), `stat` (`list_dir` shows sizes), `move_file` (write+delete or an approved `run_command`; rare enough).
 
 Common rules: all `path`/`root` params resolve inside the working directory; absolute paths and `..`-escapes ⇒ `error code=path_outside_workspace`. All results are delivered in the §4 envelope; bodies are heredoc-framed with tool-chosen tags.
 
@@ -220,7 +250,8 @@ Common rules: all `path`/`root` params resolve inside the working directory; abs
 | `grep` | `pattern`\* (regex), `path`, `glob` (filename filter), `ignore_case: yes`, `context: N` (default 0), `max` | `path:lineno: text` per hit (context lines `path:lineno- text`); capped + truncation note. This is the line-number oracle for ranged reads. |
 | `run_command` | `command`\*, `timeout` (secs, default 60), `cwd` | Line 1: `exit 0 (2.1s)` then merged stdout+stderr heredoc, tail-capped per budget tier (tail, because test/build verdicts live at the end). Allowlist match ⇒ runs silently; else approval gate; user "no" ⇒ `status=denied`. Timeout ⇒ `error code=exec_timeout` with partial tail; a user cancel ⇒ the process tree is killed the same way and reported as `error code=cancelled` with the partial tail. |
 | `ask_user` | `question`\* (inline or heredoc) | The user's typed answer, verbatim. The turn payload is not sent until the user answers (TUI contract). |
-| `task_done` | `summary` (heredoc, optional) | Tool acknowledges and stops expecting calls; the session is marked complete but the user may continue (§8). The model's summary is shown inline in the transcript; full summary + session stats are available on demand (the `e` / SummaryScreen action), not force-pushed. Bootstrap: "after task_done, the session is over; do not emit further calls." |
+| `task_done` | `summary` (heredoc, optional), `result` (heredoc, optional — **advertised to sub-agents only**) | Tool acknowledges and stops expecting calls; the session is marked complete but the user may continue (§8). The model's summary is shown inline in the transcript; full summary + session stats are available on demand (the `e` / SummaryScreen action), not force-pushed. Bootstrap: "after task_done, the session is over; do not emit further calls." `result` is a sub-agent's deliverable: it becomes the result body of the `delegate` call that spawned it, verbatim, and is the *only* thing the delegating agent sees. The engine reads `result` in both roles (a master that sends one simply has nobody to hand it to); only the sub-agent's catalog doc teaches it. Empty/absent `result` ⇒ the host falls back to `summary`, then to a placeholder — the delegating agent's result body is never empty. |
+| `delegate` | `task`\*, `context` | **Master only, and only when the sub-agent chat window is calibrated** (`allow_delegate`); otherwise the tool is absent from the catalog entirely. Hands one self-contained sub-task to a fresh sub-agent in its own chat with its own context window, bootstrapped with the §2.1 variant. Synchronous and single-flight: the delegating turn parks (`Phase.AWAITING_SUBAGENT`) until the sub-agent's `task_done` arrives, so at most one chat is live at any instant. Result body = the sub-agent's `result`, verbatim. Missing `task` ⇒ `error code=missing_param` and the turn continues unparked. Every failure of the run itself (chat not calibrated, new-chat click unverified, user abort) comes back as `status=error` on this call, so the model always learns what happened. Auto-approved: opening a sub-agent chat is loudly user-visible and every call the sub-agent makes is gated normally, so a gate here would add friction, not oversight. **A sub-agent's registry has no `delegate`**, so a nested attempt resolves as the ordinary `unknown_tool` error listing the valid tools — nesting is excluded by construction. |
 | `skill` | `name`\* | The full body of the named Agent Skill (a reusable procedure/reference), verbatim. Read-only, auto (no gate). Only present when ≥1 model-invocable skill is discovered; the catalog lists each skill's name + description so the model picks one and loads it on demand (progressive disclosure). Unknown name ⇒ `error code=unknown_skill` listing the available skills. See `docs/design/skills.md`. |
 
 ---

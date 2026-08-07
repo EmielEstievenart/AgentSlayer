@@ -13,8 +13,9 @@ Semantics implemented here (protocol.md sections 4-6 + plan synthesis):
 - execute: strict id order, denied results with user_note, the same-path skip
   rule after a failed/denied mutation, rejection-aborts-turn, the per-turn
   backup bracket (begin_turn at first mutation, finish_turn at turn end),
-  ask_user pause/resume, task_done collection, id=0 reply_truncated results,
-  and cooperative cancellation (request_cancel, from any thread).
+  ask_user pause/resume, delegate pause/resume (the host runs a sub-agent and
+  feeds its deliverable back), task_done collection, id=0 reply_truncated
+  results, and cooperative cancellation (request_cancel, from any thread).
 """
 
 from __future__ import annotations
@@ -32,7 +33,13 @@ from agentclip.engine.states import Decision, EngineStateError, Phase, can_trans
 from agentclip.protocol.composer import BudgetExceeded, Composer
 from agentclip.protocol.names import normalize_chat_name
 from agentclip.protocol.parser import normalized_hash, parse_reply
-from agentclip.protocol.types import Outbound, ParsedReply, ToolCall, ToolResult
+from agentclip.protocol.types import (
+    Outbound,
+    ParsedReply,
+    ResultStatus,
+    ToolCall,
+    ToolResult,
+)
 from agentclip.store.backups import BackupStore, UndoReport
 from agentclip.store.session import SessionStore
 from agentclip.tools.registry import ToolContext, ToolRegistry, ToolSpec, error_result
@@ -110,12 +117,25 @@ class AskUser:
 
 
 @dataclass(frozen=True, slots=True)
+class Delegate:
+    """A parked `delegate` call: run this task on a fresh sub-agent, then hand
+    its deliverable back with Engine.deliver_delegate_result()."""
+
+    task: str
+    context: str | None
+    call_id: int
+
+
+@dataclass(frozen=True, slots=True)
 class Done:
     summary: str
     outbound: Outbound | None  # results of sibling calls this turn, if any
+    # task_done's `result` param: a sub-agent's deliverable, handed to the
+    # agent that delegated to it. Empty for an ordinary master session.
+    result: str = ""
 
 
-StepResult = Send | AskUser | Done
+StepResult = Send | AskUser | Delegate | Done
 
 
 # -- internal per-turn bookkeeping ---------------------------------------------
@@ -135,9 +155,12 @@ class _Planned:
 
 @dataclass(slots=True)
 class _ExecState:
-    index: int = 0  # plan index of the in-flight ask_user (while AWAITING_USER)
+    # Plan index of the in-flight parked call (the ask_user while AWAITING_USER
+    # or the delegate while AWAITING_SUBAGENT); only one call is ever parked.
+    index: int = 0
     backup_started: bool = False
     done_summary: str | None = None
+    done_result: str = ""
     results: list[ToolResult] = field(default_factory=list)
     failed_paths: set[str] = field(default_factory=set)
 
@@ -160,8 +183,10 @@ class Engine:
         backups: BackupStore,
         composer: Composer,
         chat_name: str,
+        role: Literal["master", "subagent"] = "master",
     ) -> None:
         self._config = config
+        self._role = role
         self._registry = registry
         self._workspace = workspace
         self._session = session
@@ -196,6 +221,12 @@ class Engine:
     def chat_name(self) -> str:
         """This session's chat name; immutable for the engine's lifetime."""
         return self._chat_name
+
+    @property
+    def role(self) -> Literal["master", "subagent"]:
+        """"master" for the session the user started, "subagent" for one built
+        to serve a `delegate` call. Immutable for the engine's lifetime."""
+        return self._role
 
     def start_task(self, task: str) -> Outbound:
         """IDLE -> AWAITING_REPLY: compose and persist the bootstrap payload."""
@@ -352,6 +383,34 @@ class Engine:
         )
         return self._run_plan(self._exec.index + 1)
 
+    def deliver_delegate_result(
+        self,
+        text: str,
+        *,
+        status: ResultStatus = "ok",
+        code: str | None = None,
+    ) -> StepResult:
+        """Resume after Delegate: the sub-agent's deliverable becomes the
+        delegate call's result body and the remaining calls execute.
+
+        Every failure path of a delegation comes back through here too - an
+        uncalibrated sub-agent chat, a new-chat click that did not verify, an
+        aborted run - as status="error" with a code, so the model always learns
+        what happened to the call it made instead of silently losing it."""
+        self._require_phase(Phase.AWAITING_SUBAGENT, "deliver_delegate_result")
+        assert self._exec is not None
+        waiting = self._plan[self._exec.index]
+        self._record(
+            ToolResult(
+                call_id=waiting.call.id,
+                status=status,
+                body=text,
+                tool=waiting.call.tool,
+                code=code,
+            )
+        )
+        return self._run_plan(self._exec.index + 1)
+
     def request_cancel(self) -> None:
         """Ask the running batch to stop. THREAD-SAFE - and the only method that
         is: it just sets a threading.Event, so the host calls it from the UI
@@ -457,7 +516,7 @@ class Engine:
                     )
                 )
                 continue
-            if call.tool in ("ask_user", "task_done"):
+            if call.tool in ("ask_user", "task_done", "delegate"):
                 # Intercepted by name during execution; never pending, never gated.
                 plan.append(
                     _Planned(call, spec, PendingAction(call, "auto", "", "handled by AgentClip"))
@@ -562,9 +621,10 @@ class Engine:
                 continue
             if self._cancel.is_set():
                 # Checked between calls, so even handlers that cannot be
-                # interrupted stop the batch at the next boundary. ask_user and
-                # task_done are skipped too: a cancelled batch must not park on
-                # a question or declare the task complete.
+                # interrupted stop the batch at the next boundary. ask_user,
+                # delegate and task_done are skipped too: a cancelled batch must
+                # not park on a question, start a sub-agent, or declare the task
+                # complete.
                 self._record(_cancelled_skip_result(call))
                 continue
             if p.aborted:
@@ -620,8 +680,28 @@ class Engine:
                 exec_.index = i
                 self._set_phase(Phase.AWAITING_USER)
                 return AskUser(question=question, call_id=call.id)
+            if call.tool == "delegate":
+                task = call.params.get("task", "").strip()
+                if not task:
+                    self._record(
+                        error_result(
+                            call,
+                            "missing_param",
+                            "missing required parameter: task",
+                            "resend delegate with a task parameter.",
+                        )
+                    )
+                    continue
+                exec_.index = i
+                self._set_phase(Phase.AWAITING_SUBAGENT)
+                return Delegate(
+                    task=task,
+                    context=call.params.get("context") or None,
+                    call_id=call.id,
+                )
             if call.tool == "task_done":
                 exec_.done_summary = call.params.get("summary", "")
+                exec_.done_result = call.params.get("result", "")
                 continue
             assert p.spec is not None
             result = p.spec.handler(self._ctx, call)
@@ -649,10 +729,12 @@ class Engine:
         self._reply = None
         self._exec = None
         if exec_.done_summary is not None:
-            self._session.append_event("task_done", summary=exec_.done_summary)
+            self._session.append_event(
+                "task_done", summary=exec_.done_summary, result_chars=len(exec_.done_result)
+            )
             outbound = self._compose_results(results, notes) if results else None
             self._set_phase(Phase.DONE)
-            return Done(exec_.done_summary, outbound)
+            return Done(exec_.done_summary, outbound, exec_.done_result)
         outbound = self._compose_results(results, notes)
         self._set_phase(Phase.AWAITING_REPLY)
         return Send(outbound)
@@ -809,6 +891,7 @@ __all__ = [
     "AskUser",
     "ChunkAck",
     "Decision",
+    "Delegate",
     "Done",
     "Engine",
     "EngineStateError",

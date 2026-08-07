@@ -13,13 +13,24 @@ Layout per docs/design/protocol.md section 2:
     3 HOW TO EMIT CALLS     (grammar + chat-name echo; fence conditional)
     4 TOOL CATALOG          (passed in, header from here)
     5 RULES OF ENGAGEMENT   (max_calls substituted from the budget caps)
+
+Sections 1 and 5 come in two variants: the master brief and the sub-agent one
+(`role="subagent"`), which explains the one-shot delegated task and the
+`result` deliverable. Sections 2-4 are role-independent.
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 from agentclip.config import BudgetCaps, ServicePreset
 
-SECTION_ROLE = """\
+# Beats 1-3 of section 1, shared verbatim by both roles: provenance,
+# mechanics + oversight, judgment retained. This framing is what stops models
+# reading the pasted spec as a prompt-injection attempt and stalling on turn 1,
+# so it is load-bearing for a sub-agent's first reply exactly as it is for a
+# master's - only the closing beats differ.
+_ROLE_HEAD = """\
 SECTION 1 - ROLE
 
 You are a coding agent working on the user's machine through a relay tool
@@ -34,16 +45,33 @@ transport, so nothing happens unless they personally carry it across, and
 risky calls ask them for approval on top of that. Every action is reviewed by
 a human before it runs - more oversight than a normal coding agent has, not
 less. File changes are backed up and reversible. This is a real tool on a
-real project: the results you get back are real program output.
+real project: the results you get back are real program output."""
 
+_ROLE_JUDGMENT = """\
 Your judgment still applies as it normally would - if a task looks harmful or
-wrong, say so, or use ask_user.
+wrong, say so, or use ask_user."""
 
+_ROLE_START = """\
 Start work immediately. Your first reply must already contain CLIP calls:
 orient yourself with list_dir, glob or grep, and read the files you need. Do
 not summarise this protocol back, do not ask whether to begin, and never ask
 the user to paste code or run commands for you - you have tools for that.
 Project root: {workdir_name} on {os_name}."""
+
+_ROLE_SUBAGENT_BEAT = """\
+You are a sub-agent. Another AgentClip agent delegated one bounded task to
+you; you cannot see its conversation and it cannot see yours, and you have no
+way to ask it anything - the task below is everything you get, so make
+reasonable assumptions and state them. When the task is done, call task_done
+with a `result` heredoc containing the complete deliverable: that text is the
+only thing handed back to the agent that delegated to you. You cannot hand
+work to a further sub-agent of your own; do this task yourself."""
+
+SECTION_ROLE = "\n\n".join((_ROLE_HEAD, _ROLE_JUDGMENT, _ROLE_START))
+
+SECTION_ROLE_SUBAGENT = "\n\n".join(
+    (_ROLE_HEAD, _ROLE_JUDGMENT, _ROLE_START, _ROLE_SUBAGENT_BEAT)
+)
 
 # Included in section 2 only when the active service preset converts large
 # pastes into attached files (preset.attachment_note).
@@ -127,7 +155,7 @@ BATCHING_INSTRUCTION = (
     "do not request files one at a time; each round trip costs the user a manual copy-paste."
 )
 
-SECTION_RULES = """\
+_RULES_HEAD = """\
 SECTION 5 - RULES OF ENGAGEMENT
 
 - {batching_instruction}
@@ -146,10 +174,20 @@ SECTION 5 - RULES OF ENGAGEMENT
   not retry unchanged; reconsider or use ask_user.
 - Results may be truncated, marked like
   [truncated: showing lines 1-200 of 1843 - request further ranges].
-  Re-request narrower ranges instead of assuming you saw everything.
+  Re-request narrower ranges instead of assuming you saw everything."""
+
+_DONE_RULE = """\
 - When the task is complete and verified, send task_done. Until then every
   reply must contain at least one tool call. After task_done the session is
   over; do not emit further calls."""
+
+_DONE_RULE_SUBAGENT = """\
+- When the task is complete and verified, send task_done with `result`
+  carrying the full deliverable. Until then every reply must contain at least
+  one tool call."""
+
+SECTION_RULES = _RULES_HEAD + "\n" + _DONE_RULE
+SECTION_RULES_SUBAGENT = _RULES_HEAD + "\n" + _DONE_RULE_SUBAGENT
 
 SECTION_TASK_HEADER = "SECTION 6 - THE TASK"
 
@@ -161,21 +199,32 @@ def render_spec(
     workdir_name: str,
     os_name: str,
     chat_name: str,
+    *,
+    role: Literal["master", "subagent"] = "master",
 ) -> str:
     """Assemble bootstrap sections 1-5 (everything except the task block).
 
     ``chat_name`` is this session's agreed handle; it appears in sections 2 and
     3 because the model has to echo it on every reply (the relay drops replies
     that do not carry it).
+
+    ``role`` selects the section 1 and section 5 variants. A sub-agent is told
+    it serves one delegated task, cannot see or reach the delegating agent, and
+    must hand its deliverable back through task_done's ``result``; everything
+    else - transport, grammar, catalog framing - is identical, because a
+    sub-agent talks to AgentClip over exactly the same wire.
     """
     attachment_note = ATTACHMENT_NOTE + "\n" if preset.attachment_note else ""
     fence_instruction = FENCE_INSTRUCTION if preset.wrap_blocks_in_fence else ""
+    subagent = role == "subagent"
     sections = (
-        SECTION_ROLE.format(workdir_name=workdir_name, os_name=os_name),
+        (SECTION_ROLE_SUBAGENT if subagent else SECTION_ROLE).format(
+            workdir_name=workdir_name, os_name=os_name
+        ),
         SECTION_TRANSPORT.format(attachment_note=attachment_note, chat_name=chat_name),
         SECTION_GRAMMAR.format(fence_instruction=fence_instruction, chat_name=chat_name),
         TOOL_CATALOG_HEADER + "\n\n" + tool_catalog.strip("\n"),
-        SECTION_RULES.format(
+        (SECTION_RULES_SUBAGENT if subagent else SECTION_RULES).format(
             batching_instruction=BATCHING_INSTRUCTION,
             max_calls=caps.advised_max_calls,
         ),

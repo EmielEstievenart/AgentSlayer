@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -75,19 +76,30 @@ def make_engine(project: Path, registry: ToolRegistry) -> EngineFactory:
 
     Reloads config on each call so tests can drop a .agentclip.toml into the
     project (e.g. to extend the command allowlist) before building. Pass
-    ``tools=`` to swap the registry (e.g. for a fake slow tool).
+    ``tools=`` to swap the registry (e.g. for a fake slow tool) and ``role=``
+    to build a sub-agent engine (pair it with a sub-agent registry).
     """
 
-    def factory(config: Config | None = None, tools: ToolRegistry | None = None) -> Engine:
+    def factory(
+        config: Config | None = None,
+        tools: ToolRegistry | None = None,
+        role: Literal["master", "subagent"] = "master",
+    ) -> Engine:
         cfg = config or load_config(project, global_config_path=project / "no-such-global.toml")
         reg = tools or registry
         workspace = Workspace(project, cfg.excluded_names())
         session = SessionStore(project, service=cfg.general.service)
         backups = BackupStore(session.session_dir)
         composer = Composer(
-            cfg.preset(), cfg.caps(), reg.render_catalog(), project.name, "TestOS", CHAT_NAME
+            cfg.preset(),
+            cfg.caps(),
+            reg.render_catalog(),
+            project.name,
+            "TestOS",
+            CHAT_NAME,
+            role=role,
         )
-        return Engine(cfg, reg, workspace, session, backups, composer, CHAT_NAME)
+        return Engine(cfg, reg, workspace, session, backups, composer, CHAT_NAME, role=role)
 
     return factory
 

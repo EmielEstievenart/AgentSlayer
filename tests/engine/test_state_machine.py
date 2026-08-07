@@ -14,7 +14,13 @@ from agentclip.engine.engine import (
     ProtocolError,
     Send,
 )
-from agentclip.engine.states import Decision, EngineStateError, Phase
+from agentclip.engine.states import (
+    TRANSITIONS,
+    Decision,
+    EngineStateError,
+    Phase,
+    can_transition,
+)
 
 READ_REPLY = """===CLIP:CALL id=1 tool=read_file===
 path: README.md
@@ -378,6 +384,31 @@ def test_follow_up_task_payload(engine: Engine) -> None:
     assert "also update the docs" in out.chunks[0]
     assert engine.status().turn == 2
     assert engine.status().phase is Phase.AWAITING_REPLY
+
+
+def test_subagent_phase_is_reachable_from_the_two_mid_turn_phases() -> None:
+    # A delegate call can be the first parked call of a turn (from REVIEW) or
+    # can follow an ask_user that was just answered (from AWAITING_USER).
+    assert can_transition(Phase.REVIEW, Phase.AWAITING_SUBAGENT)
+    assert can_transition(Phase.AWAITING_USER, Phase.AWAITING_SUBAGENT)
+
+
+def test_subagent_phase_resumes_into_send_ask_or_done() -> None:
+    assert TRANSITIONS[Phase.AWAITING_SUBAGENT] == frozenset(
+        {Phase.AWAITING_REPLY, Phase.AWAITING_USER, Phase.DONE}
+    )
+    # Two delegate calls in one reply park twice: the self-transition is legal.
+    assert can_transition(Phase.AWAITING_SUBAGENT, Phase.AWAITING_SUBAGENT)
+
+
+def test_subagent_phase_is_unreachable_outside_a_turn() -> None:
+    for phase in (Phase.IDLE, Phase.AWAITING_REPLY, Phase.DONE):
+        assert not can_transition(phase, Phase.AWAITING_SUBAGENT), phase
+
+
+def test_deliver_delegate_result_outside_the_subagent_phase_raises(engine: Engine) -> None:
+    with pytest.raises(EngineStateError, match="AWAITING_SUBAGENT"):
+        engine.deliver_delegate_result("anything")
 
 
 def test_undo_with_nothing_to_undo_raises(engine: Engine) -> None:

@@ -27,7 +27,7 @@ def make_composer(
     catalog: str = "read_file(path, start, end)\n  Read a file.\n",
 ) -> Composer:
     preset = ServicePreset(
-        "test", "Test preset", budget, wrap_blocks_in_fence=fence, attachment_note=attach
+        "test", "Test preset", budget, budget * 20, wrap_blocks_in_fence=fence, attachment_note=attach
     )
     return Composer(preset, caps_for_budget(budget), catalog, "AgentClip", "Windows 11")
 

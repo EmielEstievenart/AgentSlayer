@@ -12,11 +12,15 @@ the allowlist):
 
 from __future__ import annotations
 
+import os
+import tempfile
 import tomllib
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import platformdirs
+import tomli_w
 
 # Always excluded from file tools, not configurable: the LLM must never read
 # backups/transcripts or tamper with its own approval rules.
@@ -68,27 +72,41 @@ DEFAULT_DENY_TOKENS = (";", "&&", "||", "|", "`", "$(", ">", "<", "\n")
 class ServicePreset:
     key: str
     label: str
-    max_paste_chars: int
+    max_paste_chars: int  # budget for a single paste (chunking splits above it)
+    total_context_chars: int  # the service's whole conversation window, ~chars (tokens * ~4)
     wrap_blocks_in_fence: bool = True
     attachment_note: bool = True
 
 
-def _default_services() -> dict[str, ServicePreset]:
+def default_services() -> dict[str, ServicePreset]:
+    """The twelve built-in presets, keyed by their preset key.
+
+    ``total_context_chars`` is a conservative estimate of the service's whole
+    context window (roughly tokens * 4 chars/token) - it bounds the editor's
+    validation (max input size must fit inside it) and is informational
+    elsewhere; ``max_paste_chars`` (a single paste/message budget) is what the
+    engine actually enforces per turn.
+    """
     presets = [
-        ServicePreset("chatgpt", "ChatGPT web (inline-safe)", 4_000),
-        ServicePreset("chatgpt-attach", "ChatGPT web (attachment OK)", 12_000),
-        ServicePreset("copilot-work", "M365 Copilot Chat - work tab (licensed)", 96_000),
-        ServicePreset("copilot-web", "M365 Copilot Chat - web tab", 12_000),
-        ServicePreset("copilot-free", "Copilot (unlicensed / consumer)", 6_000),
-        ServicePreset("claude", "Claude.ai", 24_000),
-        ServicePreset("gemini", "Gemini", 24_000),
-        ServicePreset("perplexity", "Perplexity", 6_000),
-        ServicePreset("deepseek", "DeepSeek", 12_000),
-        ServicePreset("grok", "Grok", 100_000),
-        ServicePreset("unknown", "Unknown service (conservative)", 6_000),
-        ServicePreset("paranoid", "Unknown service (paranoid)", 4_000),
+        ServicePreset("chatgpt", "ChatGPT web (inline-safe)", 4_000, 500_000),
+        ServicePreset("chatgpt-attach", "ChatGPT web (attachment OK)", 12_000, 500_000),
+        ServicePreset("copilot-work", "M365 Copilot Chat - work tab (licensed)", 96_000, 400_000),
+        ServicePreset("copilot-web", "M365 Copilot Chat - web tab", 12_000, 150_000),
+        ServicePreset("copilot-free", "Copilot (unlicensed / consumer)", 6_000, 128_000),
+        ServicePreset("claude", "Claude.ai", 24_000, 700_000),
+        ServicePreset("gemini", "Gemini", 24_000, 800_000),
+        ServicePreset("perplexity", "Perplexity", 6_000, 100_000),
+        ServicePreset("deepseek", "DeepSeek", 12_000, 250_000),
+        ServicePreset("grok", "Grok", 100_000, 400_000),
+        ServicePreset("unknown", "Unknown service (conservative)", 6_000, 100_000),
+        ServicePreset("paranoid", "Unknown service (paranoid)", 4_000, 50_000),
     ]
     return {p.key: p for p in presets}
+
+
+# Keys that ship built-in and therefore can't be deleted (only edited/reset) by the
+# service editor. Computed once - default_services() never varies at runtime.
+BUILTIN_SERVICE_KEYS: frozenset[str] = frozenset(default_services())
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +183,7 @@ class Config:
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     exclude: tuple[str, ...] = DEFAULT_EXCLUDES
-    services: dict[str, ServicePreset] = field(default_factory=_default_services)
+    services: dict[str, ServicePreset] = field(default_factory=default_services)
     warnings: tuple[str, ...] = ()  # non-fatal validation complaints, for the TUI to surface
 
     def preset(self) -> ServicePreset:
@@ -266,18 +284,27 @@ def load_config(
     backup_t = merged.get("backup", {})
     paths_t = merged.get("paths", {})
 
-    services = _default_services()
+    services = default_services()
     for key, table in merged.get("services", {}).items():
         if not isinstance(table, dict):
             warnings.append(f"config: [services.{key}] must be a table; ignored")
             continue
         base = services.get(key)
         ctx = f"services.{key}"
-        services[key] = ServicePreset(
+        preset = ServicePreset(
             key=key,
             label=_take_str(table, "label", base.label if base else key, ctx, warnings),
             max_paste_chars=_take_int(
                 table, "max_paste_chars", base.max_paste_chars if base else 6_000, 500, 2_000_000, ctx, warnings
+            ),
+            total_context_chars=_take_int(
+                table,
+                "total_context_chars",
+                base.total_context_chars if base else 100_000,
+                500,
+                10_000_000,
+                ctx,
+                warnings,
             ),
             wrap_blocks_in_fence=_take_bool(
                 table, "wrap_blocks_in_fence", base.wrap_blocks_in_fence if base else True, ctx, warnings
@@ -286,6 +313,12 @@ def load_config(
                 table, "attachment_note", base.attachment_note if base else True, ctx, warnings
             ),
         )
+        if preset.max_paste_chars > preset.total_context_chars:
+            warnings.append(
+                f"config: [{ctx}] max_paste_chars ({preset.max_paste_chars:,}) exceeds "
+                f"total_context_chars ({preset.total_context_chars:,})"
+            )
+        services[key] = preset
 
     service = service_override or _take_str(general_t, "service", "chatgpt-attach", "general", warnings)
     if service not in services:
@@ -336,3 +369,63 @@ def load_config(
         services=services,
         warnings=tuple(warnings),
     )
+
+
+def save_services(services: dict[str, ServicePreset], path: Path | None = None) -> None:
+    """Persist ``services`` (the complete desired preset table) into the global
+    config.toml at ``path`` (default: :func:`default_global_config_path`).
+
+    Only presets that differ from the built-in defaults are written as
+    ``[services.<key>]`` tables; a preset equal to its built-in (including one
+    just "reset to default") is omitted, so the file stays minimal and future
+    tweaks to the shipped defaults keep applying to it. A built-in key that is
+    simply absent from ``services`` is treated the same as "reset to default"
+    (deletion is only ever offered by the editor for non-built-in keys, but
+    this function itself doesn't special-case that - it just writes what it's
+    given). Every other top-level table/key already in the file (``general``,
+    ``approval``, a user's hand-written comments' *content* if not comments
+    themselves, etc.) is preserved verbatim; TOML comments are NOT preserved
+    (``tomllib`` doesn't retain them - acceptable per the design brief).
+
+    Writes atomically: the new content is written to a temp file in the same
+    directory, then swapped into place with :func:`os.replace`, so a crash or
+    power loss mid-write can never leave a truncated/corrupt config.toml.
+
+    Round-trips with :func:`load_config`: calling this then loading again
+    (with the same ``global_config_path``) reproduces the same presets.
+    """
+    target = path if path is not None else default_global_config_path()
+    discard_warnings: list[str] = []
+    data = _read_toml(target, discard_warnings)
+    defaults = default_services()
+
+    services_table: dict[str, dict[str, object]] = {}
+    for key, preset in services.items():
+        if key in defaults and preset == defaults[key]:
+            continue  # untouched (or reset) built-in: don't dump it
+        services_table[key] = {
+            "label": preset.label,
+            "max_paste_chars": preset.max_paste_chars,
+            "total_context_chars": preset.total_context_chars,
+            "wrap_blocks_in_fence": preset.wrap_blocks_in_fence,
+            "attachment_note": preset.attachment_note,
+        }
+
+    data = dict(data)
+    if services_table:
+        data["services"] = services_table
+    else:
+        data.pop("services", None)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(data, f)
+        os.replace(tmp_name, target)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(tmp_name)
+        raise

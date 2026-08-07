@@ -22,10 +22,18 @@ from agentclip.tools.skills import discover_skills
 from agentclip.tui.app import AgentClipApp
 
 
-def make_engine_factory(config: Config, project_root: Path) -> Callable[[str], Engine]:
+def make_engine_factory(
+    get_config: Callable[[], Config], project_root: Path
+) -> Callable[[str], Engine]:
     """Build one fresh Engine (and session directory) per started session.
 
-    The NewSessionScreen may pick a different service preset than the config
+    ``get_config`` is called fresh on every session start (not once) so that a
+    service edited/added/removed via the service editor takes effect for the
+    NEXT session in this process without restarting the app - the caller
+    typically passes something like ``lambda: app.app_config`` so the factory
+    always reads whatever Config is currently live.
+
+    The sidebar's service picker may select a different preset than the config
     default, so the factory rebuilds a Config with that service active - the
     engine reads its budget/caps from config.preset().
     """
@@ -33,13 +41,16 @@ def make_engine_factory(config: Config, project_root: Path) -> Callable[[str], E
     # and OpenCode use. The registry is rebuilt per session so the skill listing
     # is bounded to the chosen preset's budget (the bootstrap has no truncation
     # fallback - a big skills library must not be able to overflow it).
+    # The rest of the bootstrap is ~9k (spec text plus the built-in catalog), so
+    # the listing gets a sixth of the budget, not a quarter: at the 12k presets a
+    # quarter leaves no headroom and a full skills library tips it over.
     skills = discover_skills(project_root)
 
     def build(service_key: str) -> Engine:
-        cfg = config
+        cfg = get_config()
         if service_key != cfg.general.service and service_key in cfg.services:
             cfg = replace(cfg, general=replace(cfg.general, service=service_key))
-        registry = default_registry(skills, max_skill_listing_chars=cfg.preset().max_paste_chars // 4)
+        registry = default_registry(skills, max_skill_listing_chars=cfg.preset().max_paste_chars // 6)
         workspace = Workspace(project_root, cfg.excluded_names())
         session = SessionStore(project_root, service=cfg.general.service)
         backups = BackupStore(session.session_dir)
@@ -75,12 +86,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the configured service presets and exit",
     )
+    # Hidden: the TUI re-invokes itself with this flag to run the draw-a-box
+    # screen overlay in a child process (tkinter can't share the TUI's process).
+    parser.add_argument("--pick-region", action="store_true", help=argparse.SUPPRESS)
+    # Hidden: the instruction that overlay shows; only meaningful with --pick-region.
+    parser.add_argument("--pick-prompt", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"agentclip {__version__}")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    if args.pick_region:
+        return _pick_region_child(args.pick_prompt)
     try:
         project_root = Path(args.project).resolve(strict=True)
     except OSError as exc:
@@ -104,8 +122,31 @@ def main(argv: list[str] | None = None) -> int:
     app = AgentClipApp(
         config=config,
         provider=provider,
-        engine_factory=make_engine_factory(config, project_root),
+        # app.app_config is reassigned in place when the service editor saves, so
+        # this closure keeps reading whatever config is current.
+        engine_factory=make_engine_factory(lambda: app.app_config, project_root),
         project_root=project_root,
     )
     app.run()
+    return 0
+
+
+def _pick_region_child(prompt: str | None = None) -> int:
+    """The --pick-region child: overlay up, region wire format out, exit.
+
+    Cancel is exit 0 with no output (the parent's parse_region yields None);
+    a broken environment (no tkinter, no display) is exit 1 with the reason on
+    stderr, which screen.picker surfaces as a ScreenPickError.
+    """
+    from agentclip.screen.region import format_region
+
+    try:
+        from agentclip.screen.overlay import run_overlay
+
+        region = run_overlay(prompt)
+    except Exception as exc:  # anything here means "picker unavailable"
+        print(f"region picker unavailable: {exc}", file=sys.stderr)
+        return 1
+    if region is not None:
+        print(format_region(region))
     return 0

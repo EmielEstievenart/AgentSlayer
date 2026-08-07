@@ -117,6 +117,16 @@ class SessionController:
         """Kick off the session: prompt for a task, then run the loop."""
         self._spawn_flow(self._session_flow())
 
+    def update_config(self, config: Config) -> None:
+        """Swap in a freshly-edited Config (service editor save).
+
+        Only affects things read from ``self._config`` going forward - notably
+        the preset label/services table used when the *next* session starts and
+        the YOLO default a reset session falls back to. It never touches a
+        session already in flight (its Engine was built from its own Config
+        snapshot at start time)."""
+        self._config = config
+
     # -- view-facing events ---------------------------------------------------
 
     def submit_clipboard(self, text: str) -> None:

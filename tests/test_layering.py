@@ -23,7 +23,7 @@ STDLIB = frozenset(sys.stdlib_module_names)
 # imported module name exactly or as a package prefix, EXCEPT the bare
 # "agentclip" entry which matches only the root package itself (__version__).
 RULES: list[tuple[str, frozenset[str]]] = [
-    ("agentclip.config", frozenset({"platformdirs"})),
+    ("agentclip.config", frozenset({"platformdirs", "tomli_w"})),
     ("agentclip.protocol", frozenset({"agentclip.config", "agentclip.protocol"})),
     (
         "agentclip.tools",
@@ -31,6 +31,7 @@ RULES: list[tuple[str, frozenset[str]]] = [
     ),
     ("agentclip.store", frozenset({"agentclip", "agentclip.config", "agentclip.store"})),
     ("agentclip.clip", frozenset({"agentclip", "agentclip.clip"})),
+    ("agentclip.screen", frozenset({"agentclip", "agentclip.screen"})),
     (
         "agentclip.engine",
         frozenset(
@@ -61,8 +62,11 @@ RULES: list[tuple[str, frozenset[str]]] = [
     ),
 ]
 
-# Modules allowed to import agentclip.clip / textual.
+# Modules allowed to import agentclip.clip / agentclip.screen / textual.
 UI_MODULES = ("agentclip.cli", "agentclip.__main__", "agentclip.tui")
+
+# OS side-effect layers only the UI shell may touch (clipboard, screen overlay/click).
+OS_LAYERS = ("agentclip.clip", "agentclip.screen")
 
 
 def module_name(path: Path) -> str:
@@ -126,16 +130,20 @@ def test_layer_rules() -> None:
     assert not violations, "layering violations:\n" + "\n".join(violations)
 
 
-def test_only_tui_and_cli_import_clip_or_textual() -> None:
+def test_only_tui_and_cli_import_clip_screen_or_textual() -> None:
     violations: list[str] = []
     for path in all_modules():
         mod = module_name(path)
-        if any(_matches(mod, ui) for ui in UI_MODULES) or _matches(mod, "agentclip.clip"):
+        if any(_matches(mod, ui) for ui in UI_MODULES) or any(
+            _matches(mod, layer) for layer in OS_LAYERS
+        ):
             continue
         for imported in module_level_imports(path):
-            if imported.split(".")[0] == "textual" or _matches(imported, "agentclip.clip"):
+            if imported.split(".")[0] == "textual" or any(
+                _matches(imported, layer) for layer in OS_LAYERS
+            ):
                 violations.append(f"{mod} imports {imported}")
-    assert not violations, "clip/textual leaked outside tui/cli:\n" + "\n".join(violations)
+    assert not violations, "clip/screen/textual leaked outside tui/cli:\n" + "\n".join(violations)
 
 
 def test_engine_never_imports_ui_or_clipboard() -> None:

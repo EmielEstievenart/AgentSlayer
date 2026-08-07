@@ -37,6 +37,18 @@ uv run agentclip            # in the project you want the agent to work on
 
 Linux clipboard: the bundled backend works on X11 and Wayland-with-XWayland out of the box. On a pure-Wayland system install `wl-clipboard` (and `xclip` for X11 fallback).
 
+### Standalone executable (Windows)
+
+To use `agentclip` from any directory without the checkout, freeze it into a single self-contained exe:
+
+```powershell
+.\scripts\build-exe.ps1
+```
+
+This builds `dist\agentclip.exe` (PyInstaller onefile, ~15 MB, no Python needed to run it), smoke-tests it, and copies it to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`. Re-run it to update after changing the source. Useful flags: `-Clean` (fresh build), `-NoInstall` (build only), `-InstallDir <path>`.
+
+The build is driven by `packaging/agentclip.spec`; a onefile exe unpacks to `%TEMP%` on each launch, costing a second or two of startup.
+
 ## Configuration
 
 TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (Windows: `%APPDATA%\agentclip\config.toml`) → `<project>/.agentclip.toml` → CLI flags. See `docs/design/architecture.md` for the full default config, service presets (paste-size budgets per chat service), and the command allowlist format.

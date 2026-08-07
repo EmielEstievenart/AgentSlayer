@@ -1,1 +1,1 @@
-"""Modal screens: new session, confirm, summary, help, free-text entry."""
+"""Screens: the main chat screen plus the confirm/summary/help/text-entry/service-editor modals."""

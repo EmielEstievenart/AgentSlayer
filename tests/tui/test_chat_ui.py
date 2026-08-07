@@ -1,9 +1,10 @@
 """Pilot tests for the chat-style UI: the persistent composer and the gate.
 
 Complements test_smoke.py (the full approve-an-edit loop). Here we exercise the
-new surfaces directly: sending a follow-up from the docked chat box, and the
-focus hand-off at the approval gate (composer disabled, Approve button focused
-so the bare-letter y still approves).
+surfaces directly: the modal-free startup (empty chat + focused composer + the
+settings sidebar), sending a follow-up from the docked chat box, and the focus
+hand-off at the approval gate (composer disabled, Approve button focused so the
+bare-letter y still approves).
 """
 
 from __future__ import annotations
@@ -13,15 +14,17 @@ from collections.abc import Callable
 from pathlib import Path
 
 from textual.pilot import Pilot
-from textual.widgets import Button, TextArea
+from textual.screen import ModalScreen
+from textual.widgets import Button, Select
 
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.messages import ClipboardCaptured
-from agentclip.tui.screens.new_session import NewSessionScreen
+from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.summary import SummaryScreen
+from agentclip.tui.widgets.sidebar import Sidebar
 
 UTILS_PY = '''"""Utility helpers."""
 
@@ -109,21 +112,132 @@ def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard, Path]:
     app = AgentClipApp(
         config=config,
         provider=fake,
-        engine_factory=make_engine_factory(config, project),
+        # app.app_config, not the closed-over `config`: lets a service-editor save
+        # take effect for the next session started in this test, same as cli.py.
+        engine_factory=make_engine_factory(lambda: app.app_config, project),
         project_root=project,
     )
     return app, fake, project
 
 
-async def _start_session(app: AgentClipApp, pilot: Pilot) -> None:
-    await _wait_for(pilot, lambda: isinstance(app.screen, NewSessionScreen), "session modal")
-    app.screen.query_one("#task", TextArea).load_text("Tidy up src/utils.py.")
-    await pilot.press("ctrl+s")
+async def _start_session(
+    app: AgentClipApp, pilot: Pilot, task: str = "Tidy up src/utils.py."
+) -> None:
+    """Start a session the only way there is: type the task, press Enter."""
     main = app.main_screen
     assert main is not None
+    await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+    main.composer.load_text(task)
+    await pilot.press("enter")
     await _wait_for(pilot, lambda: main.session_active, "session armed")
     await _wait_for(pilot, lambda: main.phase_name == "AWAITING_REPLY", "armed for a reply")
     await _wait_for(pilot, lambda: not main.busy, "session flow settled")
+
+
+async def test_startup_is_modal_free_with_sidebar(tmp_path: Path) -> None:
+    """The launch experience (tui.md section 1.3): no modal - an empty chat, a
+    focused composer, and a settings sidebar whose service picker seeds the
+    session that the first message starts. F3 hides/shows the column."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        # No modal anywhere: the main screen owns the terminal from the first frame.
+        assert app.screen is main
+        assert not isinstance(app.screen, ModalScreen)
+        # An empty transcript and a usable, focused chat box.
+        assert not main.transcript.entries
+        assert not main.composer.disabled
+        assert app.focused is main.composer, f"composer should be focused, got {app.focused!r}"
+
+        # The sidebar is mounted, unlocked, and defaults to config.general.service.
+        sidebar = main.query_one(Sidebar)
+        select = sidebar.query_one("#service-select", Select)
+        assert not select.disabled
+        assert select.value == app.app_config.general.service == "chatgpt-attach"
+        assert sidebar.service == "chatgpt-attach"
+
+        # Pick a different service, then start the session from the composer.
+        select.value = "claude"
+        await pilot.pause()
+        assert sidebar.service == "claude"
+        main.composer.load_text("Tidy up src/utils.py.")
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: main.session_active, "session armed")
+        await _wait_for(pilot, lambda: not main.busy, "session flow settled")
+
+        # The sidebar's choice is what the session (and the status bar) runs with.
+        assert main._snap is not None
+        assert main._snap.service_key == "claude"
+        assert main._snap.budget_chars == app.app_config.services["claude"].max_paste_chars
+        # ...and it is locked for the duration of the session.
+        assert select.disabled
+
+        # F3 toggles the column (diffs want the horizontal room).
+        assert sidebar.display
+        await pilot.press("f3")
+        await pilot.pause()
+        assert not sidebar.display
+        await pilot.press("f3")
+        await pilot.pause()
+        assert sidebar.display
+
+
+async def test_edit_services_button_opens_settings(tmp_path: Path) -> None:
+    """The sidebar's "Edit services..." button is the door to the settings screen
+    (an F2 stub today; the service editor lands on the same hook)."""
+    app, fake, _ = _make_app(tmp_path)
+    calls: list[bool] = []
+    app.action_settings = lambda: calls.append(True)  # type: ignore[method-assign]
+    async with app.run_test(size=(110, 40)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        button = main.query_one("#edit-services-btn", Button)
+        await _wait_for(pilot, lambda: button.region.width > 0, "sidebar button laid out")
+        await pilot.click("#edit-services-btn")
+        await _wait_for(pilot, lambda: bool(calls), "settings action invoked")
+
+
+async def test_empty_task_does_not_start_a_session(tmp_path: Path) -> None:
+    """Enter on an empty composer must not start a session (it warns instead)."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await pilot.press("enter")
+        await pilot.pause(0.1)
+        assert main.awaiting_new_session  # still waiting
+        assert not main.session_active
+        assert not fake.written
+
+        # A real task still starts it afterwards.
+        main.composer.load_text("Tidy up src/utils.py.")
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: main.session_active, "session armed")
+
+
+async def test_quit_while_awaiting_a_new_session_does_not_warn(tmp_path: Path) -> None:
+    """Waiting for a new session parks the session worker on a future, so the
+    controller reports `busy` - but there is no turn to lose: quitting from the
+    start screen must exit, not push the mid-turn warning."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+        main.composer.load_text("/new")
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "inline start flow re-armed")
+        assert main.busy  # the session flow is parked on the inline prompt
+
+        await app.action_quit()
+        assert not isinstance(app.screen, ConfirmScreen)
 
 
 async def test_followup_via_composer(tmp_path: Path) -> None:
@@ -328,7 +442,9 @@ async def test_yolo_command_auto_approves_every_call(tmp_path: Path) -> None:
 
 
 async def test_new_command_clears_and_restarts(tmp_path: Path) -> None:
-    """Typing /new clears the chat window and re-opens the new-session modal."""
+    """Typing /new clears the chat window and re-arms the inline start flow -
+    still no modal, and the service picker unlocks so the next session can pick
+    a different one."""
     app, fake, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 40)) as pilot:
         await _start_session(app, pilot)
@@ -336,15 +452,23 @@ async def test_new_command_clears_and_restarts(tmp_path: Path) -> None:
         assert main is not None
         assert main.session_active
         assert main.transcript.entries  # the bootstrap left content in the window
+        assert main.sidebar.service_select.disabled  # locked while a session runs
 
         main.composer.load_text("/new")
         await pilot.press("enter")
 
-        await _wait_for(
-            pilot, lambda: isinstance(app.screen, NewSessionScreen), "new-session modal returns"
-        )
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "inline start flow re-armed")
+        assert app.screen is main  # no modal was pushed
         assert not main.session_active
         assert not main.transcript.entries  # the window was cleared
+        assert not main.sidebar.service_select.disabled  # picker unlocked again
+        await _wait_for(pilot, lambda: not main.composer.disabled, "composer usable again")
+
+        # And a second session starts the same way.
+        main.composer.load_text("Second task, please.")
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: main.session_active, "second session armed")
+        assert "Second task, please." in fake.written[-1]
 
 
 async def test_slash_leading_answer_is_delivered_not_hijacked(tmp_path: Path) -> None:

@@ -10,8 +10,10 @@ Two method families:
 
 - *Display / chrome* calls the controller makes to update what the user sees
   (transcript adds, ``render_state`` snapshot push, gate show/hide, status, toasts).
-- *Blocking modal prompts* the controller awaits for a user decision
-  (``prompt_new_session`` / ``confirm`` / ``prompt_text`` / ``show_summary``).
+- *Blocking prompts* the controller awaits for a user decision
+  (``prompt_new_session`` / ``confirm`` / ``prompt_text`` / ``show_summary``). How the
+  view asks is its own business: the Textual front-end serves ``prompt_new_session``
+  inline (composer + sidebar, no modal) and the rest as modal screens.
 
 Clipboard I/O (the read-watcher and the outbound write) is deliberately a view/transport
 concern - it lives behind ``copy_outbound`` / ``read_clipboard`` / ``start_input`` /
@@ -90,7 +92,9 @@ class ChatView(Protocol):
     def spawn(self, coro: Coroutine[Any, Any, Any]) -> None: ...
     def exit_app(self) -> None: ...
 
-    # -- blocking modal prompts ----------------------------------------------
+    # -- blocking prompts -----------------------------------------------------
+    # prompt_new_session returns the spec for the session to start, or None if the
+    # user wants out (the controller then exits the app).
     async def prompt_new_session(self) -> SessionSpec | None: ...
     async def confirm(self, title: str, body: str = "") -> bool: ...
     async def prompt_text(self, title: str, hint: str) -> str | None: ...

@@ -1,11 +1,11 @@
 """The single Textual Pilot smoke test (architecture.md section 8).
 
-Boots the real app over a tmp project with a FakeClipboard, drives the
-NewSessionScreen, injects an LLM reply by posting ClipboardCaptured directly
-(the documented injectable path - deterministic, no watcher-thread timing),
-approves the edit gate with "y", and asserts: the edit landed ON DISK, the
-results payload was written to the fake clipboard, and the transcript shows
-the result.
+Boots the real app over a tmp project with a FakeClipboard, starts the session by
+typing into the docked composer (there is no launch modal - tui.md section 1.3),
+injects an LLM reply by posting ClipboardCaptured directly (the documented
+injectable path - deterministic, no watcher-thread timing), approves the edit gate
+with "y", and asserts: the edit landed ON DISK, the results payload was written to
+the fake clipboard, and the transcript shows the result.
 """
 
 from __future__ import annotations
@@ -15,14 +15,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 from textual.pilot import Pilot
-from textual.widgets import TextArea
 
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.messages import ClipboardCaptured
-from agentclip.tui.screens.new_session import NewSessionScreen
 
 UTILS_PY = '''"""Utility helpers."""
 
@@ -71,18 +69,17 @@ async def test_smoke_full_loop(tmp_path: Path) -> None:
     app = AgentClipApp(
         config=config,
         provider=fake,
-        engine_factory=make_engine_factory(config, project),
+        engine_factory=make_engine_factory(lambda: app.app_config, project),
         project_root=project,
     )
 
     async with app.run_test(size=(110, 40)) as pilot:
-        # -- NewSessionScreen: type the task, ctrl+s starts ----------------------
-        # ctrl+s (not ctrl+enter) is the reliable cross-terminal submit key.
-        await _wait_for(pilot, lambda: isinstance(app.screen, NewSessionScreen), "session modal")
-        app.screen.query_one("#task", TextArea).load_text(
-            "Fix the date parsing bug in src/utils.py: use ISO dates."
-        )
-        await pilot.press("ctrl+s")
+        # -- no modal: type the task into the docked composer, Enter starts ------
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        main.composer.load_text("Fix the date parsing bug in src/utils.py: use ISO dates.")
+        await pilot.press("enter")
 
         # -- the bootstrap payload was written to the (fake) clipboard ----------
         await _wait_for(pilot, lambda: bool(fake.written), "bootstrap on the clipboard")
@@ -91,8 +88,6 @@ async def test_smoke_full_loop(tmp_path: Path) -> None:
         assert "Fix the date parsing bug" in bootstrap
         assert "edit_file" in bootstrap  # tool catalog made it into the bootstrap
 
-        main = app.main_screen
-        assert main is not None
         await _wait_for(pilot, lambda: main.session_active, "session armed")
 
         # -- inject the LLM reply (documented injectable path) -------------------

@@ -17,7 +17,10 @@ Two method families:
 
 Clipboard I/O (the read-watcher and the outbound write) is deliberately a view/transport
 concern - it lives behind ``copy_outbound`` / ``read_clipboard`` / ``start_input`` /
-``stop_input`` so the controller stays free of any ``clip`` dependency.
+``stop_input`` so the controller stays free of any ``clip`` dependency. Delegation is
+the same shape: the controller decides *that* a sub-agent runs, the view knows *where*
+(``delegation_available`` / ``start_chat`` / ``end_chat``) and *how it is shown*
+(``open_session_view`` / ``focus_session_view`` / ``finish_session_view``).
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from collections.abc import Coroutine
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
-from agentclip.app.types import SessionSpec
+from agentclip.app.types import Role, SessionRef, SessionSpec
 from agentclip.engine.engine import PendingAction, StatusSnapshot
 from agentclip.protocol.types import Outbound, ToolCall
 
@@ -40,6 +43,13 @@ class SessionView:
     The view maps this onto its own widgets/reactives and repaints; it is the
     single, unidirectional channel for "the orchestration state changed".
     ``snapshot`` is the engine's ``StatusSnapshot`` (None before a session arms).
+
+    The three ``session_*`` fields say *whose* state this is - the master's or a
+    sub-agent's. They are additive with master-shaped defaults so a view that
+    predates delegation (or a test that builds a SessionView by hand) keeps
+    working unchanged; a view that cares uses them to label the gate and the
+    status bar, because during a sub-run every other field describes the
+    sub-agent rather than the conversation the user started.
     """
 
     session_active: bool
@@ -48,10 +58,20 @@ class SessionView:
     awaiting_answer: bool
     has_outbound: bool
     snapshot: StatusSnapshot | None
+    session_id: str = "master"
+    session_role: Role = "master"
+    session_title: str = ""
 
 
 class ChatView(Protocol):
     # -- transcript -----------------------------------------------------------
+    # INVARIANT: every add_* writes to the view the controller last FOCUSED (see
+    # focus_session_view), never to whichever tab the user happens to be looking
+    # at. Delegation is single-flight - the master is parked inside `delegate`
+    # while a sub-agent runs - so exactly one session produces output at a time
+    # and a session_id parameter on nine methods would buy nothing. The
+    # controller's contract is the other half: focus a session view before
+    # writing to it, and refocus the master when the sub-run ends.
     async def add_user(self, text: str) -> None: ...
     async def add_prose(self, text: str) -> None: ...
     async def add_call(self, call: ToolCall) -> None: ...
@@ -87,6 +107,25 @@ class ChatView(Protocol):
     async def read_clipboard(self) -> str | None: ...
     def start_input(self) -> None: ...
     def stop_input(self) -> None: ...
+
+    # -- session views (transcript tabs) --------------------------------------
+    # open -> focus -> ... -> finish is the sub-agent run's whole view lifecycle.
+    # ``finish_session_view`` only annotates and relabels: the view stays mounted
+    # and readable (the panels are output-only anyway), so the user can go back
+    # and read what a sub-agent did after the master has moved on.
+    async def open_session_view(self, session: SessionRef) -> None: ...
+    def focus_session_view(self, session_id: str) -> None: ...
+    async def finish_session_view(self, session_id: str, note: str) -> None: ...
+
+    # -- sub-agent transport --------------------------------------------------
+    # ``delegation_available`` is asked BEFORE a sub-agent engine is built, so an
+    # uncalibrated host answers the model with an error result instead of
+    # stranding a half-started run. ``start_chat`` is all-or-nothing: False must
+    # mean nothing was clicked and nothing was retargeted, because pasting a
+    # sub-agent's bootstrap into the master's chat would corrupt it irrecoverably.
+    def delegation_available(self) -> bool: ...
+    async def start_chat(self, session: SessionRef) -> bool: ...
+    async def end_chat(self, session: SessionRef) -> None: ...
 
     # -- scheduling + lifecycle ----------------------------------------------
     def spawn(self, coro: Coroutine[Any, Any, Any]) -> None: ...

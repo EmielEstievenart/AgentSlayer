@@ -458,6 +458,18 @@ class SessionController:
         return _NOISE_TEXT.get(reason, reason).format(chat=self._chat_name or "?")
 
     async def _run_turn(self, reply: ParsedReply) -> None:
+        await self._handle_step(await self._run_turn_body(reply))
+
+    async def _run_turn_body(self, reply: ParsedReply) -> StepResult:
+        """Everything one ingested reply does up to (and including) ``execute()``:
+        show it, gate each pending action, run the calls - and *return* the step.
+
+        Split from ``_run_turn`` because a sub-agent's turn needs exactly this
+        much and then does something different with the result (it loops on the
+        sub-agent's own chat instead of handing the step to the master's
+        ``_handle_step``). No behaviour of its own: the master path is still
+        body-then-handle, in that order.
+        """
         engine = self._engine
         assert engine is not None
         for prose in reply.prose:
@@ -503,8 +515,7 @@ class SessionController:
                 await self._view.add_note(f"✓ {label} {action.call.tool} {target}".rstrip())
         self._view.hide_gate()
         await self._refresh_status()  # EXECUTING (status segment driven by busy)
-        step = await self._run_engine_step(engine.execute)
-        await self._handle_step(step)
+        return await self._run_engine_step(engine.execute)
 
     def _set_glyph(self, call_id: int, glyph: str) -> None:
         if call_id in self._turn_glyphs:

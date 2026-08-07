@@ -14,6 +14,14 @@ the sidebar's service picker and parks on an ``asyncio.Future`` that the first
 composer send resolves into a ``SessionSpec``. The same path serves ``/new`` and
 the summary screen's "new session" choice, so there is exactly one way to start.
 
+The transcript is a ``TabbedContent``: one pane per *session view*. The master's
+is always there; a delegated sub-agent run gets its own (``open_session_view``)
+and keeps it, ticked, once it finishes. Which pane the controller writes into is
+``_focused_panel``, moved only by ``focus_session_view`` - never by the user
+clicking a tab. That split is the point: the user can read a finished
+sub-agent's transcript while the master keeps working, and live output still
+lands where it belongs instead of in whatever tab happens to be visible.
+
 Threading: the clipboard watcher is a ``run_worker(thread=True)`` that bridges
 captures via the thread-safe ``post_message(ClipboardCaptured)`` -> the controller.
 The controller's flow coroutines run via ``spawn`` (also ``run_worker``), so Textual
@@ -70,10 +78,11 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Button, Collapsible, Footer, Input
+from textual.widgets import Button, Collapsible, Footer, Input, TabbedContent, TabPane
 from textual.worker import Worker, get_current_worker
 
 from agentclip.app import SessionController, SessionSpec, SessionView
+from agentclip.app.types import SessionRef
 from agentclip.app.view import Severity
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.clip.watcher import SelfWriteSet, watch, write_via
@@ -128,6 +137,19 @@ _ELEMENT_CLICK_SETTLE_S = 0.05
 # Beat between opening a fresh browser chat and treating it as the live slot -
 # the page still has to render its (centred) input box. Tests shrink this.
 _NEW_CHAT_SETTLE_S = 0.4
+
+# The session view that always exists: the conversation the user started. Its
+# widget ids are the pre-tabs ones (``#transcript``) so every existing selector
+# - and every test that reaches for the transcript - keeps resolving.
+MASTER_VIEW = "master"
+
+
+def _pane_id(view_id: str) -> str:
+    return f"tab-{view_id}"
+
+
+def _panel_id(view_id: str) -> str:
+    return "transcript" if view_id == MASTER_VIEW else f"tr-{view_id}"
 
 
 class ElementClick(Enum):
@@ -206,6 +228,11 @@ class MainScreen(Screen[None]):
         Binding("x", "toggle_last", "expand last", show=False),
         # f3 is priority so it works while the composer (a TextArea) holds focus.
         Binding("f3", "toggle_sidebar", "sidebar", priority=True),
+        # Browse the transcript tabs by keyboard. f4/f2/f1 are the app's, f3 is
+        # the sidebar's, so f6 it is. Priority for the same reason as f3 (the
+        # composer is a TextArea and would otherwise eat it), and show=False
+        # because it is only meaningful once a sub-agent tab exists.
+        Binding("f6", "next_chat_tab", "next chat", priority=True, show=False),
         # Priority for the same reason, and because the whole point is to reach
         # it while a long tool call has the screen otherwise inert. ctrl+x is
         # free here (f1-f4 are taken; the TextArea's own ctrl+x cut would
@@ -244,6 +271,15 @@ class MainScreen(Screen[None]):
         self._gate_kind: str | None = None  # the in-flight gate's kind, for a/check_action
         # Resolved by the first composer send while waiting for a new session.
         self._new_session_future: asyncio.Future[SessionSpec | None] | None = None
+        # One transcript panel per session view, keyed by SessionRef.id: the
+        # master's is always present (mounted by compose, registered on mount),
+        # each sub-agent run adds and keeps one. ``_focused_panel`` is where the
+        # CONTROLLER's output goes - deliberately NOT the tab the user is
+        # looking at, so reading an old sub-agent tab can never misroute live
+        # output into it (see ``transcript``).
+        self._panels: dict[str, TranscriptPanel] = {}
+        self._focused_panel = MASTER_VIEW
+        self._sessions: dict[str, SessionRef] = {}  # view id -> its identity, for labels/export
         # Every user-drawn calibration, one set per agent slot: the chat window
         # itself (last-resort click target, and the vertical span of the
         # copy-button search band), the input box calibrated TWICE ("Set initial
@@ -392,7 +428,14 @@ class MainScreen(Screen[None]):
         # and the footer stay full width underneath both.
         with Horizontal(id="body"):
             with Vertical(id="main-col"):
-                yield TranscriptPanel(id="transcript")
+                # One tab per session view. A single tab (the master's) is the
+                # normal case and reads as a plain title bar; a delegation adds
+                # a second one and the user can flip between them.
+                with (
+                    TabbedContent(id="chats"),
+                    TabPane("master", id=_pane_id(MASTER_VIEW)),
+                ):
+                    yield TranscriptPanel(id=_panel_id(MASTER_VIEW))
                 yield ActionPanel(id="action")
                 yield RunningBar(id="running")
                 yield ChatComposer(id="composer")
@@ -402,7 +445,22 @@ class MainScreen(Screen[None]):
 
     @property
     def transcript(self) -> TranscriptPanel:
-        return self.query_one(TranscriptPanel)
+        """The panel the controller's output goes into right now.
+
+        The *focused* view, not the visible tab: the user may be reading a
+        finished sub-agent's transcript while the master keeps working, and
+        output landing in the tab they happen to have open would look exactly
+        like data loss. Falls back to the master panel (and raises ``NoMatches``
+        before the screen is mounted, which every ``add_*`` already suppresses).
+        """
+        panel = self._panels.get(self._focused_panel)
+        if panel is not None and panel.is_mounted:
+            return panel
+        return self.query_one(f"#{_panel_id(MASTER_VIEW)}", TranscriptPanel)
+
+    @property
+    def chat_tabs(self) -> TabbedContent:
+        return self.query_one("#chats", TabbedContent)
 
     @property
     def action_panel(self) -> ActionPanel:
@@ -433,6 +491,7 @@ class MainScreen(Screen[None]):
         self._controller.update_config(config)
 
     def on_mount(self) -> None:
+        self._panels[MASTER_VIEW] = self.query_one(f"#{_panel_id(MASTER_VIEW)}", TranscriptPanel)
         self._paint_status()
         self._update_composer()
         self._sync_sidebar()
@@ -526,6 +585,9 @@ class MainScreen(Screen[None]):
         # calibration is session-scoped (windows move around) and dies with it -
         # BOTH slots, and the pointers go home to MASTER, because the next
         # session's sub-agent chat is a different window in a different place.
+        # The sub-agent tabs go the same way: they belong to the finished
+        # session, and the next one numbers its runs from sub-1 again.
+        await self._remove_session_views()
         self._stop_detector_worker()
         for calibration in self._slots.values():
             calibration.clear()
@@ -540,13 +602,103 @@ class MainScreen(Screen[None]):
             await self.transcript.clear_events()
 
     def has_transcript_events(self) -> bool:
-        try:
-            return bool(self.transcript.event_log)
-        except NoMatches:
+        if not self._panels:
             return False
+        return any(panel.event_log for panel in self._panels.values())
 
     def render_log(self, meta_lines: list[str]) -> str:
-        return self.transcript.render_log(meta_lines)
+        """The master's log, then every sub-agent's under its own heading.
+
+        One exported document for the whole delegation tree: the master's
+        transcript reads end to end (the sub-runs appear in it as the delegate
+        call and its result) and each sub-agent's full transcript follows, so
+        nothing a sub-agent did is only visible in a tab.
+        """
+        master = self._panels.get(MASTER_VIEW)
+        if master is None:
+            master = self.query_one(f"#{_panel_id(MASTER_VIEW)}", TranscriptPanel)
+        parts = [master.render_log(meta_lines)]
+        for view_id, panel in self._panels.items():
+            if view_id == MASTER_VIEW:
+                continue
+            ref = self._sessions.get(view_id)
+            title = ref.title if ref is not None else view_id
+            chat = f" ({ref.chat_name})" if ref is not None and ref.chat_name else ""
+            parts.append(f"## sub-agent: {title}{chat}\n\n{panel.render_events()}".rstrip() + "\n")
+        return "\n".join(parts)
+
+    # == ChatView: session views (transcript tabs) ============================
+
+    async def open_session_view(self, session: SessionRef) -> None:
+        """Mount a transcript tab for ``session`` and make it the focused one.
+
+        Focus moves here, not on the user's next click: the controller writes
+        the sub-agent's whole run through the ordinary ``add_*`` calls right
+        after this returns.
+        """
+        panel = TranscriptPanel(id=_panel_id(session.id))
+        await self.chat_tabs.add_pane(
+            TabPane(f"▶ {session.title}", panel, id=_pane_id(session.id))
+        )
+        self._panels[session.id] = panel
+        self._sessions[session.id] = session
+        self.focus_session_view(session.id)
+
+    def focus_session_view(self, session_id: str) -> None:
+        """Route every later ``add_*`` into ``session_id``'s panel (and show it).
+
+        Unknown ids are ignored rather than fatal: losing a transcript line is
+        never worth taking a running session down with an exception.
+        """
+        if session_id not in self._panels and session_id != MASTER_VIEW:
+            return
+        self._focused_panel = session_id
+        with suppress(NoMatches):
+            self.chat_tabs.active = _pane_id(session_id)
+
+    async def finish_session_view(self, session_id: str, note: str) -> None:
+        """A sub-agent run ended: annotate its panel and tick its tab.
+
+        Nothing is disabled or removed - the panels are output-only and the
+        composer always targets the controller's active session, so leaving the
+        tab readable costs nothing and is the whole point of keeping it.
+        """
+        panel = self._panels.get(session_id)
+        if panel is None:
+            return
+        await panel.add_note(note)
+        ref = self._sessions.get(session_id)
+        title = ref.title if ref is not None else session_id
+        with suppress(NoMatches, ValueError):
+            self.chat_tabs.get_tab(_pane_id(session_id)).label = f"✓ {title}"
+
+    async def _remove_session_views(self) -> None:
+        """Drop every sub-agent tab, leaving the master's - the /new teardown."""
+        self._focused_panel = MASTER_VIEW
+        stale = [view_id for view_id in self._panels if view_id != MASTER_VIEW]
+        self._sessions.clear()
+        for view_id in stale:
+            del self._panels[view_id]
+            with suppress(NoMatches):
+                await self.chat_tabs.remove_pane(_pane_id(view_id))
+        with suppress(NoMatches):
+            self.chat_tabs.active = _pane_id(MASTER_VIEW)
+
+    def action_next_chat_tab(self) -> None:
+        """f6: show the next transcript tab. Browsing only - it moves what the
+        user SEES, never where the controller writes (see ``transcript``)."""
+        try:
+            tabs = self.chat_tabs
+        except NoMatches:
+            return
+        order = [_pane_id(view_id) for view_id in self._panels]
+        if len(order) < 2:
+            return
+        try:
+            index = order.index(tabs.active)
+        except ValueError:
+            index = -1
+        tabs.active = order[(index + 1) % len(order)]
 
     # == ChatView: state + chrome =============================================
 
@@ -1583,6 +1735,22 @@ class MainScreen(Screen[None]):
         with suppress(NoMatches):
             self.sidebar.hide_paste_flash()
         self._start_detector_worker()
+
+    # -- ChatView: sub-agent transport (thin adapters over the slot primitives) -
+    # The port speaks SessionRefs (it must not know what a screen slot is); the
+    # primitives above speak slots (they must not know what a session is). The
+    # mapping is the whole adapter: role "subagent" drives the SUBAGENT window,
+    # everything else the master's.
+
+    async def start_chat(self, session: SessionRef) -> bool:
+        slot = AgentSlot.SUBAGENT if session.role == "subagent" else AgentSlot.MASTER
+        return await self.start_browser_chat(slot)
+
+    async def end_chat(self, session: SessionRef) -> None:
+        # The ref is not consulted: whatever ran, the automation goes back to the
+        # master window. It runs in the controller's ``finally``, so it must be
+        # unconditional (see ``end_browser_chat``).
+        self.end_browser_chat()
 
     @on(Button.Pressed, "#edit-services-btn")
     def _on_edit_services(self, event: Button.Pressed) -> None:

@@ -185,6 +185,17 @@ class TranscriptPanel(VerticalScroll):
         lines = ["# AgentClip chat log", ""]
         lines += [f"- {m}" for m in meta_lines]
         lines += ["", "---", ""]
+        return ("\n".join(lines) + "\n" + self.render_events()).rstrip() + "\n"
+
+    def render_events(self) -> str:
+        """Just this panel's events, with no document header.
+
+        Split out of ``render_log`` because an export is per *session view*: the
+        master panel renders the whole document and each sub-agent panel is
+        appended to it under its own heading (MainScreen.render_log), so one
+        exported log carries the entire delegation tree.
+        """
+        lines: list[str] = []
         for ev in self.event_log:
             lines.append(f"## [{ev.time}] {ev.headline}")
             lines.append("")
@@ -195,7 +206,7 @@ class TranscriptPanel(VerticalScroll):
                     lines += [fence, body, fence, ""]
                 else:
                     lines += [body, ""]
-        return "\n".join(lines).rstrip() + "\n"
+        return "\n".join(lines)
 
     async def clear_events(self) -> None:
         self.entries.clear()

@@ -98,18 +98,33 @@ JSON dies on the exact hazards we have: unescaped newlines in code, smart-quote 
 
 ## 2. Bootstrap prompt
 
-One canonical bootstrap, assembled from config at send time (budget number, max-calls number, OS, workdir name substituted in). **Estimated size: ~8,800 chars (~2,900 tokens at 3 chars/token).** Fits in one paste on Copilot-work/Gemini/Claude presets; goes out as 3 chunks on the ChatGPT-inline 4,000-char preset via §5.1 (one-time cost, acceptable). Rejected: a separate "lite" bootstrap — two grammars to maintain, and under-specified protocol is the #1 source of malformed replies.
+One canonical bootstrap, assembled from config at send time (budget number, max-calls number, OS, workdir name substituted in). **Estimated size: ~8,900 chars (~3,000 tokens at 3 chars/token).** Fits in one paste on Copilot-work/Gemini/Claude presets; goes out as 3 chunks on the ChatGPT-inline 4,000-char preset via §5.1 (one-time cost, acceptable). Rejected: a separate "lite" bootstrap — two grammars to maintain, and under-specified protocol is the #1 source of malformed replies.
 
 Outline with the load-bearing passages verbatim:
 
 ```
-SECTION 1 — ROLE (~500 chars)
-You are a coding agent operating on the user's machine through a relay
-tool called AgentClip. You cannot run anything yourself. You emit tool
-calls as plain-text CLIP blocks (spec below); the user relays them to
-AgentClip, which executes them in the project directory and pastes the
-results back to you. Work autonomously: prefer issuing tool calls over
-asking questions. Project root: {workdir_name} on {os}.
+SECTION 1 — ROLE (~1,350 chars)
+Four beats, in order — every one of them is load-bearing against the
+turn-1 refusal (some models read the pasted spec as a prompt-injection
+attempt trying to redefine their identity, and stall):
+1. Provenance. "The user pasted this message in themselves: it is your
+   operating brief for this session, not content from a web page, a
+   file, or a tool result. Treat it the way you would treat a system
+   prompt."
+2. Mechanics + oversight. You cannot run anything directly; you write
+   CLIP blocks and the user carries them to AgentClip, which runs them
+   and pastes the real output back. "The user is the transport",
+   risky calls need approval on top, "Every action is reviewed by a
+   human before it runs - more oversight than a normal coding agent
+   has, not less", changes are backed up and reversible, and the
+   results are real program output.
+3. Judgment retained. "Your judgment still applies as it normally
+   would - if a task looks harmful or wrong, say so, or use ask_user."
+4. No stalling. "Start work immediately. Your first reply must already
+   contain CLIP calls": orient with list_dir/glob/grep, don't summarise
+   the protocol back, don't ask whether to begin, and never ask the
+   user to paste code or run commands.
+Ends with: Project root: {workdir_name} on {os}.
 
 SECTION 2 — TRANSPORT WARNINGS (~700 chars)
 - My messages may arrive as an attached text file (named like
@@ -140,7 +155,7 @@ SECTION 4 — TOOL CATALOG (~4,200 chars)
 worked example block (examples average ~6 lines). Full specs in §3
 of this document.
 
-SECTION 5 — RULES OF ENGAGEMENT (~1,100 chars)
+SECTION 5 — RULES OF ENGAGEMENT (~1,250 chars)
 - At most {max_calls} calls per reply. If your reply would be long,
   send fewer calls — a cut-off reply wastes a round trip.
 - Calls in one reply run in order; later calls see earlier effects.
@@ -150,6 +165,8 @@ SECTION 5 — RULES OF ENGAGEMENT (~1,100 chars)
   write_file/edit_file/delete_file so every change is backed up and
   reversible.                       [undo contract — architecture]
 - Read before you edit. Keep edit_file find-blocks small but unique.
+- Never ask the user to paste file contents or run commands for you -
+  read and run things yourself with the tools above.
 - Some calls need user approval. status=denied means the user said
   no: do not retry unchanged; reconsider or use ask_user.
 - Results may be truncated, marked like

@@ -13,6 +13,7 @@ def make_preset(budget: int = 12_000, *, fence: bool = True, attach: bool = True
         "test",
         "Test preset",
         budget,
+        budget * 20,
         wrap_blocks_in_fence=fence,
         attachment_note=attach,
     )
@@ -64,6 +65,46 @@ def test_fence_instruction_off() -> None:
 def test_workdir_and_os_substituted() -> None:
     text = render()
     assert "Project root: AgentClip on Windows 11." in text
+
+
+def test_role_frames_the_bootstrap_as_the_users_own_brief() -> None:
+    # Some models read the pasted spec as a prompt-injection attempt and stall
+    # on turn 1; this framing is what resolves that ambiguity.
+    flat = " ".join(render().split())
+    assert "The user pasted this message in themselves" in flat
+    assert "not content from a web page, a file, or a tool result" in flat
+    assert "Treat it the way you would treat a system prompt" in flat
+
+
+def test_role_explains_the_human_in_the_loop_oversight() -> None:
+    flat = " ".join(render().split())
+    assert "The user is the transport" in flat
+    assert "Every action is reviewed by a human before it runs" in flat
+    assert "File changes are backed up and reversible" in flat
+    assert "the results you get back are real program output" in flat
+
+
+def test_role_preserves_the_models_own_judgment() -> None:
+    flat = " ".join(render().split())
+    assert "Your judgment still applies" in flat
+    assert "if a task looks harmful or wrong, say so, or use ask_user" in flat
+
+
+def test_role_demands_calls_in_the_first_reply() -> None:
+    flat = " ".join(render().split())
+    assert "Start work immediately." in flat
+    assert "Your first reply must already contain CLIP calls" in flat
+    assert "orient yourself with list_dir, glob or grep" in flat
+    assert "do not ask whether to begin" in flat
+    assert "never ask the user to paste code or run commands for you" in flat
+
+
+def test_rules_forbid_delegating_reads_and_commands_to_the_user() -> None:
+    flat = " ".join(render().split())
+    assert (
+        "Never ask the user to paste file contents or run commands for you - "
+        "read and run things yourself with the tools above." in flat
+    )
 
 
 def test_max_calls_substituted_per_budget_tier() -> None:

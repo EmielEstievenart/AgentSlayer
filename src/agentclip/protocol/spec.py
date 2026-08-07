@@ -9,8 +9,8 @@ a plain string.
 Layout per docs/design/protocol.md section 2:
 
     1 ROLE                  (workdir + OS substituted)
-    2 TRANSPORT WARNINGS    (attachment note conditional on preset)
-    3 HOW TO EMIT CALLS     (grammar; fence instruction conditional on preset)
+    2 TRANSPORT WARNINGS    (chat name; attachment note conditional on preset)
+    3 HOW TO EMIT CALLS     (grammar + chat-name echo; fence conditional)
     4 TOOL CATALOG          (passed in, header from here)
     5 RULES OF ENGAGEMENT   (max_calls substituted from the budget caps)
 """
@@ -55,12 +55,19 @@ ATTACHMENT_NOTE = """\
 SECTION_TRANSPORT = """\
 SECTION 2 - TRANSPORT WARNINGS
 
-{attachment_note}- Every message I send ends with a line ===CLIP:EOM turn=N===. If that line
-  is missing, my paste was cut off: reply with exactly
-  ===CLIP:NACK reason=truncated=== and nothing else.
+This chat's name is {chat_name}. Every message I send carries it, and every
+reply you send must carry it back on its final line - see section 3. Replies
+without the correct chat name are ignored by the relay, so it never mistakes
+text from another chat (or a stray copy-paste) for your work.
+
+{attachment_note}- Every message I send ends with a line
+  ===CLIP:EOM turn=N chat={chat_name}===. If that line is missing, my paste
+  was cut off: reply with exactly
+  ===CLIP:NACK reason=truncated chat={chat_name}=== and nothing else.
 - If you receive ===CLIP:PART k/n===: that is piece k of n of one message.
-  For k<n reply with exactly ===CLIP:ACK k/n=== and nothing else. After part
-  n/n, concatenate all parts in order and respond to the whole message."""
+  For k<n reply with exactly ===CLIP:ACK k/n chat={chat_name}=== and nothing
+  else. After part n/n, concatenate all parts in order and respond to the
+  whole message."""
 
 # Included in section 3 only when preset.wrap_blocks_in_fence is set.
 FENCE_INSTRUCTION = """\
@@ -100,10 +107,12 @@ EOT2
 ids are integers starting at 1, unique within one reply. End every reply
 with exactly one line:
 
-===CLIP:EOM calls=N turn=T===
+===CLIP:EOM calls=N chat={chat_name}===
 
-where N is the number of CALL blocks in your reply and T is the turn number
-of the message you are answering: echo turn=N from my EOM line in yours.
+where N is the number of CALL blocks in your reply and {chat_name} is this
+chat's name, written exactly as shown. A reply whose last line is missing,
+or carries a different chat name, is ignored by the relay - the user then
+has to prompt you again, which costs a round trip.
 {fence_instruction}"""
 
 TOOL_CATALOG_HEADER = """\
@@ -151,14 +160,20 @@ def render_spec(
     tool_catalog: str,
     workdir_name: str,
     os_name: str,
+    chat_name: str,
 ) -> str:
-    """Assemble bootstrap sections 1-5 (everything except the task block)."""
+    """Assemble bootstrap sections 1-5 (everything except the task block).
+
+    ``chat_name`` is this session's agreed handle; it appears in sections 2 and
+    3 because the model has to echo it on every reply (the relay drops replies
+    that do not carry it).
+    """
     attachment_note = ATTACHMENT_NOTE + "\n" if preset.attachment_note else ""
     fence_instruction = FENCE_INSTRUCTION if preset.wrap_blocks_in_fence else ""
     sections = (
         SECTION_ROLE.format(workdir_name=workdir_name, os_name=os_name),
-        SECTION_TRANSPORT.format(attachment_note=attachment_note),
-        SECTION_GRAMMAR.format(fence_instruction=fence_instruction),
+        SECTION_TRANSPORT.format(attachment_note=attachment_note, chat_name=chat_name),
+        SECTION_GRAMMAR.format(fence_instruction=fence_instruction, chat_name=chat_name),
         TOOL_CATALOG_HEADER + "\n\n" + tool_catalog.strip("\n"),
         SECTION_RULES.format(
             batching_instruction=BATCHING_INSTRUCTION,

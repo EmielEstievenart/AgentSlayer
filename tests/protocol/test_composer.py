@@ -15,6 +15,8 @@ from agentclip.protocol.composer import (
 )
 from agentclip.protocol.types import ToolResult
 
+CHAT_NAME = "amber-falcon"
+
 # ---------------------------------------------------------------------------
 # helpers
 
@@ -29,7 +31,9 @@ def make_composer(
     preset = ServicePreset(
         "test", "Test preset", budget, budget * 20, wrap_blocks_in_fence=fence, attachment_note=attach
     )
-    return Composer(preset, caps_for_budget(budget), catalog, "AgentClip", "Windows 11")
+    return Composer(
+        preset, caps_for_budget(budget), catalog, "AgentClip", "Windows 11", CHAT_NAME
+    )
 
 
 def representative_catalog(target: int = 4_200) -> str:
@@ -124,13 +128,35 @@ def test_bootstrap_kind_turn_and_eom() -> None:
     assert out.turn == 1
     assert len(out.chunks) == 1
     assert out.total_chars == len(out.chunks[0])
-    assert out.chunks[0].endswith("===CLIP:EOM turn=1===\n")
+    assert out.chunks[0].endswith("===CLIP:EOM turn=1 chat=amber-falcon===\n")
+
+
+def test_bootstrap_teaches_the_chat_name() -> None:
+    composer = make_composer()
+    assert composer.chat_name == CHAT_NAME
+    payload = composer.bootstrap("Fix the bug").chunks[0]
+    assert "This chat's name is amber-falcon." in payload
+    assert "===CLIP:EOM calls=N chat=amber-falcon===" in payload
+    assert "===CLIP:ACK k/n chat=amber-falcon===" in payload
+    assert "===CLIP:NACK reason=truncated chat=amber-falcon===" in payload
+    assert "turn=T" not in payload  # the turn echo is gone from the model's instructions
+
+
+def test_every_outbound_kind_carries_the_chat_name() -> None:
+    composer = make_composer()
+    for payload in (
+        composer.bootstrap("t").chunks[0],
+        composer.task(2, "more").chunks[0],
+        composer.note(3, "reverted").chunks[0],
+        composer.results(4, [ToolResult(1, "ok", "fine")]).chunks[0],
+    ):
+        assert payload.rstrip().endswith(" chat=amber-falcon===")
 
 
 def test_bootstrap_contains_task_block_and_batching_instruction() -> None:
     out = make_composer().bootstrap("Fix the date parsing bug")
     payload = out.chunks[0]
-    assert "===CLIP:TASK===\nFix the date parsing bug\n===CLIP:EOM turn=1===\n" in payload
+    assert "===CLIP:TASK===\nFix the date parsing bug\n===CLIP:EOM turn=1 chat=amber-falcon===\n" in payload
     assert (
         "Batch all independent calls into one reply - read every file you need at once, "
         "do not request files one at a time; each round trip costs the user a manual "
@@ -180,7 +206,7 @@ def test_task_payload_exact_form() -> None:
     out = make_composer().task(5, "Also update the README")
     assert out.kind == "user_answer"
     assert out.turn == 5
-    assert out.chunks == ("===CLIP:TASK===\nAlso update the README\n===CLIP:EOM turn=5===\n",)
+    assert out.chunks == ("===CLIP:TASK===\nAlso update the README\n===CLIP:EOM turn=5 chat=amber-falcon===\n",)
     assert out.total_chars == len(out.chunks[0])
 
 
@@ -190,7 +216,7 @@ def test_note_payload_exact_form() -> None:
     assert out.turn == 7
     assert out.chunks == (
         "===CLIP:NOTE===\nthe user reverted turn 6; file states rolled back\n"
-        "===CLIP:EOM turn=7===\n",
+        "===CLIP:EOM turn=7 chat=amber-falcon===\n",
     )
 
 
@@ -216,7 +242,7 @@ def test_results_basic_round_trip() -> None:
     assert out.kind == "results"
     assert out.turn == 4
     assert payload.startswith("===CLIP:RESULTS turn=4===\n")
-    assert payload.endswith("===CLIP:EOM turn=4===\n")
+    assert payload.endswith("===CLIP:EOM turn=4 chat=amber-falcon===\n")
     assert "===CLIP:RESULT id=1 status=ok===" in payload
     assert "===CLIP:RESULT id=2 status=ok===" in payload
     assert payload.index("id=1") < payload.index("id=2")  # execution order preserved
@@ -286,12 +312,12 @@ def test_results_notes_render_as_note_block_before_results() -> None:
 
 def test_results_empty_list_still_framed() -> None:
     payload = make_composer().results(8, []).chunks[0]
-    assert payload == "===CLIP:RESULTS turn=8===\n===CLIP:EOM turn=8===\n"
+    assert payload == "===CLIP:RESULTS turn=8===\n===CLIP:EOM turn=8 chat=amber-falcon===\n"
 
 
 def test_results_eom_turn_stamping() -> None:
     payload = make_composer().results(42, [ToolResult(1, "ok", "x")]).chunks[0]
-    assert payload.endswith("===CLIP:EOM turn=42===\n")
+    assert payload.endswith("===CLIP:EOM turn=42 chat=amber-falcon===\n")
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +350,7 @@ def test_results_over_budget_truncates_largest_body_to_fit() -> None:
     assert "===CLIP:RESULT id=1 status=ok===" in payload
     assert "===CLIP:RESULT id=2 status=ok===" in payload
     assert payload.count("===CLIP:END===") == 2
-    assert payload.endswith("===CLIP:EOM turn=3===\n")
+    assert payload.endswith("===CLIP:EOM turn=3 chat=amber-falcon===\n")
 
 
 def test_results_under_budget_not_truncated() -> None:

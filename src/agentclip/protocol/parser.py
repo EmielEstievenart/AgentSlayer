@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import re
 
+from agentclip.protocol.names import normalize_chat_name
 from agentclip.protocol.types import (
     PROTOCOL_MARKER,
     EomInfo,
@@ -124,10 +125,12 @@ class _Parser:
         self.eom_present = False
         self.eom_calls: int | None = None
         self.eom_turn: int | None = None
+        self.eom_chat: str | None = None
         self.eom_line = 0
         self.ack_kind: str | None = None  # "ack" | "nack"
         self.ack_part: int | None = None
         self.ack_total: int | None = None
+        self.ack_chat: str | None = None
         self.nack_reason: str | None = None
 
     # -- top level ---------------------------------------------------------
@@ -178,7 +181,10 @@ class _Parser:
         self.eom_present = True
         self.eom_line = i + 1
         self.eom_calls = _to_int(attrs.get("calls"))
+        # turn= is legacy-tolerated (AgentClip still stamps it outbound for
+        # ordering); chat= is what the engine actually gates on.
         self.eom_turn = _to_int(attrs.get("turn"))
+        self.eom_chat = normalize_chat_name(attrs.get("chat"))
 
     def _handle_ack_nack(
         self, keyword: str, attrs: dict[str, str], positional: list[str]
@@ -197,6 +203,7 @@ class _Parser:
             part = _to_int(attrs.get("part"))
             total = _to_int(attrs.get("total"))
         self.ack_part, self.ack_total = part, total
+        self.ack_chat = normalize_chat_name(attrs.get("chat"))
         if keyword == "NACK":
             self.nack_reason = attrs.get("reason")
 
@@ -389,10 +396,13 @@ def parse_reply(text: str) -> ParsedReply:
         calls=tuple(p.calls),
         prose=tuple(p.prose),
         warnings=tuple(warnings),
-        eom=EomInfo(present=p.eom_present, calls=p.eom_calls, turn=p.eom_turn),
+        eom=EomInfo(
+            present=p.eom_present, calls=p.eom_calls, turn=p.eom_turn, chat=p.eom_chat
+        ),
         truncated=truncated,
         normalized_hash=normalized_hash(text),
         ack_part=p.ack_part,
         ack_total=p.ack_total,
+        ack_chat=p.ack_chat,
         nack_reason=p.nack_reason,
     )

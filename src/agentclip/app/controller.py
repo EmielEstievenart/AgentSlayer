@@ -51,11 +51,13 @@ from agentclip.protocol.types import Outbound, ParsedReply
 
 _T = TypeVar("_T")
 
+# Noise reason -> toast. "{chat}" is filled with the session's chat name.
 _NOISE_TEXT = {
     "duplicate": "duplicate reply ignored",
-    "stale-turn": "stale reply ignored (it echoes an older turn)",
     "not-protocol": "clipboard text has no CLIP blocks - ignored",
     "wrong-phase": "reply ignored - not awaiting a reply right now",
+    "missing-chat": "ignored a paste without this chat's name ({chat}) - not from this chat?",
+    "wrong-chat": "ignored a paste naming a different chat - this session is {chat}",
 }
 
 
@@ -93,6 +95,7 @@ class SessionController:
         self._view = view
 
         self._engine: Engine | None = None
+        self._chat_name: str | None = None  # this session's agreed chat name
         self._preset: ServicePreset | None = None
         self._snap: StatusSnapshot | None = None
         self._engine_lock = asyncio.Lock()
@@ -362,10 +365,17 @@ class SessionController:
                 continue
             break
         self._engine = engine
+        # Immutable for the session, so it is read straight off the engine (no
+        # _engine_call round trip needed) and mirrored for the noise toasts.
+        self._chat_name = engine.chat_name
         self._preset = self._config.services.get(spec.service, self._config.preset())
         self._stats = SessionStats(service=spec.service)
         await self._view.add_user(spec.task)
         await self._copy_outbound(out)
+        await self._view.add_note(
+            f"chat name: {engine.chat_name} - the model echoes chat={engine.chat_name} on "
+            "every reply; pastes without it are ignored"
+        )
         await self._view.add_note(
             f"→ bootstrap copied ({out.total_chars:,} chars) - paste into {self._preset.label}"
         )
@@ -391,7 +401,7 @@ class SessionController:
                     "no tool calls found - reply shown in transcript; press t to follow up"
                 )
             else:
-                self._view.notify(_NOISE_TEXT.get(result.reason, result.reason))
+                self._view.notify(self._noise_text(result.reason))
             return
         if isinstance(result, ProtocolError):
             await self._view.add_error(
@@ -406,6 +416,10 @@ class SessionController:
         self._stats.replies += 1
         self._stats.chars_in += len(text)
         await self._run_turn(result.reply)
+
+    def _noise_text(self, reason: str) -> str:
+        """Toast for one ingest rejection; unknown reasons pass through raw."""
+        return _NOISE_TEXT.get(reason, reason).format(chat=self._chat_name or "?")
 
     async def _run_turn(self, reply: ParsedReply) -> None:
         engine = self._engine
@@ -559,6 +573,7 @@ class SessionController:
     async def _reset_session(self) -> None:
         self._session_active = False
         self._engine = None
+        self._chat_name = None
         self._preset = None
         self._snap = None
         self._last_outbound = None

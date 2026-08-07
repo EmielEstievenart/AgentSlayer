@@ -48,7 +48,7 @@ EOT
 ===CLIP:CALL id=3 tool=run_command===
 command: python -c "print(601)"
 ===CLIP:END===
-===CLIP:EOM calls=3 turn=1===
+===CLIP:EOM calls=3 chat=amber-falcon===
 ~~~~
 """
 
@@ -61,7 +61,7 @@ Changed parse_date in src/utils.py to ISO format (%Y-%m-%d).
 Verified with a python command.
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=2===
+===CLIP:EOM calls=1 chat=amber-falcon===
 ~~~~
 """
 
@@ -100,7 +100,7 @@ def test_full_roundtrip(project: Path, make_engine) -> None:
     assert payload.count("status=ok") == 3
     assert "replaced 1 occurrence" in payload
     assert "601" in payload  # run_command output made it into the results
-    assert payload.rstrip().endswith("===CLIP:EOM turn=2===")
+    assert payload.rstrip().endswith("===CLIP:EOM turn=2 chat=amber-falcon===")
 
     # THE EDIT IS ON DISK.
     on_disk = (project / "src" / "utils.py").read_text(encoding="utf-8")
@@ -140,7 +140,7 @@ command: pytest -q
 ===CLIP:CALL id=4 tool=read_file===
 path: README.md
 ===CLIP:END===
-===CLIP:EOM calls=4 turn=1===
+===CLIP:EOM calls=4 chat=amber-falcon===
 """
 
 
@@ -175,7 +175,7 @@ target: src/utils.py
 ===CLIP:CALL id=2 tool=read_file===
 path: README.md
 ===CLIP:END===
-===CLIP:EOM calls=2 turn=1===
+===CLIP:EOM calls=2 chat=amber-falcon===
 """
 
 
@@ -223,7 +223,7 @@ path: README.md
 ===CLIP:CALL id=5 tool=read_file===
 path: src/utils.py
 ===CLIP:END===
-===CLIP:EOM calls=2 turn=1===
+===CLIP:EOM calls=2 chat=amber-falcon===
 """
 
 
@@ -256,7 +256,7 @@ content <<EOT
 overwritten!
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=2 turn=1===
+===CLIP:EOM calls=2 chat=amber-falcon===
 """
 
 
@@ -284,7 +284,7 @@ replace <<EOT
     return datetime.strptime(s, "%Y-%m-%d")
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 """
 
 
@@ -327,7 +327,7 @@ summary <<EOT
 Edit applied; done.
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=2===
+===CLIP:EOM calls=1 chat=amber-falcon===
 """
 
 
@@ -359,7 +359,7 @@ def test_undo_after_done_reopens_session(project: Path, engine: Engine) -> None:
         "===CLIP:CALL id=1 tool=read_file===\n"
         "path: src/utils.py\n"
         "===CLIP:END===\n"
-        "===CLIP:EOM calls=1 turn=3===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
     )
     assert isinstance(engine.ingest(reply_to_notice), NewTurn)
 

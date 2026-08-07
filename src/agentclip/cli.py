@@ -14,6 +14,7 @@ from agentclip.clip.base import select_provider
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import Engine
 from agentclip.protocol.composer import Composer
+from agentclip.protocol.names import generate_chat_name
 from agentclip.store.backups import BackupStore
 from agentclip.store.session import SessionStore, prune_sessions
 from agentclip.tools.registry import default_registry
@@ -23,7 +24,9 @@ from agentclip.tui.app import AgentClipApp
 
 
 def make_engine_factory(
-    get_config: Callable[[], Config], project_root: Path
+    get_config: Callable[[], Config],
+    project_root: Path,
+    chat_name: str | None = None,
 ) -> Callable[[str], Engine]:
     """Build one fresh Engine (and session directory) per started session.
 
@@ -36,6 +39,11 @@ def make_engine_factory(
     The sidebar's service picker may select a different preset than the config
     default, so the factory rebuilds a Config with that service active - the
     engine reads its budget/caps from config.preset().
+
+    Each session gets a fresh chat name, which the bootstrap teaches the model
+    and every reply must echo back. ``chat_name`` pins it (tests need a fixed
+    name to write canned replies against); the default draws a new one per
+    session, so two sessions never accept each other's pastes.
     """
     # Skills are discovered once per process from the same folders Claude Code
     # and OpenCode use. The registry is rebuilt per session so the skill listing
@@ -47,6 +55,7 @@ def make_engine_factory(
     skills = discover_skills(project_root)
 
     def build(service_key: str) -> Engine:
+        session_chat_name = chat_name or generate_chat_name()
         cfg = get_config()
         if service_key != cfg.general.service and service_key in cfg.services:
             cfg = replace(cfg, general=replace(cfg.general, service=service_key))
@@ -60,8 +69,9 @@ def make_engine_factory(
             registry.render_catalog(),
             project_root.name,
             platform.system() or "unknown OS",
+            session_chat_name,
         )
-        return Engine(cfg, registry, workspace, session, backups, composer)
+        return Engine(cfg, registry, workspace, session, backups, composer, session_chat_name)
 
     return build
 

@@ -13,5 +13,5 @@ EOT
 ===CLIP:CALL id=2 tool=run_command===
 command: pytest tests/test_utils.py -q
 ===CLIP:END===
-===CLIP:EOM calls=2 turn=4===
+===CLIP:EOM calls=2 turn=4 chat=amber-falcon===
 ~~~~

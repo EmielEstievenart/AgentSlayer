@@ -7,7 +7,7 @@ never touches the clipboard, and never imports Textual (enforced by
 tests/test_layering.py). The TUI calls it from exactly one worker thread.
 
 Semantics implemented here (protocol.md sections 4-6 + plan synthesis):
-- ingest: dedup over the last 20 normalized hashes, stale-turn guard, tool
+- ingest: dedup over the last 20 normalized hashes, the chat-name gate, tool
   name validation (unknown tool -> pre-resolved unknown_tool result), fatal
   per-call parse issues -> pre-resolved error results;
 - execute: strict id order, denied results with user_note, the same-path skip
@@ -28,6 +28,7 @@ from agentclip.engine.approval import ApprovalPolicy
 from agentclip.engine.results import fit_results
 from agentclip.engine.states import Decision, EngineStateError, Phase, can_transition
 from agentclip.protocol.composer import BudgetExceeded, Composer
+from agentclip.protocol.names import normalize_chat_name
 from agentclip.protocol.parser import normalized_hash, parse_reply
 from agentclip.protocol.types import Outbound, ParsedReply, ToolCall, ToolResult
 from agentclip.store.backups import BackupStore, UndoReport
@@ -84,7 +85,7 @@ class ChunkAck:
 
 @dataclass(frozen=True, slots=True)
 class Noise:
-    reason: str  # "wrong-phase" | "not-protocol" | "duplicate" | "stale-turn"
+    reason: str  # "wrong-phase" | "not-protocol" | "duplicate" | "missing-chat" | "wrong-chat"
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +157,7 @@ class Engine:
         session: SessionStore,
         backups: BackupStore,
         composer: Composer,
+        chat_name: str,
     ) -> None:
         self._config = config
         self._registry = registry
@@ -170,8 +172,12 @@ class Engine:
             caps=config.caps(),
             backup_hook=self._backup_hook,
         )
+        # The session's agreed chat name, normalized once for comparison. The
+        # composer stamps the same name on every outbound; ingest requires the
+        # model to echo it (see _chat_gate).
+        self._chat_name = normalize_chat_name(chat_name) or chat_name
         self._phase = Phase.IDLE
-        self._turn = 0  # number of the last outbound payload (the model echoes it)
+        self._turn = 0  # number of the last outbound payload (ordering only)
         self._seen_hashes: deque[str] = deque(maxlen=20)
         self._reply: ParsedReply | None = None
         self._plan: list[_Planned] = []
@@ -179,6 +185,11 @@ class Engine:
         self._last_outbound_chars = 0
 
     # -- task lifecycle ------------------------------------------------------
+
+    @property
+    def chat_name(self) -> str:
+        """This session's chat name; immutable for the engine's lifetime."""
+        return self._chat_name
 
     def start_task(self, task: str) -> Outbound:
         """IDLE -> AWAITING_REPLY: compose and persist the bootstrap payload."""
@@ -212,7 +223,12 @@ class Engine:
     def ingest(self, text: str) -> IngestResult:
         """Parse one clipboard text. Only meaningful in AWAITING_REPLY: any
         other phase returns Noise("wrong-phase") and the TUI decides what to
-        show (e.g. the unexpected-reply modal)."""
+        show (e.g. the unexpected-reply modal).
+
+        Gate order is load-bearing: wrong-phase, not-protocol, duplicate, then
+        the chat name. Dedup stays ahead of the chat gate so re-pasting the
+        same accepted reply is still reported as a duplicate rather than as a
+        chat mismatch."""
         if self._phase is not Phase.AWAITING_REPLY:
             return Noise("wrong-phase")
         reply = parse_reply(text)
@@ -220,6 +236,11 @@ class Engine:
             return Noise("not-protocol")
         if reply.normalized_hash in self._seen_hashes:
             return Noise("duplicate")  # duplicate copy or our own outbound: silent
+        chat_noise = self._chat_gate(reply)
+        if chat_noise is not None:
+            # Not remembered: a foreign paste must report the same reason every
+            # time, not decay into "duplicate" on the second attempt.
+            return chat_noise
         self._remember_hash(reply.normalized_hash)
         self._session.append_event("inbound", raw=text)
         self._session.append_event(
@@ -232,6 +253,7 @@ class Engine:
             warnings=[w.kind for w in reply.warnings],
             truncated=reply.truncated,
             eom_turn=reply.eom.turn,
+            eom_chat=reply.eom.chat,
         )
         if reply.kind == "ack":
             return ChunkAck(reply.ack_part, reply.ack_total)
@@ -240,12 +262,29 @@ class Engine:
             return ProtocolError(
                 f"model NACKed the last paste (reason={reason}); re-copy the outbound payload"
             )
-        if reply.eom.turn is not None and reply.eom.turn < self._turn:
-            return Noise("stale-turn")
         self._reply = reply
         self._plan = self._build_plan(reply)
         self._set_phase(Phase.REVIEW)
         return NewTurn(reply)
+
+    def _chat_gate(self, reply: ParsedReply) -> Noise | None:
+        """Require this session's chat name on every line the model was told to
+        stamp it on: the EOM of a full reply and the ACK/NACK chunk lines.
+
+        A reply whose EOM never arrived carries no chat name to check - that is
+        the truncation signature, and it must stay on the truncated/NACK
+        recovery path (section 5.2) rather than being silently dropped here."""
+        if reply.kind in ("ack", "nack"):
+            seen = reply.ack_chat
+        elif reply.eom.present:
+            seen = reply.eom.chat
+        else:
+            return None
+        if seen is None:
+            return Noise("missing-chat")
+        if seen != self._chat_name:
+            return Noise("wrong-chat")
+        return None
 
     # -- review --------------------------------------------------------------
 

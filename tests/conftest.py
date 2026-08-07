@@ -31,6 +31,10 @@ TEST_UTILS_PY = """def test_parse_date():
     assert parse_date("2026-06-12")
 """
 
+# Every engine built by these fixtures agrees this chat name with its "model",
+# so canned replies can hard-code `chat=amber-falcon` on their EOM line.
+CHAT_NAME = "amber-falcon"
+
 
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
@@ -56,6 +60,12 @@ def registry() -> ToolRegistry:
     return default_registry()
 
 
+@pytest.fixture
+def chat_name() -> str:
+    """The chat name the fixture engines expect every reply to echo."""
+    return CHAT_NAME
+
+
 EngineFactory = Callable[..., Engine]
 
 
@@ -73,9 +83,9 @@ def make_engine(project: Path, registry: ToolRegistry) -> EngineFactory:
         session = SessionStore(project, service=cfg.general.service)
         backups = BackupStore(session.session_dir)
         composer = Composer(
-            cfg.preset(), cfg.caps(), registry.render_catalog(), project.name, "TestOS"
+            cfg.preset(), cfg.caps(), registry.render_catalog(), project.name, "TestOS", CHAT_NAME
         )
-        return Engine(cfg, registry, workspace, session, backups, composer)
+        return Engine(cfg, registry, workspace, session, backups, composer, CHAT_NAME)
 
     return factory
 

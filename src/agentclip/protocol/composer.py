@@ -1,8 +1,10 @@
 """Outbound payload composer: bootstrap / task / results / note rendering.
 
 Stdlib-only protocol leaf (imports config + protocol.types + protocol.spec).
-Every outbound payload ends with ===CLIP:EOM turn=N=== so the model can echo
-the turn number back (stale-reply guard).
+Every outbound payload ends with ===CLIP:EOM turn=N chat=NAME===: turn=N is
+AgentClip's internal ordering stamp, chat=NAME is the session's agreed chat
+name, which the model echoes back on every reply (the engine's ingest gate
+drops replies that do not carry it).
 
 M1 chunking policy: single chunk only. A RESULTS payload that exceeds the
 paste budget is fitted by middle-truncating the largest result bodies; a
@@ -119,19 +121,31 @@ class Composer:
         tool_catalog: str,
         workdir_name: str,
         os_name: str,
+        chat_name: str,
     ) -> None:
         self._preset = preset
         self._caps = caps
         self._tool_catalog = tool_catalog
         self._workdir_name = workdir_name
         self._os_name = os_name
+        self._chat_name = chat_name
 
     # -- public API ---------------------------------------------------------
+
+    @property
+    def chat_name(self) -> str:
+        """The chat name stamped on every payload this composer renders."""
+        return self._chat_name
 
     def bootstrap(self, task: str) -> Outbound:
         """The full protocol spec + tool catalog + initial task. Always turn 1."""
         spec_text = render_spec(
-            self._preset, self._caps, self._tool_catalog, self._workdir_name, self._os_name
+            self._preset,
+            self._caps,
+            self._tool_catalog,
+            self._workdir_name,
+            self._os_name,
+            self._chat_name,
         )
         body = task.rstrip("\n")
         payload = (
@@ -140,20 +154,20 @@ class Composer:
             "\n"
             "===CLIP:TASK===\n"
             f"{body}\n"
-            "===CLIP:EOM turn=1===\n"
+            f"{self._eom(1)}\n"
         )
         return self._single("bootstrap", payload, turn=1)
 
     def task(self, turn: int, text: str) -> Outbound:
         """A follow-up task/message from the user, mid- or post-session."""
         body = text.rstrip("\n")
-        payload = f"===CLIP:TASK===\n{body}\n===CLIP:EOM turn={turn}===\n"
+        payload = f"===CLIP:TASK===\n{body}\n{self._eom(turn)}\n"
         return self._single("user_answer", payload, turn)
 
     def note(self, turn: int, text: str) -> Outbound:
         """An informational notice to the LLM (e.g. 'the user reverted turn 5')."""
         body = text.rstrip("\n")
-        payload = f"===CLIP:NOTE===\n{body}\n===CLIP:EOM turn={turn}===\n"
+        payload = f"===CLIP:NOTE===\n{body}\n{self._eom(turn)}\n"
         return self._single("note", payload, turn)
 
     def results(
@@ -189,6 +203,11 @@ class Composer:
         raise BudgetExceeded(len(payload), budget)
 
     # -- helpers ------------------------------------------------------------
+
+    def _eom(self, turn: int) -> str:
+        """The terminating sentinel. turn= orders payloads for AgentClip's own
+        bookkeeping; chat= is the handshake token the model must echo back."""
+        return f"===CLIP:EOM turn={turn} chat={self._chat_name}==="
 
     def _single(
         self,
@@ -235,5 +254,5 @@ class Composer:
                 lines.append(body)
             lines.append(tag)
             lines.append("===CLIP:END===")
-        lines.append(f"===CLIP:EOM turn={turn}===")
+        lines.append(self._eom(turn))
         return "\n".join(lines) + "\n"

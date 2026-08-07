@@ -6,6 +6,7 @@ from agentclip.config import ServicePreset, caps_for_budget
 from agentclip.protocol import spec
 
 CATALOG = "read_file(path, start, end)\n  Read a file; 1-based inclusive range.\n"
+CHAT_NAME = "amber-falcon"
 
 
 def make_preset(budget: int = 12_000, *, fence: bool = True, attach: bool = True) -> ServicePreset:
@@ -27,7 +28,9 @@ def render(
     catalog: str = CATALOG,
 ) -> str:
     preset = make_preset(budget, fence=fence, attach=attach)
-    return spec.render_spec(preset, caps_for_budget(budget), catalog, "AgentClip", "Windows 11")
+    return spec.render_spec(
+        preset, caps_for_budget(budget), catalog, "AgentClip", "Windows 11", CHAT_NAME
+    )
 
 
 def test_contains_batching_instruction_verbatim() -> None:
@@ -145,11 +148,27 @@ def test_grammar_shows_call_end_eom_forms() -> None:
     text = render()
     assert "===CLIP:CALL id=1 tool=read_file===" in text
     assert "===CLIP:END===" in text
-    assert "===CLIP:EOM calls=N turn=T===" in text
+    assert "===CLIP:EOM calls=N chat=amber-falcon===" in text
 
 
-def test_grammar_turn_echo_instruction() -> None:
-    assert "echo turn=N from my EOM line in yours" in render()
+def test_grammar_asks_for_the_chat_name_not_the_turn() -> None:
+    flat = " ".join(render().split())
+    assert "This chat's name is amber-falcon." in flat
+    assert "is this chat's name, written exactly as shown" in flat
+    assert "carries a different chat name, is ignored by the relay" in flat
+    # The turn echo is AgentClip's business now; the model is never asked for it.
+    assert "turn=T" not in flat
+    assert "echo turn" not in flat
+
+
+def test_chat_name_substituted_everywhere_it_is_taught() -> None:
+    text = render()
+    # Sections 2 and 3 both carry it: section 2 for the transport handshake,
+    # section 3 for the EOM the model actually writes.
+    transport = text[text.index("SECTION 2"):text.index("SECTION 3")]
+    grammar = text[text.index("SECTION 3"):text.index("SECTION 4")]
+    assert "amber-falcon" in transport
+    assert "amber-falcon" in grammar
 
 
 def test_heredoc_collision_rule_and_worked_example() -> None:
@@ -168,14 +187,14 @@ def test_heredoc_collision_rule_and_worked_example() -> None:
 
 def test_transport_nack_on_missing_eom() -> None:
     text = render()
-    assert "===CLIP:EOM turn=N===" in text
-    assert "===CLIP:NACK reason=truncated===" in text
+    assert "===CLIP:EOM turn=N chat=amber-falcon===" in text
+    assert "===CLIP:NACK reason=truncated chat=amber-falcon===" in text
 
 
 def test_transport_part_ack_handshake() -> None:
     text = render()
     assert "===CLIP:PART k/n===" in text
-    assert "===CLIP:ACK k/n===" in text
+    assert "===CLIP:ACK k/n chat=amber-falcon===" in text
     assert "concatenate all parts in order" in text
 
 

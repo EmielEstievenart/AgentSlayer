@@ -103,7 +103,7 @@ content <<EOT
 beta
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=2 turn=1===
+===CLIP:EOM calls=2 chat=amber-falcon===
 """
 
 THIRD_EDIT_REPLY = """===CLIP:CALL id=1 tool=write_file===
@@ -112,13 +112,13 @@ content <<EOT
 gamma
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=2===
+===CLIP:EOM calls=1 chat=amber-falcon===
 """
 
 UNLISTED_COMMAND_REPLY = """===CLIP:CALL id=1 tool=run_command===
 command: definitely-not-allowlisted --flag
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=3===
+===CLIP:EOM calls=1 chat=amber-falcon===
 """
 
 
@@ -197,7 +197,7 @@ EOT
 ===CLIP:CALL id=2 tool=run_command===
 command: echo yolo-ran
 ===CLIP:END===
-===CLIP:EOM calls=2 turn=1===
+===CLIP:EOM calls=2 chat=amber-falcon===
 """
 
 

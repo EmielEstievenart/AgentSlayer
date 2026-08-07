@@ -365,14 +365,19 @@ def test_registry_lists_only_invocable_skills() -> None:
 # -- engine round-trip --------------------------------------------------------
 
 
+CHAT_NAME = "amber-falcon"  # matches the chat= on the canned replies below
+
+
 def _engine_with_skills(project: Path, skills: list[Skill]) -> Engine:
     cfg = load_config(project, global_config_path=project / "no-such-global.toml")
     registry = default_registry(skills)
     workspace = Workspace(project, cfg.excluded_names())
     session = SessionStore(project, service=cfg.general.service)
     backups = BackupStore(session.session_dir)
-    composer = Composer(cfg.preset(), cfg.caps(), registry.render_catalog(), project.name, "TestOS")
-    return Engine(cfg, registry, workspace, session, backups, composer)
+    composer = Composer(
+        cfg.preset(), cfg.caps(), registry.render_catalog(), project.name, "TestOS", CHAT_NAME
+    )
+    return Engine(cfg, registry, workspace, session, backups, composer, CHAT_NAME)
 
 
 def test_engine_runs_skill_call_and_returns_body(project: Path) -> None:
@@ -385,7 +390,7 @@ def test_engine_runs_skill_call_and_returns_body(project: Path) -> None:
         "===CLIP:CALL id=1 tool=skill===\n"
         "name: greet\n"
         "===CLIP:END===\n"
-        "===CLIP:EOM calls=1 turn=1===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
     )
     assert isinstance(engine.ingest(reply), NewTurn)
     assert engine.pending() == ()  # auto tool: no approval gate
@@ -404,7 +409,7 @@ def test_engine_unknown_skill_returns_error(project: Path) -> None:
         "===CLIP:CALL id=1 tool=skill===\n"
         "name: missing\n"
         "===CLIP:END===\n"
-        "===CLIP:EOM calls=1 turn=1===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
     )
     assert isinstance(engine.ingest(reply), NewTurn)
     step = engine.execute()

@@ -85,6 +85,9 @@ class EomInfo:
     present: bool
     calls: int | None = None  # the LLM's own count of CALL blocks it sent
     turn: int | None = None  # echo of the turn number AgentClip stamped outbound
+    # Echo of the session's chat name. The engine's ingest gate requires it to
+    # match; None means the LLM sent an EOM line without one.
+    chat: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +110,7 @@ class ParsedReply:
     normalized_hash: str = ""  # blake2b hex over the normalized text (dedup key)
     ack_part: int | None = None  # k in ACK/NACK k/n
     ack_total: int | None = None  # n in ACK/NACK k/n
+    ack_chat: str | None = None  # chat= on the ACK/NACK line (gated like eom.chat)
     nack_reason: str | None = None
 
 

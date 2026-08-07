@@ -44,7 +44,7 @@ replace <<EOT
     return datetime.strptime(s, "%Y-%m-%d")
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 ~~~~
 """
 
@@ -69,7 +69,7 @@ async def test_smoke_full_loop(tmp_path: Path) -> None:
     app = AgentClipApp(
         config=config,
         provider=fake,
-        engine_factory=make_engine_factory(lambda: app.app_config, project),
+        engine_factory=make_engine_factory(lambda: app.app_config, project, "amber-falcon"),
         project_root=project,
     )
 

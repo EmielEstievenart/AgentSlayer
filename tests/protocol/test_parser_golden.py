@@ -48,10 +48,16 @@ def to_json(reply: ParsedReply) -> dict[str, object]:
         ],
         "prose": list(reply.prose),
         "warnings": [_issue_to_json(i) for i in reply.warnings],
-        "eom": {"present": reply.eom.present, "calls": reply.eom.calls, "turn": reply.eom.turn},
+        "eom": {
+            "present": reply.eom.present,
+            "calls": reply.eom.calls,
+            "turn": reply.eom.turn,
+            "chat": reply.eom.chat,
+        },
         "truncated": reply.truncated,
         "ack_part": reply.ack_part,
         "ack_total": reply.ack_total,
+        "ack_chat": reply.ack_chat,
         "nack_reason": reply.nack_reason,
     }
 
@@ -140,6 +146,73 @@ def test_nack_without_part_info() -> None:
     assert reply.ack_part is None and reply.ack_total is None
     assert reply.nack_reason == "truncated"
     assert not reply.truncated  # ACK/NACK replies carry no EOM by design
+
+
+def test_ack_carries_the_chat_name() -> None:
+    reply = parse_reply("===CLIP:ACK 1/3 chat=amber-falcon===\n")
+    assert reply.kind == "ack"
+    assert reply.ack_chat == "amber-falcon"
+    assert (reply.ack_part, reply.ack_total) == (1, 3)
+
+
+def test_nack_carries_the_chat_name() -> None:
+    reply = parse_reply("===CLIP:NACK reason=truncated chat=amber-falcon===\n")
+    assert reply.kind == "nack"
+    assert reply.ack_chat == "amber-falcon"
+    assert reply.nack_reason == "truncated"
+
+
+def test_ack_without_chat_name_parses_with_chat_none() -> None:
+    # The parser never rejects: the engine's ingest gate decides.
+    assert parse_reply("===CLIP:ACK 1/3===").ack_chat is None
+
+
+# --- chat name on the EOM ------------------------------------------------------
+
+
+def _eom_reply(eom: str) -> str:
+    return f"===CLIP:CALL id=1 tool=read_file===\npath: a.py\n===CLIP:END===\n{eom}\n"
+
+
+def test_eom_chat_name_parsed() -> None:
+    reply = parse_reply(_eom_reply("===CLIP:EOM calls=1 chat=amber-falcon==="))
+    assert reply.eom.present
+    assert reply.eom.chat == "amber-falcon"
+    assert reply.eom.turn is None  # turn is optional now
+    assert not reply.truncated
+
+
+def test_eom_chat_and_turn_together() -> None:
+    """turn= stays parseable: AgentClip still stamps it on its own payloads and
+    a model echoing both must not be rejected."""
+    reply = parse_reply(_eom_reply("===CLIP:EOM calls=1 turn=7 chat=amber-falcon==="))
+    assert (reply.eom.calls, reply.eom.turn, reply.eom.chat) == (1, 7, "amber-falcon")
+
+
+def test_eom_chat_order_free_and_case_insensitive() -> None:
+    reply = parse_reply(_eom_reply("===CLIP:EOM CHAT=Amber-Falcon calls=1==="))
+    assert reply.eom.chat == "amber-falcon"
+
+
+def test_eom_chat_strips_decorative_quoting() -> None:
+    assert parse_reply(_eom_reply("===CLIP:EOM calls=1 chat=`amber-falcon`===")).eom.chat == (
+        "amber-falcon"
+    )
+    assert parse_reply(_eom_reply('===CLIP:EOM calls=1 chat="amber-falcon"===')).eom.chat == (
+        "amber-falcon"
+    )
+
+
+def test_eom_without_chat_is_present_with_chat_none() -> None:
+    reply = parse_reply(_eom_reply("===CLIP:EOM calls=1==="))
+    assert reply.eom.present and reply.eom.chat is None
+
+
+def test_missing_eom_has_no_chat_and_flags_truncation() -> None:
+    reply = parse_reply("===CLIP:CALL id=1 tool=read_file===\npath: a.py\n===CLIP:END===\n")
+    assert not reply.eom.present
+    assert reply.eom.chat is None
+    assert reply.truncated
 
 
 # --- sentinel and param tolerances --------------------------------------------

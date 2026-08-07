@@ -45,7 +45,7 @@ replace <<EOT
     return s.strip()
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 ~~~~
 """
 
@@ -57,7 +57,7 @@ summary <<EOT
 Tidied up src/utils.py; nothing else to do.
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 ~~~~
 """
 
@@ -69,7 +69,7 @@ question <<EOT
 Which absolute path should I write to?
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 ~~~~
 """
 
@@ -87,7 +87,7 @@ replace <<EOT
     return s.strip()
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=2===
+===CLIP:EOM calls=1 chat=amber-falcon===
 ~~~~
 """
 
@@ -114,7 +114,7 @@ def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard, Path]:
         provider=fake,
         # app.app_config, not the closed-over `config`: lets a service-editor save
         # take effect for the next session started in this test, same as cli.py.
-        engine_factory=make_engine_factory(lambda: app.app_config, project),
+        engine_factory=make_engine_factory(lambda: app.app_config, project, "amber-falcon"),
         project_root=project,
     )
     return app, fake, project

@@ -18,10 +18,12 @@
   "eom": {
     "present": true,
     "calls": 1,
-    "turn": null
+    "turn": null,
+    "chat": null
   },
   "truncated": false,
   "ack_part": null,
   "ack_total": null,
+  "ack_chat": null,
   "nack_reason": null
 }

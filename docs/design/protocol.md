@@ -64,15 +64,25 @@ TAG
 
 Rejected alternative: bare `find <<< ... >>>` markers (the original sketch) — unrecoverable when content contains `>>>` (every Python repl transcript, every merge-conflict file). Tagged heredocs are a pattern LLMs already know cold from shell.
 
-### 1.3 End-of-message marker
+### 1.3 End-of-message marker and the chat name
+
+Every session gets a short **chat name** — an `adjective-noun` handle like `amber-falcon`, drawn per session from two ~50-word lists (`protocol/names.py`, ~2,900 combinations). It is generated when the session's Engine is built, taught in the bootstrap, and shown once in the transcript so the user knows what their chat answers to.
 
 Every LLM reply containing calls MUST end with:
 
 ```
-===CLIP:EOM calls=2===
+===CLIP:EOM calls=2 chat=amber-falcon===
 ```
 
 `calls=` is the number of CALL blocks the LLM believes it sent. Missing EOM ⇒ reply truncated (§5.2). Count mismatch with parsed blocks ⇒ a block was eaten by lossy copy ⇒ also routed to §5.2. (LLMs count blocks reliably; we deliberately do NOT ask them to count chars or lines — they can't.)
+
+`chat=` is the session's chat name, echoed verbatim. **It is the ingest gate** (§6.2): a reply whose EOM carries the wrong name, or no name at all, never becomes a turn. Rationale: the only thing standing between AgentClip and an unrelated clipboard is "does this text look like protocol traffic", and *any* text does once the user has been pasting `===CLIP:` blocks around — a second chat tab, a scrollback copy, a doc quoting the protocol. A per-session token the model must reproduce turns that into a positive check. It is a handshake, not a secret: the threat model is accidents, not adversaries.
+
+Matching is tolerant on the way in — case-insensitive, surrounding whitespace, quotes and backticks stripped — and exact after that.
+
+**Outbound** payloads AgentClip composes end with `===CLIP:EOM turn=N chat=amber-falcon===`. `turn=N` is AgentClip's own ordering stamp and is no longer something the model is asked to echo (it remains parseable on the way in for tolerance); `chat=` is what the model reads and copies back.
+
+Rejected alternative: **turn echo** (`===CLIP:EOM calls=N turn=T===`, reply dropped when `T < current turn`). It only orders replies *within* one correctly-paired chat, so it caught stale re-pastes and nothing else: a fresh reply from the wrong chat carries a plausible turn number and sails through. The chat name subsumes it — and the turn number was one more thing for the model to get wrong.
 
 ### 1.4 Parser tolerances (decided, exhaustive)
 
@@ -89,6 +99,7 @@ Every LLM reply containing calls MUST end with:
 | 9 | Unterminated heredoc that swallowed a later `CLIP:CALL` header (LLM forgot terminator mid-reply) | **Recovery scan:** at EOF with heredoc open, scan swallowed text for `CLIP:CALL` headers; if found, fail *this* call with `code=unterminated_heredoc` and re-parse from the swallowed header. Later calls survive. |
 | 10 | Duplicate / missing / non-integer `id` | Renumber sequentially, report mapping |
 | 11 | Whole reply has no sentinel lines | Not protocol traffic — watcher ignores (pre-filter is the literal substring `===CLIP:` per the clipboard research) |
+| 12 | `chat=` missing / wrong / differently-cased / backticked on EOM or ACK/NACK | Parser records it verbatim-but-normalized and never rejects; the *engine* gates (§6.2) |
 
 ### 1.5 Why line-oriented, not JSON (one line, since it's decided)
 
@@ -126,17 +137,22 @@ attempt trying to redefine their identity, and stall):
    user to paste code or run commands.
 Ends with: Project root: {workdir_name} on {os}.
 
-SECTION 2 — TRANSPORT WARNINGS (~700 chars)
+SECTION 2 — TRANSPORT WARNINGS (~900 chars)
+Opens by naming the chat: "This chat's name is {chat_name}. Every
+message I send carries it, and every reply you send must carry it back
+on its final line. Replies without the correct chat name are ignored by
+the relay." Then:
 - My messages may arrive as an attached text file (named like
   "Pasted text" or "paste.txt"). If so, read the ENTIRE file and treat
   its contents as the message body.    [attachment hazard, research §3]
-- Every message I send ends with a line ===CLIP:EOM===. If that line is
-  missing, my paste was cut off: reply with exactly
-  ===CLIP:NACK reason=truncated=== and nothing else.
+- Every message I send ends with a line
+  ===CLIP:EOM turn=N chat={chat_name}===. If that line is missing, my
+  paste was cut off: reply with exactly
+  ===CLIP:NACK reason=truncated chat={chat_name}=== and nothing else.
 - If you receive ===CLIP:PART k/n=== : that is piece k of n of one
-  message. For k<n reply with exactly ===CLIP:ACK k/n=== and nothing
-  else. After part n/n, mentally concatenate all parts in order and
-  respond to the whole message.
+  message. For k<n reply with exactly ===CLIP:ACK k/n chat={chat_name}===
+  and nothing else. After part n/n, mentally concatenate all parts in
+  order and respond to the whole message.
 
 SECTION 3 — HOW TO EMIT CALLS (~1,800 chars)
 Exact grammar: CALL header, key: value lines, heredoc rule, END line,
@@ -148,7 +164,11 @@ EOM line — the §1.2/§1.3 forms shown as two short examples, plus:
 - Heredoc collision rule, verbatim from §1.2, with a 4-line worked
   example writing a file that itself contains a line "EOT".
 - ids: integers from 1, unique per reply.
-- End every reply with ===CLIP:EOM calls=N===.
+- End every reply with ===CLIP:EOM calls=N chat={chat_name}===, where
+  {chat_name} is written exactly as shown, plus the consequence of
+  getting it wrong ("ignored by the relay - the user then has to prompt
+  you again, which costs a round trip"). The model is NOT asked to echo
+  the turn number; that is AgentClip's bookkeeping.
 
 SECTION 4 — TOOL CATALOG (~4,200 chars)
 10 entries; each = signature line, 1-2 semantic notes, one minimal
@@ -178,7 +198,7 @@ SECTION 5 — RULES OF ENGAGEMENT (~1,250 chars)
 SECTION 6 — THE TASK (~variable)
 ===CLIP:TASK===
 {user task text}
-===CLIP:EOM===
+===CLIP:EOM turn=1 chat={chat_name}===
 ```
 
 ---
@@ -226,7 +246,7 @@ Closest near-miss at lines 86-89 (differs in indentation):
 hint: re-read lines 80-95 and resend the edit with the exact text.
 R2
 ===CLIP:END===
-===CLIP:EOM===
+===CLIP:EOM turn=4 chat=amber-falcon===
 ```
 
 - **status:** `ok` | `error` (with `code=`) | `denied` (user rejected at approval gate) | `skipped` (user aborted the rest of the turn; bootstrap: "skipped calls did not run — resend them if still wanted").
@@ -248,13 +268,13 @@ When a serialized payload exceeds the active inline budget, split **on line boun
 ===CLIP:PART 2/3===
 <raw line-aligned slice of the payload>
 ===CLIP:PART-END 2/3===
-Reply with exactly: ===CLIP:ACK 2/3===
+Reply with exactly: ===CLIP:ACK 2/3 chat=amber-falcon===
 ```
 
 Final part's trailer instead reads: `All 3 parts sent. Concatenate parts 1-3 in order and respond to the full message.`
 
-- Watcher sees `===CLIP:ACK 2/3===` on the clipboard ⇒ auto-copies part 3, status bar: "paste part 3/3". Wrong-index ACK (user pasted parts out of order) ⇒ re-copy the correct part, status-bar warning. Duplicate part pasted ⇒ model just ACKs again (taught in bootstrap §2) — harmless.
-- **Truncation check the model can actually perform:** presence of the `PART-END` line (a presence check, not a char count — models cannot count 6k chars). Missing ⇒ `===CLIP:NACK 2/3 reason=truncated===` ⇒ tool re-copies the same part; after 2 NACKs the TUI suggests lowering the budget preset.
+- Watcher sees `===CLIP:ACK 2/3 chat=amber-falcon===` on the clipboard ⇒ auto-copies part 3, status bar: "paste part 3/3". Wrong-index ACK (user pasted parts out of order) ⇒ re-copy the correct part, status-bar warning. Duplicate part pasted ⇒ model just ACKs again (taught in bootstrap §2) — harmless.
+- **Truncation check the model can actually perform:** presence of the `PART-END` line (a presence check, not a char count — models cannot count 6k chars). Missing ⇒ `===CLIP:NACK 2/3 reason=truncated chat=amber-falcon===` ⇒ tool re-copies the same part; after 2 NACKs the TUI suggests lowering the budget preset.
 - **Calibration (one-shot command):** tool copies a numbered ruler payload (`MARK 0500`, `MARK 1000`, … every 500 chars) and asks the model to report the last MARK visible; sets the budget. Covers the historic silent-truncation UIs.
 
 ### 5.2 Inbound (LLM → tool): truncated-reply detection and resume
@@ -276,7 +296,7 @@ R0
 ===CLIP:RESULT id=1 status=ok===
 ...
 ===CLIP:END===
-===CLIP:EOM===
+===CLIP:EOM turn=5 chat=amber-falcon===
 ```
 
 Completed calls are executed and reported; only the cut-off tail is re-requested. `write_file mode: append` is the designated escape hatch for content larger than one reply.
@@ -299,7 +319,25 @@ Explicit ranged requests (`start`/`end`, `max`) are honored up to 4× budget —
 ## 6. Idempotency and safety
 
 1. **Duplicate ingestion:** blake2b-128 over the normalized reply (fences stripped, CRLF→LF, trailing-whitespace-stripped lines). Watcher keeps the last 20 hashes; a match ⇒ silently ignored + status-bar notice "duplicate reply ignored". Tool's own outbound payload hashes live in the same suppression set (self-write suppression — mandatory, since results payloads contain `===CLIP:` and would otherwise re-trigger the watcher).
-2. **Out-of-order / stale pastes:** exact re-copies are caught by (1). A *different* protocol-bearing clipboard while a turn is mid-approval or mid-PART-handshake ⇒ TUI modal "Unexpected reply detected — Replace current turn / Ignore" (never auto-execute). Regenerated replies (new hash, same intent) land here too; the per-call approval gates are the final backstop.
+2. **Foreign / out-of-order pastes — the ingest gate.** `Engine.ingest` applies four checks, in this order, and the order is normative:
+
+   | # | check | verdict |
+   |---|---|---|
+   | 1 | phase is not AWAITING_REPLY | `Noise("wrong-phase")` |
+   | 2 | no sentinel lines at all | `Noise("not-protocol")` |
+   | 3 | normalized hash in the last 20 seen | `Noise("duplicate")` |
+   | 4 | chat name (below) | `Noise("missing-chat")` / `Noise("wrong-chat")` |
+
+   Dedup stays **ahead** of the chat check so that re-pasting a reply AgentClip already ran still reads as "duplicate reply ignored" — the accurate diagnosis — instead of being re-litigated on identity. Conversely a paste rejected at step 4 is *not* added to the seen-hash set: a foreign paste must report the same reason every time rather than decaying into "duplicate" on the second attempt.
+
+   The chat check applies exactly where the model was told to write the name:
+   - reply with an EOM line ⇒ `eom.chat` must equal the session chat name;
+   - `ACK` / `NACK` chunk line ⇒ same requirement on that line;
+   - **reply with no EOM at all ⇒ not gated.** A missing EOM is the truncation signature (§5.2): the model may well have written the name on a line that never made it across, so the reply stays on the truncated-reply recovery path and the model is told to resend. Gating here would turn every truncation into a silent drop — the one failure mode §0.4 forbids.
+
+   Everything downstream is unchanged: a *different* protocol-bearing clipboard while a turn is mid-approval or mid-PART-handshake ⇒ TUI modal "Unexpected reply detected — Replace current turn / Ignore" (never auto-execute). Regenerated replies (new hash, same intent) land here too; the per-call approval gates are the final backstop.
+
+   Self-write suppression (1) also means AgentClip's own outbound — which now carries the chat name and would otherwise pass step 4 — is dropped at step 3 as before.
 3. **Id hygiene:** ids missing/duplicated/non-numeric are renumbered sequentially at ingestion; if anything changed, the results payload leads with an informational note: `note: you sent two calls with id=2; treated as id=2 and id=3 below.` Correlation is thus never ambiguous on either side.
 4. **Hallucinated tools/params:** closed-set validation ⇒ `unknown_tool` / `missing_param` / `bad_param` results with the valid alternatives in the hint. Execution of valid siblings proceeds.
 5. **Ordering within a reply:** strictly sequential by (renumbered) id; a failed call does not halt later calls *except* later calls naming the same path as a failed `write_file`/`edit_file`, which are auto-`skipped` with `hint: prior edit of this file failed; resend after fixing.` (Prevents compounding a failed edit.)
@@ -316,7 +354,7 @@ Explicit ranged requests (`start`/`end`, `max`) are honored up to 4× budget —
 ===CLIP:TASK===
 tests/test_utils.py fails: parse_date in src/utils.py expects DD/MM/YYYY
 but the spec says ISO dates (YYYY-MM-DD). Fix it and verify with pytest.
-===CLIP:EOM===
+===CLIP:EOM turn=1 chat=amber-falcon===
 ```
 
 **LLM reply 1 (user clicks Copy; watcher ingests):**
@@ -336,7 +374,7 @@ EOT
 ===CLIP:CALL id=2 tool=run_command===
 command: pytest tests/test_utils.py -q
 ===CLIP:END===
-===CLIP:EOM calls=2===
+===CLIP:EOM calls=2 chat=amber-falcon===
 ~~~~
 
 *(AgentClip: shows diff, user approves id=1; `pytest` matches the allowlist, runs; tool copies results, user pastes:)*
@@ -357,7 +395,7 @@ exit 0 (1.4s)
 5 passed in 0.31s
 R2
 ===CLIP:END===
-===CLIP:EOM===
+===CLIP:EOM turn=2 chat=amber-falcon===
 ```
 
 **LLM reply 2:**
@@ -371,7 +409,7 @@ Changed parse_date in src/utils.py to ISO format (%Y-%m-%d), line 88.
 Verified: pytest tests/test_utils.py - 5 passed.
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 ~~~~
 
 *(AgentClip marks the session complete and renders the model's summary inline in the transcript — full stats one keypress away via `e` — and stops the expectation loop. No further paste required; the user may type a follow-up to continue, or undo turns against the backup store.)*
@@ -382,6 +420,8 @@ EOT
 
 **Architecture designer must honor:**
 - Parser is a pure function, clipboard-agnostic: `parse_reply(text: str) -> ParsedReply` where `ParsedReply(calls: list[ToolCall], prose: list[str], warnings: list[ParseIssue], truncation: TruncationInfo | None, eom: EomInfo | None, normalized_hash: str)` and `ToolCall(id: int, original_id: str | None, tool: str, params: dict[str, str], issues: list[ParseIssue])`. Serializer mirror: `render_results(turn_results, budget) -> list[str]` returning 1..n clipboard-ready chunks (PART-wrapped iff n>1).
+- `EomInfo` carries `present`, `calls`, `turn` and `chat`; `ParsedReply` additionally carries `ack_chat` for ACK/NACK lines. The parser only records these — the §6.2 gate is the Engine's.
+- The Engine is handed its `chat_name` explicitly at construction and exposes it as a read-only property; the Composer is handed the same name and stamps it on every payload. One generator call per session wires both (`make_engine_factory`), so two concurrent sessions can never accept each other's pastes.
 - Executor must implement: sequential execution, per-turn backup snapshot before each mutation, path jail, allowlist gate, the §5.3 cap table, and the §6.5 same-path skip rule.
 - Self-write suppression: every string `render_results` produces gets its normalized hash registered with the watcher *before* the clipboard write.
 - Heredoc tag generation for outbound bodies must scan content and guarantee no collision.
@@ -390,6 +430,7 @@ EOT
 **TUI designer must honor:**
 - Watcher pre-filter is the literal substring `===CLIP:`; all parsing happens off the UI thread; detection arrives as a posted message carrying `ParsedReply`.
 - Status bar fields fed by this protocol: watcher state, active preset + budget chars, PART progress ("paste part 2/3"), duplicate-ignored notices, NACK retry counter.
+- The chat name is surfaced once in the transcript at session start ("chat name: amber-falcon — the model echoes chat=amber-falcon on every reply; pastes without it are ignored"), and named again in the `missing-chat` / `wrong-chat` toasts so a rejection is self-explaining.
 - Approval flow returns exactly one of approve / deny / abort-rest-of-turn, mapping to `ok` / `denied` / `skipped`; "auto-accept edits this session" only affects `write_file`/`edit_file`/`delete_file`, never `run_command`.
 - `ask_user` blocks payload assembly until the user answers in the TUI (or explicitly cancels ⇒ `denied`).
 - "Unexpected reply" modal (§6.2) and the calibration command (§5.1) need UI affordances.

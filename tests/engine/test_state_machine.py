@@ -19,13 +19,27 @@ from agentclip.engine.states import Decision, EngineStateError, Phase
 READ_REPLY = """===CLIP:CALL id=1 tool=read_file===
 path: README.md
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 """
 
-STALE_REPLY = """===CLIP:CALL id=1 tool=read_file===
+WRONG_CHAT_REPLY = """===CLIP:CALL id=1 tool=read_file===
 path: README.md
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=0===
+===CLIP:EOM calls=1 chat=silver-otter===
+"""
+
+NO_CHAT_REPLY = """===CLIP:CALL id=1 tool=read_file===
+path: README.md
+===CLIP:END===
+===CLIP:EOM calls=1===
+"""
+
+# Sentinels present, no EOM at all: the truncation signature, which must stay
+# on the truncated-reply path instead of tripping the chat gate.
+TRUNCATED_REPLY = """===CLIP:CALL id=1 tool=write_file===
+path: notes.txt
+content <<EOT
+the reply was cut off before the heredoc terminator
 """
 
 EDIT_REPLY = """===CLIP:CALL id=1 tool=write_file===
@@ -34,13 +48,13 @@ content <<EOT
 hello from the model
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 """
 
 ASK_REPLY = """===CLIP:CALL id=1 tool=ask_user===
 question: Should I also update the changelog?
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 """
 
 DONE_REPLY = """===CLIP:CALL id=1 tool=task_done===
@@ -48,7 +62,7 @@ summary <<EOT
 All done.
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=1 turn=1===
+===CLIP:EOM calls=1 chat=amber-falcon===
 """
 
 DONE_WITH_SIBLING_REPLY = """===CLIP:CALL id=1 tool=read_file===
@@ -59,11 +73,11 @@ summary <<EOT
 Read it; done.
 EOT
 ===CLIP:END===
-===CLIP:EOM calls=2 turn=1===
+===CLIP:EOM calls=2 chat=amber-falcon===
 """
 
 EMPTY_REPLY = """Looking around first.
-===CLIP:EOM calls=0 turn=1===
+===CLIP:EOM calls=0 chat=amber-falcon===
 """
 
 
@@ -95,7 +109,7 @@ def test_start_task_bootstrap(engine: Engine) -> None:
     assert out.turn == 1
     assert len(out.chunks) == 1
     assert "Fix the bug." in out.chunks[0]
-    assert out.chunks[0].rstrip().endswith("===CLIP:EOM turn=1===")
+    assert out.chunks[0].rstrip().endswith("===CLIP:EOM turn=1 chat=amber-falcon===")
     snap = engine.status()
     assert snap.phase is Phase.AWAITING_REPLY
     assert snap.turn == 1
@@ -117,20 +131,64 @@ def test_own_outbound_is_suppressed_as_duplicate(engine: Engine) -> None:
     assert isinstance(result, Noise) and result.reason == "duplicate"
 
 
-def test_stale_turn_guard(engine: Engine) -> None:
+def test_chat_name_is_stamped_on_the_bootstrap(engine: Engine) -> None:
+    out = engine.start_task("t")
+    assert engine.chat_name == "amber-falcon"
+    payload = out.chunks[0]
+    assert "This chat's name is amber-falcon." in payload
+    assert "===CLIP:EOM calls=N chat=amber-falcon===" in payload
+    assert payload.rstrip().endswith("===CLIP:EOM turn=1 chat=amber-falcon===")
+
+
+def test_wrong_chat_name_is_noise(engine: Engine) -> None:
     engine.start_task("t")
-    result = engine.ingest(STALE_REPLY)
-    assert isinstance(result, Noise) and result.reason == "stale-turn"
+    result = engine.ingest(WRONG_CHAT_REPLY)
+    assert isinstance(result, Noise) and result.reason == "wrong-chat"
     assert engine.status().phase is Phase.AWAITING_REPLY
+    # Rejected pastes are not remembered: the reason must be stable on a retry.
+    again = engine.ingest(WRONG_CHAT_REPLY)
+    assert isinstance(again, Noise) and again.reason == "wrong-chat"
+
+
+def test_missing_chat_name_is_noise(engine: Engine) -> None:
+    engine.start_task("t")
+    result = engine.ingest(NO_CHAT_REPLY)
+    assert isinstance(result, Noise) and result.reason == "missing-chat"
+    assert engine.status().phase is Phase.AWAITING_REPLY
+
+
+def test_chat_name_match_is_case_and_quote_tolerant(engine: Engine) -> None:
+    engine.start_task("t")
+    reply = READ_REPLY.replace("chat=amber-falcon", "chat=`Amber-Falcon`")
+    assert isinstance(engine.ingest(reply), NewTurn)
+
+
+def test_truncated_reply_without_eom_skips_the_chat_gate(engine: Engine) -> None:
+    engine.start_task("t")
+    result = engine.ingest(TRUNCATED_REPLY)
+    assert isinstance(result, NewTurn)
+    assert result.reply.truncated
+    step = engine.execute()
+    assert isinstance(step, Send)
+    payload = step.outbound.chunks[0]
+    assert "code=reply_truncated" in payload
+    assert "chat=amber-falcon" in payload  # our own EOM still carries the name
 
 
 def test_ack_and_nack(engine: Engine) -> None:
     engine.start_task("t")
-    ack = engine.ingest("===CLIP:ACK 2/3===")
+    ack = engine.ingest("===CLIP:ACK 2/3 chat=amber-falcon===")
     assert isinstance(ack, ChunkAck) and (ack.part, ack.total) == (2, 3)
     assert engine.status().phase is Phase.AWAITING_REPLY
-    nack = engine.ingest("===CLIP:NACK reason=truncated===")
+    nack = engine.ingest("===CLIP:NACK reason=truncated chat=amber-falcon===")
     assert isinstance(nack, ProtocolError) and "truncated" in nack.detail
+
+
+def test_ack_nack_without_the_chat_name_is_noise(engine: Engine) -> None:
+    engine.start_task("t")
+    assert engine.ingest("===CLIP:ACK 2/3===") == Noise("missing-chat")
+    assert engine.ingest("===CLIP:ACK 2/3 chat=silver-otter===") == Noise("wrong-chat")
+    assert engine.ingest("===CLIP:NACK reason=truncated===") == Noise("missing-chat")
 
 
 def test_review_and_execute_flow(engine: Engine) -> None:
@@ -156,6 +214,8 @@ def test_review_and_execute_flow(engine: Engine) -> None:
 
 
 def test_duplicate_reply_after_roundtrip(engine: Engine) -> None:
+    """Dedup runs BEFORE the chat gate, so a re-pasted reply that carries the
+    right chat name is still diagnosed as a duplicate, not re-litigated."""
     engine.start_task("t")
     assert isinstance(engine.ingest(READ_REPLY), NewTurn)
     engine.execute()
@@ -239,7 +299,7 @@ def test_follow_up_reopens_completed_session(engine: Engine) -> None:
         "===CLIP:CALL id=1 tool=read_file===\n"
         "path: README.md\n"
         "===CLIP:END===\n"
-        "===CLIP:EOM calls=1 turn=2===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
     )
     assert isinstance(engine.ingest(next_reply), NewTurn)
     assert isinstance(engine.execute(), Send)
@@ -253,7 +313,7 @@ def _done_reply(turn: int) -> str:
         f"done at turn {turn}\n"  # distinct text per turn so the dedup guard never fires
         "EOT\n"
         "===CLIP:END===\n"
-        f"===CLIP:EOM calls=1 turn={turn}===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
     )
 
 
@@ -261,7 +321,7 @@ def test_repeated_done_reopen_cycle(engine: Engine) -> None:
     """The DONE <-> AWAITING_REPLY loop is stable across iterations: complete,
     continue, complete again, continue again, with a monotonically rising turn."""
     engine.start_task("t")
-    expected_turn = 1  # the bootstrap is turn 1; each done reply must echo the live turn
+    expected_turn = 1  # the bootstrap is turn 1
     for follow_up_text in ("keep going", "and again"):
         assert isinstance(engine.ingest(_done_reply(expected_turn)), NewTurn)
         assert isinstance(engine.execute(), Done)
@@ -294,7 +354,7 @@ def test_task_done_with_sibling_results(engine: Engine) -> None:
         "===CLIP:CALL id=1 tool=read_file===\n"
         "path: README.md\n"
         "===CLIP:END===\n"
-        "===CLIP:EOM calls=1 turn=3===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
     )
     assert isinstance(engine.ingest(next_reply), NewTurn)
     assert isinstance(engine.execute(), Send)

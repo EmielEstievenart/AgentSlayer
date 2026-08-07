@@ -31,10 +31,12 @@
   "eom": {
     "present": true,
     "calls": 3,
-    "turn": null
+    "turn": null,
+    "chat": null
   },
   "truncated": true,
   "ack_part": null,
   "ack_total": null,
+  "ack_chat": null,
   "nack_reason": null
 }

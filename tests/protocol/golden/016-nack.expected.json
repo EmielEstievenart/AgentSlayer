@@ -6,10 +6,12 @@
   "eom": {
     "present": false,
     "calls": null,
-    "turn": null
+    "turn": null,
+    "chat": null
   },
   "truncated": false,
   "ack_part": null,
   "ack_total": null,
+  "ack_chat": "amber-falcon",
   "nack_reason": "truncated"
 }

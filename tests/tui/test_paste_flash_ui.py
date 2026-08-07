@@ -1,4 +1,4 @@
-"""Pilot tests for the sidebar's blinking "PRESS CTRL+V" banner.
+"""Pilot tests for the sidebar's blinking "PRESS CTRL+V" / "PRESS ENTER" banner.
 
 The banner turns on the moment an outbound payload lands on the clipboard
 (``copy_outbound``) and keeps blinking until something proves the moment
@@ -6,6 +6,11 @@ passed: the busy region reports the model generating again (the paste landed),
 a new clipboard capture arrives (the conversation moved on without it), or the
 session is reset. The blink itself is a timer toggling a CSS class - display
 on/off is the observable contract, so that is what these tests pin down.
+
+``copy_outbound`` also auto-pastes (sends Ctrl+V) once the focus click lands,
+so ``send_paste`` is monkeypatched in every test here even when it should
+never be reached - reaching it for real would press Ctrl+V into whatever
+window is focused on the machine running the suite.
 """
 
 from __future__ import annotations
@@ -14,16 +19,20 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 from textual.pilot import Pilot
 from textual.widgets import Static
 
+import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
+from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.messages import BusyProbed, ClipboardCaptured
 from agentclip.tui.screens.main import MainScreen
+from agentclip.tui.widgets.sidebar import ENTER_FLASH_TEXT, PASTE_FLASH_TEXT
 
 
 async def _wait_for(
@@ -56,11 +65,23 @@ def _flash(app: AgentClipApp) -> Static:
     return app.main_screen.query_one("#side-paste-flash", Static)
 
 
+def _flash_text(app: AgentClipApp) -> str:
+    return str(_flash(app).render())
+
+
 async def _ready(app: AgentClipApp, pilot: Pilot) -> MainScreen:
     main = app.main_screen
     assert main is not None
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
     return main
+
+
+@pytest.fixture(autouse=True)
+def _no_real_paste(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Never let a real Ctrl+V escape into the test runner's window - every
+    path through ``copy_outbound`` is monkeypatched here, even the ones that
+    should never reach ``send_paste`` (no click region drawn)."""
+    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
 
 
 async def test_copy_outbound_turns_the_flash_on(tmp_path: Path) -> None:
@@ -73,6 +94,44 @@ async def test_copy_outbound_turns_the_flash_on(tmp_path: Path) -> None:
         await pilot.pause()
         assert _flash(app).display is True
         assert fake.read_text() == "the payload"  # the copy itself still happened
+
+
+async def test_no_click_region_shows_ctrl_v_and_never_pastes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No click/chat region drawn means no focus click, so the paste is never
+    attempted - focus could be on any window, and blind-pasting is unsafe."""
+    paste_calls: list[None] = []
+    monkeypatch.setattr(main_mod, "send_paste", lambda: paste_calls.append(None) or True)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 55)) as pilot:
+        main = await _ready(app, pilot)
+        assert main._click_region is None
+        assert main._chat_region is None
+
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert paste_calls == []
+        assert PASTE_FLASH_TEXT.splitlines()[0] in _flash_text(app)
+
+
+async def test_landed_click_pastes_and_shows_enter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drawn region + a click that lands means AgentClip pastes the payload
+    itself - the banner then only has to ask for Enter."""
+    paste_calls: list[None] = []
+    monkeypatch.setattr(main_mod, "click_region", lambda region: True)
+    monkeypatch.setattr(main_mod, "send_paste", lambda: paste_calls.append(None) or True)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 55)) as pilot:
+        main = await _ready(app, pilot)
+        main._click_region = ScreenRegion(0, 0, 100, 20)
+
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert paste_calls == [None]
+        assert ENTER_FLASH_TEXT.splitlines()[0] in _flash_text(app)
 
 
 async def test_busy_match_turns_the_flash_off(tmp_path: Path) -> None:

@@ -34,6 +34,7 @@ from agentclip.screen.region import ScreenRegion
 
 _HINT = "F3 hides this column · F2 settings · F1 help"
 PASTE_FLASH_TEXT = ">>> PRESS CTRL+V <<<\nin the chat, then send"
+ENTER_FLASH_TEXT = ">>> PRESS ENTER <<<\nreply pasted - just send it"
 _FLASH_BLINK_S = 0.4
 _REGION_UNSET = "not set - alt-tab to the chat yourself"
 _CLICK_UNSET = "not set - clicks fall back to the chat region"
@@ -165,11 +166,13 @@ class Sidebar(Vertical):
 
     # -- the paste flash --------------------------------------------------------
 
-    def show_paste_flash(self) -> None:
-        """Turn on the blinking Ctrl+V banner: an outbound payload sits on the
-        clipboard and nothing moves until the user pastes it into the chat.
-        Obnoxious by design - the user is staring at the browser, not at us."""
+    def show_paste_flash(self, text: str = PASTE_FLASH_TEXT) -> None:
+        """Turn on the blinking banner: either the outbound payload still needs
+        a manual Ctrl+V (``PASTE_FLASH_TEXT``), or AgentClip already pasted it
+        and only Enter is left (``ENTER_FLASH_TEXT``). Obnoxious by design -
+        the user is staring at the browser, not at us."""
         flash = self.query_one("#side-paste-flash", Static)
+        flash.update(Text(text))
         flash.display = True
         if self._flash_timer is None:
             self._flash_timer = self.set_interval(_FLASH_BLINK_S, self._blink_paste_flash)

@@ -55,7 +55,13 @@ from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.busy import BusyProbe, BusyState, probe_busy
 from agentclip.screen.capture import CaptureError, RegionImage, capture_region
-from agentclip.screen.focus import click_region, focus_window, foreground_window, scroll_region
+from agentclip.screen.focus import (
+    click_region,
+    focus_window,
+    foreground_window,
+    scroll_region,
+    send_paste,
+)
 from agentclip.screen.picker import ScreenPickError, pick_region
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.template import find_lowest_match
@@ -66,7 +72,13 @@ from agentclip.tui.screens.text_entry import TextEntryScreen
 from agentclip.tui.widgets.action_panel import ActionPanel
 from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.running_bar import RunningBar
-from agentclip.tui.widgets.sidebar import BUSY_UNSET, COPY_UNSET, Sidebar
+from agentclip.tui.widgets.sidebar import (
+    BUSY_UNSET,
+    COPY_UNSET,
+    ENTER_FLASH_TEXT,
+    PASTE_FLASH_TEXT,
+    Sidebar,
+)
 from agentclip.tui.widgets.statusbar import StatusBar
 from agentclip.tui.widgets.transcript import TranscriptPanel
 
@@ -421,21 +433,31 @@ class MainScreen(Screen[None]):
                 "fails, copy from .agentclip/sessions/<id>/outbound/",
                 severity="warning",
             )
-        await self._click_after_response()
-        # The payload now waits on the user's Ctrl+V - nag until the busy
-        # region reports the model chewing (or a new capture/reset happens).
+        clicked = await self._click_after_response()
+        # Only paste when the click actually landed - focus could be on any
+        # window otherwise, and pasting into an unknown app is the one
+        # unforgivable failure mode here.
+        pasted = False
+        if clicked:
+            await asyncio.sleep(0.15)  # let focus settle before typing into it
+            pasted = await asyncio.to_thread(send_paste)
+        # The payload now waits on the user's Enter (pasted) or Ctrl+V+Enter
+        # (not pasted) - nag until the busy region reports the model chewing
+        # (or a new capture/reset happens).
         with suppress(NoMatches):
-            self.sidebar.show_paste_flash()
+            self.sidebar.show_paste_flash(ENTER_FLASH_TEXT if pasted else PASTE_FLASH_TEXT)
 
-    async def _click_after_response(self) -> None:
+    async def _click_after_response(self) -> bool:
         """The payload is on the clipboard - poke the chat (when a region is
         drawn) so the browser has focus and the paste lands without alt-tab.
+        Returns True only when a region was drawn AND the click landed - the
+        signal callers use to decide whether it is safe to also send Ctrl+V.
 
         The click region wins; the chat region is the fallback for users who
         only drew the window. Neither drawn means no click at all."""
         region = self._click_region or self._chat_region
         if region is None:
-            return
+            return False
         clicked = await asyncio.to_thread(click_region, region)
         if not clicked and not self._region_click_warned:
             self._region_click_warned = True  # once, not on every copy
@@ -443,6 +465,7 @@ class MainScreen(Screen[None]):
                 "the focus click did not land (it is Windows-only) - alt-tab to the chat instead",
                 severity="warning",
             )
+        return clicked
 
     async def read_clipboard(self) -> str | None:
         return await asyncio.to_thread(self._provider.read_text)
@@ -899,17 +922,67 @@ class MainScreen(Screen[None]):
         target = ScreenRegion(
             copy_region.left, band.top + match.y_offset, copy_region.width, template.height
         )
-        await asyncio.to_thread(click_region, target)
-        self.notify(f"copy button clicked (diff {match.diff:.2f})")
-        with suppress(NoMatches):
-            self.sidebar.update_copy(f"{copy_region.describe()} · clicked (diff {match.diff:.2f})")
+        clicked = await self._verified_copy_click(target)
+        if clicked:
+            self.notify(f"copy button clicked (diff {match.diff:.2f})")
+            with suppress(NoMatches):
+                self.sidebar.update_copy(
+                    f"{copy_region.describe()} · clicked (diff {match.diff:.2f})"
+                )
+            # The response is on its way to the clipboard - hand focus back to
+            # AgentClip so the user watches the ingest here, not the browser. A
+            # short beat first so the click registers before focus moves away.
+            if self._own_window is not None:
+                await asyncio.sleep(0.15)
+                await asyncio.to_thread(focus_window, self._own_window)
+            return
 
-        # The response is on its way to the clipboard - hand focus back to
-        # AgentClip so the user watches the ingest here, not the browser. A
-        # short beat first so the click registers before focus moves away.
-        if self._own_window is not None:
-            await asyncio.sleep(0.15)
-            await asyncio.to_thread(focus_window, self._own_window)
+        # Every attempt clicked but the clipboard never changed - leave the
+        # browser focused so the user can click the copy button themselves.
+        self.notify(
+            "copy click did not take - click the response's copy button yourself",
+            severity="warning",
+        )
+        with suppress(NoMatches):
+            self.sidebar.update_copy(f"{copy_region.describe()} · click did not take")
+
+    # Small offsets from the matched rect, still inside a ~24 px icon.
+    _COPY_CLICK_OFFSETS = ((0, 0), (-3, -3), (3, 3))
+    _COPY_VERIFY_READS = 6
+    _COPY_VERIFY_INTERVAL_S = 0.2
+
+    async def _verified_copy_click(self, target: ScreenRegion) -> bool:
+        """Click the matched copy-button rect, retrying at slightly offset
+        points (still inside the icon) until the clipboard actually changes.
+
+        Sometimes the click lands on the right spot but nothing is copied (a
+        hover-rendered button that hadn't quite settled). Each attempt polls
+        the clipboard for a change instead of trusting the click return value,
+        since ``click_region`` only reports whether the OS accepted the input,
+        not whether the target app reacted to it.
+
+        Returns True once a change is observed (or, when the clipboard can't
+        be read at all, after one unverified click - retrying blind would
+        just spam clicks with no way to tell if any of them worked).
+        """
+        try:
+            before = await asyncio.to_thread(self._provider.read_text)
+        except ClipboardUnavailable:
+            await asyncio.to_thread(click_region, target, settle_s=0.05)
+            return True
+
+        for dx, dy in self._COPY_CLICK_OFFSETS:
+            shifted = ScreenRegion(target.left + dx, target.top + dy, target.width, target.height)
+            await asyncio.to_thread(click_region, shifted, settle_s=0.05)
+            for _ in range(self._COPY_VERIFY_READS):
+                await asyncio.sleep(self._COPY_VERIFY_INTERVAL_S)
+                try:
+                    after = await asyncio.to_thread(self._provider.read_text)
+                except ClipboardUnavailable:
+                    after = None
+                if after != before:
+                    return True
+        return False
 
     @on(Button.Pressed, "#edit-services-btn")
     def _on_edit_services(self, event: Button.Pressed) -> None:

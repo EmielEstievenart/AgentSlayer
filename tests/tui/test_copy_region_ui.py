@@ -309,14 +309,20 @@ async def test_flow_clicks_the_lowest_match(
     bands: list[ScreenRegion] = []
     match = TemplateMatch(y_offset=4, diff=0.03)
 
-    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    app, fake = _make_app(tmp_path)
+
+    def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
+        clicks.append(region)
+        fake.write_text("copied!")  # a real click would land the copy - verification needs this
+        return True
+
+    monkeypatch.setattr(main_mod, "click_region", fake_click)
     monkeypatch.setattr(
         main_mod, "scroll_region", lambda region, n: scrolls.append((region, n)) or True
     )
     monkeypatch.setattr(main_mod, "find_lowest_match", lambda template, band: match)
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
-    app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _arm_with_template(app, pilot)
 
@@ -334,15 +340,17 @@ async def test_flow_clicks_the_lowest_match(
         await _post_probe(main, pilot, BusyState.CHANGED, 0.3)
         await _post_probe(main, pilot, BusyState.CHANGED, 0.31)
 
-        await _wait_for(pilot, lambda: len(clicks) == 1, "copy button clicked")
+        await _wait_for(
+            pilot, lambda: "clicked (diff 0.03)" in _copy_label(app), "copy button clicked"
+        )
         assert scrolls, "the transcript was scrolled before the click"
+        assert len(clicks) == 1  # verified fine on the first attempt - no retry needed
         band = bands[0]
         assert band == COPY_REGION  # no chat region drawn: band is the copy region alone
         expected = ScreenRegion(
             COPY_REGION.left, band.top + match.y_offset, COPY_REGION.width, TEMPLATE.height
         )
         assert clicks[-1] == expected
-        assert "clicked (diff 0.03)" in _copy_label(app)
 
 
 async def test_not_found_notifies_and_does_not_click(
@@ -375,7 +383,15 @@ async def test_flow_snaps_focus_back_to_the_tool(
     _patch_picker(monkeypatch)
     events: list[str] = []
     monkeypatch.setattr(main_mod, "foreground_window", lambda: 4242)
-    monkeypatch.setattr(main_mod, "click_region", lambda region: events.append("click") or True)
+
+    app, fake = _make_app(tmp_path)
+
+    def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
+        events.append("click")
+        fake.write_text("copied!")  # verification needs the clipboard to actually change
+        return True
+
+    monkeypatch.setattr(main_mod, "click_region", fake_click)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
     monkeypatch.setattr(
         main_mod, "find_lowest_match", lambda template, band: TemplateMatch(y_offset=4, diff=0.02)
@@ -389,7 +405,6 @@ async def test_flow_snaps_focus_back_to_the_tool(
 
     monkeypatch.setattr(main_mod, "focus_window", fake_focus)
 
-    app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _arm_with_template(app, pilot)
         assert main._own_window == 4242  # recorded at mount
@@ -400,6 +415,102 @@ async def test_flow_snaps_focus_back_to_the_tool(
 
         await _wait_for(pilot, lambda: focus_calls == [4242], "focus snapped back")
         assert events == ["click", "focus"]
+
+
+# -- the verified, retried copy click --------------------------------------------
+
+
+async def test_verified_click_retries_at_an_offset_on_no_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sometimes the click lands on the right spot but nothing gets copied -
+    the flow must retry at a slightly offset point still inside the icon
+    before giving up."""
+    _patch_picker(monkeypatch)
+    match = TemplateMatch(y_offset=4, diff=0.03)
+    clicks: list[tuple[ScreenRegion, float]] = []
+
+    app, fake = _make_app(tmp_path)
+
+    def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
+        clicks.append((region, settle_s))
+        if len(clicks) == 2:  # the SECOND attempt is the one that "takes"
+            fake.write_text("copied!")
+        return True
+
+    monkeypatch.setattr(main_mod, "click_region", fake_click)
+    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
+    monkeypatch.setattr(main_mod, "find_lowest_match", lambda template, band: match)
+    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+
+    async with app.run_test(size=(110, 55)) as pilot:
+        main = await _arm_with_template(app, pilot)
+
+        await _post_probe(main, pilot, BusyState.MATCH, 0.01)
+        await _post_probe(main, pilot, BusyState.CHANGED, 0.3)
+        await _post_probe(main, pilot, BusyState.CHANGED, 0.31)
+
+        await _wait_for(pilot, lambda: len(clicks) == 2, "second attempt landed")
+        await _wait_for(
+            pilot, lambda: "clicked (diff 0.03)" in _copy_label(app), "success status shown"
+        )
+        assert len(clicks) == 2  # not a third attempt - the second one verified fine
+
+        base = ScreenRegion(
+            COPY_REGION.left, COPY_REGION.top + match.y_offset, COPY_REGION.width, TEMPLATE.height
+        )
+        assert clicks[0] == (base, 0.05)
+        offset = ScreenRegion(base.left - 3, base.top - 3, base.width, base.height)
+        assert clicks[1] == (offset, 0.05)
+
+
+async def test_verified_click_exhausts_retries_and_leaves_focus(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the clipboard never changes across all three attempts, the flow
+    reports the failure and deliberately does NOT snap focus back - the
+    browser stays focused so the user can click the copy button themselves."""
+    _patch_picker(monkeypatch)
+    match = TemplateMatch(y_offset=4, diff=0.03)
+    clicks: list[tuple[ScreenRegion, float]] = []
+    focus_calls: list[int] = []
+
+    app, _fake = _make_app(tmp_path)
+
+    def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
+        clicks.append((region, settle_s))
+        return True  # the clipboard never actually changes
+
+    monkeypatch.setattr(main_mod, "click_region", fake_click)
+    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
+    monkeypatch.setattr(main_mod, "find_lowest_match", lambda template, band: match)
+    monkeypatch.setattr(
+        main_mod, "focus_window", lambda handle: focus_calls.append(handle) or True
+    )
+
+    async with app.run_test(size=(110, 55)) as pilot:
+        main = await _arm_with_template(app, pilot)
+
+        await _post_probe(main, pilot, BusyState.MATCH, 0.01)
+        await _post_probe(main, pilot, BusyState.CHANGED, 0.3)
+        await _post_probe(main, pilot, BusyState.CHANGED, 0.31)
+
+        await _wait_for(
+            pilot, lambda: "click did not take" in _copy_label(app), "exhausted status shown"
+        )
+        assert len(clicks) == 3
+
+        base = ScreenRegion(
+            COPY_REGION.left, COPY_REGION.top + match.y_offset, COPY_REGION.width, TEMPLATE.height
+        )
+        expected_offsets = [(0, 0), (-3, -3), (3, 3)]
+        expected = [
+            ScreenRegion(base.left + dx, base.top + dy, base.width, base.height)
+            for dx, dy in expected_offsets
+        ]
+        assert [region for region, _settle in clicks] == expected
+        assert all(settle == 0.05 for _region, settle in clicks)
+        assert focus_calls == []  # no snap-back on failure
 
 
 # -- session teardown -----------------------------------------------------------

@@ -19,7 +19,15 @@ Chat commands (type in the chat box, leading slash)
   /yolo [on|off]  auto-approve EVERY edit and command (bypasses allowlist).
                   Bare /yolo toggles. The status bar shows a red YOLO badge.
   /new            clear the chat and start a fresh session
+  /abort          end the delegated sub-agent run in flight. The model is told
+                  the run was aborted and carries on with the rest of its turn.
   /help           list these commands
+
+Sub-agents (only when the second chat window is calibrated, see the sidebar)
+  The model can hand one bounded sub-task to a fresh sub-agent in its own chat.
+  It runs in its own tab (magenta status bar, "SUB-AGENT" on the approval box)
+  while your conversation waits; you still approve every edit and command.
+  ctrl+x cancels the calls running right now; /abort ends the whole run.
 
 Approval (the bordered box above the chat)
   y  approve      n  reject (optional reason)      a  approve + auto-accept edits

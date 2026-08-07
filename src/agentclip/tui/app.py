@@ -14,6 +14,7 @@ from textual.app import App
 from textual.binding import Binding
 from textual.theme import Theme
 
+from agentclip.app.types import EngineRequest
 from agentclip.clip.base import ClipboardProvider
 from agentclip.config import (
     DEFAULT_THEME,
@@ -303,6 +304,12 @@ class AgentClipApp(App[None]):
         background: $error;
         text-style: bold;
     }
+    /* A delegated sub-agent run owns the watcher segment while it lasts; magenta
+       is used nowhere else, so "this is not your conversation" reads at a glance. */
+    .st-sub {
+        color: magenta;
+        text-style: bold;
+    }
 
     ConfirmScreen, SummaryScreen, HelpScreen, TextEntryScreen, ServiceEditorScreen, SettingsScreen {
         align: center middle;
@@ -392,7 +399,7 @@ class AgentClipApp(App[None]):
         *,
         config: Config,
         provider: ClipboardProvider,
-        engine_factory: Callable[[str], Engine],
+        engine_factory: Callable[[EngineRequest], Engine],
         project_root: Path,
         global_config_path: Path | None = None,
     ) -> None:

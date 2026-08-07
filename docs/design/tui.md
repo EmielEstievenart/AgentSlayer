@@ -24,7 +24,9 @@ AgentClipApp(App[None])            # CSS embedded in App.CSS (avoids PyInstaller
 MainScreen
 ├── Horizontal                       id=body              # 1fr height
 │   ├── Vertical                     id=main-col          # width 1fr: the chat column
-│   │   ├── TranscriptPanel(VerticalScroll)  id=transcript        # 1fr height
+│   │   ├── TabbedContent            id=chats             # 1fr height; one pane per session view (§1.6)
+│   │   │ └── TabPane "master"       id=tab-master        # + "▶ <title>" / "✓ <title>" per sub-agent run
+│   │   ├── TranscriptPanel(VerticalScroll)  id=transcript        # inside tab-master; sub panes get id=tr-sub-N
 │   │   │   ├── Markdown                     .ev-user             # user task / follow-ups
 │   │   │   ├── Markdown                     .ev-prose            # LLM prose between blocks
 │   │   │   ├── Vertical                     .ev-call             # one per tool call
@@ -70,17 +72,28 @@ Sidebar(Vertical)          id=sidebar        # width 32; F3 toggles display
 ├── Select[str]            id=service-select        # "key · 12k" rows; value = config.general.service
 ├── Static                 id=side-service-label    # "ChatGPT web (attachment OK) · 12,000 chars per paste · 500,000 chars context"
 ├── Button                 id=edit-services-btn     # "Edit services..." → App.action_settings() (F2)
+├── Static "AGENT SLOT"
+├── Select[str]            id=slot-select           # "MASTER" / "SUB-AGENT": which slot the buttons below calibrate (§1.6)
+├── Static                 id=side-slot-note        # "the main agent's chat window" / "delegation ON" / "delegation off · need: copy button, new-chat button"
 ├── Static "CHAT WINDOW"
 ├── Button                 id=set-region-btn        # "Set chat region..." → draw-a-box overlay (§3.4a)
 ├── Static                 id=side-region           # "not set - ..." / "812×540 at (1050, 340) · chatbot window"
-├── Button                 id=set-click-btn         # "Set click region..." → draw-a-box overlay (§3.4a)
-├── Static                 id=side-click            # "not set - ..." / "400×90 at (1200, 800) · outbound copies click it"
+├── Button                 id=set-chatbox-initial-btn   # the input box AS IT SITS IN A FRESH CHAT (centred)
+├── Static                 id=side-chatbox-initial
+├── Button                 id=set-chatbox-ongoing-btn   # ...and as it sits in an ongoing chat (docked bottom)
+├── Static                 id=side-chatbox-ongoing
 ├── Static "REASONING"
 ├── Button                 id=set-busy-btn          # "Set busy region..." → draw-a-box overlay, calibrated live
 ├── Static                 id=side-busy             # "not calibrated - ..." / "● GENERATING · match (diff 1.2%)"
+├── Button                 id=set-idle-btn          # "Set idle button..." → the same, calibrated while IDLE
+├── Static                 id=side-idle
 ├── Static "COPY BUTTON"
 ├── Button                 id=set-copy-btn          # "Set copy button..." → draw-a-box overlay (§3.4b)
 ├── Static                 id=side-copy             # "not set - ..." / "24×24 at (1830, 612) · set" / "... · clicked (diff 0.03)"
+├── Static "NEW CHAT"
+├── Button                 id=set-newchat-btn       # calibrate the browser's new-chat control (verified before every click)
+├── Static                 id=side-newchat
+├── Button                 id=newchat-btn           # "New browser chat": click it now, in the CALIBRATING slot
 └── Static .side-hint                               # "F3 hides this column · F2 settings · F1 help"
 (first child, above PROJECT: Static id=side-paste-flash — the blinking ">>> PRESS CTRL+V <<<" / ">>> PRESS ENTER <<<" banner, hidden until an outbound copy; §3.4b)
 ```
@@ -127,7 +140,28 @@ ServiceEditorScreen(ModalScreen)  .modal-box, id=service-editor-box (width 112)
 
 ### 1.5 End-of-session summary (SummaryScreen)
 
-Pushed on demand via `e` (end session); it is **not** auto-pushed on `task_done` — the user stays in the chat and may follow up (protocol.md §8). Contents: a `Static` rendering a Rich `Table` — turns, calls per tool, files created/modified (paths), commands run, total chars pasted both ways — plus the `task_done` summary text from the LLM as `Markdown`. Bindings on the modal: `u` undo entire session (turn-by-turn restore, with ConfirmScreen), `t` new session, `escape` back to main (transcript stays for review), `ctrl+q` quit.
+Pushed on demand via `e` (end session); it is **not** auto-pushed on `task_done` — the user stays in the chat and may follow up (protocol.md §8). Contents: a `Static` rendering a Rich `Table` — turns, calls per tool, files created/modified (paths), commands run, total chars pasted both ways, and `sub-agent runs` when the session delegated at least once — plus the `task_done` summary text from the LLM as `Markdown`. Bindings on the modal: `u` undo entire session (turn-by-turn restore, with ConfirmScreen), `t` new session, `escape` back to main (transcript stays for review), `ctrl+q` quit.
+
+### 1.6 Agent slots and transcript tabs (delegation)
+
+Delegation (protocol.md §3's `delegate` tool) gives the model a second chat window to run a bounded sub-task in. That turns two singletons into pairs, and each got the smallest change that works.
+
+**Slots — one calibration set per browser window.** Everything the user draws (chat region, both chat boxes, the busy/idle detectors, the copy button, the new-chat button) moves off MainScreen and into `SlotCalibration` (`agentclip.screen.slot` — pure data, stdlib only, unit-tested without Textual), one per `AgentSlot`: `MASTER` is the chat the session runs in, `SUBAGENT` the window a delegated sub-agent gets. Two independent pointers ride on top:
+
+- `_calibrating` — which slot the sidebar's buttons write into, moved by the `#slot-select` picker. Never locked by session state: the user must be able to calibrate the sub-agent window while the master chat is mid-turn. Both slots share the picker code, so the SUB-AGENT prompts are prefixed *"SUB-AGENT window · …"*.
+- `_live` — which slot the automation drives right now (the focus click, the finish-detector poller, the auto-copy flow). Only `start_browser_chat` / `end_browser_chat` move it.
+
+`SlotCalibration.can_delegate` is the single source of truth for "delegation is available", and it is strict on purpose — a new-chat button *and* somewhere to paste *and* a finish detector *and* a copy button. Without all four a sub-run would strand halfway, so a half-calibrated slot must read as unavailable. `missing()` returns the gaps, which the sidebar shows in `#side-slot-note` and which the controller embeds in the error the *model* gets if it calls `delegate` against an uncalibrated host.
+
+`start_browser_chat(slot)` is deliberately all-or-nothing: it verifies the new-chat button against its snapshot, clicks it, and **only then** retargets `_live`, resets the finish trigger and restarts the poller. A `False` return guarantees nothing was clicked and nothing was retargeted, which is what lets the controller abort a delegation before its first paste — a sub-agent's bootstrap pasted into the master's chat would corrupt that conversation irrecoverably. `end_browser_chat()` is the mirror and is unconditional: it runs in the controller's `finally`, so it must work even after the sub-run blew up.
+
+**Tabs — one transcript per session view.** The transcript becomes a `TabbedContent` with one `TranscriptPanel` per pane. The master's is always there (its widget ids are the pre-tabs ones, so every existing selector still resolves); each delegation adds one, labelled `▶ <task title>` while it runs and `✓ <task title>` once it is done. Nothing is ever removed or disabled short of `/new` — the panels are output-only and the composer always targets the controller's *active* session, so leaving a finished sub-agent's transcript readable costs nothing.
+
+The load-bearing distinction is **focused panel ≠ visible tab**. `MainScreen.transcript` resolves to `_focused_panel`, which only `focus_session_view` moves; clicking a tab (or `F6`) moves what the user *sees* and nothing else. Without that split, a user reading the master tab mid-delegation would silently divert the sub-agent's output into it, which looks exactly like data loss. `render_log` walks every panel — the master's transcript first, then each sub-agent's under a `## sub-agent: <title> (<chat_name>)` heading — so an export carries the whole delegation tree.
+
+**Who is talking.** During a sub-run every piece of state the controller pushes describes the sub-agent, so three places say so: the watcher status segment is rebadged `◆ SUB-AGENT · …` in magenta (`.st-sub`, a colour used nowhere else), the approval drawer's title gains a `SUB-AGENT ‹task title› · ` prefix, and every bell/toast is prefixed `sub-agent: `. The `SessionView` snapshot carries `session_id` / `session_role` / `session_title` for exactly this (additive, master-shaped defaults).
+
+**Known limitation.** The tool catalog is baked into the bootstrap, so whether the model is offered `delegate` at all is decided once, at session start, from `SlotCalibration.can_delegate`. Calibrating the sub-agent slot mid-session notifies *"sub-agent slot ready — /new to give the model the delegate tool"*; it cannot be retro-fitted into a conversation the model has already read.
 
 ---
 
@@ -153,6 +187,7 @@ IDLE ──copy bootstrap──▶ ARMED ──reply parsed──▶ EXECUTING �
 | `run_command` | auto-run if allowlist matches (transcript shows matched rule: `auto: matched "pytest *"`); else **gated** |
 | `write_file`, `edit_file` | **gated**, unless session auto-accept-edits is ON |
 | `ask_user` | pauses for typed answer (not an approval; §9) |
+| `delegate` | auto-runs (master only, and only when the sub-agent chat is calibrated): parks the turn and runs a sub-agent in the second window — §3.4c. Never gated, because opening a sub-agent chat is loudly visible and every call the sub-agent makes is gated normally |
 | `task_done` | auto-runs; ends the turn and marks the session complete (the user may still follow up to reopen it) |
 
 YOLO mode (§2.6) overrides the whole table for the gated rows: when ON, `run_command`, `write_file`, and `edit_file` all auto-run regardless of allowlist/deny tokens.
@@ -259,24 +294,25 @@ The chat box also accepts slash commands (parsed in `SessionController.submit_me
 
 - `/yolo [on|off]` — toggle YOLO mode (§2.6).
 - `/new` — clear the transcript and start a fresh session (re-arms the inline start flow of §1.3; the service picker unlocks so the next session can use a different preset). Refused mid-turn (answer/finish the current step first); reachable while armed/idle or after `task_done`.
+- `/abort` — end the delegated sub-agent run in flight (§3.4c). A no-op with a warning when nothing is delegated.
 - `/help` — list the commands in the transcript.
 
 Precedence: while answering an `ask_user` question, the typed text is **always** the answer (commands are not parsed) — so a slash-leading answer like `/etc/hosts` is delivered verbatim, never eaten. A follow-up message that must begin with a literal slash is escaped as `//…` (one slash is stripped and the rest sent as a message).
 
 ### 3.4a Screen regions and the focus click (the "hand me back to the browser" nudge)
 
-The user can draw **two** boxes on their physical screen, both from the sidebar's CHAT WINDOW block, both the same overlay with a different instruction:
+The user draws **three** boxes for this from the sidebar's CHAT WINDOW block, all the same overlay with a different instruction, all written into whichever slot `#slot-select` currently points at (§1.6):
 
-- **Chat region** (`#set-region-btn` → `#side-region`) — the *window that hosts the AI chatbot*. It describes where the conversation lives; it is not primarily a click target.
-- **Click region** (`#set-click-btn` → `#side-click`) — *where AgentClip clicks once it has fully handled a model response*, i.e. after each outbound clipboard copy. Typically the chat's input box.
+- **Chat region** (`#set-region-btn` → `#side-region`) — the *window that hosts the AI chatbot*. It describes where the conversation lives; it is the last-resort click target and the vertical span of the copy-button search band.
+- **The chat input box, calibrated twice** (`#set-chatbox-initial-btn` / `#set-chatbox-ongoing-btn`) — because a fresh chat centres its box and an ongoing one docks it at the bottom, and after a new-chat click the layout is the *initial* one. Each is a `CalibratedElement` (region + pixel snapshot), not a bare region: the snapshot is how `_chatbox_region` decides which layout is actually on screen right now.
 
-After **every outbound clipboard copy** — bootstrap, results, user answers, revert notices, re-copies — MainScreen clicks the center of the **click region if one is drawn, otherwise the chat region's** (`self._click_region or self._chat_region` in `_click_after_response`, which now returns `bool` — True only when a region was drawn AND the click landed), so the browser regains OS focus and the paste lands without alt-tabbing. Neither drawn means no click at all.
+After **every outbound clipboard copy** — bootstrap, results, user answers, revert notices, re-copies — MainScreen clicks the centre of whichever chat box currently *matches its snapshot* (ongoing is probed first: mid-session it is the common case, so the usual path costs one capture), falling back to the other box and finally to the chat region. `_click_after_response` returns `bool` — True only when a target was known AND the click landed. Nothing drawn means no click at all. Every one of those reads comes from the **live** slot, so mid-delegation the click goes into the sub-agent's window.
 
 Only when that click landed does `copy_outbound` go one step further: after a 0.15 s settle it sends a synthetic Ctrl+V itself (`screen.focus.send_paste`), dropping the outbound payload straight into the focused input. If no region is drawn — or the click did not land — the paste is never attempted: focus could be on any window, and pasting into an unknown app is the one unforgivable failure mode here, so it stays click-only in that case exactly as before.
 
 - **Drawing**: each button spawns the tkinter overlay as a *child process* (`agentclip --pick-region`, hidden flag) — tkinter cannot share the Textual process (both want an event loop; tkinter wants the main thread). A `_picker_open` flag on MainScreen refuses (with a toast) any picker button press — chat, click, or busy — while an overlay is already up, so only one overlay is ever on screen; an exclusive worker group alone cannot guarantee this, because cancelling the worker does not kill the blocking child overlay process. The overlay is a translucent topmost fullscreen window spanning the whole virtual desktop (multi-monitor, Windows metrics); drag draws a rectangle, `Esc` cancels, a sub-8-px drag is treated as a stray click and ignored. The child prints `left top width height` on stdout; cancel prints nothing. Each caller passes its own prompt ("the window that hosts the AI chatbot" / "the spot to click after each response").
 - **Clicking**: `screen.focus.click_region` — Windows-only `SetCursorPos` + `SendInput` via ctypes (stdlib, no new dependency). Both processes force DPI awareness first so overlay coordinates and click coordinates share the physical-pixel space. On non-Windows the click returns False and the user is told once (not per copy) that focus clicks are unsupported.
-- **Scope**: session-only by design (windows move around). Both regions live on MainScreen (`_chat_region`, `_click_region` — same `ScreenRegion` dataclass), show in the sidebar's `#side-region` / `#side-click` labels, can be redrawn mid-session (window moved), and reset on `/new` / the summary's *new session*. Nothing is persisted to config.
+- **Scope**: session-only by design (windows move around). Every calibration lives in a `SlotCalibration` on MainScreen (§1.6), shows in the sidebar's `#side-region` / `#side-chatbox-*` labels, can be redrawn mid-session (window moved), and is cleared for **both** slots on `/new` / the summary's *new session*. Nothing is persisted to config.
 - **Layering**: all of it lives in `agentclip.screen` (region/overlay/picker/focus), an OS side-effect leaf like `clip` that only `tui`/`cli` may import (enforced in test_layering). The controller never knows the feature exists — the click rides inside the view's `copy_outbound`.
 
 ### 3.4b The copy button and auto-copy-click
@@ -286,8 +322,8 @@ Most chat sites need a click to get a response onto the clipboard at all — the
 - **Calibrating**: "Set copy button..." (`#set-copy-btn`) spawns the same draw-a-box overlay as the other regions, prompting for a **tight** box around **one** copy-button icon — "pick the one under the last response, while the page is idle." The drawn region is dual-purpose: it is later the click target, and its pixels are captured immediately (`capture_region`) as a template (`_copy_template`) the auto-flow searches for. A capture failure at calibration time is reported and adopts neither the region nor the template — mirrors the busy region's calibration-capture handling. `#side-copy` shows `"<region> · set"` (not-set default otherwise); if no chat region is drawn yet the toast adds a nudge that one enables a full-height scan.
 - **Arming and firing**: `on_busy_probed` feeds every probe into `_track_copy_trigger`. A `MATCH` probe arms the trigger (a generation is in progress) and resets the CHANGED streak; two **consecutive** `CHANGED` probes while armed *and* a template is calibrated fire `_auto_copy_flow` exactly once and disarm, so it cannot refire until the next `MATCH`. An `ERROR` probe resets the streak but leaves the armed flag alone — a single capture blip must not cancel an in-flight finish. Requiring two consecutive `CHANGED` probes (not one) absorbs a single noisy poll; requiring `MATCH` first means the flow never fires before a generation was ever observed.
 - **The flow** (`_auto_copy_flow`, all OS calls off the event loop via `asyncio.to_thread`):
-  1. Focus the browser exactly like `copy_outbound` does after every copy — `_click_after_response` (click region wins, chat region is the fallback) — then a 0.15 s settle.
-  2. Scroll the transcript to the bottom fast: `scroll_region(target, -40)` where `target` is the chat region if drawn, else the click region, else the copy region itself. A 0.4 s pause lets the page render after the flick.
+  1. Focus the browser exactly like `copy_outbound` does after every copy — `_click_after_response` (the matching chat box wins, the chat region is the fallback) — then a 0.15 s settle.
+  2. Scroll the transcript to the bottom fast: `scroll_region(target, -40)` where `target` is the chat region if drawn, else the chat box, else the copy region itself. A 0.4 s pause lets the page render after the flick.
   3. Build a same-width vertical search band at the copy region's `left`/`width`: when a chat region is drawn, the band spans the union of the chat and copy regions' vertical extents (the whole transcript column, so any response's icon is in view); otherwise it is just the copy region. If that union would still be shorter than the template, the flow falls back to the copy region alone rather than handing `screen.template` a band it would reject.
   4. Capture the band and hand it to `agentclip.screen.template.find_lowest_match(template, band)`, which scans bottom-up and returns the first (i.e. lowest, i.e. newest) match — the icon appears once per response, so multiple matches are normal and only the bottom-most one matters. A capture failure or a defensive `ValueError` from the matcher is reported and the flow aborts.
   5. No match: toast "copy button not found on screen" (warning) and stop — nothing is clicked. A match: a **verified, retried click** (`_verified_copy_click`) at the matched rectangle (`copy_region.left`, `band.top + match.y_offset`, `copy_region.width`, `template.height`) — sometimes the cursor lands on the right spot but the hover-rendered button hasn't quite registered the click, so a single unverified click is not trusted. The provider's clipboard text is read once as a baseline before the first attempt; up to **three** attempts fire, each at a small offset from the matched rect's position that stays well inside the ~24 px icon — `(0, 0)`, then `(-3, -3)`, then `(+3, +3)` — each attempt doing `click_region(rect, settle_s=0.05)` (the 50 ms hover settle, same reasoning as the copy-button hover elsewhere) followed by up to six clipboard reads 0.2 s apart, stopping as soon as the text differs from the baseline. If the baseline read itself is unavailable (`ClipboardUnavailable`), the flow falls back to one unverified click instead of retrying blind — there is no signal to retry against.
@@ -295,6 +331,25 @@ Most chat sites need a click to get a response onto the clipboard at all — the
 - Every branch also repaints `#side-copy` with a short ASCII status (`set` / `clicked (diff 0.03)` / `click did not take` / `not found` / `capture failed` / `search failed`).
 - **The paste flash and auto-paste**: automation covers browser→AgentClip; AgentClip→browser used to always end in a human Ctrl+V, and now only sometimes does. Right after its focus click, `copy_outbound` checks whether that click actually landed (`_click_after_response` now returns `bool`): if it did, a 0.15 s settle and then a synthetic Ctrl+V (`screen.focus.send_paste`) drops the payload straight into the focused input, and the sidebar banner reads `>>> PRESS ENTER <<<` (`Sidebar.ENTER_FLASH_TEXT`) — the human's only job left is the send keystroke. If the click did not land, or no region was drawn at all, no paste is attempted (pasting into an unknown window is the one unforgivable failure mode) and the banner falls back to its original `>>> PRESS CTRL+V <<<` wording (`PASTE_FLASH_TEXT`). Either way it is the same obnoxious banner at the very top of the sidebar (`#side-paste-flash`, bold, red/yellow, blinking at 0.4 s via a Sidebar-owned timer toggling the `flash-alt` class — pure presentation, so the dumb widget may own it), just with different text; `Sidebar.show_paste_flash(text=...)` takes the copy to show. It hides when the moment has provably passed: a `MATCH` busy probe (the model is chewing — the paste/send landed), a new `ClipboardCaptured` (the conversation moved on without it), or `clear_transcript()`. `Sidebar.show_paste_flash`/`hide_paste_flash` are the only entry points; display on/off (and, now, which text) is the tested contract.
 - **Scope and layering**: session-scoped (`_copy_region`, `_copy_template`, `_copy_armed`, `_copy_changed_streak`), reset by `clear_transcript()` like the other three regions; nothing persisted to config. Lives entirely on MainScreen, like the focus click — the controller never knows the feature exists.
+
+### 3.4c A sub-agent run, end to end
+
+When the model calls `delegate`, the engine parks the turn in `AWAITING_SUBAGENT` and hands the controller a `Delegate(task, context)` step. What follows is a *nested session*, not a parallel one: the master's flow coroutine is blocked inside the delegate call for the whole run, which is exactly what lets the single clipboard watcher, the single approval gate, the single `ask_user` future and the single focused transcript be **retargeted** rather than duplicated. At most one chat is live at any instant.
+
+1. **Ask first.** `view.delegation_available()` is checked before anything is built. False ⇒ the model gets `status=error` naming the missing calibrations (`view.delegation_missing()`), the master's turn continues, and no tab is opened. The controller never learns what a "new-chat button" is — the gaps cross the port as data.
+2. **Save the master.** The whole per-session context (engine, chat name, preset, stats, glyph strip, last outbound, YOLO mirror) is snapshotted into a local and restored in a `finally`. YOLO deliberately does **not** inherit: `ApprovalPolicy` is per-engine, so a sub-agent starts from the configured default.
+3. **Build a sub-agent.** `EngineRequest(role="subagent", allow_delegate=False, parent_chat_name=…)` → its own Engine, its own chat name, its own `SessionStore` (the `session` event records the parent, so the audit trail joins up), the sub-agent bootstrap variant, and a catalog with no `delegate` in it — nesting is excluded by construction, not by a special case.
+4. **Open its tab and compose.** `open_session_view(ref)` mounts and focuses the pane; the task (plus `context` under its documented heading) is composed into a bootstrap. A `BudgetExceeded` here is an error result to the master, never a crash.
+5. **Open its chat — before any paste.** `start_chat(ref)` verifies and clicks the SUB-AGENT slot's new-chat button and only then retargets the automation. **False aborts the delegation with zero paste calls**, because a sub-agent's bootstrap in the master's chat is unrecoverable. This is the single most damaging failure mode in the feature and has its own tests at both layers.
+6. **Run the ordinary loop.** Ingest → review → gate → execute, against the sub-agent's engine, on the sub-agent's tab, pasting into the sub-agent's window. Replies are routed by chat name (`peek_chat_name`, a cheap scan of the last sentinel line) **before** the busy check — a sub-agent reply reaching the master's depth-1 queue would never be looked at, since the master is busy for the whole run. A master-chat reply arriving mid-run is dropped with an explanation, never queued: the master's next payload is composed fresh afterwards, so it is stale by definition.
+7. **Hand the result back.** `task_done`'s `result` becomes the `delegate` call's result body, verbatim (falling back to `summary`, then to a placeholder — the delegating agent's result body is never empty). The tab is annotated and ticked, `end_chat` returns the automation to the master window, the master's context is restored, its tab is refocused, and the turn resumes at the call *after* `delegate`.
+
+**Waiting and stopping.** There is no wall-clock timeout — the transport is a human alt-tabbing between two browser windows and a bounded sub-task can honestly take twenty minutes. The composer therefore stays enabled for the whole sub-run (its border reads *"Sub-agent running · /abort ends it and tells the model"*) even though the master's flow is busy, because `/abort` is typed there. Two escape hatches, deliberately different:
+
+- **`ctrl+x`** cancels the tool calls running *right now*, in whichever chat is live. The turn still finishes and reports (the killed call plus the skipped ones) into that chat. A delegation survives it.
+- **`/abort`** ends the whole run. The master gets `status=error, body="the user aborted the sub-agent run…"`. Where it lands depends on where the run is parked, and all three cases converge on the same `finally`: waiting for a reply ⇒ the reply future raises; at an approval gate ⇒ the gate is rejected (which aborts that turn) and a latched flag ends the run at the next reply park; executing tool calls ⇒ `request_cancel()` on the sub-agent's engine unblocks the worker, that turn ends normally, and the latch ends the run when the loop comes back for a reply. A sub-agent's `ask_user` is **not** abortable this way: while the composer is in answer mode its text is the answer, verbatim (§3.3a's precedence rule), so `/abort` typed there is an answer like any other.
+
+Every failure path — uncalibrated, unverified click, abort, budget, or an exception nobody predicted — comes back to the model as an `error` result on the `delegate` call, and the `finally` always restores the master, drops the live slot back to the master's window and refocuses the master's tab.
 
 ### 3.4 Manual fallback and copy-again
 
@@ -415,9 +470,11 @@ The user is staring at the browser; the terminal must call them back:
 | `F1` / `?` | HelpScreen | global (App) |
 | `F2` | ServiceEditorScreen | global (App) |
 | `F3` | show/hide the settings sidebar | MainScreen (priority: works while the composer has focus) |
+| `F4` | SettingsScreen (preferences) | global (App) |
+| `F6` | show the next transcript tab — browsing only, it never moves where output lands (§1.6) | MainScreen (priority; `show=False`, only meaningful once a sub-agent tab exists) |
 | `enter` | send the composer (task at start, answer, follow-up) | composer focused |
 | `ctrl+s` / `ctrl+enter` | send the composer without focusing it | MainScreen (priority) |
-| `ctrl+x` | cancel the tool calls running now (`Engine.request_cancel`) | MainScreen (priority), while the RunningBar is up (`executing`) |
+| `ctrl+x` | cancel the tool calls running now (`Engine.request_cancel`) — in whichever chat is live; the turn still reports back. `/abort` is the one that ends a delegation (§3.4c) | MainScreen (priority), while the RunningBar is up (`executing`) |
 | `ctrl+p` | command palette (every action mirrored here) | global, Textual default |
 | `ctrl+q` | quit (Confirm if mid-turn) | global, Textual default |
 | SummaryScreen: `u` undo session, `t` new session, `esc` close | | modal-local BINDINGS |

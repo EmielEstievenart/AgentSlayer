@@ -82,7 +82,7 @@ from textual.widgets import Button, Collapsible, Footer, Input, TabbedContent, T
 from textual.worker import Worker, get_current_worker
 
 from agentclip.app import SessionController, SessionSpec, SessionView
-from agentclip.app.types import SessionRef
+from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import Severity
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.clip.watcher import SelfWriteSet, watch, write_via
@@ -169,6 +169,15 @@ def _fmt_k(chars: int) -> str:
     return f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
 
 
+# Leading state glyphs the watcher segment prefixes its text with; a sub-agent
+# run replaces them with its own, so they are stripped before rebadging.
+_STATE_GLYPHS = "●○■✓✗"
+
+
+def _strip_glyph(text: str) -> str:
+    return text.lstrip(_STATE_GLYPHS).lstrip()
+
+
 def _format_busy_probe(probe: BusyProbe) -> str:
     """Unmistakable readout for the sidebar - this is the whole deliverable."""
     if probe.state is BusyState.ERROR:
@@ -253,12 +262,16 @@ class MainScreen(Screen[None]):
     watch_paused: reactive[bool] = reactive(False, bindings=True)
     reject_open: reactive[bool] = reactive(False, bindings=True)
     has_outbound: reactive[bool] = reactive(False, bindings=True)
+    # True for the whole of a delegated sub-agent run. The master's flow is busy
+    # throughout, which would normally disable the composer - but /abort is the
+    # only way out of a sub-run, so the box has to stay reachable.
+    sub_running: reactive[bool] = reactive(False, bindings=True)
 
     def __init__(
         self,
         config: Config,
         provider: ClipboardProvider,
-        engine_factory: Callable[[str], Engine],
+        engine_factory: Callable[[EngineRequest], Engine],
         project_root: Path,
     ) -> None:
         super().__init__()
@@ -269,6 +282,10 @@ class MainScreen(Screen[None]):
         self._watch_worker: Worker[None] | None = None
         self._snap: StatusSnapshot | None = None  # mirrors SessionView.snapshot (read by tests)
         self._gate_kind: str | None = None  # the in-flight gate's kind, for a/check_action
+        # Mirrors SessionView.session_role/title: whose session the chrome is
+        # currently describing (see render_state).
+        self._session_role = "master"
+        self._session_title = ""
         # Resolved by the first composer send while waiting for a new session.
         self._new_session_future: asyncio.Future[SessionSpec | None] | None = None
         # One transcript panel per session view, keyed by SessionRef.id: the
@@ -540,7 +557,11 @@ class MainScreen(Screen[None]):
         if action == "export_log":
             return True if self.session_active else None
         if action == "submit_composer":
+            # ...and during a sub-agent run, where the box exists so /abort can
+            # be typed even though the master's flow is busy throughout.
             if self.awaiting_answer or self.awaiting_new_session:
+                return True
+            if self.sub_running and not self.pending_approval:
                 return True
             return (
                 self.session_active
@@ -706,6 +727,13 @@ class MainScreen(Screen[None]):
         if not self.is_mounted:
             return
         self._snap = view.snapshot
+        # Whose state the rest of this snapshot describes. During a delegation
+        # every field below is the SUB-AGENT's, so the status bar, the gate
+        # title and the composer all have to say so - a magenta status segment
+        # is the one glance that tells the user which conversation is asking.
+        self._session_role = view.session_role
+        self._session_title = view.session_title
+        self.sub_running = view.session_role == "subagent"
         self.session_active = view.session_active
         self.has_outbound = view.has_outbound
         self.pending_approval = view.pending_approval
@@ -731,8 +759,17 @@ class MainScreen(Screen[None]):
         if not self.is_mounted:
             return
         with suppress(NoMatches):
-            self.action_panel.show_approval(action, position, queue)
+            self.action_panel.show_approval(action, position, queue, prefix=self._gate_prefix())
             self.action_panel.focus_default()  # focus Approve so y/n/a bubble to the screen
+
+    def _gate_prefix(self) -> str:
+        """Whose call this gate is for. The user approving an edit mid-delegation
+        is approving a SUB-agent's edit, and nothing else on screen would say so:
+        the diff and the transcript around it look the same either way."""
+        if self._session_role != "subagent":
+            return ""
+        title = self._session_title
+        return f"SUB-AGENT ‹{title}› · " if title else "SUB-AGENT · "
 
     def hide_gate(self) -> None:
         self._gate_kind = None
@@ -1683,6 +1720,16 @@ class MainScreen(Screen[None]):
         """
         return self._slots[AgentSlot.SUBAGENT].can_delegate
 
+    def delegation_missing(self) -> tuple[str, ...]:
+        """The calibrations still standing between here and ``can_delegate``.
+
+        Handed to the controller as data so the error the *model* gets when it
+        calls ``delegate`` against an uncalibrated host names the actual gaps -
+        the controller cannot import ``screen`` to ask, and should not have to
+        know what a "new-chat button" is.
+        """
+        return self._slots[AgentSlot.SUBAGENT].missing()
+
     async def start_browser_chat(self, slot: AgentSlot) -> bool:
         """Open a fresh browser chat in ``slot`` and make it the live one.
 
@@ -1831,6 +1878,12 @@ class MainScreen(Screen[None]):
         elif self.awaiting_answer:
             composer.disabled = False
             composer.border_title = "Answer the model  ·  Enter sends · Ctrl+J newline"
+        elif self.sub_running and not self.pending_approval:
+            # The master's flow is busy for the whole delegation, so the usual
+            # "armed and idle" rule would lock the box - but /abort is the only
+            # way to end a sub-run, and it is typed here.
+            composer.disabled = False
+            composer.border_title = "Sub-agent running  ·  /abort ends it and tells the model"
         elif (
             self.session_active
             and not self.busy
@@ -1869,6 +1922,19 @@ class MainScreen(Screen[None]):
     # -- status bar -----------------------------------------------------------
 
     def _watch_segment(self) -> tuple[str, str]:
+        """The leftmost status segment: what the app wants from the user next.
+
+        While a delegated run is live the whole segment is rebadged magenta and
+        prefixed ``◆ SUB-AGENT``, because everything it reports - the phase, the
+        approval, the question - is that sub-agent's, not the conversation the
+        user is watching.
+        """
+        text, style = self._base_watch_segment()
+        if self._session_role == "subagent":
+            return f"◆ SUB-AGENT · {_strip_glyph(text)}", "st-sub"
+        return text, style
+
+    def _base_watch_segment(self) -> tuple[str, str]:
         if self.phase_name == "DONE":
             return "✓ done - reply to continue", "st-done"
         if self.pending_approval:

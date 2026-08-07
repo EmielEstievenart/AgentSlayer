@@ -66,13 +66,20 @@ src/agentclip/
 │   ├── watcher.py         # poll loop (plain function, thread-agnostic), self-write suppression
 │   └── fake.py            # FakeClipboard + ScriptedClipboard for tests
 │
+├── app/                   # UI-agnostic orchestration: drives the engine, never imports tui/clip/screen
+│   ├── controller.py      # SessionController: flows, gate/ask futures, delegation (nested sessions)
+│   ├── view.py            # ChatView Protocol (the one UI seam) + SessionView state snapshot
+│   └── types.py           # SessionSpec, SessionRef, EngineRequest, SessionStats
+│
 ├── screen/                # OS screen layer (like clip: imported ONLY by tui/cli; stdlib-only)
 │   ├── region.py          # ScreenRegion dataclass + the "left top width height" wire format
 │   ├── overlay.py         # draw-a-box tkinter overlay; runs in a CHILD process (--pick-region)
 │   ├── picker.py          # spawns the child (works frozen and from source), parses its stdout
 │   ├── capture.py         # GDI BitBlt/GetDIBits screen-region grab (ctypes) -> RegionImage
 │   ├── focus.py           # Windows SetCursorPos+SendInput click/scroll into a region; window focus snap-back (ctypes)
+│   ├── element.py         # CalibratedElement (region + snapshot) + probe_element: "still the thing I was pointed at?"
 │   ├── busy.py            # baseline-vs-fresh-capture diff -> BusyState (MATCH/CHANGED/ERROR)
+│   ├── slot.py            # AgentSlot (MASTER/SUBAGENT) + SlotCalibration: one calibration set per chat window
 │   └── template.py        # bottom-up vertical-band scan for a captured icon -> lowest match
 │
 └── tui/
@@ -134,7 +141,9 @@ class Composer:
 # engine/engine.py -------------------------------------------------------
 class Phase(Enum):
     IDLE = auto(); AWAITING_REPLY = auto(); REVIEW = auto()
-    SENDING_CHUNKS = auto(); AWAITING_USER = auto(); DONE = auto()
+    SENDING_CHUNKS = auto(); AWAITING_USER = auto()
+    AWAITING_SUBAGENT = auto()   # a `delegate` call parked mid-turn; see below
+    DONE = auto()
 
 class Decision(Enum):
     APPROVE = auto(); REJECT = auto(); APPROVE_ALL_EDITS = auto()  # escalation sticks for session
@@ -155,15 +164,51 @@ class Engine:
     def ingest(self, text: str) -> IngestResult                  # AWAITING_REPLY → REVIEW (or noise/error)
     def pending(self) -> tuple[PendingAction, ...]
     def decide(self, call_id: str, decision: Decision) -> None
-    def execute(self) -> StepResult                              # REVIEW → AWAITING_REPLY | AWAITING_USER | DONE
+    def execute(self) -> StepResult                              # REVIEW → AWAITING_REPLY | AWAITING_USER | AWAITING_SUBAGENT | DONE
     def answer_user(self, text: str) -> Outbound                 # AWAITING_USER → AWAITING_REPLY
+    def deliver_delegate_result(self, text: str, *, status: ResultStatus = "ok",
+                                code: str | None = None) -> StepResult   # AWAITING_SUBAGENT → resume the turn
     def request_cancel(self) -> None                             # THREAD-SAFE (sets an Event); no-op when idle
     def next_chunk(self) -> Outbound | None                      # M3: chunk ACK advance
     def undo_last_turn(self) -> UndoReport                       # M3 (backups written from M1)
     def status(self) -> StatusSnapshot                           # phase, turn, budget use — for status bar
+    role: Literal["master", "subagent"]                          # immutable; picks the bootstrap variant
+    chat_name: str                                               # immutable; stamped on every outbound
 
 # IngestResult is a union: NewTurn(parsed) | ChunkAck | Noise | ProtocolError(issues)
-# StepResult is a union: Send(outbound) | AskUser(question) | Done(summary)
+# StepResult is a union: Send(outbound) | AskUser(question) | Delegate(task, context) | Done(summary, outbound, result)
+#
+# Delegate is the exact mirror of AskUser: the engine parks mid-plan, hands the
+# host something it cannot do itself, and resumes when the host hands a body
+# back. AskUser asks a human; Delegate asks a whole second agent. Both resume
+# methods write an ordinary ToolResult for the parked call, so from the model's
+# side a delegation is just a tool call that took a while — and every failure of
+# the run (uncalibrated chat, unverified new-chat click, user abort, crash) comes
+# back through deliver_delegate_result as status="error" with a code, never as a
+# dropped call. Done.result carries task_done's `result` param (a sub-agent's
+# deliverable) and is empty for an ordinary master session.
+
+# app/types.py -----------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class EngineRequest:
+    """What the controller asks cli.make_engine_factory to build."""
+    service: str
+    role: Literal["master", "subagent"] = "master"
+    allow_delegate: bool = False        # `delegate` in the catalog at all (master + calibrated only)
+    chat_name: str | None = None        # None → the factory draws a fresh one
+    parent_chat_name: str | None = None # recorded in the session log for the audit trail
+
+@dataclass(frozen=True, slots=True)
+class SessionRef:
+    id: str                             # "master", "sub-1", "sub-2", ...
+    role: Literal["master", "subagent"]
+    title: str                          # the transcript tab's label
+    chat_name: str                      # routes pastes to the right session
+
+# A request object rather than a bare service key because role, catalog gating
+# and chat naming have to travel as plain data: the factory lives in `cli` (it
+# needs the tool/store/composer wiring) while the decision to spawn a sub-agent
+# is made in `app`, which must not import `screen` or `tui` to make it.
 
 # tools/registry.py ------------------------------------------------------
 @dataclass(frozen=True, slots=True)

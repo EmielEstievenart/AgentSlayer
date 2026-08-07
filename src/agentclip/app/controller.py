@@ -17,23 +17,36 @@ Threading model (unchanged from the old MainScreen, now expressed through the po
   time (the ``busy`` flag). A reply arriving mid-turn is queued depth-1, newest wins.
 - The approval gate is an ``asyncio.Future`` resolved by ``submit_decision``;
   ask_user uses a second future resolved by ``submit_message``.
+
+Delegation (the ``delegate`` tool) is a *nested session*, not a second one
+running alongside: when the master engine parks in ``AWAITING_SUBAGENT`` the
+controller pushes the master's whole session context onto a local, swaps in a
+freshly built sub-agent Engine, runs the ordinary ingest -> review -> execute
+loop against it until it emits ``task_done``, and then restores the master and
+feeds the sub-agent's ``result`` back as the ``delegate`` call's result body.
+The master is blocked inside its own flow coroutine for the entire sub-run, so
+**at most one session is live at any instant** - which is precisely what lets
+the single clipboard watcher, the single approval gate, the single ask_user
+future and the single focused transcript be *retargeted* instead of duplicated.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
-from agentclip.app.types import SessionStats
+from agentclip.app.types import EngineRequest, SessionRef, SessionStats
 from agentclip.app.view import ChatView, SessionView
 from agentclip.config import Config, ServicePreset
 from agentclip.engine.engine import (
     AskUser,
     ChunkAck,
     Decision,
+    Delegate,
     Done,
     Engine,
     EngineStateError,
@@ -47,9 +60,45 @@ from agentclip.engine.engine import (
     StepResult,
 )
 from agentclip.protocol.composer import BudgetExceeded
-from agentclip.protocol.types import Outbound, ParsedReply
+from agentclip.protocol.parser import peek_chat_name
+from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus
 
 _T = TypeVar("_T")
+
+# What a delegation hands back to the master when it could not run. Every one of
+# these is delivered as an `error` ToolResult on the `delegate` call, never as a
+# silent drop: the model made a call and must always learn what became of it.
+_DELEGATION_HINT = "hint: do this part of the work yourself in this conversation."
+
+_NEW_CHAT_FAILED_BODY = (
+    "delegation failed: AgentClip could not open a fresh chat for the sub-agent. "
+    "The new-chat button did not verify against its calibration, so nothing was "
+    "clicked and nothing was pasted - no sub-agent ran.\n" + _DELEGATION_HINT
+)
+
+_ABORTED_BODY = (
+    "the user aborted the sub-agent run before it produced a result, so nothing "
+    "was handed back.\n"
+    "hint: ask the user what they want instead, or do the work yourself here."
+)
+
+# Unreachable by construction (a sub-agent's registry has no `delegate`, so the
+# call pre-resolves as unknown_tool); kept as the belt to that braces.
+_NESTED_DELEGATION_BODY = (
+    "a sub-agent cannot delegate further - nesting is not supported.\n"
+    "hint: do this part of the task yourself."
+)
+
+_EMPTY_RESULT_BODY = (
+    "the sub-agent finished without stating a result. Treat the sub-task as "
+    "unverified and check anything you depended on it for."
+)
+
+# Annotation left on a sub-agent's transcript tab when its run ends, whatever
+# the outcome - the tab stays mounted and readable afterwards.
+_FINISHED_NOTE = "sub-agent run ended - the result above was handed back to the delegating agent"
+
+_ABORT_NOTE = "the user aborted the sub-agent run"
 
 # Noise reason -> toast. "{chat}" is filled with the session's chat name.
 _NOISE_TEXT = {
@@ -78,13 +127,81 @@ def _parse_onoff(arg: str, *, current: bool) -> bool | None:
     return None
 
 
+def _short_title(task: str) -> str:
+    """A tab-sized label for one delegated task (first line, squeezed)."""
+    line = " ".join(task.split())
+    if not line:
+        return "sub-agent"
+    return line if len(line) <= 32 else line[:31].rstrip() + "…"
+
+
+def _compose_sub_task(req: Delegate) -> str:
+    """The delegated task as the sub-agent receives it: the `task` param, plus
+    the optional `context` param under the heading protocol.md section 2.1
+    promises the sub-agent it will find it under."""
+    if not req.context:
+        return req.task
+    return f"{req.task}\n\nContext from the delegating agent:\n{req.context}"
+
+
+def _unavailable_body(missing: tuple[str, ...]) -> str:
+    gaps = ", ".join(missing) if missing else "the sub-agent chat window"
+    return (
+        "delegation is unavailable: the sub-agent chat window is not calibrated "
+        f"in AgentClip (missing: {gaps}). No sub-agent was started.\n"
+        f"{_DELEGATION_HINT} Do not retry delegate."
+    )
+
+
+def _budget_body(exc: BudgetExceeded) -> str:
+    return (
+        f"the sub-task did not fit in one paste: its bootstrap needs "
+        f"{exc.needed_chars:,} chars but the service allows {exc.budget_chars:,}. "
+        "No sub-agent ran.\n"
+        "hint: split it into smaller delegations, or do the work yourself."
+    )
+
+
+class _SubagentAborted(Exception):
+    """The user ended a sub-agent run with /abort.
+
+    Raised into whichever await the sub-run is parked on (the reply future, the
+    ask_user future) so the run unwinds through ``_run_subagent``'s ``finally``
+    like any other failure - one restore path, not two.
+    """
+
+
+@dataclass(slots=True)
+class _SessionContext:
+    """Everything ``SessionController`` holds *per session*, saved whole.
+
+    Nearly every method on the controller reads ``self._engine`` /
+    ``self._stats`` / ``self._snap``; a delegation swaps all of it for the
+    sub-agent's and swaps it back afterwards, so those methods work on the
+    sub-agent unchanged. Save-and-restore beats threading a session parameter
+    through thirty call sites, and it is exactly right because delegation is
+    single-flight: there is never a second live session to confuse it with.
+    """
+
+    ref: SessionRef
+    engine: Engine
+    chat_name: str | None
+    preset: ServicePreset | None
+    snap: StatusSnapshot | None
+    stats: SessionStats
+    turn_glyphs: dict[int, list[str]]
+    last_outbound: str | None
+    has_outbound: bool
+    yolo: bool
+
+
 class SessionController:
     """Synchronous-at-heart session driver; UI-agnostic via the ChatView port."""
 
     def __init__(
         self,
         config: Config,
-        engine_factory: Callable[[str], Engine],
+        engine_factory: Callable[[EngineRequest], Engine],
         project_root: Path,
         *,
         view: ChatView,
@@ -105,6 +222,21 @@ class SessionController:
         self._last_outbound: str | None = None
         self._stats = SessionStats()
         self._turn_glyphs: dict[int, list[str]] = {}  # call id -> [glyph, tool]
+
+        # -- delegation ------------------------------------------------------
+        # ``_active`` is whose session the fields above currently describe: the
+        # master normally, a sub-agent for the length of a delegation.
+        # ``_sub`` is non-None EXACTLY while a sub-run is in flight and is the
+        # switch every routing decision reads (clipboard, /abort, labels).
+        self._active: SessionRef | None = None
+        self._sub: SessionRef | None = None
+        self._sub_index = 0  # numbers the sub-1, sub-2, ... transcript tabs
+        # Where a parked sub-run waits for its chat's next reply. The master
+        # never uses it: its replies arrive as flows, not as awaited values.
+        self._reply_future: asyncio.Future[str] | None = None
+        # Latched by /abort so an abort that lands while the sub-agent is
+        # executing (nothing to resolve yet) still ends the run at the next park.
+        self._sub_aborting = False
 
         # state flags mirrored to the view via SessionView
         self._session_active = False
@@ -136,14 +268,57 @@ class SessionController:
     # -- view-facing events ---------------------------------------------------
 
     def submit_clipboard(self, text: str) -> None:
-        """A captured (or injected) clipboard reply. Queued if a turn is busy."""
+        """A captured (or injected) clipboard reply, routed to the session that
+        claimed it. Queued if that session's turn is busy.
+
+        Routing is by chat name (``peek_chat_name`` - a cheap scan of the last
+        sentinel line, no parse), and it runs *before* the busy check on
+        purpose: while a sub-agent runs, the master's flow is busy for the whole
+        delegation, so a sub-agent reply reaching the depth-1 queue would be
+        swallowed and never seen. An unnamed paste (an ACK, or a model that
+        dropped the attribute) falls through to whichever session is live - the
+        engine's own chat gate is the backstop.
+        """
         if not self._session_active or self._engine is None:
+            return
+        name = peek_chat_name(text)
+        sub = self._sub
+        if sub is not None:
+            self._route_to_subagent(text, name, sub)
+            return
+        active = self._active
+        if name is not None and active is not None and name != active.chat_name:
+            self._view.notify(
+                f"ignored a paste naming the {name} chat - this session is {active.chat_name}",
+                severity="warning",
+            )
             return
         if self._busy:
             self._queued_capture = text  # depth-1 queue, newest wins
             self._view.notify("reply received mid-turn - queued (newest wins)", severity="warning")
             return
         self._spawn_flow(self._ingest_flow(text))
+
+    def _route_to_subagent(self, text: str, name: str | None, sub: SessionRef) -> None:
+        """Hand a paste to the parked sub-run, or explain why it was dropped.
+
+        Nothing is ever queued here: the master composes its next payload fresh
+        once the delegation returns, so a master-chat reply arriving mid-sub-run
+        is stale by definition."""
+        if name is not None and name != sub.chat_name:
+            self._view.notify(
+                f"that reply is from the {name} chat - the sub-agent run ({sub.chat_name}) "
+                "is still waiting; /abort ends it",
+                severity="warning",
+            )
+            return
+        future = self._reply_future
+        if future is None or future.done():
+            self._view.notify(
+                "the sub-agent is still working - that paste was ignored", severity="warning"
+            )
+            return
+        future.set_result(text)
 
     def submit_message(self, text: str) -> None:
         """Composer send: an ask_user answer, a slash command, or a follow-up."""
@@ -198,12 +373,15 @@ class SessionController:
             self._cmd_yolo(arg)
         elif name == "new":
             self._cmd_new()
+        elif name == "abort":
+            self._cmd_abort()
         elif name in ("help", "commands", "?"):
             self._cmd_help()
         else:
             shown = f"/{name}" if name else "/"
             self._view.notify(
-                f"unknown command: {shown} - try /yolo, /new, or /help", severity="warning"
+                f"unknown command: {shown} - try /yolo, /new, /abort, or /help",
+                severity="warning",
             )
 
     def _cmd_yolo(self, arg: str) -> None:
@@ -265,11 +443,54 @@ class SessionController:
             return
         self._spawn_flow(self._reset_session())
 
+    def _cmd_abort(self) -> None:
+        """End the sub-agent run in flight (protocol.md's delegate failure path).
+
+        Deliberately the ONLY thing that kills a whole delegation - ctrl+x is the
+        narrower tool (it cancels the tool calls running right now, in whichever
+        chat is live, and the turn still finishes and reports). The two are
+        reachable at the same time and mean different things.
+
+        There is no single await to interrupt, because a sub-run parks in three
+        different places, so this resolves whichever one is actually up and
+        latches ``_sub_aborting`` for the rest:
+
+        * waiting for the sub-agent's next reply -> the reply future raises;
+        * at an approval gate -> the gate is rejected, which aborts the sub-
+          agent's turn; the abort then lands at the next reply park;
+        * executing tool calls -> ``request_cancel`` on the SUB-AGENT's engine
+          (``self._engine`` is the sub's for the length of the run) so the
+          worker thread unblocks; that turn ends normally, and the latched flag
+          ends the run when it comes back for a reply.
+
+        A sub-agent's ask_user is NOT abortable this way, by design: while the
+        composer is in answer mode its text is the answer, verbatim (the
+        standing invariant), so "/abort" typed there is an answer like any other.
+        """
+        if self._sub is None:
+            self._view.notify("no sub-agent run to abort", severity="warning")
+            return
+        self._sub_aborting = True
+        self._view.notify("aborting the sub-agent run...", severity="warning")
+        future = self._reply_future
+        if future is not None and not future.done():
+            future.set_exception(_SubagentAborted(_ABORT_NOTE))
+            return
+        gate = self._gate_future
+        if gate is not None and not gate.done():
+            gate.set_result((Decision.REJECT, _ABORT_NOTE))
+            return
+        engine = self._engine
+        if self._executing and engine is not None:
+            engine.request_cancel()
+
     def _cmd_help(self) -> None:
         self._view.spawn(
             self._view.add_note(
                 "commands:  /yolo [on|off] - toggle auto-approve-everything  ·  "
-                "/new - clear the chat and start a new session  ·  /help - this list"
+                "/new - clear the chat and start a new session  ·  "
+                "/abort - end the sub-agent run in flight (ctrl+x only cancels "
+                "the calls running now)  ·  /help - this list"
             )
         )
 
@@ -363,7 +584,9 @@ class SessionController:
         async with self._engine_lock:
             return await asyncio.to_thread(fn, *args, **kwargs)
 
-    async def _run_engine_step(self, fn: Callable[..., _T], /, *args: object) -> _T:
+    async def _run_engine_step(
+        self, fn: Callable[..., _T], /, *args: object, **kwargs: object
+    ) -> _T:
         """Run execute()/answer_user() with the 'working' spinner showing meanwhile.
 
         The window this brackets is exactly the window in which cancelling means
@@ -374,7 +597,7 @@ class SessionController:
         self._view.start_working(label)
         self._executing = True
         try:
-            return await self._engine_call(fn, *args)
+            return await self._engine_call(fn, *args, **kwargs)
         finally:
             self._executing = False
             self._view.stop_working()
@@ -387,7 +610,15 @@ class SessionController:
             if spec is None:
                 self._view.exit_app()
                 return
-            engine = await asyncio.to_thread(self._engine_factory, spec.service)
+            # The catalog is fixed at bootstrap, so whether the model is offered
+            # `delegate` at all is decided HERE, once, from the sub-agent chat's
+            # calibration. Calibrating it later notifies the user to /new - we
+            # cannot retro-fit a tool into a conversation the model already read.
+            delegation = self._view.delegation_available()
+            engine = await asyncio.to_thread(
+                self._engine_factory,
+                EngineRequest(service=spec.service, allow_delegate=delegation),
+            )
             try:
                 out = await self._engine_call(engine.start_task, spec.task)
             except BudgetExceeded as exc:
@@ -404,6 +635,12 @@ class SessionController:
         # Immutable for the session, so it is read straight off the engine (no
         # _engine_call round trip needed) and mirrored for the noise toasts.
         self._chat_name = engine.chat_name
+        self._active = SessionRef(
+            id="master",
+            role="master",
+            title=_short_title(spec.task),
+            chat_name=engine.chat_name,
+        )
         self._preset = self._config.services.get(spec.service, self._config.preset())
         self._stats = SessionStats(service=spec.service)
         await self._view.add_user(spec.task)
@@ -412,6 +649,11 @@ class SessionController:
             f"chat name: {engine.chat_name} - the model echoes chat={engine.chat_name} on "
             "every reply; pastes without it are ignored"
         )
+        if delegation:
+            await self._view.add_note(
+                "delegate tool enabled - the model may hand a bounded sub-task to a "
+                "sub-agent in the calibrated second chat; /abort ends a run in flight"
+            )
         await self._view.add_note(
             f"→ bootstrap copied ({out.total_chars:,} chars) - paste into {self._preset.label}"
         )
@@ -530,7 +772,9 @@ class SessionController:
         self._pending_approval = True
         self._push_state()  # composer disabled while the gate is up
         self._view.show_gate(action, position, self._queue_strip())
-        self._view.alert(f"approval needed: {action.call.tool}", severity="warning")
+        self._view.alert(
+            f"{self._alert_prefix}approval needed: {action.call.tool}", severity="warning"
+        )
         self._gate_future = asyncio.get_running_loop().create_future()
         try:
             return await self._gate_future
@@ -545,11 +789,24 @@ class SessionController:
     async def _handle_step(self, step: StepResult) -> None:
         engine = self._engine
         assert engine is not None
-        while isinstance(step, AskUser):
-            await self._view.add_note(f"? {step.question}")
-            answer = await self._ask(step.question)
-            await self._view.add_user(answer)
-            step = await self._run_engine_step(engine.answer_user, answer)
+        # Both parking steps resume the SAME turn, so they loop together: a
+        # reply may ask a question, then delegate, then ask again. `engine` stays
+        # valid across a delegation because _run_subagent restores this session's
+        # context before it returns.
+        while isinstance(step, (AskUser, Delegate)):
+            if isinstance(step, AskUser):
+                await self._view.add_note(f"? {step.question}")
+                answer = await self._ask(step.question)
+                await self._view.add_user(answer)
+                step = await self._run_engine_step(engine.answer_user, answer)
+                continue
+            text, status, code = await self._run_subagent(step)
+            await self._view.add_note(
+                f"← sub-agent result ({len(text):,} chars, {status}) - handed back to the model"
+            )
+            step = await self._run_engine_step(
+                engine.deliver_delegate_result, text, status=status, code=code
+            )
         if isinstance(step, Send):
             await self._copy_outbound(step.outbound)
             await self._view.add_outbound(step.outbound, "results copied")
@@ -579,7 +836,10 @@ class SessionController:
     async def _ask(self, question: str) -> str:
         self._awaiting_answer = True  # the view switches the composer into answer mode
         self._push_state()
-        self._view.alert("the model asks you a question - type your answer below", severity="warning")
+        self._view.alert(
+            f"{self._alert_prefix}the model asks you a question - type your answer below",
+            severity="warning",
+        )
         self._answer_future = asyncio.get_running_loop().create_future()
         try:
             return await self._answer_future
@@ -587,6 +847,260 @@ class SessionController:
             self._answer_future = None
             self._awaiting_answer = False
             self._push_state()
+
+    @property
+    def _alert_prefix(self) -> str:
+        """Bells and toasts pull the user back from the browser, so they must say
+        WHO wants them - the conversation they started, or a sub-agent of it."""
+        active = self._active
+        return "sub-agent: " if active is not None and active.role == "subagent" else ""
+
+    # -- delegation ------------------------------------------------------------
+
+    async def _run_subagent(self, req: Delegate) -> tuple[str, ResultStatus, str | None]:
+        """Run one delegated sub-task to completion and return its result body.
+
+        Always returns - never raises - because the caller is mid-turn on the
+        master and every outcome, including a crash, has to reach the model as
+        the `delegate` call's result. The ``finally`` is what makes that safe:
+        whatever happened, the master's context is restored, the live browser
+        chat goes back to the master's window and the master's tab is refocused
+        before this returns.
+        """
+        if not self._view.delegation_available():
+            body = _unavailable_body(self._view.delegation_missing())
+            await self._view.add_error("delegation refused: the sub-agent chat is not calibrated")
+            self._view.notify(
+                "the model tried to delegate, but the sub-agent chat is not calibrated",
+                severity="warning",
+            )
+            return (body, "error", "delegation_unavailable")
+
+        master = self._snapshot_ctx()
+        master.stats.subagents += 1
+        self._sub_index += 1
+        ref = SessionRef(
+            id=f"sub-{self._sub_index}",
+            role="subagent",
+            title=_short_title(req.task),
+            chat_name="",
+        )
+        await self._view.add_note(f"→ delegating to a sub-agent · {ref.title}")
+        outcome: tuple[str, ResultStatus, str | None]
+        try:
+            outcome = await self._sub_run(req, ref, master)
+        except _SubagentAborted:
+            await self._view.add_note("✗ sub-agent run aborted by the user")
+            outcome = (_ABORTED_BODY, "error", "aborted")
+        except (EngineStateError, BudgetExceeded) as exc:
+            await self._view.add_error(f"sub-agent run failed: {exc}")
+            outcome = (f"the sub-agent run failed: {exc}\n{_DELEGATION_HINT}", "error", "failed")
+        except Exception as exc:  # never take the master's turn down with it
+            await self._view.add_error(f"sub-agent run failed: {exc!r}")
+            outcome = (f"the sub-agent run failed: {exc!r}\n{_DELEGATION_HINT}", "error", "failed")
+        finally:
+            sub, self._sub = self._sub, None
+            self._reply_future = None
+            self._sub_aborting = False
+            await self._view.end_chat(sub if sub is not None else ref)
+            if sub is not None:
+                await self._view.finish_session_view(sub.id, _FINISHED_NOTE)
+            self._restore_ctx(master)
+            self._view.focus_session_view(master.ref.id)
+            await self._refresh_status()
+        return outcome
+
+    async def _sub_run(
+        self, req: Delegate, ref: SessionRef, master: _SessionContext
+    ) -> tuple[str, ResultStatus, str | None]:
+        """The sub-run proper, with the master's context already saved.
+
+        Order is load-bearing: the transcript tab opens before anything is
+        clicked (so a failure is visible where it happened), the bootstrap is
+        composed before the browser is touched (a budget failure must cost
+        nothing), and ``start_chat`` runs before the FIRST paste - a False there
+        aborts with zero ``copy_outbound`` calls, because a sub-agent bootstrap
+        pasted into the master's chat would corrupt that conversation
+        irrecoverably.
+        """
+        engine = await asyncio.to_thread(
+            self._engine_factory,
+            EngineRequest(
+                service=master.stats.service or self._config.general.service,
+                role="subagent",
+                allow_delegate=False,  # nesting is excluded by construction
+                parent_chat_name=master.ref.chat_name,
+            ),
+        )
+        ref = replace(ref, chat_name=engine.chat_name)
+        await self._view.open_session_view(ref)
+        self._sub = ref
+        self._adopt_ctx(ref, engine)
+        task_text = _compose_sub_task(req)
+        await self._view.add_note(
+            f"sub-agent chat: {engine.chat_name} - a fresh chat with its own context; "
+            "it sees nothing of the conversation that delegated to it"
+        )
+        await self._view.add_user(task_text)
+        try:
+            out = await self._engine_call(engine.start_task, task_text)
+        except BudgetExceeded as exc:
+            await self._view.add_error(f"the sub-agent bootstrap does not fit one paste: {exc}")
+            return (_budget_body(exc), "error", "too_large")
+        if not await self._view.start_chat(ref):
+            await self._view.add_error(
+                "could not open a fresh chat for the sub-agent - nothing was pasted"
+            )
+            return (_NEW_CHAT_FAILED_BODY, "error", "new_chat_failed")
+        await self._copy_outbound(out)
+        await self._view.add_note(
+            f"→ sub-agent bootstrap copied ({out.total_chars:,} chars) - it goes into the "
+            "sub-agent chat"
+        )
+        await self._refresh_status()
+        return (await self._sub_loop(engine), "ok", None)
+
+    async def _sub_loop(self, engine: Engine) -> str:
+        """The ordinary session loop, with an awaited reply instead of a flow.
+
+        Same body as the master's (``_run_turn_body`` is literally shared, so
+        the gate, the glyph strip and the transcript behave identically); the
+        difference is only what brackets it - this loop *waits* for the next
+        reply rather than being re-entered by one, and it ends by returning the
+        sub-agent's deliverable instead of leaving the session armed.
+        """
+        while True:
+            text = await self._await_reply()
+            result = await self._engine_call(engine.ingest, text)
+            if isinstance(result, Noise):
+                self._view.notify(f"sub-agent: {self._noise_text(result.reason)}")
+                continue
+            if isinstance(result, ChunkAck):
+                self._view.notify(
+                    "sub-agent: chunk ACK received, but chunked sends land in M3",
+                    severity="warning",
+                )
+                continue
+            if isinstance(result, ProtocolError):
+                await self._view.add_error(f"protocol error: {result.detail}")
+                self._view.notify(
+                    "sub-agent: protocol error - re-copy its reply", severity="warning"
+                )
+                continue
+            assert isinstance(result, NewTurn)
+            self._stats.replies += 1
+            self._stats.chars_in += len(text)
+            step = await self._run_turn_body(result.reply)
+            while isinstance(step, (AskUser, Delegate)):
+                if isinstance(step, AskUser):
+                    await self._view.add_note(f"? {step.question}")
+                    answer = await self._ask(step.question)
+                    await self._view.add_user(answer)
+                    step = await self._run_engine_step(engine.answer_user, answer)
+                    continue
+                # Unreachable: `delegate` is not in a sub-agent's registry, so
+                # the call pre-resolves as unknown_tool long before here.
+                step = await self._run_engine_step(
+                    engine.deliver_delegate_result,
+                    _NESTED_DELEGATION_BODY,
+                    status="error",
+                    code="unknown_tool",
+                )
+            if isinstance(step, Done):
+                self._stats.summary = step.summary
+                if step.outbound is not None:
+                    # Sibling results of the task_done turn: they belong in the
+                    # sub-agent's chat, which nobody will read again - so they
+                    # are recorded, not copied out.
+                    await self._view.add_outbound(step.outbound, "final results (not copied)")
+                await self._view.add_note("✓ sub-agent task done")
+                if step.summary.strip():
+                    await self._view.add_prose(step.summary)
+                deliverable = step.result.strip() or step.summary.strip() or _EMPTY_RESULT_BODY
+                # The deliverable goes in this tab too, not only into the
+                # master's payload: it is the whole point of the run, and this
+                # tab is the only place the user can ever read it again.
+                await self._view.add_note(f"→ result handed back ({len(deliverable):,} chars)")
+                if deliverable != step.summary.strip():
+                    await self._view.add_prose(deliverable)
+                await self._refresh_status()
+                return deliverable
+            assert isinstance(step, Send)
+            await self._copy_outbound(step.outbound)
+            await self._view.add_outbound(step.outbound, "results copied")
+            self._view.alert(
+                f"sub-agent: results copied ({step.outbound.total_chars:,} chars) - "
+                "paste into the sub-agent chat"
+            )
+            await self._refresh_status()
+
+    async def _await_reply(self) -> str:
+        """Park until the sub-agent's chat produces a reply (or /abort fires).
+
+        No wall-clock timeout on purpose: the transport is a human alt-tabbing
+        between windows, and a sub-task can legitimately take many minutes. The
+        way out is ``/abort``, which either resolves this future with
+        ``_SubagentAborted`` or - if it fired while nothing was parked here -
+        leaves the flag this checks on the way in."""
+        if self._sub_aborting:
+            raise _SubagentAborted(_ABORT_NOTE)
+        future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+        self._reply_future = future
+        try:
+            return await future
+        finally:
+            self._reply_future = None
+
+    # -- session context save / restore ---------------------------------------
+
+    def _snapshot_ctx(self) -> _SessionContext:
+        engine = self._engine
+        active = self._active
+        assert engine is not None and active is not None
+        return _SessionContext(
+            ref=active,
+            engine=engine,
+            chat_name=self._chat_name,
+            preset=self._preset,
+            snap=self._snap,
+            stats=self._stats,
+            turn_glyphs=self._turn_glyphs,
+            last_outbound=self._last_outbound,
+            has_outbound=self._has_outbound,
+            yolo=self._yolo,
+        )
+
+    def _adopt_ctx(self, ref: SessionRef, engine: Engine) -> None:
+        """Make ``ref``/``engine`` the session every other method operates on.
+
+        The stats, glyph strip and outbound state start empty - they describe a
+        conversation, and this is a different one. YOLO deliberately does NOT
+        inherit: ``ApprovalPolicy`` is per-engine, so a sub-agent starts from the
+        configured default and the user re-arms it per session if they mean it.
+        """
+        self._active = ref
+        self._engine = engine
+        self._chat_name = engine.chat_name
+        self._snap = None
+        self._stats = SessionStats(service=self._stats.service)
+        self._turn_glyphs = {}
+        self._last_outbound = None
+        self._has_outbound = False
+        self._yolo = self._config.approval.yolo
+        self._push_state()
+
+    def _restore_ctx(self, ctx: _SessionContext) -> None:
+        self._active = ctx.ref
+        self._engine = ctx.engine
+        self._chat_name = ctx.chat_name
+        self._preset = ctx.preset
+        self._snap = ctx.snap
+        self._stats = ctx.stats
+        self._turn_glyphs = ctx.turn_glyphs
+        self._last_outbound = ctx.last_outbound
+        self._has_outbound = ctx.has_outbound
+        self._yolo = ctx.yolo
+        self._push_state()
 
     # -- summary / reset ------------------------------------------------------
 
@@ -611,6 +1125,8 @@ class SessionController:
         ]
         calls = ", ".join(f"{tool}×{n}" for tool, n in sorted(self._stats.calls.items()))
         rows.append(("tool calls", calls or "none"))
+        if self._stats.subagents:
+            rows.append(("sub-agent runs", str(self._stats.subagents)))
         rows.append(("chars copied out", f"{self._stats.chars_out:,}"))
         rows.append(("chars ingested", f"{self._stats.chars_in:,}"))
         if snap is not None:
@@ -621,6 +1137,13 @@ class SessionController:
         self._session_active = False
         self._engine = None
         self._chat_name = None
+        # A sub-run cannot be live here (/new is refused mid-turn), but the
+        # numbering restarts with the session: the view drops the sub tabs too.
+        self._active = None
+        self._sub = None
+        self._sub_index = 0
+        self._reply_future = None
+        self._sub_aborting = False
         self._preset = None
         self._snap = None
         self._last_outbound = None
@@ -760,6 +1283,10 @@ class SessionController:
         self._push_state()
 
     def _push_state(self) -> None:
+        # The session_* fields say WHOSE state the rest of this snapshot is:
+        # during a delegation every other field describes the sub-agent, and a
+        # status bar or gate that did not say so would be actively misleading.
+        active = self._active
         self._view.render_state(
             SessionView(
                 session_active=self._session_active,
@@ -768,6 +1295,9 @@ class SessionController:
                 awaiting_answer=self._awaiting_answer,
                 has_outbound=self._has_outbound,
                 snapshot=self._snap,
+                session_id=active.id if active is not None else "master",
+                session_role=active.role if active is not None else "master",
+                session_title=active.title if active is not None else "",
             )
         )
 

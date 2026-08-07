@@ -66,3 +66,6 @@ class SessionStats:
     chars_out: int = 0
     chars_in: int = 0
     summary: str = ""
+    # Delegated sub-agent runs started from this session (master stats only; a
+    # sub-agent cannot delegate, so its own counter never moves).
+    subagents: int = 0

@@ -84,10 +84,16 @@ class ActionPanel(Vertical):
 
     # -- approval mode --------------------------------------------------------
 
-    def show_approval(self, action: PendingAction, position: str, queue: str) -> None:
+    def show_approval(
+        self, action: PendingAction, position: str, queue: str, prefix: str = ""
+    ) -> None:
+        """``prefix`` labels whose call this is - empty for the conversation the
+        user started, ``"SUB-AGENT ‹title› · "`` while a delegated run is what
+        is asking. It is the title line's job because the diff below it looks
+        identical either way."""
         self.current_action = action
         target = action.call.params.get("path") or action.call.params.get("command", "")
-        title = f"APPROVE  ·  call {position}  ·  {action.call.tool} {target}".rstrip()
+        title = f"{prefix}APPROVE  ·  call {position}  ·  {action.call.tool} {target}".rstrip()
         self.query_one("#action-title", Static).update(Text(title))
         self.query_one("#action-queue", Static).update(Text(queue))
         self.query_one("#action-content", Static).update(preview_renderable(action))

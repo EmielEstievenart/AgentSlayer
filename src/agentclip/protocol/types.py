@@ -47,6 +47,7 @@ ERROR_CODES = frozenset(
         "match_not_found",
         "multiple_matches",
         "exec_timeout",
+        "cancelled",
         "too_large",
         "unterminated_heredoc",
         "reply_truncated",

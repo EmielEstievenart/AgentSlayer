@@ -109,6 +109,9 @@ class SessionController:
         # state flags mirrored to the view via SessionView
         self._session_active = False
         self._busy = False
+        # True only while execute()/answer_user() is actually running tool calls
+        # on the worker thread - the window in which cancel_execution() bites.
+        self._executing = False
         self._pending_approval = False
         self._awaiting_answer = False
         self._has_outbound = False
@@ -276,6 +279,33 @@ class SessionController:
         if future is not None and not future.done():
             future.set_result((decision, note))
 
+    @property
+    def executing(self) -> bool:
+        """True while the engine is running this turn's tool calls (the spinner
+        is up). The view reads it to enable/disable the cancel affordance."""
+        return self._executing
+
+    def cancel_execution(self) -> None:
+        """Cancel the tool calls running right now (a too-slow command, usually).
+
+        Deliberately does NOT go through ``_engine_call``: the engine lock is
+        held by the very ``execute()`` we are interrupting, and
+        ``request_cancel`` is thread-safe by design (it sets an Event) precisely
+        so it can be called from here, on the event loop, mid-execute.
+
+        The turn is not aborted: the engine finishes it normally and the results
+        - the interrupted call plus the skipped ones - flow through the usual
+        Send path, so the model is told what happened without the user doing
+        anything else. A no-op when nothing is executing."""
+        engine = self._engine
+        if engine is None or not self._executing:
+            return
+        engine.request_cancel()
+        self._view.notify(
+            "cancelling - the killed call and the skipped ones are sent to the model",
+            severity="warning",
+        )
+
     def undo(self) -> None:
         if self._busy or not self._session_active:
             return
@@ -334,13 +364,19 @@ class SessionController:
             return await asyncio.to_thread(fn, *args, **kwargs)
 
     async def _run_engine_step(self, fn: Callable[..., _T], /, *args: object) -> _T:
-        """Run execute()/answer_user() with the 'working' spinner showing meanwhile."""
+        """Run execute()/answer_user() with the 'working' spinner showing meanwhile.
+
+        The window this brackets is exactly the window in which cancelling means
+        something (``_executing``): the engine is chewing through tool calls on
+        the worker thread and the user is watching the spinner."""
         n = len(self._turn_glyphs)
         label = f"Working - running {n} tool call{'' if n == 1 else 's'}..." if n else "Working..."
         self._view.start_working(label)
+        self._executing = True
         try:
             return await self._engine_call(fn, *args)
         finally:
+            self._executing = False
             self._view.stop_working()
 
     # -- session start --------------------------------------------------------

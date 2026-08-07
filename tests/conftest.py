@@ -74,18 +74,20 @@ def make_engine(project: Path, registry: ToolRegistry) -> EngineFactory:
     """Factory building a fully wired, headless Engine over the tmp project.
 
     Reloads config on each call so tests can drop a .agentclip.toml into the
-    project (e.g. to extend the command allowlist) before building.
+    project (e.g. to extend the command allowlist) before building. Pass
+    ``tools=`` to swap the registry (e.g. for a fake slow tool).
     """
 
-    def factory(config: Config | None = None) -> Engine:
+    def factory(config: Config | None = None, tools: ToolRegistry | None = None) -> Engine:
         cfg = config or load_config(project, global_config_path=project / "no-such-global.toml")
+        reg = tools or registry
         workspace = Workspace(project, cfg.excluded_names())
         session = SessionStore(project, service=cfg.general.service)
         backups = BackupStore(session.session_dir)
         composer = Composer(
-            cfg.preset(), cfg.caps(), registry.render_catalog(), project.name, "TestOS", CHAT_NAME
+            cfg.preset(), cfg.caps(), reg.render_catalog(), project.name, "TestOS", CHAT_NAME
         )
-        return Engine(cfg, registry, workspace, session, backups, composer, CHAT_NAME)
+        return Engine(cfg, reg, workspace, session, backups, composer, CHAT_NAME)
 
     return factory
 

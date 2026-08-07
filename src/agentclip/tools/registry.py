@@ -12,6 +12,7 @@ and meta cannot drift apart in how they report failures:
 from __future__ import annotations
 
 import functools
+import threading
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,12 +33,23 @@ class ToolContext:
     backup_hook(rel_path, abs_path, action) with action in {"write", "delete"}:
     the engine wires this to the BackupStore; mutating handlers MUST call it
     before first touching a file.
+
+    cancel_event: set from ANOTHER thread when the user cancels the running
+    batch (Engine.request_cancel). Long-running handlers must poll it via
+    ``ctx.cancelled()`` and bail out with a code=cancelled error carrying
+    whatever partial output they have; fast handlers can ignore it (the engine
+    checks it between calls anyway).
     """
 
     workspace: Workspace
     limits: LimitsConfig
     caps: BudgetCaps
     backup_hook: Callable[[str, Path, str], None] | None = None
+    cancel_event: threading.Event | None = None
+
+    def cancelled(self) -> bool:
+        """True once the user asked to cancel the batch this call belongs to."""
+        return self.cancel_event is not None and self.cancel_event.is_set()
 
 
 @dataclass(frozen=True, slots=True)

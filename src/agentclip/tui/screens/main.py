@@ -191,6 +191,11 @@ class MainScreen(Screen[None]):
         Binding("x", "toggle_last", "expand last", show=False),
         # f3 is priority so it works while the composer (a TextArea) holds focus.
         Binding("f3", "toggle_sidebar", "sidebar", priority=True),
+        # Priority for the same reason, and because the whole point is to reach
+        # it while a long tool call has the screen otherwise inert. ctrl+x is
+        # free here (f1-f4 are taken; the TextArea's own ctrl+x cut would
+        # otherwise swallow it, hence priority).
+        Binding("ctrl+x", "cancel_execution", "cancel run", priority=True),
         Binding("ctrl+s", "submit_composer", "send", priority=True, show=False),
         Binding("ctrl+enter", "submit_composer", "send", priority=True, show=False),
         Binding("escape", "cancel_entry", "cancel", show=False),
@@ -199,6 +204,7 @@ class MainScreen(Screen[None]):
     pending_approval: reactive[bool] = reactive(False, bindings=True)
     awaiting_answer: reactive[bool] = reactive(False, bindings=True)
     busy: reactive[bool] = reactive(False, bindings=True)
+    executing: reactive[bool] = reactive(False, bindings=True)  # tool calls in flight
     session_active: reactive[bool] = reactive(False, bindings=True)
     awaiting_new_session: reactive[bool] = reactive(False, bindings=True)
     phase_name: reactive[str] = reactive("IDLE", bindings=True)
@@ -385,6 +391,8 @@ class MainScreen(Screen[None]):
             )
         if action == "cancel_entry":
             return self.reject_open
+        if action == "cancel_execution":  # only while tool calls are actually running
+            return True if self.executing else None
         return True
 
     # == ChatView: transcript =================================================
@@ -499,12 +507,16 @@ class MainScreen(Screen[None]):
             self.action_panel.hide_panel()
 
     def start_working(self, label: str) -> None:
+        # The running bar and the cancel binding share one lifetime: the bar
+        # advertises ctrl+x, so ctrl+x must work exactly while it is up.
+        self.executing = True
         if not self.is_mounted:
             return
         with suppress(NoMatches):
             self.running_bar.start(label)
 
     def stop_working(self) -> None:
+        self.executing = False
         if not self.is_mounted:
             return
         with suppress(NoMatches):
@@ -1366,6 +1378,11 @@ class MainScreen(Screen[None]):
             return
         with suppress(NoMatches):
             self.sidebar.set_locked(not self.awaiting_new_session)
+
+    def action_cancel_execution(self) -> None:
+        """ctrl+x while the running bar is up: stop the tool call in flight. The
+        controller no-ops if nothing is executing, so a stray press is safe."""
+        self._controller.cancel_execution()
 
     def action_undo(self) -> None:
         self._controller.undo()

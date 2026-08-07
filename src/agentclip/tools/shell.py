@@ -10,6 +10,13 @@ before the handler runs. This handler just executes:
   caps.command_tail_lines / caps.command_tail_chars;
 - first body line is "exit N (X.Xs)"; a timeout becomes an exec_timeout
   error carrying the partial tail.
+
+This is the one handler that can run for minutes, so it is also the one that
+can be interrupted: instead of a single blocking communicate() it waits in
+short slices, checking BOTH the deadline and ctx.cancelled() between them. A
+cancelled command is killed exactly like a timed out one but reported as
+code=cancelled, so the model can tell "your command was too slow" apart from
+"the user stopped you".
 """
 
 from __future__ import annotations
@@ -31,6 +38,10 @@ from agentclip.tools.registry import (
 )
 
 _DEFAULT_TIMEOUT_S = 60
+# How long each wait slice is: the deadline and the user's cancel are both
+# re-checked this often, so a cancel lands within roughly this long. Repeated
+# communicate() calls are safe - buffered output survives across them.
+_POLL_SLICE_S = 0.2
 
 
 def _coerce_output(raw: str | bytes | None) -> str:
@@ -83,6 +94,18 @@ def _kill_tree(proc: subprocess.Popen[str]) -> None:
             proc.kill()
 
 
+def _kill_and_drain(
+    ctx: ToolContext, proc: subprocess.Popen[str], exc: subprocess.TimeoutExpired, max_chars: int
+) -> str:
+    """Kill the process tree and return the tail of whatever it managed to emit."""
+    _kill_tree(proc)
+    try:  # collect whatever was buffered before the kill
+        out, _ = proc.communicate(timeout=5)
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        out = _coerce_output(exc.output)
+    return _tail_cap(_coerce_output(out), ctx.caps.command_tail_lines, max_chars)
+
+
 @tool_handler
 def run_command(ctx: ToolContext, call: ToolCall) -> str:
     (command,) = require(call, "command")
@@ -94,6 +117,7 @@ def run_command(ctx: ToolContext, call: ToolCall) -> str:
         popen_kwargs["start_new_session"] = True  # own process group, so killpg reaps children
 
     start = time.monotonic()
+    deadline = start + timeout_s
     proc = subprocess.Popen(
         command,
         shell=True,
@@ -104,23 +128,40 @@ def run_command(ctx: ToolContext, call: ToolCall) -> str:
         errors="replace",
         **popen_kwargs,
     )
-    try:
-        out, _ = proc.communicate(timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        _kill_tree(proc)
-        try:  # collect whatever was buffered before the kill
-            out, _ = proc.communicate(timeout=5)
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            out = _coerce_output(exc.output)
-        partial = _tail_cap(_coerce_output(out), ctx.caps.command_tail_lines, max_chars)
-        message = f"command timed out after {timeout_s}s"
-        if partial:
-            message += f"\npartial output (tail):\n{partial}"
-        raise ToolError(
-            "exec_timeout",
-            message,
-            f"raise timeout (limit {ctx.limits.command_timeout_s}s) or run a narrower command.",
-        ) from None
+    while True:
+        slice_s = max(0.0, min(_POLL_SLICE_S, deadline - time.monotonic()))
+        try:
+            out, _ = proc.communicate(timeout=slice_s)
+            break
+        except subprocess.TimeoutExpired as exc:
+            # The user's cancel wins over the deadline: it is the more specific
+            # story, and it is the one they are waiting to see.
+            if ctx.cancelled():
+                partial = _kill_and_drain(ctx, proc, exc, max_chars)
+                waited = time.monotonic() - start
+                message = (
+                    "command cancelled by the user before completion"
+                    f" (killed after {waited:.1f}s)"
+                )
+                if partial:
+                    message += f"\npartial output (tail):\n{partial}"
+                raise ToolError(
+                    "cancelled",
+                    message,
+                    "the user stopped this deliberately - do not re-run it unchanged;"
+                    " ask what they want instead.",
+                ) from None
+            if time.monotonic() >= deadline:
+                partial = _kill_and_drain(ctx, proc, exc, max_chars)
+                message = f"command timed out after {timeout_s}s"
+                if partial:
+                    message += f"\npartial output (tail):\n{partial}"
+                raise ToolError(
+                    "exec_timeout",
+                    message,
+                    f"raise timeout (limit {ctx.limits.command_timeout_s}s)"
+                    " or run a narrower command.",
+                ) from None
     elapsed = time.monotonic() - start
 
     tail = _tail_cap(out or "", ctx.caps.command_tail_lines, max_chars)
@@ -135,7 +176,8 @@ run_command(command*, timeout)
   Run a shell command from the project root (timeout in seconds, default
   60). Returns "exit N (X.Xs)" plus merged stdout+stderr, tail-capped (the
   end of the output - where test verdicts live - always survives). A timed
-  out command is killed and reported as exec_timeout with the partial tail.
+  out command is killed and reported as exec_timeout with the partial tail;
+  one the user cancels is killed the same way and reported as cancelled.
   NEVER modify files with commands (no sed/redirects/rm) - use
   write_file/edit_file/delete_file so every change is backed up.
 ===CLIP:CALL id=1 tool=run_command===

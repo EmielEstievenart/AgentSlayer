@@ -31,6 +31,9 @@ Session  (press Esc first if the chat box has focus)
   w  pause/resume the clipboard watcher   t  jump to the chat box
   e  end session / show the summary       x  expand the last collapsed output
   l  export the full chat log to a file (raw blocks + payloads, for debugging)
+  ctrl+x  cancel the tool calls running now (the "Working..." bar). The running
+          command is killed, later calls are skipped, and the model is told -
+          the results are copied out as usual, so the turn ends cleanly.
 
 App
   F1 or ?  this help        F2  settings (lands in M3 - edit .agentclip.toml)

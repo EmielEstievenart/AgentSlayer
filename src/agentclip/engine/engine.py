@@ -13,11 +13,13 @@ Semantics implemented here (protocol.md sections 4-6 + plan synthesis):
 - execute: strict id order, denied results with user_note, the same-path skip
   rule after a failed/denied mutation, rejection-aborts-turn, the per-turn
   backup bracket (begin_turn at first mutation, finish_turn at turn end),
-  ask_user pause/resume, task_done collection, id=0 reply_truncated results.
+  ask_user pause/resume, task_done collection, id=0 reply_truncated results,
+  and cooperative cancellation (request_cancel, from any thread).
 """
 
 from __future__ import annotations
 
+import threading
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -166,11 +168,15 @@ class Engine:
         self._backups = backups
         self._composer = composer
         self._policy = ApprovalPolicy(config.approval)
+        # Set by request_cancel() from the UI thread while the plan runs on the
+        # engine's worker thread; cleared at the start of every plan run.
+        self._cancel = threading.Event()
         self._ctx = ToolContext(
             workspace=workspace,
             limits=config.limits,
             caps=config.caps(),
             backup_hook=self._backup_hook,
+            cancel_event=self._cancel,
         )
         # The session's agreed chat name, normalized once for comparison. The
         # composer stamps the same name on every outbound; ingest requires the
@@ -345,6 +351,28 @@ class Engine:
             ToolResult(call_id=waiting.call.id, status="ok", body=text, tool=waiting.call.tool)
         )
         return self._run_plan(self._exec.index + 1)
+
+    def request_cancel(self) -> None:
+        """Ask the running batch to stop. THREAD-SAFE - and the only method that
+        is: it just sets a threading.Event, so the host calls it from the UI
+        thread while execute()/answer_user() is in flight on the worker thread.
+
+        What the model ends up seeing:
+
+        - the call being executed right now is interrupted if its handler
+          cooperates (run_command polls the same event, kills its process tree
+          and returns code=cancelled with the partial output); a handler that
+          does not cooperate simply finishes and reports normally;
+        - every call after it is skipped with a code=cancelled error result, so
+          the reply says explicitly that they did not run;
+        - the turn then finishes NORMALLY - the results are composed and
+          returned as the usual Send step, which the host copies out. Cancelling
+          is not an abort of the conversation, it is a short turn.
+
+        A cancel requested while nothing is executing is a no-op: every plan run
+        clears the flag before its first call.
+        """
+        self._cancel.set()
 
     # -- undo ------------------------------------------------------------------
 
@@ -522,11 +550,22 @@ class Engine:
     def _run_plan(self, start: int) -> StepResult:
         exec_ = self._exec
         assert exec_ is not None
+        # A cancel governs the run it was pressed during and nothing else: a
+        # stray one from an idle moment (or a leftover from the previous turn)
+        # must never poison this run.
+        self._cancel.clear()
         for i in range(start, len(self._plan)):
             p = self._plan[i]
             call = p.call
             if p.pre_result is not None:
                 self._record(p.pre_result)
+                continue
+            if self._cancel.is_set():
+                # Checked between calls, so even handlers that cannot be
+                # interrupted stop the batch at the next boundary. ask_user and
+                # task_done are skipped too: a cancelled batch must not park on
+                # a question or declare the task complete.
+                self._record(_cancelled_skip_result(call))
                 continue
             if p.aborted:
                 self._record(
@@ -697,6 +736,17 @@ class Engine:
 
 
 # -- module-level helpers ---------------------------------------------------------
+
+
+def _cancelled_skip_result(call: ToolCall) -> ToolResult:
+    """The result a call gets when the user cancelled before it started."""
+    return error_result(
+        call,
+        "cancelled",
+        "skipped: the user cancelled this batch before this call ran, so it had no effect.",
+        "nothing changed for this call - ask what the user wants instead, or resend"
+        " it only if they still want it.",
+    )
 
 
 def _truncated_result(reply: ParsedReply) -> ToolResult:

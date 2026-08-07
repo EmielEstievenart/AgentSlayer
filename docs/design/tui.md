@@ -41,7 +41,7 @@ MainScreen
 │   │   │   └── Horizontal           id=action-footer
 │   │   │       ├── Static           id=action-hints      # "[y] approve  [n] reject  [a] auto-accept edits"
 │   │   │       └── Input            id=reject-reason     # hidden until 'n'
-│   │   ├── RunningBar(Static)       id=running           # spinner while a turn executes
+│   │   ├── RunningBar(Static)       id=running           # spinner + "(ctrl+x to cancel)" while a turn executes
 │   │   └── ChatComposer(TextArea)   id=composer          # the one text box: task, answers, follow-ups
 │   └── Sidebar(Vertical)            id=sidebar           # width 32; F3 hides it (§1.3)
 ├── StatusBar(Horizontal)            id=statusbar         # full width, height 1 (sits above Footer)
@@ -417,6 +417,7 @@ The user is staring at the browser; the terminal must call them back:
 | `F3` | show/hide the settings sidebar | MainScreen (priority: works while the composer has focus) |
 | `enter` | send the composer (task at start, answer, follow-up) | composer focused |
 | `ctrl+s` / `ctrl+enter` | send the composer without focusing it | MainScreen (priority) |
+| `ctrl+x` | cancel the tool calls running now (`Engine.request_cancel`) | MainScreen (priority), while the RunningBar is up (`executing`) |
 | `ctrl+p` | command palette (every action mirrored here) | global, Textual default |
 | `ctrl+q` | quit (Confirm if mid-turn) | global, Textual default |
 | SummaryScreen: `u` undo session, `t` new session, `esc` close | | modal-local BINDINGS |

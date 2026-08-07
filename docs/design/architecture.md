@@ -157,6 +157,7 @@ class Engine:
     def decide(self, call_id: str, decision: Decision) -> None
     def execute(self) -> StepResult                              # REVIEW → AWAITING_REPLY | AWAITING_USER | DONE
     def answer_user(self, text: str) -> Outbound                 # AWAITING_USER → AWAITING_REPLY
+    def request_cancel(self) -> None                             # THREAD-SAFE (sets an Event); no-op when idle
     def next_chunk(self) -> Outbound | None                      # M3: chunk ACK advance
     def undo_last_turn(self) -> UndoReport                       # M3 (backups written from M1)
     def status(self) -> StatusSnapshot                           # phase, turn, budget use — for status bar
@@ -611,7 +612,7 @@ clipboard.write_text(step.outbound.chunks[0])        # results payload back to t
 
 **TUI designer must honor:**
 1. The engine API in §1 is the **complete** surface — no reaching into `tools/`, `store/`, or `protocol/` from `tui/`. Status bar reads `engine.status()` only.
-2. The engine is synchronous and **not thread-safe**: call it from exactly one `@work(thread=True)` worker; never from the event loop (`execute()` runs subprocesses for minutes).
+2. The engine is synchronous and **not thread-safe**: call it from exactly one `@work(thread=True)` worker; never from the event loop (`execute()` runs subprocesses for minutes). The single exception is `request_cancel()` — it only sets a `threading.Event`, and is *meant* to be called from the UI thread while that worker is inside `execute()`. Cancelling is not an abort: the interrupted call gets a `code=cancelled` error result (with its partial output), the calls after it get `cancelled` skip results, and the turn finishes through the normal `Send` path so the model is told what happened.
 3. The watcher is a plain function (`clip/watcher.py`) — you own wrapping it in a thread worker and bridging via `post_message`; inject `FakeClipboard` in tests.
 4. Every outbound write must go through `SelfWriteSet.note(text)` before `provider.write_text` (self-detection suppression), and reads/writes should share one clipboard thread.
 5. Approval UX maps to exactly three `Decision` values (approve / reject / approve-all-edits-this-session); diff text arrives precomputed in `PendingAction.preview` — do not re-diff in the TUI.

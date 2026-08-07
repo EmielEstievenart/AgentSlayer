@@ -15,6 +15,10 @@ from textual.widgets import Static
 
 _FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 
+# The bar is the only moment the cancel key does anything, so it is also the
+# only place that has to advertise it (MainScreen owns the binding itself).
+CANCEL_HINT = "(ctrl+x to cancel)"
+
 
 class RunningBar(Static):
     def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
@@ -45,4 +49,4 @@ class RunningBar(Static):
         self._paint()
 
     def _paint(self) -> None:
-        self.update(Text(f"{_FRAMES[self._frame]} {self._label}"))
+        self.update(Text(f"{_FRAMES[self._frame]} {self._label}  {CANCEL_HINT}"))

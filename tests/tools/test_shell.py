@@ -1,7 +1,8 @@
-"""run_command tests: roundtrip, merged output, timeout kill, tail cap."""
+"""run_command tests: roundtrip, merged output, timeout/cancel kill, tail cap."""
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
@@ -26,11 +27,13 @@ def make_ctx(
     *,
     limits: LimitsConfig | None = None,
     caps: BudgetCaps | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> ToolContext:
     return ToolContext(
         workspace=Workspace(root, Config().excluded_names()),
         limits=limits or LimitsConfig(),
         caps=caps or caps_for_budget(12_000),
+        cancel_event=cancel_event,
     )
 
 
@@ -86,6 +89,73 @@ def test_timeout_capped_by_limits(tmp_path: Path) -> None:
     )
     assert res.status == "error" and res.code == "exec_timeout"
     assert "timed out after 1s" in res.body  # effective timeout is the configured cap
+
+
+def _sleeper(marker: Path, seconds: int = 30) -> str:
+    """A command that announces itself (flushed), drops a marker file, then
+    sleeps - so a test can cancel it at a moment its output provably exists."""
+    code = (
+        "import pathlib, time; print('before-sleep', flush=True); "
+        f"pathlib.Path('{marker.as_posix()}').write_text('go'); time.sleep({seconds})"
+    )
+    return f'{PY} "{code}"'
+
+
+def _set_when_running(marker: Path, event: threading.Event) -> threading.Thread:
+    """Fire ``event`` once the command is demonstrably mid-flight."""
+
+    def wait_then_set() -> None:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not marker.exists():
+            time.sleep(0.02)
+        event.set()
+
+    thread = threading.Thread(target=wait_then_set, daemon=True)
+    thread.start()
+    return thread
+
+
+def test_cancel_kills_the_process_and_keeps_partial_output(tmp_path: Path) -> None:
+    """The user's cancel is not a timeout: same kill, distinct code, and the
+    output the command had already produced still reaches the model."""
+    event = threading.Event()
+    ctx = make_ctx(tmp_path, cancel_event=event)
+    marker = tmp_path / "running.txt"
+    watcher = _set_when_running(marker, event)
+
+    start = time.monotonic()
+    res = shell.run_command(ctx, make_call(command=_sleeper(marker), timeout="30"))
+    elapsed = time.monotonic() - start
+    watcher.join(timeout=5)
+
+    assert res.status == "error" and res.code == "cancelled"
+    assert "cancelled by the user before completion" in res.body
+    assert "before-sleep" in res.body  # the partial output survived the kill
+    assert res.body.splitlines()[-1].startswith("hint: ")
+    assert elapsed < 25  # the sleep was killed, not waited out
+
+
+def test_cancel_set_upfront_bails_out_immediately(tmp_path: Path) -> None:
+    event = threading.Event()
+    event.set()
+    ctx = make_ctx(tmp_path, cancel_event=event)
+    start = time.monotonic()
+    res = shell.run_command(
+        ctx, make_call(command=f'{PY} "import time; time.sleep(30)"', timeout="30")
+    )
+    assert res.status == "error" and res.code == "cancelled"
+    assert time.monotonic() - start < 25
+
+
+def test_timeout_still_reports_exec_timeout_with_a_cancel_event_present(tmp_path: Path) -> None:
+    """The two kill paths stay distinguishable: an uncancelled slow command is
+    still exec_timeout, never cancelled."""
+    ctx = make_ctx(tmp_path, cancel_event=threading.Event())
+    res = shell.run_command(
+        ctx, make_call(command=f'{PY} "import time; time.sleep(30)"', timeout="1")
+    )
+    assert res.status == "error" and res.code == "exec_timeout"
+    assert "timed out after 1s" in res.body
 
 
 def test_tail_cap_keeps_the_end(tmp_path: Path) -> None:

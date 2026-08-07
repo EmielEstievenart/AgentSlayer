@@ -314,6 +314,7 @@ async def test_flow_clicks_the_lowest_match(
         main_mod, "scroll_region", lambda region, n: scrolls.append((region, n)) or True
     )
     monkeypatch.setattr(main_mod, "find_lowest_match", lambda template, band: match)
+    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
@@ -352,6 +353,7 @@ async def test_not_found_notifies_and_does_not_click(
     monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
     monkeypatch.setattr(main_mod, "find_lowest_match", lambda template, band: None)
+    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
@@ -363,6 +365,41 @@ async def test_not_found_notifies_and_does_not_click(
 
         await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
         assert clicks == []
+
+
+async def test_flow_snaps_focus_back_to_the_tool(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After clicking the browser's copy button the flow hands focus back to
+    the window recorded at mount - click first, snap-back strictly after."""
+    _patch_picker(monkeypatch)
+    events: list[str] = []
+    monkeypatch.setattr(main_mod, "foreground_window", lambda: 4242)
+    monkeypatch.setattr(main_mod, "click_region", lambda region: events.append("click") or True)
+    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
+    monkeypatch.setattr(
+        main_mod, "find_lowest_match", lambda template, band: TemplateMatch(y_offset=4, diff=0.02)
+    )
+    focus_calls: list[int] = []
+
+    def fake_focus(handle: int) -> bool:
+        focus_calls.append(handle)
+        events.append("focus")
+        return True
+
+    monkeypatch.setattr(main_mod, "focus_window", fake_focus)
+
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 55)) as pilot:
+        main = await _arm_with_template(app, pilot)
+        assert main._own_window == 4242  # recorded at mount
+
+        await _post_probe(main, pilot, BusyState.MATCH, 0.01)
+        await _post_probe(main, pilot, BusyState.CHANGED, 0.3)
+        await _post_probe(main, pilot, BusyState.CHANGED, 0.31)
+
+        await _wait_for(pilot, lambda: focus_calls == [4242], "focus snapped back")
+        assert events == ["click", "focus"]
 
 
 # -- session teardown -----------------------------------------------------------

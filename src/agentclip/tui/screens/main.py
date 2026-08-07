@@ -55,7 +55,7 @@ from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.busy import BusyProbe, BusyState, probe_busy
 from agentclip.screen.capture import CaptureError, RegionImage, capture_region
-from agentclip.screen.focus import click_region, scroll_region
+from agentclip.screen.focus import click_region, focus_window, foreground_window, scroll_region
 from agentclip.screen.picker import ScreenPickError, pick_region
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.template import find_lowest_match
@@ -164,6 +164,11 @@ class MainScreen(Screen[None]):
         self._copy_template: RegionImage | None = None
         self._copy_armed = False
         self._copy_changed_streak = 0
+        # Our own terminal window, refreshed while the user is demonstrably
+        # typing here - the auto-copy flow snaps focus back to it after
+        # clicking the browser's copy button. Not session-scoped: the terminal
+        # outlives /new.
+        self._own_window: int | None = None
         # One overlay at a time, across ALL pickers: cancelling an exclusive
         # worker cannot kill the blocking child overlay process it spawned, so
         # extra button presses are refused up front instead.
@@ -221,7 +226,17 @@ class MainScreen(Screen[None]):
         self._paint_status()
         self._update_composer()
         self._sync_sidebar()
+        self._remember_own_window()  # the user just launched us - focus is our terminal
         self._controller.start()
+
+    def _remember_own_window(self) -> None:
+        """Record the foreground window at a moment the user is provably
+        interacting with AgentClip (launch, composer send), so the auto-copy
+        flow knows which window "back to the tool" means. A None reading (mid
+        focus switch, non-Windows) keeps the last good handle."""
+        handle = foreground_window()
+        if handle is not None:
+            self._own_window = handle
 
     # -- dynamic bindings -----------------------------------------------------
 
@@ -314,6 +329,7 @@ class MainScreen(Screen[None]):
         self._copy_changed_streak = 0
         with suppress(NoMatches):
             self.sidebar.update_copy(COPY_UNSET)
+            self.sidebar.hide_paste_flash()
         with suppress(NoMatches):
             await self.transcript.clear_events()
 
@@ -406,6 +422,10 @@ class MainScreen(Screen[None]):
                 severity="warning",
             )
         await self._click_after_response()
+        # The payload now waits on the user's Ctrl+V - nag until the busy
+        # region reports the model chewing (or a new capture/reset happens).
+        with suppress(NoMatches):
+            self.sidebar.show_paste_flash()
 
     async def _click_after_response(self) -> None:
         """The payload is on the clipboard - poke the chat (when a region is
@@ -515,6 +535,10 @@ class MainScreen(Screen[None]):
 
     def on_clipboard_captured(self, message: ClipboardCaptured) -> None:
         message.stop()
+        # A new capture means the conversation moved on without the paste
+        # (manual copy, no busy region) - stop nagging either way.
+        with suppress(NoMatches):
+            self.sidebar.hide_paste_flash()
         self._controller.submit_clipboard(message.text)
 
     # -- key actions / events -> controller -----------------------------------
@@ -574,6 +598,7 @@ class MainScreen(Screen[None]):
         command parsing, exactly like an ask_user answer), and it starts the session
         with the sidebar's selected service. Otherwise it goes to the controller.
         """
+        self._remember_own_window()  # typing here = our terminal has OS focus
         future = self._new_session_future
         if future is not None and not future.done():
             task = text.strip()
@@ -756,6 +781,9 @@ class MainScreen(Screen[None]):
         if probe.state is BusyState.MATCH:
             self._copy_armed = True
             self._copy_changed_streak = 0
+            # The model is generating again - the Ctrl+V landed, stop nagging.
+            with suppress(NoMatches):
+                self.sidebar.hide_paste_flash()
             return
         if probe.state is BusyState.ERROR:
             self._copy_changed_streak = 0
@@ -875,6 +903,13 @@ class MainScreen(Screen[None]):
         self.notify(f"copy button clicked (diff {match.diff:.2f})")
         with suppress(NoMatches):
             self.sidebar.update_copy(f"{copy_region.describe()} · clicked (diff {match.diff:.2f})")
+
+        # The response is on its way to the clipboard - hand focus back to
+        # AgentClip so the user watches the ingest here, not the browser. A
+        # short beat first so the click registers before focus moves away.
+        if self._own_window is not None:
+            await asyncio.sleep(0.15)
+            await asyncio.to_thread(focus_window, self._own_window)
 
     @on(Button.Pressed, "#edit-services-btn")
     def _on_edit_services(self, event: Button.Pressed) -> None:

@@ -179,6 +179,21 @@ class AgentClipApp(App[None]):
     Sidebar #side-region, Sidebar #side-click, Sidebar #side-copy {
         color: $text-muted;
     }
+    Sidebar #side-paste-flash {
+        display: none;
+        margin-top: 1;
+        padding: 0 1;
+        text-align: center;
+        text-style: bold;
+        color: white;
+        background: red;
+        border: heavy yellow;
+    }
+    Sidebar #side-paste-flash.flash-alt {
+        color: red;
+        background: yellow;
+        border: heavy red;
+    }
     Sidebar .side-hint {
         color: $text-muted;
         margin-top: 1;

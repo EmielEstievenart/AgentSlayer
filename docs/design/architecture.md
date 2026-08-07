@@ -71,7 +71,7 @@ src/agentclip/
 │   ├── overlay.py         # draw-a-box tkinter overlay; runs in a CHILD process (--pick-region)
 │   ├── picker.py          # spawns the child (works frozen and from source), parses its stdout
 │   ├── capture.py         # GDI BitBlt/GetDIBits screen-region grab (ctypes) -> RegionImage
-│   ├── focus.py           # Windows SetCursorPos+SendInput click/scroll into a region (ctypes)
+│   ├── focus.py           # Windows SetCursorPos+SendInput click/scroll into a region; window focus snap-back (ctypes)
 │   ├── busy.py            # baseline-vs-fresh-capture diff -> BusyState (MATCH/CHANGED/ERROR)
 │   └── template.py        # bottom-up vertical-band scan for a captured icon -> lowest match
 │

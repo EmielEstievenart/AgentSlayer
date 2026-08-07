@@ -9,9 +9,13 @@ unlocks again whenever the app is waiting for a new session's first message.
 
 The widget is dumb on purpose: it holds no session state, exposes ``service``
 (the chosen preset key), ``set_locked``, ``refresh_services``, ``update_region``,
-``update_click``, ``update_busy`` and ``update_copy``; MainScreen owns every bit
+``update_click``, ``update_busy``, ``update_copy`` and the
+``show_paste_flash``/``hide_paste_flash`` pair; MainScreen owns every bit
 of routing, including the "Edit services..." button, the "Set busy region..."
-polling loop and the "Set copy button..." picker + auto-copy-click flow.
+polling loop and the "Set copy button..." picker + auto-copy-click flow. The
+paste flash is the one animated thing here - a deliberately obnoxious blinking
+banner that nags the user to Ctrl+V the outbound payload into the chat; the
+blink timer is pure presentation, so the dumb widget may own it.
 """
 
 from __future__ import annotations
@@ -22,12 +26,15 @@ from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.timer import Timer
 from textual.widgets import Button, Select, Static
 
 from agentclip.config import Config
 from agentclip.screen.region import ScreenRegion
 
 _HINT = "F3 hides this column · F2 settings · F1 help"
+PASTE_FLASH_TEXT = ">>> PRESS CTRL+V <<<\nin the chat, then send"
+_FLASH_BLINK_S = 0.4
 _REGION_UNSET = "not set - alt-tab to the chat yourself"
 _CLICK_UNSET = "not set - clicks fall back to the chat region"
 BUSY_UNSET = "not calibrated - set while the model is generating"  # MainScreen's teardown default
@@ -59,8 +66,10 @@ class Sidebar(Vertical):
         super().__init__(id=id)
         self._config = config
         self._project_root = project_root
+        self._flash_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
+        yield Static(Text(PASTE_FLASH_TEXT), id="side-paste-flash")
         yield Static(Text("PROJECT"), classes="side-title")
         yield Static(Text(_short_root(self._project_root)), id="side-root")
         yield Static(Text("SERVICE"), classes="side-title")
@@ -153,6 +162,31 @@ class Sidebar(Vertical):
         detector loop and formats the text - MATCH/CHANGED/ERROR, or the
         not-calibrated default)."""
         self.query_one("#side-busy", Static).update(Text(text))
+
+    # -- the paste flash --------------------------------------------------------
+
+    def show_paste_flash(self) -> None:
+        """Turn on the blinking Ctrl+V banner: an outbound payload sits on the
+        clipboard and nothing moves until the user pastes it into the chat.
+        Obnoxious by design - the user is staring at the browser, not at us."""
+        flash = self.query_one("#side-paste-flash", Static)
+        flash.display = True
+        if self._flash_timer is None:
+            self._flash_timer = self.set_interval(_FLASH_BLINK_S, self._blink_paste_flash)
+        else:
+            self._flash_timer.resume()
+
+    def hide_paste_flash(self) -> None:
+        """The paste happened (busy region went MATCH) or the moment passed
+        (new capture, session reset) - stop nagging."""
+        flash = self.query_one("#side-paste-flash", Static)
+        flash.display = False
+        flash.remove_class("flash-alt")
+        if self._flash_timer is not None:
+            self._flash_timer.pause()
+
+    def _blink_paste_flash(self) -> None:
+        self.query_one("#side-paste-flash", Static).toggle_class("flash-alt")
 
     # -- the copy-button region -------------------------------------------------
 

@@ -16,6 +16,10 @@ This builds from `packaging/agentclip.spec`, smoke-tests the frozen exe, and cop
 
 Commit after every change — each coherent edit gets its own commit; don't batch unrelated changes into one.
 
+## Subagents
+
+Delegate work to subagents rather than doing it inline. Use Sonnet for exploration, search and reading (e.g. the Explore agent); use Opus for implementation, editing and debugging. Launch independent agents in a single message so they run concurrently.
+
 ## Dev commands
 
 - Tests: `uv run pytest`

@@ -67,6 +67,13 @@ DEFAULT_ALLOWLIST = (
 
 DEFAULT_DENY_TOKENS = (";", "&&", "||", "|", "`", "$(", ">", "<", "\n")
 
+# Theme names selectable in Settings > Appearance (F3). Two are Textual
+# built-ins; "claude-warm"/"claude-dark" are registered by AgentClipApp on
+# mount (tui/app.py) - config.py stays a stdlib-only leaf, so it validates
+# against this literal set rather than importing textual just to ask it.
+VALID_THEMES = frozenset({"textual-light", "textual-dark", "claude-warm", "claude-dark"})
+DEFAULT_THEME = "textual-dark"
+
 
 @dataclass(frozen=True, slots=True)
 class ServicePreset:
@@ -135,6 +142,7 @@ def caps_for_budget(budget_chars: int) -> BudgetCaps:
 class GeneralConfig:
     service: str = "chatgpt-attach"
     chars_per_token: int = 3  # code-like payloads tokenize at ~3 chars/token
+    theme: str = DEFAULT_THEME
 
 
 @dataclass(frozen=True, slots=True)
@@ -330,10 +338,16 @@ def load_config(
         warnings.append(f"config: unknown clipboard provider {provider!r}; using 'auto'")
         provider = "auto"
 
+    theme = _take_str(general_t, "theme", DEFAULT_THEME, "general", warnings)
+    if theme not in VALID_THEMES:
+        warnings.append(f"config: unknown theme {theme!r}; using {DEFAULT_THEME!r}")
+        theme = DEFAULT_THEME
+
     return Config(
         general=GeneralConfig(
             service=service,
             chars_per_token=_take_int(general_t, "chars_per_token", 3, 1, 10, "general", warnings),
+            theme=theme,
         ),
         clipboard=ClipboardConfig(
             provider=provider,
@@ -416,6 +430,44 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
         data["services"] = services_table
     else:
         data.pop("services", None)
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(data, f)
+        os.replace(tmp_name, target)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(tmp_name)
+        raise
+
+
+def save_theme(theme: str, path: Path | None = None) -> None:
+    """Persist ``theme`` as ``[general] theme`` into the global config.toml at
+    ``path`` (default: :func:`default_global_config_path`).
+
+    Mirrors :func:`save_services`'s atomic-write behaviour: the new content is
+    written to a temp file in the same directory then swapped into place with
+    :func:`os.replace`, so a crash mid-write can never corrupt config.toml.
+
+    Only the ``theme`` key under ``[general]`` is touched - any other key
+    already in ``[general]`` (e.g. ``service``, ``chars_per_token``) and every
+    other top-level table are preserved verbatim. ``path`` is a parameter
+    (rather than always resolving :func:`default_global_config_path`) so
+    tests can point it at a tmp file instead of the user's real config.
+    """
+    target = path if path is not None else default_global_config_path()
+    discard_warnings: list[str] = []
+    data = _read_toml(target, discard_warnings)
+
+    general_table = dict(data.get("general", {}))
+    general_table["theme"] = theme
+
+    data = dict(data)
+    data["general"] = general_table
 
     target.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(

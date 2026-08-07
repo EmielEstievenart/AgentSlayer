@@ -14,10 +14,12 @@ import pytest
 
 from agentclip.config import (
     BUILTIN_SERVICE_KEYS,
+    DEFAULT_THEME,
     ServicePreset,
     default_services,
     load_config,
     save_services,
+    save_theme,
 )
 
 
@@ -223,3 +225,84 @@ def test_save_services_is_atomic_no_leftover_tmp_files(project: Path, global_pat
     leftovers = list(global_path.parent.glob("*.tmp"))
     assert leftovers == []
     assert global_path.exists()
+
+
+# -- theme: default / load / save --------------------------------------------
+
+
+def test_default_theme_is_textual_dark(project: Path, global_path: Path) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.theme == "textual-dark"
+    assert DEFAULT_THEME == "textual-dark"
+
+
+def test_load_config_reads_theme_from_toml(project: Path, global_path: Path) -> None:
+    global_path.write_text('[general]\ntheme = "claude-dark"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.theme == "claude-dark"
+    assert not cfg.warnings
+
+
+def test_load_config_rejects_unknown_theme_and_warns(project: Path, global_path: Path) -> None:
+    global_path.write_text('[general]\ntheme = "not-a-real-theme"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.theme == DEFAULT_THEME
+    assert any("theme" in w for w in cfg.warnings)
+
+
+def test_load_config_accepts_all_four_selectable_themes(project: Path, global_path: Path) -> None:
+    for theme in ("textual-light", "textual-dark", "claude-warm", "claude-dark"):
+        global_path.write_text(f'[general]\ntheme = "{theme}"\n', encoding="utf-8")
+        cfg = load_config(project, global_config_path=global_path)
+        assert cfg.general.theme == theme
+        assert not cfg.warnings
+
+
+def test_save_theme_then_load_round_trips(project: Path, global_path: Path) -> None:
+    save_theme("claude-warm", global_path)
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.theme == "claude-warm"
+    assert not cfg.warnings
+
+
+def test_save_theme_preserves_other_general_keys_and_top_level_tables(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        '[general]\nservice = "claude"\nchars_per_token = 4\n\n'
+        "[clipboard]\npoll_interval_ms = 500\n",
+        encoding="utf-8",
+    )
+    save_theme("claude-dark", global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+
+    assert raw["general"] == {"service": "claude", "chars_per_token": 4, "theme": "claude-dark"}
+    assert raw["clipboard"] == {"poll_interval_ms": 500}
+
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.theme == "claude-dark"
+    assert cfg.general.service == "claude"
+    assert cfg.general.chars_per_token == 4
+    assert cfg.clipboard.poll_interval_ms == 500
+
+
+def test_save_theme_overwrites_a_previous_theme_value(project: Path, global_path: Path) -> None:
+    save_theme("claude-warm", global_path)
+    save_theme("claude-dark", global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["general"]["theme"] == "claude-dark"
+
+
+def test_save_theme_is_atomic_no_leftover_tmp_files(project: Path, global_path: Path) -> None:
+    save_theme("claude-dark", global_path)
+    leftovers = list(global_path.parent.glob("*.tmp"))
+    assert leftovers == []
+    assert global_path.exists()
+
+
+def test_save_theme_creates_missing_parent_dirs(tmp_path: Path) -> None:
+    nested = tmp_path / "nested" / "does" / "not" / "exist" / "config.toml"
+    save_theme("claude-warm", nested)
+    assert nested.exists()
+    raw = tomllib.loads(nested.read_text(encoding="utf-8"))
+    assert raw["general"]["theme"] == "claude-warm"

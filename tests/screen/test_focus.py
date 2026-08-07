@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from agentclip.screen.focus import click_region, scroll_region
+from agentclip.screen.focus import click_region, focus_window, foreground_window, scroll_region
 from agentclip.screen.region import ScreenRegion
 
 REGION = ScreenRegion(120, 240, 32, 24)
@@ -31,3 +31,14 @@ def test_scroll_is_unavailable_off_windows() -> None:
 @off_windows_only
 def test_click_is_unavailable_off_windows() -> None:
     assert click_region(REGION) is False
+
+
+def test_focus_refuses_a_null_handle() -> None:
+    """0 is Windows' own "no window" value - refused before any OS call."""
+    assert focus_window(0) is False
+
+
+@off_windows_only
+def test_window_focus_is_unavailable_off_windows() -> None:
+    assert foreground_window() is None
+    assert focus_window(0x1234) is False

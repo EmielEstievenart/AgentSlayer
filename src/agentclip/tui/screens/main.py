@@ -428,10 +428,9 @@ class MainScreen(Screen[None]):
         move it - everything else reads it."""
         return self._slots[self._live]
 
-    # Compatibility proxies onto the MASTER slot. The single-window vocabulary
-    # (``_chat_region``, ``_copy_template``, ...) predates slots and is what the
-    # region/chatbox/copy/newchat Pilot tests poke; keeping it as read/write
-    # views of MASTER means the migration to slots changed no test at all.
+    # The last compatibility proxy onto the MASTER slot. The single-window
+    # vocabulary predates slots and is what the older Pilot suites poke; only
+    # ``_chat_region`` is left, because it is the only thing a slot still holds.
     @property
     def _chat_region(self) -> ScreenRegion | None:
         return self._slots[AgentSlot.MASTER].chat_region
@@ -1160,10 +1159,16 @@ class MainScreen(Screen[None]):
         return prompt
 
     def _after_calibration(self) -> None:
-        """Repaint the slot readiness line after any single calibration landed,
-        and tell the user once when the sub-agent slot becomes usable - the
-        delegate tool is baked into the bootstrap, so it only reaches the model
-        on the next /new."""
+        """Repaint the slot readiness line after anything readiness depends on
+        changed, and tell the user once when the sub-agent slot becomes usable
+        - the delegate tool is baked into the bootstrap, so it only reaches the
+        model on the next /new.
+
+        Both kinds of event have to land here, which is easy to get wrong:
+        readiness is composed from the slot AND the service profile, so
+        capturing a copy button can flip delegation ON without any region being
+        drawn - and it does so for BOTH slots at once, since the profile is
+        shared."""
         ready = self.delegation_available()
         with suppress(NoMatches):
             self.sidebar.update_slot_note(self._slot_note())

@@ -1,18 +1,18 @@
-"""Pilot tests for the AGENT SLOT picker and per-slot calibration state.
+"""Pilot tests for the AGENT SLOT picker.
 
-Every calibration in the sidebar belongs to one slot: MASTER is the chat the
-session runs in, SUBAGENT the second window a delegated sub-agent gets. The
-picker under "AGENT SLOT" chooses which slot the buttons below it write into -
-it does NOT change which window the automation drives (that is
+A slot is one drawn box now, so the picker under "AGENT SLOT" routes exactly
+one button: "Set chat region...". MASTER is the chat the session runs in,
+SUBAGENT the second window a delegated sub-agent gets, and choosing between
+them does NOT change which window the automation drives (that is
 ``start_browser_chat``'s job, tested in test_subagent_slot_ui.py).
 
-What we verify: the two slots are genuinely independent, switching the picker
-repaints the whole column from the selected slot's stored state, the sub-agent's
-picker prompts say which window to draw on, the picker is never locked by a
-session (calibrating mid-session is the normal way to reach delegation), /new
-keeps BOTH slots' calibrations and only sends the slot pointers home, and the
-legacy single-window attributes still read and write the MASTER slot so the
-older Pilot suites keep passing unchanged.
+Everything else in the column is the SERVICE's - captured appearances shared by
+both slots - which is what makes the second window cost one drag. These tests
+pin down exactly that split: the two windows are independent, the appearances
+are not, the readiness note names the gaps from ``slot.missing()``, only the
+region prompt is slot-prefixed, the picker is never locked by a session
+(drawing the sub-agent window mid-session is the normal way to reach
+delegation), and /new keeps both windows while sending the pointers home.
 """
 
 from __future__ import annotations
@@ -32,7 +32,12 @@ from agentclip.config import load_config
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import AgentSlot
+from agentclip.screen.slot import (
+    MISSING_CHAT_REGION,
+    MISSING_COPY,
+    MISSING_NEWCHAT,
+    AgentSlot,
+)
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import SLOT_NOTE_MASTER, SLOT_NOTE_READY
@@ -73,15 +78,16 @@ async def _wait_for(
     raise AssertionError(f"timed out waiting for {what}")
 
 
-def _make_app(tmp_path: Path) -> AgentClipApp:
+def _make_app(tmp_path: Path, profile_root: Path) -> AgentClipApp:
     project = tmp_path / "project"
-    project.mkdir()
+    project.mkdir(exist_ok=True)
     config = load_config(project, global_config_path=project / "no-such-global.toml")
     app = AgentClipApp(
         config=config,
         provider=FakeClipboard(),
         engine_factory=make_engine_factory(lambda: app.app_config, project),
         project_root=project,
+        profile_root=profile_root,
     )
     return app
 
@@ -150,12 +156,12 @@ async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
 
 
 async def test_the_two_slots_are_independent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Calibrating the sub-agent window must not disturb the master's, and the
-    legacy attribute names keep meaning "the master slot"."""
+    """Drawing the sub-agent window must not disturb the master's, and the
+    legacy attribute name keeps meaning "the master slot"."""
     picker = _patch_screen(monkeypatch)
-    app = _make_app(tmp_path)
+    app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -173,11 +179,11 @@ async def test_the_two_slots_are_independent(
         assert main._live is AgentSlot.MASTER  # calibrating never retargets
 
 
-async def test_switching_the_slot_repaints_every_readout(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_switching_the_slot_repaints_the_window_but_not_the_appearances(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     picker = _patch_screen(monkeypatch)
-    app = _make_app(tmp_path)
+    app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -209,10 +215,10 @@ async def test_switching_the_slot_repaints_every_readout(
 
 
 async def test_the_note_reports_what_delegation_is_still_missing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     picker = _patch_screen(monkeypatch)
-    app = _make_app(tmp_path)
+    app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -220,16 +226,19 @@ async def test_the_note_reports_what_delegation_is_still_missing(
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await pilot.pause()
         note = _label(app, "#side-slot-note")
-        assert "new-chat button" in note
-        assert "copy button" in note
+        for gap in (MISSING_CHAT_REGION, MISSING_COPY, MISSING_NEWCHAT):
+            assert gap in note
 
         # The window has to be drawn first: an appearance with nowhere to be
         # searched for is not yet a usable piece of the slot.
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
-        assert "new-chat button" not in _label(app, "#side-slot-note")
+        assert MISSING_CHAT_REGION not in _label(app, "#side-slot-note")
 
-        await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
+        assert MISSING_NEWCHAT not in _label(app, "#side-slot-note")
+
+        # A capture is a profile change, not a slot one - the ready-toast seam
+        # has to notice it too, or delegation would silently stay "off".
         await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
         await _wait_for(
             pilot,
@@ -240,7 +249,7 @@ async def test_the_note_reports_what_delegation_is_still_missing(
 
 
 async def test_subagent_prompts_name_the_window_being_drawn_on(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Both slots share the picker code, so the prompt is the only thing that
     tells the user which browser window to point at.
@@ -249,7 +258,7 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
     about the SERVICE, and the answer is the same whichever window it is drawn
     in - a slot prefix there would be a lie."""
     picker = _patch_screen(monkeypatch)
-    app = _make_app(tmp_path)
+    app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -269,12 +278,12 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
 
 
 async def test_the_slot_picker_is_never_locked_by_a_session(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Unlike the service picker: a session that wants to delegate has to be
     able to calibrate the sub-agent window after it started."""
     picker = _patch_screen(monkeypatch)
-    app = _make_app(tmp_path)
+    app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -293,13 +302,13 @@ async def test_the_slot_picker_is_never_locked_by_a_session(
 
 
 async def test_new_keeps_both_slots_and_sends_the_pointers_home(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """/new is a session teardown, not a recalibration: the service's windows
     have not moved, so both slots' calibrations survive and only the slot
     pointers (calibrating + live) go home to MASTER."""
     picker = _patch_screen(monkeypatch)
-    app = _make_app(tmp_path)
+    app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -329,14 +338,14 @@ async def test_new_keeps_both_slots_and_sends_the_pointers_home(
 
 
 async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A sub-agent slot calibrated to readiness stays ready across /new:
     ``_delegation_ready`` is re-derived from the surviving slot instead of being
     zeroed, so the next session gets the delegate tool and the one-shot "slot
     ready" toast has no False->True edge to re-fire on."""
     picker = _patch_screen(monkeypatch)
-    app = _make_app(tmp_path)
+    app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -357,7 +366,7 @@ async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
 
 
 async def test_the_new_browser_chat_button_targets_the_calibrating_slot(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The button is how the user *tests* a calibration, so it follows the
     sidebar - and it never moves the live slot. The appearance is the service's
@@ -368,7 +377,7 @@ async def test_the_new_browser_chat_button_targets_the_calibrating_slot(
     monkeypatch.setattr(
         main_mod, "click_region", lambda region, **kw: bool(clicks.append(region)) or True
     )
-    app = _make_app(tmp_path)
+    app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None

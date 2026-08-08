@@ -29,7 +29,7 @@ from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.capture import CaptureError, RegionImage
 from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import AgentSlot
+from agentclip.screen.slot import AgentSlot, can_finish
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import STALE_CALIBRATED, STALE_UNSET
@@ -180,7 +180,7 @@ async def test_drawing_the_chat_window_is_the_whole_calibration(
         assert main._slots[AgentSlot.MASTER].chat_region == REGION
         assert "WHOLE browser window" in picker.prompts[-1] or "box" in picker.prompts[-1]
         assert main._active_profile().captured == ()  # nothing captured at all
-        assert main.live.can_finish
+        assert can_finish(main.live, main._active_profile())
 
         await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
         # ...and it really polls: the tracker's first frame reads as CHANGING.

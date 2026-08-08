@@ -327,6 +327,30 @@ async def test_an_uncalibrated_slot_is_refused_without_touching_the_screen(
         assert main._live is AgentSlot.MASTER
 
 
+async def test_a_drawn_window_without_a_new_chat_capture_is_refused_the_same_way(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NOT_CALIBRATED has two causes - no window drawn, or no appearance
+    captured - and the second must refuse just as absolutely: a drawn window
+    with nothing to look for in it is still nowhere to click."""
+    picker, clicks, probed = _patch_screen(monkeypatch)
+    app = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _select_slot(app, pilot, AgentSlot.SUBAGENT)
+        await _calibrate(app, pilot, picker, "#set-region-btn", SUB_BOX)
+        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_COPY)
+        clicks.clear()
+        probed.clear()
+
+        assert await main.start_browser_chat(AgentSlot.SUBAGENT) is False
+        assert probed == []  # refused before any search, let alone a click
+        assert clicks == []
+        assert main._live is AgentSlot.MASTER
+
+
 async def test_end_browser_chat_always_returns_to_the_master(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

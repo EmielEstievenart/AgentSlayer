@@ -77,6 +77,7 @@ src/agentclip/
 │   ├── picker.py          # spawns the child (works frozen and from source), parses its stdout
 │   ├── capture.py         # GDI BitBlt/GetDIBits screen-region grab (ctypes) -> RegionImage
 │   ├── focus.py           # Windows SetCursorPos+SendInput click/scroll into a region; window focus snap-back (ctypes)
+│   ├── hover.py           # cursor-stop geometry for the hover scan (icons that only render under the pointer)
 │   ├── busy.py            # diff_fraction + the BusyState/BusyProbe vocabulary every detector answers in
 │   ├── stale.py           # StaleTracker: frame-to-frame stability of a region -> StaleState
 │   ├── presence.py        # PresenceTracker: is this appearance on screen? de-bounced -> BusyProbe

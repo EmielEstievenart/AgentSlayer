@@ -25,37 +25,46 @@ lands where it belongs instead of in whatever tab happens to be visible.
 Threading: the clipboard watcher is a ``run_worker(thread=True)`` that bridges
 captures via the thread-safe ``post_message(ClipboardCaptured)`` -> the controller.
 The controller's flow coroutines run via ``spawn`` (also ``run_worker``), so Textual
-cancels everything on unmount. The finish detectors (sidebar's "Set busy
-region..." / "Set idle button..." / "Set response region...") are the same
-shape: one thread worker polling whichever detectors are calibrated and
-bridging ``BusyProbed`` / ``IdleProbed`` / ``StaleProbed`` to the sidebar.
+cancels everything on unmount. The finish detectors are the same shape: ONE
+thread worker takes a single capture of the live chat region per tick and
+hands it to whichever detectors the active service supports - a busy tracker
+if it has a busy appearance captured, an idle one if it has an idle
+appearance, and the stale tracker always - bridging ``BusyProbed`` /
+``IdleProbed`` / ``StaleProbed`` back to the UI.
 
 Their combined verdict drives the copy-button auto-click (``_evaluate_finish``):
-the busy element was calibrated mid-generation so MATCH there means "still
-generating", the idle element was calibrated while idle so MATCH there means
-"finished", and the stale detector needs no calibration pixels at all - the
-response region reading unchanged for the preset's ``stable_seconds`` means
-"finished" (the service-agnostic fallback for chats whose busy/idle cues are
-unreliable). Any detector saying "generating" arms the trigger; the trigger
-fires only once EVERY calibrated detector says "finished" on two consecutive
-polls - with several calibrated that agreement is the whole point of having
-more than one. Firing runs ``_auto_copy_flow``: click the live chat input box,
-scroll to the bottom, find the newest (lowest) copy-button icon in a vertical
-band - falling back to a hover scan for chats that only render the icon under
-the pointer - click it, and let the clipboard watcher ingest the copy. The
-flow itself scrolls and hover-scans the very screen the stale detector
-watches, so evaluation is suspended while it runs (``_flow_running``) and the
-stale tracker forgets its history when the flow ends - without that the flow
-would read as a fresh generation and re-fire itself forever.
+the busy appearance is on screen only WHILE the model generates, so finding it
+means "still generating"; the idle appearance is on screen only while the chat
+is idle, so finding it means "finished"; and the stale detector needs no
+appearance at all - the drawn chat region reading unchanged for the preset's
+``stable_seconds`` means "finished". That last one is the service-agnostic
+fallback for chats whose busy/idle cues are unreliable, and the reason one
+drawn box is already a working finish detector. Any detector saying
+"generating" arms the trigger; it fires only once EVERY running detector says
+"finished" on two consecutive ticks - with more than one running, that
+agreement is the whole point of having them. Firing runs ``_auto_copy_flow``:
+click the live chat input box, scroll to the bottom, find the newest (lowest)
+copy-button icon anywhere in the drawn region - falling back to a hover scan
+for chats that only render the icon under the pointer - click it, and let the
+clipboard watcher ingest the copy. The flow itself scrolls and hover-scans the
+very screen those detectors watch, so evaluation is suspended while it runs
+(``_flow_running``) and every tracker forgets its history when the flow ends -
+without that the flow would read as a fresh generation and re-fire itself
+forever.
 
 The chat input box is not a stored location at all any more: the two layouts a
 service can show (a fresh chat centres its box, an ongoing one docks it at the
 bottom) are *appearances* captured once per service (``screen.profile``) and
-searched for INSIDE the drawn chat region on the spot (``_find``). Moving or
-resizing the browser therefore costs nothing.
+searched for INSIDE the drawn chat region on the spot (``_find_all``). Moving
+or resizing the browser therefore costs nothing.
 The browser's new-chat button works the same way: captured once per service,
 found inside the chat region and clicked where it actually is
-(``_click_profile_element``).
+(``_click_profile_element``). Every such search asks for ALL the matches
+rather than the first, because an appearance belongs to the service and not to
+a window: two windows of the same service overlapping one drawn region make it
+findable twice, and "click the first one" is exactly how a sub-agent's
+new-chat click lands in the master's window. Two genuinely distinct matches
+are therefore a refusal, never a coin toss.
 
 Every one of those calibrations belongs to an *agent slot*
 (:mod:`agentclip.screen.slot`), not to the screen: MASTER is the chat the
@@ -134,7 +143,7 @@ from agentclip.screen.stale import StaleProbe, StaleState, StaleTracker
 from agentclip.screen.template import (
     RegionMatch,
     Template,
-    find_in_region,
+    find_all_in_region,
     find_lowest_in_region,
     match_rect,
 )
@@ -195,17 +204,57 @@ def _panel_id(view_id: str) -> str:
 class ElementClick(Enum):
     """Outcome of the find-then-click primitive (``_click_profile_element``).
 
-    Four states, not a bool, because the three failures are three different
+    Five states, not a bool, because the four failures are four different
     things to tell the user: nothing to look for or nowhere to look
     (NOT_CALIBRATED - go capture it), it is simply not on screen (MISMATCH -
-    nothing was clicked, and clicking blind is never the answer), or we clicked
-    and the OS refused (NOT_CLICKED - Windows-only input).
+    nothing was clicked, and clicking blind is never the answer), it is on
+    screen in more than one place (AMBIGUOUS - which is not a search failure
+    but a *drawing* failure, and the fix is to redraw the window), or we
+    clicked and the OS refused (NOT_CLICKED - Windows-only input).
     """
 
     CLICKED = "clicked"
     MISMATCH = "mismatch"  # not on screen right now; refused to click
+    AMBIGUOUS = "ambiguous"  # several of them in the region; refused to guess
     NOT_CLICKED = "not_clicked"  # found fine, but the click did not land
     NOT_CALIBRATED = "not_calibrated"  # no chat region drawn, or nothing captured
+
+
+# How many matches of one appearance are worth collecting. The question the
+# search answers is "one, or more than one?", so anything past a handful is the
+# same answer - and every extra candidate is a full pixel comparison.
+_MAX_MATCHES = 8
+
+
+def _same_element(one: ScreenRegion, other: ScreenRegion) -> bool:
+    """Are these two matches the same physical thing on screen?
+
+    A template routinely matches its own element at several neighbouring
+    origins - a pixel or two of drift is well inside the diff threshold - so a
+    raw match count says more about anti-aliasing than about how many buttons
+    are on screen. Overlapping rectangles are one element: a genuine second
+    copy of a button cannot be drawn on top of the first.
+
+    Per axis, not as one radius, because a template can be very lopsided. A
+    chat input box is ~800x90, and "within max(width, height)" would fold two
+    input boxes 400px apart - the two windows this whole check exists to tell
+    apart - into one.
+    """
+    return (
+        abs(one.left - other.left) < one.width and abs(one.top - other.top) < one.height
+    )
+
+
+def _distinct_rects(
+    region: ScreenRegion, template: Template, matches: list[RegionMatch]
+) -> list[ScreenRegion]:
+    """Scene-local matches as absolute rectangles, one per physical element."""
+    kept: list[ScreenRegion] = []
+    for match in matches:
+        rect = match_rect(region, template, match)
+        if not any(_same_element(rect, other) for other in kept):
+            kept.append(rect)
+    return kept
 
 
 def _fmt_k(chars: int) -> str:
@@ -368,14 +417,14 @@ class MainScreen(Screen[None]):
         self._panels: dict[str, TranscriptPanel] = {}
         self._focused_panel = MASTER_VIEW
         self._sessions: dict[str, SessionRef] = {}  # view id -> its identity, for labels/export
-        # Every user-drawn calibration, one set per agent slot: the chat window
-        # itself (where appearances are searched for, the last-resort click
-        # target, and the vertical span of the copy-button search band), the
-        # two finish detectors, the copy button and the new-chat button.
-        # Calibrations describe where the service's windows are, not what one
-        # conversation said, so they survive /new; only the pointers below
-        # reset. What the service LOOKS like lives in ``_profiles`` instead -
-        # captured once, shared by both slots, persisted across runs.
+        # Every user-drawn calibration, one set per agent slot - which since the
+        # appearance model is exactly one thing: the chat window. That single
+        # box is where every appearance is searched for, the click target of
+        # last resort, and the whole calibration of the staleness detector.
+        # It describes where a service's window IS, not what one conversation
+        # said, so it survives /new; only the pointers below reset. What the
+        # service LOOKS like lives in ``_profiles`` instead - captured once,
+        # shared by both slots, persisted across runs.
         #
         # ``_calibrating`` is the slot the sidebar's pickers write into;
         # ``_live`` is the slot the automation (paste click, detector poller,
@@ -866,14 +915,14 @@ class MainScreen(Screen[None]):
         with suppress(NoMatches):
             self.sidebar.show_paste_flash(ENTER_FLASH_TEXT if pasted else PASTE_FLASH_TEXT)
 
-    async def _find(
+    async def _find_all(
         self,
         kind: TemplateKind,
         slot: AgentSlot | None = None,
         *,
         scene: RegionImage | None = None,
-    ) -> ScreenRegion | None:
-        """Where ``kind`` is on screen right now, in absolute coordinates.
+    ) -> list[ScreenRegion]:
+        """Every place ``kind`` is on screen right now, in absolute coordinates.
 
         The one primitive behind every "is it there / click it" question. It
         looks *inside the drawn chat region* for the ACTIVE SERVICE's captured
@@ -881,30 +930,42 @@ class MainScreen(Screen[None]):
         drew one box per window, and everything inside it is recognised rather
         than remembered, so moving or resizing the browser costs nothing.
 
+        All of them rather than the first, because that is the question callers
+        actually have to answer: an appearance is the SERVICE's, so a second
+        window of the same service inside (or overlapping) the drawn region
+        carries the same button, and clicking whichever match came back first
+        would click a different conversation's. Near-duplicate hits on one
+        physical element are folded away first (``_distinct_rects``), so a list
+        longer than one really does mean two elements.
+
         ``scene`` lets a caller that already captured the chat region reuse the
         frame, so several appearances can be hunted in one picture of one
-        instant. None is returned - never raised - for every way this can come
-        up empty: no chat region drawn, no such appearance captured, the
-        capture failed, or it simply is not on screen.
+        instant - which is why it may not be combined with ``slot``: the frame
+        was taken from one window, and translating its matches back through
+        another slot's rectangle would put them anywhere at all.
+
+        Empty - never raised - for every way this can come up empty: no chat
+        region drawn, no such appearance captured, the capture failed, or it
+        simply is not on screen.
         """
+        if scene is not None and slot is not None:
+            raise ValueError("_find_all takes a slot or a captured scene, never both")
         cal = self._slots[slot] if slot is not None else self.live
         region = cal.chat_region
         if region is None:
-            return None
+            return []
         template = self._active_profile().get(kind)
         if template is None:
-            return None
+            return []
         if scene is None:
             try:
                 scene = await asyncio.to_thread(capture_region, region)
             except CaptureError:
-                return None
-        match = await asyncio.to_thread(
-            find_in_region, template, scene, max_diff=kind.max_diff
+                return []
+        matches = await asyncio.to_thread(
+            find_all_in_region, template, scene, max_diff=kind.max_diff, limit=_MAX_MATCHES
         )
-        if match is None:
-            return None
-        return match_rect(region, template, match)
+        return _distinct_rects(region, template, matches)
 
     async def _chatbox_region(self) -> ScreenRegion | None:
         """Which chat input box to poke right now, or None if none is known.
@@ -920,6 +981,14 @@ class MainScreen(Screen[None]):
         is the answer rather than nothing: clicking a window is recoverable,
         not clicking at all means the paste never lands.
 
+        Two input boxes of the same layout inside the region take that same
+        fallback, and for a sharper reason: this click is what focuses the
+        window a payload is about to be pasted into, so poking the wrong one
+        pastes a whole turn into somebody else's conversation. The drawn region
+        is the user's own answer to "where is this chat", so a click in the
+        middle of it is the conservative move - and it is exactly what happens
+        with no chat box captured at all.
+
         Always the LIVE slot: mid-delegation this is the sub-agent's window.
         """
         region = self.live.chat_region
@@ -930,9 +999,17 @@ class MainScreen(Screen[None]):
         except CaptureError:
             return region
         for kind in (TemplateKind.CHATBOX_ONGOING, TemplateKind.CHATBOX_INITIAL):
-            found = await self._find(kind, scene=scene)
-            if found is not None:
-                return found
+            found = await self._find_all(kind, scene=scene)
+            if len(found) == 1:
+                return found[0]
+            if len(found) > 1:
+                self.notify(
+                    f"found {len(found)} things that look like the {kind.label} in the chat "
+                    "window - clicking its centre instead; redraw the window so it contains "
+                    "only this chat",
+                    severity="warning",
+                )
+                return region
         return region
 
     async def _click_after_response(self) -> bool:
@@ -1809,13 +1886,21 @@ class MainScreen(Screen[None]):
         move: a page that re-laid itself out, scrolled, or opened a dialog
         simply reads as not-on-screen and gets no click at all. Refusing is
         always the safe answer - the user can click it themselves.
+
+        Finding it TWICE is refused just as firmly. An appearance belongs to
+        the service, so a second window of the same service sitting inside the
+        drawn region carries an identical button; picking one of them is a coin
+        toss between two conversations, and the loser is a chat that gets
+        clicked - reset, even - on behalf of the other.
         """
         if self._slots[slot].chat_region is None or not self._active_profile().has(kind):
             return ElementClick.NOT_CALIBRATED
-        found = await self._find(kind, slot)
-        if found is None:
+        found = await self._find_all(kind, slot)
+        if not found:
             return ElementClick.MISMATCH
-        clicked = await asyncio.to_thread(click_region, found, settle_s=settle_s)
+        if len(found) > 1:
+            return ElementClick.AMBIGUOUS
+        clicked = await asyncio.to_thread(click_region, found[0], settle_s=settle_s)
         return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
 
     # -- the browser's new-chat button ------------------------------------------
@@ -1857,6 +1942,15 @@ class MainScreen(Screen[None]):
                 severity="warning",
             )
             self._newchat_status("not on screen - not clicked")
+            return
+        if outcome is ElementClick.AMBIGUOUS:
+            self.notify(
+                "found several things that look like the new-chat button in the chat "
+                "window - nothing was clicked; redraw the window so it contains only "
+                "this chat",
+                severity="warning",
+            )
+            self._newchat_status("several on screen - not clicked")
             return
         if outcome is ElementClick.NOT_CLICKED:
             self.notify(
@@ -1916,11 +2010,17 @@ class MainScreen(Screen[None]):
             )
             return False
         if outcome is not ElementClick.CLICKED:
-            reason = (
-                "is not on screen"
-                if outcome is ElementClick.MISMATCH
-                else "could not be clicked (it is Windows-only)"
-            )
+            # AMBIGUOUS is the one worth spelling out: nothing is broken, the
+            # drawn region simply holds two chats, and the fix is a redraw
+            # rather than a recapture.
+            reasons = {
+                ElementClick.MISMATCH: "is not on screen",
+                ElementClick.AMBIGUOUS: (
+                    "was found in several places in the drawn window - redraw it so it "
+                    "contains only this chat"
+                ),
+            }
+            reason = reasons.get(outcome, "could not be clicked (it is Windows-only)")
             self.notify(
                 f"the {slot.label} chat's new-chat button {reason} - nothing was "
                 "clicked and nothing was pasted",

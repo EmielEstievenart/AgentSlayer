@@ -34,6 +34,7 @@ from agentclip.screen.profile_store import load_profile
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.template import RegionMatch, Template
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.screens.main import MainScreen
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 NEWCHAT_BOX = ScreenRegion(120, 90, 180, 36)
@@ -43,7 +44,22 @@ FOUND = RegionMatch(x=40, y=24, diff=0.02)
 CLICK_TARGET = ScreenRegion(
     CHAT_REGION.left + FOUND.x, CHAT_REGION.top + FOUND.y, NEWCHAT_BOX.width, NEWCHAT_BOX.height
 )
+# The same button seen a couple of pixels over - one element, two matches.
+JITTERED = RegionMatch(x=FOUND.x + 3, y=FOUND.y + 2, diff=0.04)
+# A SECOND browser window of the same service inside the drawn region: far
+# enough away to be a different button, which is the whole problem.
+SECOND_WINDOW = RegionMatch(x=FOUND.x + 400, y=FOUND.y, diff=0.03)
 SIZE = (110, 100)
+
+
+@pytest.fixture(autouse=True)
+def _no_detector_poller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing here is about the finish detectors, and a live poller rewrites a
+    wrapping line in the sidebar on its own schedule - which reflows every
+    button below it, so a probe landing between a click's mouse-down and
+    mouse-up moves the button out from under the pointer and the press is
+    silently lost. (The poller itself is test_stale_detector_ui's.)"""
+    monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
 
 
 def _frame(region: ScreenRegion) -> RegionImage:
@@ -97,15 +113,20 @@ async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
     await pilot.press("enter")
 
 
-def _patch_found(monkeypatch: pytest.MonkeyPatch, match: RegionMatch | None) -> list[RegionImage]:
-    """Say whether the captured button is on screen, and record every search."""
+def _patch_found(
+    monkeypatch: pytest.MonkeyPatch, *matches: RegionMatch
+) -> list[RegionImage]:
+    """Say where the captured button is on screen, and record every search.
+
+    Several matches means several of them really are in the region - the search
+    itself is screen.template's job (tested there)."""
     scenes: list[RegionImage] = []
 
-    def fake_find(template: Template, scene: RegionImage, **kw: object) -> RegionMatch | None:
+    def fake_find_all(template: Template, scene: RegionImage, **kw: object) -> list[RegionMatch]:
         scenes.append(scene)
-        return match
+        return list(matches)
 
-    monkeypatch.setattr(main_mod, "find_in_region", fake_find)
+    monkeypatch.setattr(main_mod, "find_all_in_region", fake_find_all)
     return scenes
 
 
@@ -230,7 +251,7 @@ async def test_not_on_screen_warns_and_clicks_nothing(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _capture_newchat(app, pilot, monkeypatch)
-        _patch_found(monkeypatch, None)
+        _patch_found(monkeypatch)
         clicks.clear()
 
         await _press(app, pilot, "#newchat-btn")
@@ -238,6 +259,56 @@ async def test_not_on_screen_warns_and_clicks_nothing(
         assert clicks == []
         # The capture is kept, so the user can retry once the page settles.
         assert main._active_profile().has(TemplateKind.NEW_CHAT)
+
+
+async def test_two_of_them_in_the_region_warns_and_clicks_nothing(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The appearance is the SERVICE's, so a second window of the same service
+    inside the drawn region carries an identical button. Picking one is a coin
+    toss between two conversations - so neither is clicked, and the fix the user
+    is told about is a redraw, not a recapture."""
+    clicks: list[ScreenRegion] = []
+    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _capture_newchat(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND, SECOND_WINDOW)
+        clicks.clear()
+
+        await _press(app, pilot, "#newchat-btn")
+        await _wait_for(pilot, lambda: "several on screen" in _newchat_label(app), "refusal shown")
+        assert clicks == []
+        assert main._active_profile().has(TemplateKind.NEW_CHAT)  # nothing was lost
+
+
+async def test_two_hits_on_the_same_button_are_still_one_button(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A template matches its own element at several neighbouring origins - a
+    pixel of drift is well inside the diff threshold - so counting raw matches
+    would refuse every click on a perfectly ordinary screen."""
+    clicks: list[ScreenRegion] = []
+    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _capture_newchat(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND, JITTERED)
+        clicks.clear()
+
+        await _press(app, pilot, "#newchat-btn")
+        await _wait_for(pilot, lambda: "clicked" in _newchat_label(app), "clicked once")
+        assert clicks == [CLICK_TARGET]  # the first of the two, once
 
 
 async def test_a_refused_click_is_reported_separately(

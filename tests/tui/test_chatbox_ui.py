@@ -40,6 +40,7 @@ from agentclip.screen.profile_store import load_profile
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.template import RegionMatch, Template
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.screens.main import MainScreen
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 INITIAL_BOX = ScreenRegion(1300, 520, 400, 90)
@@ -48,6 +49,17 @@ ONGOING_BOX = ScreenRegion(1300, 860, 400, 90)
 # The sidebar is a tall stack of calibration rows now - every button has to be
 # on screen for pilot.click to reach it.
 SIZE = (110, 100)
+
+
+@pytest.fixture(autouse=True)
+def _no_detector_poller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Nothing here is about the finish detectors, and a live poller is actively
+    hostile to it: it rewrites a wrapping line in the sidebar on its own
+    schedule, which reflows every capture button below - so a probe landing
+    between a click's mouse-down and mouse-up moves the button out from under
+    the pointer and the press is silently lost. (It could also fire the
+    auto-copy flow into the middle of a bootstrap.)"""
+    monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
 
 
 def _frame(region: ScreenRegion) -> RegionImage:
@@ -110,6 +122,10 @@ def _patch_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_mod, "capture_region", _frame)
 
 
+def _local(rect: ScreenRegion) -> RegionMatch:
+    return RegionMatch(rect.left - CHAT_REGION.left, rect.top - CHAT_REGION.top, 0.01)
+
+
 def _patch_found(monkeypatch: pytest.MonkeyPatch, *rects: ScreenRegion) -> None:
     """Say which appearances are on screen, and where.
 
@@ -120,13 +136,11 @@ def _patch_found(monkeypatch: pytest.MonkeyPatch, *rects: ScreenRegion) -> None:
     """
     wanted = {bytes(_frame(rect).pixels[:4]): rect for rect in rects}
 
-    def fake_find(template: Template, scene: RegionImage, **kw: object) -> RegionMatch | None:
+    def fake_find_all(template: Template, scene: RegionImage, **kw: object) -> list[RegionMatch]:
         rect = wanted.get(bytes(template.image.pixels[:4]))
-        if rect is None:
-            return None
-        return RegionMatch(rect.left - CHAT_REGION.left, rect.top - CHAT_REGION.top, 0.01)
+        return [] if rect is None else [_local(rect)]
 
-    monkeypatch.setattr(main_mod, "find_in_region", fake_find)
+    monkeypatch.setattr(main_mod, "find_all_in_region", fake_find_all)
 
 
 async def _draw_chat_region(app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -421,6 +435,44 @@ async def test_neither_on_screen_falls_back_to_the_chat_window(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         await _capture_both(app, pilot, monkeypatch)
         _patch_found(monkeypatch)  # nothing is on screen
+
+        await _send(app, pilot, "Say hello.")
+        await _wait_for(pilot, lambda: main.session_active, "session armed")
+        await _wait_for(pilot, lambda: not main.busy, "session flow settled")
+        assert clicks == [CHAT_REGION]
+
+
+async def test_two_boxes_of_one_layout_fall_back_to_the_drawn_window(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two windows of the same service under one drawn box show two identical
+    input boxes. This click is what focuses the window a whole turn is about to
+    be pasted into, so poking the wrong one puts the payload in somebody else's
+    conversation - the drawn region's centre is the user's own answer to "where
+    is this chat", and it is what a service with no box captured gets anyway."""
+    clicks: list[ScreenRegion] = []
+    _patch_capture(monkeypatch)
+    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    app, _ = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _capture_both(app, pilot, monkeypatch)
+
+        second = ScreenRegion(
+            ONGOING_BOX.left + 400, ONGOING_BOX.top, ONGOING_BOX.width, ONGOING_BOX.height
+        )
+
+        def fake_find_all(
+            template: Template, scene: RegionImage, **kw: object
+        ) -> list[RegionMatch]:
+            if bytes(template.image.pixels[:4]) != bytes(_frame(ONGOING_BOX).pixels[:4]):
+                return []
+            return [_local(ONGOING_BOX), _local(second)]
+
+        monkeypatch.setattr(main_mod, "find_all_in_region", fake_find_all)
+        assert await main._chatbox_region() == CHAT_REGION
 
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")

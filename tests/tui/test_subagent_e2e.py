@@ -138,13 +138,13 @@ def patched(monkeypatch: pytest.MonkeyPatch, trace: list[tuple[str, object]]) ->
     # to its own window's copy of it.
     newchat_at = {AgentSlot.MASTER: MASTER_NEWCHAT, AgentSlot.SUBAGENT: SUB_NEWCHAT}
 
-    async def fake_find(self, kind, slot=None, *, scene=None):
+    async def fake_find_all(self, kind, slot=None, *, scene=None):
         cal = self._slots[slot] if slot is not None else self.live
         if cal.chat_region is None or not self._active_profile().has(kind):
-            return None
-        return newchat_at[cal.slot] if kind is TemplateKind.NEW_CHAT else cal.chat_region
+            return []
+        return [newchat_at[cal.slot] if kind is TemplateKind.NEW_CHAT else cal.chat_region]
 
-    monkeypatch.setattr(MainScreen, "_find", fake_find)
+    monkeypatch.setattr(MainScreen, "_find_all", fake_find_all)
     # The finish detectors are not what this test is about, and a live poller
     # would fire the auto-copy flow into the middle of the traced sequence.
     monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)

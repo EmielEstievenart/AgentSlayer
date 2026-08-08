@@ -95,6 +95,7 @@ def _patch_screen(
     *,
     probe_ok: bool = True,
     click_ok: bool = True,
+    copies: int = 1,
 ) -> tuple[_Picker, list[ScreenRegion], list[ScreenRegion]]:
     picker = _Picker()
     clicks: list[ScreenRegion] = []
@@ -103,24 +104,30 @@ def _patch_screen(
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "_NEW_CHAT_SETTLE_S", 0.01)
     monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
-    async def fake_find(
+    async def fake_find_all(
         self: MainScreen,
         kind: TemplateKind,
         slot: AgentSlot | None = None,
         *,
         scene: RegionImage | None = None,
-    ) -> ScreenRegion | None:
+    ) -> list[ScreenRegion]:
         """Stand-in for the in-region appearance search (screen.template's job,
         tested there): records the attempt and answers where each slot's copy
-        of ``kind`` sits."""
+        of ``kind`` sits. ``copies`` makes the same appearance resolve more than
+        once, as a second window of the same service inside the region would."""
         cal = self._slots[slot] if slot is not None else self.live
         if cal.chat_region is None or not self._active_profile().has(kind):
-            return None
+            return []
         rect = NEWCHAT_AT[cal.slot] if kind is TemplateKind.NEW_CHAT else cal.chat_region
         probed.append(rect)
-        return rect if probe_ok else None
+        if not probe_ok:
+            return []
+        return [
+            ScreenRegion(rect.left + 400 * n, rect.top, rect.width, rect.height)
+            for n in range(copies)
+        ]
 
-    monkeypatch.setattr(MainScreen, "_find", fake_find)
+    monkeypatch.setattr(MainScreen, "_find_all", fake_find_all)
     monkeypatch.setattr(
         main_mod,
         "click_region",
@@ -290,6 +297,36 @@ async def test_a_mismatched_new_chat_button_changes_nothing(
         assert clicks == []
         assert main._live is AgentSlot.MASTER
         assert main._copy_armed is True  # untouched, like everything else
+
+
+async def test_two_new_chat_buttons_in_the_region_are_refused_outright(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two windows of the same service under one drawn box carry the same
+    button. Clicking either is a coin toss between two conversations - and the
+    losing side of that toss is a chat that gets RESET on the other's behalf,
+    which is the exact disaster this contract exists to prevent."""
+    picker, clicks, probed = _patch_screen(monkeypatch, copies=2)
+    notes: list[str] = []
+    monkeypatch.setattr(
+        MainScreen, "notify", lambda self, message, **kw: notes.append(message)
+    )
+    app = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _calibrate_subagent(app, pilot, picker)
+        main._copy_armed = True
+        clicks.clear()
+
+        assert await main.start_browser_chat(AgentSlot.SUBAGENT) is False
+
+        assert probed  # it did look
+        assert clicks == []  # ...and clicked nothing at all
+        assert main._live is AgentSlot.MASTER
+        assert main._copy_armed is True  # untouched, like everything else
+        assert any("several places" in note and "redraw" in note for note in notes)
 
 
 async def test_a_click_the_os_refused_changes_nothing(

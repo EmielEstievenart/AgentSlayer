@@ -104,22 +104,23 @@ def _patch_screen(monkeypatch: pytest.MonkeyPatch) -> _Picker:
     # the press is silently lost. (The poller itself is test_stale_detector_ui's.)
     monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
 
-    async def fake_find(
+    async def fake_find_all(
         self: MainScreen,
         kind: TemplateKind,
         slot: AgentSlot | None = None,
         *,
         scene: RegionImage | None = None,
-    ) -> ScreenRegion | None:
+    ) -> list[ScreenRegion]:
         """Stand-in for the in-region appearance search: every captured
-        appearance is "found" filling the searched slot's own window, which is
-        what makes a shared capture resolve to two different rectangles."""
+        appearance is "found" exactly once, filling the searched slot's own
+        window - which is what makes a shared capture resolve to two different
+        rectangles."""
         cal = self._slots[slot] if slot is not None else self.live
         if cal.chat_region is None or not self._active_profile().has(kind):
-            return None
-        return cal.chat_region
+            return []
+        return [cal.chat_region]
 
-    monkeypatch.setattr(MainScreen, "_find", fake_find)
+    monkeypatch.setattr(MainScreen, "_find_all", fake_find_all)
     return picker
 
 

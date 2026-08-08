@@ -84,8 +84,23 @@ def _frame(region: ScreenRegion) -> RegionImage:
     return RegionImage(region.width, region.height, b"\x00" * (region.width * region.height * 4))
 
 
+@pytest.fixture(autouse=True)
+def _no_detector_poller(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the poller out: these tests inject the finish sequence themselves,
+    and a live one would interleave its own stale verdicts with it (as well as
+    reflowing the sidebar under the pointer between a click's mouse-down and
+    mouse-up). ``_active_detectors`` is what stands in for it - see ``_fire``."""
+    monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
+
+
 async def _fire(main: MainScreen, pilot: Pilot) -> None:
-    """MATCH then two CHANGED: the busy detector's finish sequence."""
+    """MATCH then two CHANGED: the busy detector's finish sequence.
+
+    ``_active_detectors`` says which detectors the poller would be posting -
+    verdicts from any other are dropped as leftovers of a cancelled loop - so
+    declaring the busy tracker live is what makes these injected probes count.
+    """
+    main._active_detectors = ("busy",)
     for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
         main.post_message(BusyProbed(BusyProbe(state, 0.2)))
         await pilot.pause()

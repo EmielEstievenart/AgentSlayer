@@ -8,9 +8,10 @@ concern is the Textual wiring: F2/the button open it, escape persists valid
 edits and propagates the new Config to app_config/MainScreen/the sidebar, and
 invalid input never gets saved.
 
-The editor also *reports* on a service's captured appearances and can forget
-them, but it never captures one: drawing a box needs the browser on screen,
-which is a main-screen job.
+The editor is also the whole per-service *profile* editor now: it captures the
+six appearances (covered end to end in test_profile_capture_ui.py) and edits the
+finish-signal checklist plus the hover-scan opt-in, both of which ride the same
+close-and-persist path as the size fields.
 """
 
 from __future__ import annotations
@@ -24,7 +25,7 @@ from pathlib import Path
 import pytest
 from textual.message import Message
 from textual.pilot import Pilot
-from textual.widgets import Button, Input, Select, Static
+from textual.widgets import Button, Checkbox, Input, Select, Static
 
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
@@ -34,8 +35,14 @@ from agentclip.screen.profile import TemplateKind
 from agentclip.screen.profile_store import load_profile, profile_dir, save_template
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.confirm import ConfirmScreen
-from agentclip.tui.screens.service_editor import TEMPLATES_NONE, ServiceEditorScreen
-from agentclip.tui.widgets.sidebar import TEMPLATE_UNSET, Sidebar
+from agentclip.tui.screens.service_editor import (
+    SIGNAL_UNCAPTURED,
+    TEMPLATES_NONE,
+    ServiceEditorScreen,
+    capture_button_id,
+    signal_checkbox_id,
+)
+from agentclip.tui.widgets.sidebar import Sidebar
 
 
 async def _wait_for(
@@ -410,8 +417,9 @@ async def test_the_editor_reports_what_a_service_looks_like(
     tmp_path: Path, profile_root: Path
 ) -> None:
     """The editor is where a user reasons about a service, so "does this one
-    know what its copy button looks like?" has to be answerable here - even
-    though the capture itself lives on the main screen."""
+    know what its copy button looks like?" has to be answerable here - and it
+    is the place the answer is changed, so the readout is re-derived from disk
+    on every selection change."""
     save_template(profile_root, "claude", TemplateKind.COPY, _image())
     save_template(profile_root, "claude", TemplateKind.BUSY, _image())
 
@@ -437,6 +445,8 @@ async def test_the_editor_reports_what_a_service_looks_like(
         await pilot.pause()
         assert TEMPLATES_NONE in str(editor.query_one("#svc-templates", Static).render())
         assert not editor.query_one("#svc-forget-templates-btn", Button).display
+        # ...and the per-kind lines it captures from say the same thing.
+        assert "not captured" in str(editor.query_one("#svc-tpl-copy", Static).render())
 
 
 async def test_forgetting_an_appearance_leaves_the_preset_alone(
@@ -484,7 +494,7 @@ async def test_forgetting_an_appearance_reaches_the_main_screen(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         assert main._active_profile().has(TemplateKind.COPY)
-        assert "captured" in _label(app, "#side-tpl-copy")
+        assert "1/6 captured" in _label(app, "#side-profile-note")
 
         await _open_editor_via_f2(app, pilot)
         editor = app.screen
@@ -502,7 +512,7 @@ async def test_forgetting_an_appearance_reaches_the_main_screen(
         await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
 
         assert not main._active_profile().has(TemplateKind.COPY)  # the cache was invalidated
-        assert _label(app, "#side-tpl-copy") == TEMPLATE_UNSET
+        assert "0/6 captured" in _label(app, "#side-profile-note")
         assert not global_path.exists()  # no preset edit to persist
 
 
@@ -571,3 +581,160 @@ async def test_declining_keeps_the_appearance(tmp_path: Path, profile_root: Path
         await _wait_for(pilot, lambda: app.screen is editor, "back on the editor")
 
         assert load_profile(profile_root, "claude").has(TemplateKind.COPY)
+
+
+# -- the detection checklist ------------------------------------------------
+
+
+def _tick(editor: ServiceEditorScreen, signal: str, on: bool) -> None:
+    editor.query_one(f"#{signal_checkbox_id(signal)}", Checkbox).value = on
+
+
+async def test_the_checklist_and_hover_scan_round_trip_into_the_saved_services(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """``finish_signals``/``hover_scan`` are per-service policy, so they ride the
+    same working-copy-then-persist path as the size fields - no separate save,
+    no separate propagation."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        # The shipped default: stale only, no hover scan.
+        assert not editor.query_one(f"#{signal_checkbox_id('busy')}", Checkbox).value
+        assert editor.query_one(f"#{signal_checkbox_id('stale')}", Checkbox).value
+        assert not editor.query_one("#svc-hover-scan", Checkbox).value
+
+        _tick(editor, "busy", True)
+        await pilot.pause()
+        _tick(editor, "stale", False)
+        await pilot.pause()
+        editor.query_one("#svc-hover-scan", Checkbox).value = True
+        await pilot.pause()
+
+        # Canonical order, whatever order the boxes were ticked in.
+        assert editor._services["claude"].finish_signals == ("busy",)
+        assert editor._services["claude"].hover_scan is True
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["claude"].finish_signals == ("busy",)
+        assert app.app_config.services["claude"].hover_scan is True
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["claude"]["finish_signals"] == ["busy"]
+        assert raw["services"]["claude"]["hover_scan"] is True
+
+
+async def test_the_checkboxes_follow_the_selected_service(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Four toggles, one per service: switching the picker must reload them, and
+    the echo Textual fires while they are being written must not leak the old
+    service's answers into the new one."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        before_gemini = editor._services["gemini"]
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        _tick(editor, "idle", True)
+        await pilot.pause()
+        assert editor._services["claude"].finish_signals == ("idle", "stale")
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        assert not editor.query_one(f"#{signal_checkbox_id('idle')}", Checkbox).value
+        assert editor._services["gemini"] == before_gemini
+
+
+async def test_a_ticked_signal_with_nothing_captured_warns_until_it_is_captured(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checklist and the profile are ANDed, so a ticked busy signal with no
+    busy appearance runs nothing at all - invisible until an auto-copy never
+    fires, hence the inline warning next to the tick that caused it."""
+    import agentclip.tui.screens.service_editor as editor_mod
+    from agentclip.screen.region import ScreenRegion
+
+    box = ScreenRegion(10, 10, 32, 32)
+    monkeypatch.setattr(editor_mod, "pick_region", lambda prompt=None: box)
+    monkeypatch.setattr(editor_mod, "capture_region", lambda region: _image(32))
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        warning = editor.query_one("#svc-signal-warning", Static)
+        assert str(warning.render()) == ""  # stale is ticked, and stale needs nothing
+
+        _tick(editor, "busy", True)
+        await pilot.pause()
+        assert SIGNAL_UNCAPTURED in str(warning.render())
+        assert "busy indicator" in str(warning.render())
+
+        await pilot.click(f"#{capture_button_id(TemplateKind.BUSY)}")
+        await _wait_for(
+            pilot,
+            lambda: load_profile(profile_root, "claude").has(TemplateKind.BUSY),
+            "busy captured",
+        )
+        await _wait_for(pilot, lambda: str(warning.render()) == "", "the warning cleared")
+
+        # Unticking is the other way out of it.
+        _tick(editor, "idle", True)
+        await pilot.pause()
+        assert "idle indicator" in str(warning.render())
+        _tick(editor, "idle", False)
+        await pilot.pause()
+        assert str(warning.render()) == ""
+
+
+async def test_captures_and_checklist_are_inert_until_the_service_exists(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """There is no key to file a PNG or a checklist under until "Add service"
+    has run, so the controls are disabled rather than hidden - the column must
+    not reflow while the form is being filled in."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "+add-new+"
+        await pilot.pause()
+        assert all(
+            button.disabled
+            for button in editor.query(f"#{capture_button_id(TemplateKind.BUSY)}").results(Button)
+        )
+        assert all(box.disabled for box in editor.query(Checkbox))
+        assert TEMPLATES_NONE in str(editor.query_one("#svc-templates", Static).render())
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        assert not editor.query_one(f"#{capture_button_id(TemplateKind.BUSY)}", Button).disabled
+        assert not any(box.disabled for box in editor.query(Checkbox))

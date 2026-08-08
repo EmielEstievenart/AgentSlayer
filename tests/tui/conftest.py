@@ -55,6 +55,17 @@ def profile_root(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
+def make_template_image() -> Callable[..., RegionImage]:
+    """:func:`template_image`, for suites that need bespoke pixels.
+
+    ``save_template(profile_root, key, kind, image)`` is the escape hatch when a
+    seeded appearance has to be findable in a *particular* fake scene rather
+    than merely present.
+    """
+    return template_image
+
+
+@pytest.fixture
 def seed_templates(profile_root: Path) -> Callable[..., None]:
     """Give ``key`` the listed appearances, as if they had been captured.
 

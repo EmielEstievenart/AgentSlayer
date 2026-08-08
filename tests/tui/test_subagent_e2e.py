@@ -47,13 +47,13 @@ MASTER_CHAT = "amber-falcon"
 SUB_CHAT = "jade-otter"
 
 MASTER_BOX = ScreenRegion(10, 400, 300, 40)
-MASTER_BUSY = ScreenRegion(10, 10, 40, 20)
-MASTER_COPY = ScreenRegion(10, 300, 24, 24)
 MASTER_NEWCHAT = ScreenRegion(10, 60, 80, 24)
 SUB_BOX = ScreenRegion(900, 400, 300, 40)
-SUB_BUSY = ScreenRegion(900, 10, 40, 20)
-SUB_COPY = ScreenRegion(900, 300, 24, 24)
 SUB_NEWCHAT = ScreenRegion(900, 60, 80, 24)
+
+# The service both windows are pointed at (``service_override`` below), and so
+# the key its captured appearances are filed under.
+SERVICE = "claude"
 
 SIZE = (110, 100)
 
@@ -171,7 +171,7 @@ def _make_app(tmp_path: Path, provider: FakeClipboard) -> AgentClipApp:
         return load_config(
             project,
             global_config_path=project / "no-such-global.toml",
-            service_override="claude",
+            service_override=SERVICE,
         )
 
     base = make_engine_factory(get_config, project)
@@ -212,16 +212,29 @@ async def _select_slot(app: AgentClipApp, pilot: Pilot, slot: AgentSlot) -> None
 
 
 async def _calibrate_both_slots(app: AgentClipApp, pilot: Pilot, picker: _Picker) -> None:
+    """One drawn box per window, which is all a slot is.
+
+    What the service LOOKS like is captured in the service editor and shared by
+    both slots, so it is seeded into the profile store before the app starts
+    (see ``_seeded``) rather than dragged out twice here.
+    """
     await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_BOX)
-    await _calibrate(app, pilot, picker, "#capture-busy-btn", MASTER_BUSY)
-    await _calibrate(app, pilot, picker, "#capture-copy-btn", MASTER_COPY)
-    await _calibrate(app, pilot, picker, "#capture-new-chat-btn", MASTER_NEWCHAT)
     await _select_slot(app, pilot, AgentSlot.SUBAGENT)
     await _calibrate(app, pilot, picker, "#set-region-btn", SUB_BOX)
-    await _calibrate(app, pilot, picker, "#capture-busy-btn", SUB_BUSY)
-    await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_COPY)
-    await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_NEWCHAT)
     await _select_slot(app, pilot, AgentSlot.MASTER)
+
+
+@pytest.fixture
+def _seeded(seed_templates: Callable[..., None]) -> None:
+    """The service already knows what its copy and new-chat buttons look like.
+
+    The two appearances ``can_delegate`` insists on, written straight into the
+    profile store before the app loads it - the same files a capture leaves
+    behind. Busy and idle are deliberately absent: this suite stops the finish
+    detectors dead (see ``patched``), so a seeded indicator would only be
+    scenery.
+    """
+    seed_templates(SERVICE, TemplateKind.COPY, TemplateKind.NEW_CHAT, size=(24, 24))
 
 
 async def _armed(app: AgentClipApp, pilot: Pilot) -> MainScreen:
@@ -231,6 +244,7 @@ async def _armed(app: AgentClipApp, pilot: Pilot) -> MainScreen:
     return main
 
 
+@pytest.mark.usefixtures("_seeded")
 async def test_a_delegation_runs_end_to_end(
     tmp_path: Path, patched: _Picker, trace: list[tuple[str, object]]
 ) -> None:
@@ -294,6 +308,7 @@ async def test_a_delegation_runs_end_to_end(
         assert "src/ holds exactly one file" in sub_entries  # the work stayed on its tab
 
 
+@pytest.mark.usefixtures("_seeded")
 async def test_the_status_bar_and_gate_say_it_is_a_sub_agent(
     tmp_path: Path, patched: _Picker, trace: list[tuple[str, object]]
 ) -> None:

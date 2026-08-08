@@ -33,23 +33,18 @@ from pathlib import Path
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Button
 
 import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
-from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
-from agentclip.screen.region import ScreenRegion
 from agentclip.screen.stale import StaleProbe, StaleState
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.messages import BusyProbed, IdleProbed, StaleProbed
 from agentclip.tui.screens.main import MainScreen
 
-COPY_REGION = ScreenRegion(1830, 612, 24, 24)
-TEMPLATE = RegionImage(width=24, height=24, pixels=b"\x00" * (24 * 24 * 4))
 SIZE = (110, 100)
 
 
@@ -78,18 +73,6 @@ def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard]:
     return app, fake
 
 
-async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
-    assert app.main_screen is not None
-    button = app.main_screen.query_one(button_id, Button)
-    await _wait_for(pilot, lambda: button.region.width > 0, "sidebar button laid out")
-    await pilot.click(button_id)
-
-
-def _patch_copy_picker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: COPY_REGION)
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: TEMPLATE)
-
-
 def _patch_flow(monkeypatch: pytest.MonkeyPatch) -> list[None]:
     """Stub the flow itself - these tests are about what fires it, not what it does."""
     calls: list[None] = []
@@ -101,15 +84,25 @@ def _patch_flow(monkeypatch: pytest.MonkeyPatch) -> list[None]:
     return calls
 
 
-async def _arm_with_template(app: AgentClipApp, pilot: Pilot) -> MainScreen:
+async def _arm_with_template(
+    app: AgentClipApp, pilot: Pilot, seed: Callable[..., None]
+) -> MainScreen:
     """The trigger refuses to fire without a copy-button appearance, so every
-    test here captures one first (into the active service's profile)."""
+    test here gives the active service one first.
+
+    Capturing is the service editor's job now, and what MainScreen sees of it is
+    a profile on disk plus a dropped cache - which is what ``seed_templates``
+    and ``update_config`` reproduce here, without an editor visit these tests
+    are not about.
+    """
     main = app.main_screen
     assert main is not None
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-    await _press(app, pilot, "#capture-copy-btn")
+    seed(main._selected_service(), TemplateKind.COPY, size=(24, 24))
+    main._profiles.clear()
+    main.update_config(main._config)
     await _wait_for(
-        pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
+        pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button appearance known"
     )
     _detectors(main, "busy")  # the default for these tests; each overrides it
     return main
@@ -167,13 +160,12 @@ async def _tick(main: MainScreen, pilot: Pilot, busy: BusyState, idle: BusyState
 
 
 async def test_busy_only_arms_on_match_and_fires_on_two_changed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
 
         await _busy(main, pilot, BusyState.MATCH)  # generating -> armed
         await _busy(main, pilot, BusyState.CHANGED)
@@ -191,13 +183,12 @@ async def test_busy_only_arms_on_match_and_fires_on_two_changed(
 
 
 async def test_busy_only_error_breaks_the_streak_but_keeps_the_arm(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
 
         await _busy(main, pilot, BusyState.MATCH)
         await _busy(main, pilot, BusyState.CHANGED)
@@ -215,14 +206,13 @@ async def test_busy_only_error_breaks_the_streak_but_keeps_the_arm(
 
 
 async def test_idle_only_arms_on_changed_and_fires_on_two_matches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Inverted polarity: CHANGED is "generating" here, MATCH is "finished"."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "idle")
 
         await _idle(main, pilot, BusyState.CHANGED)  # generating -> armed
@@ -241,15 +231,14 @@ async def test_idle_only_arms_on_changed_and_fires_on_two_matches(
 
 
 async def test_idle_only_never_fires_without_a_generation_first(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An idle screen at startup matches the baseline forever - that must not
     look like a response finishing."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "idle")
 
         for _ in range(5):
@@ -262,13 +251,12 @@ async def test_idle_only_never_fires_without_a_generation_first(
 
 
 async def test_both_fire_only_when_they_agree_for_two_ticks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "busy", "idle")
 
         # Generating: busy matches its mid-generation baseline, idle does not.
@@ -290,15 +278,14 @@ async def test_both_fire_only_when_they_agree_for_two_ticks(
 
 
 async def test_both_one_detector_alone_can_never_fire_it(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The whole point of calibrating two: the busy element going quiet while
     the idle element still reads "generating" is not a finish."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "busy", "idle")
 
         await _tick(main, pilot, BusyState.MATCH, BusyState.CHANGED)
@@ -314,15 +301,14 @@ async def test_both_one_detector_alone_can_never_fire_it(
 
 
 async def test_both_either_detector_can_arm_the_trigger(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The idle element alone spotting a new generation re-arms it - the busy
     element may well never have caught the stop button in a poll."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "busy", "idle")
 
         # Only the idle element notices; the busy element says "finished".
@@ -335,13 +321,12 @@ async def test_both_either_detector_can_arm_the_trigger(
 
 
 async def test_both_an_error_on_either_side_breaks_the_streak(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "busy", "idle")
 
         await _tick(main, pilot, BusyState.MATCH, BusyState.CHANGED)
@@ -357,15 +342,14 @@ async def test_both_an_error_on_either_side_breaks_the_streak(
 
 
 async def test_a_busy_probe_alone_never_closes_a_dual_tick(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With both calibrated the verdict is evaluated once per tick, on the
     closing (idle) message - so half a tick can neither arm nor fire."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "busy", "idle")
 
         for _ in range(4):
@@ -378,16 +362,15 @@ async def test_a_busy_probe_alone_never_closes_a_dual_tick(
 
 
 async def test_stale_only_arms_on_a_sustained_change_and_fires_on_two_stale_ticks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The third detector works alone: a sustained large CHANGING run (the
     response region really moving) is "generating", STALE is "finished" - the
     same streak rules from there on."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "stale")
 
         await _stale_send(main, pilot)  # generating -> armed
@@ -406,15 +389,14 @@ async def test_stale_only_arms_on_a_sustained_change_and_fires_on_two_stale_tick
 
 
 async def test_stale_never_fires_without_a_change_observed_first(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A screen that is stale from the start (nothing ever generated) must not
     read as a response finishing - same rule as the idle element."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "stale")
 
         for ticks in range(5):
@@ -424,16 +406,15 @@ async def test_stale_never_fires_without_a_change_observed_first(
 
 
 async def test_stale_saying_changing_vetoes_the_other_detectors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With busy + stale running, the busy indicator going away while the chat
     region is still moving is not a finish - and with stale running,
     ``StaleProbed`` (not ``BusyProbed``) closes the tick."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "busy", "stale")
 
         await _busy(main, pilot, BusyState.MATCH)
@@ -456,15 +437,14 @@ async def test_stale_saying_changing_vetoes_the_other_detectors(
 
 
 async def test_a_busy_probe_alone_never_closes_a_tick_with_stale_calibrated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Stale is last in the fixed busy -> idle -> stale order, so once it is
     running nothing earlier in the order may fold the verdict."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "busy", "stale")
 
         for _ in range(4):
@@ -474,16 +454,15 @@ async def test_a_busy_probe_alone_never_closes_a_tick_with_stale_calibrated(
 
 
 async def test_evaluation_is_suspended_while_the_flow_runs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The auto-copy flow scrolls the very region the stale detector watches,
     so while it runs no probe may arm or fire anything - and once its finally
     lifts the suspension, a genuine new generation re-arms as usual."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "stale")
 
         main._flow_running = True  # as if _evaluate_finish just fired the flow
@@ -500,15 +479,14 @@ async def test_evaluation_is_suspended_while_the_flow_runs(
 
 
 async def test_the_flow_wrapper_lifts_the_suspension_so_it_can_refire(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A second response must be able to fire the flow again: the wrapper's
     finally clears ``_flow_running`` even with the flow body stubbed out."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "stale")
 
         await _stale_send(main, pilot)
@@ -527,18 +505,17 @@ async def test_the_flow_wrapper_lifts_the_suspension_so_it_can_refire(
 
 
 async def test_small_stale_deltas_never_arm_and_a_still_screen_never_fires(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """THE bug this rule closes: between AgentClip's paste and the user's Enter
     the composer's caret blinks and the mouse drifts, which the stale detector
     reports as CHANGING with a tiny diff. Arming on that made the still,
     reply-less pre-Enter screen read as a finished response - auto-copy fired
     and harvested nothing."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "stale")
 
         for _ in range(6):  # well past SEND_ARM_TICKS
@@ -552,13 +529,12 @@ async def test_small_stale_deltas_never_arm_and_a_still_screen_never_fires(
 
 
 async def test_a_sustained_large_delta_takes_exactly_send_arm_ticks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_copy_picker(monkeypatch)
     _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "stale")
 
         for _ in range(main_mod.SEND_ARM_TICKS - 1):
@@ -570,15 +546,14 @@ async def test_a_sustained_large_delta_takes_exactly_send_arm_ticks(
 
 
 async def test_one_small_delta_restarts_the_large_delta_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """"Consecutive" is literal: a quiet frame in the middle means what came
     before it was not one sustained change, and the count starts over."""
-    _patch_copy_picker(monkeypatch)
     _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "stale")
 
         for _ in range(main_mod.SEND_ARM_TICKS - 1):
@@ -595,16 +570,15 @@ async def test_one_small_delta_restarts_the_large_delta_run(
 
 
 async def test_a_busy_verdict_still_arms_on_a_single_tick(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Icon evidence is not de-bounced: the reasoning indicator being on screen
     is something only a real generation produces, so one frame is enough - and
     the sustained-delta rule must not slow that down."""
-    _patch_copy_picker(monkeypatch)
     _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "busy", "stale")
 
         # A tick where only the busy icon says "generating": the stale diff is
@@ -619,18 +593,17 @@ async def test_a_busy_verdict_still_arms_on_a_single_tick(
 
 
 async def test_a_ghost_verdict_from_a_dropped_detector_cannot_wedge_the_trigger(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Cancelling the poller only raises a flag: the loop it interrupts still
     finishes its tick and posts it, AFTER the restart cleared the verdicts. When
     the new detector set is smaller (a forgotten busy appearance, a service
     switch) that leftover "still generating" used to re-arm the trigger on every
     later tick, and the auto-copy could never fire again."""
-    _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _arm_with_template(app, pilot)
+        main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "busy", "stale")
 
         await _busy(main, pilot, BusyState.MATCH)  # the model is generating

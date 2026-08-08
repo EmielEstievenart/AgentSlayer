@@ -174,6 +174,19 @@ def _record_stale_ticks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return ticks
 
 
+def _capture_busy(main: MainScreen, seed: Callable[..., None]) -> None:
+    """Give the ACTIVE service a busy appearance, as a capture leaves it.
+
+    Capturing moved into the service editor (F2), and all this screen ever sees
+    of a visit there is a PNG in the profile store plus an ``update_config``
+    telling it to drop its cached profile - which is also the documented path
+    that rebuilds the poller around what it can now hunt for.
+    """
+    seed(main._selected_service(), TemplateKind.BUSY)
+    main._profiles.clear()
+    main.update_config(main._config)
+
+
 def _record_notifications(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     seen: list[str] = []
 
@@ -434,7 +447,10 @@ async def test_editing_the_stillness_window_rebuilds_the_poller(
 
 
 async def test_calibrating_the_subagent_slot_spares_the_masters_poller(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The master chat can be mid-generation while the user draws the sub-agent
     window, and a restart would throw its streaks (and its trackers' previous
@@ -462,17 +478,13 @@ async def test_calibrating_the_subagent_slot_spares_the_masters_poller(
             lambda: main._slots[AgentSlot.SUBAGENT].chat_region == SUB_REGION,
             "sub-agent region adopted",
         )
-        await _press(app, pilot, "#capture-copy-btn")
-        await _wait_for(
-            pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy captured"
-        )
         await pilot.pause(0.2)  # a restart would have landed by now
-        assert starts == [None]  # neither touched the window the poller watches
+        assert starts == [None]  # a window the poller does not watch: untouched
         assert main._live is AgentSlot.MASTER
 
         # The busy appearance IS one of the things the poller hunts, and it is
-        # the service's - so capturing it rebuilds whichever slot is live.
-        await _press(app, pilot, "#capture-busy-btn")
+        # the service's - so gaining one rebuilds whichever slot is live.
+        _capture_busy(main, seed_templates)
         await _wait_for(
             pilot, lambda: starts == [None, None], "poller rebuilt for the new busy appearance"
         )
@@ -540,7 +552,10 @@ async def test_stale_is_opt_out_not_unconditional(
 
 
 async def test_a_ticked_detector_needs_its_appearance_captured(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The checklist says what the service is allowed to use; the profile says
     what it can actually see. Both, or the detector does not run."""
@@ -554,10 +569,9 @@ async def test_a_ticked_detector_needs_its_appearance_captured(
 
         await _press(app, pilot, "#set-region-btn")
         await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
-        await pilot.pause(_CLICK_CHAIN_S)
-        await _press(app, pilot, "#capture-busy-btn")
+        _capture_busy(main, seed_templates)
         await _wait_for(
-            pilot, lambda: main._active_profile().has(TemplateKind.BUSY), "busy captured"
+            pilot, lambda: main._active_profile().has(TemplateKind.BUSY), "busy appearance known"
         )
         # Captured but not ticked: the default checklist is stale-only.
         assert main._active_detectors == ("stale",)
@@ -574,7 +588,10 @@ async def test_a_ticked_detector_needs_its_appearance_captured(
 
 
 async def test_an_unticked_stale_detector_posts_no_stale_verdicts(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The tick's message sequence follows the built set, so an unticked
     detector must be silent rather than merely ignored."""
@@ -588,10 +605,9 @@ async def test_an_unticked_stale_detector_posts_no_stale_verdicts(
 
         await _press(app, pilot, "#set-region-btn")
         await _wait_for(pilot, lambda: "GENERATING" in _stale_label(app), "a stale probe arrives")
-        await pilot.pause(_CLICK_CHAIN_S)
-        await _press(app, pilot, "#capture-busy-btn")
+        _capture_busy(main, seed_templates)
         await _wait_for(
-            pilot, lambda: main._active_profile().has(TemplateKind.BUSY), "busy captured"
+            pilot, lambda: main._active_profile().has(TemplateKind.BUSY), "busy appearance known"
         )
 
         _with_signals(main, "busy")

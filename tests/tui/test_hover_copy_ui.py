@@ -120,22 +120,32 @@ async def _fire(main: MainScreen, pilot: Pilot) -> None:
 
 
 async def _calibrate(
-    app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatch
+    app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatch, seed: Callable[..., None]
 ) -> MainScreen:
-    """Draw the chat region (where the hunt happens) and capture the copy icon."""
+    """Draw the chat region (where the hunt happens) and give the service a
+    copy-icon appearance to hunt for.
+
+    The appearance is written straight into the profile store - the same files
+    the service editor's capture leaves behind - and the cache dropped through
+    ``update_config``, which is what an editor visit does to this screen. Its
+    size is what matters here: the flow translates a match back to a screen
+    region using the template's own width and height.
+    """
     main = app.main_screen
     assert main is not None
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-    picked = [CHAT_REGION, COPY_ICON]
-    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: picked.pop(0))
+    seed(main._selected_service(), TemplateKind.COPY, size=(COPY_ICON.width, COPY_ICON.height))
+    main._profiles.clear()
+    main.update_config(main._config)
+    await _wait_for(
+        pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy icon appearance known"
+    )
+
+    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: CHAT_REGION)
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     await _press(app, pilot, "#set-region-btn")
     await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
-    await _press(app, pilot, "#capture-copy-btn")
-    await _wait_for(
-        pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
-    )
     return main
 
 
@@ -167,14 +177,17 @@ def _patch_flow_io(
 
 
 async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The icon only renders once the pointer has climbed three stops - the
     scan must stop right there, not carry on to the top of the region."""
     match = RegionMatch(x=700, y=180, diff=0.04)
     app, fake = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _calibrate(app, pilot, monkeypatch)
+        main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
 
         looks = {"n": 0}
@@ -199,13 +212,16 @@ async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
 
 
 async def test_a_static_hit_never_moves_the_cursor(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The cheap path stays cheap: chats that render the icon unconditionally
     must not pay for a hover scan."""
     app, fake = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _calibrate(app, pilot, monkeypatch)
+        main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
         monkeypatch.setattr(
             main_mod,
@@ -220,13 +236,16 @@ async def test_a_static_hit_never_moves_the_cursor(
 
 
 async def test_an_exhausted_scan_reports_not_found_and_never_clicks_the_icon(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Same outcome as the plain not-found path - a toast and a sidebar note -
     after the whole region has been hovered."""
     app, fake = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _calibrate(app, pilot, monkeypatch)
+        main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
         monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda template, scene, **kw: None)
 
@@ -239,13 +258,16 @@ async def test_an_exhausted_scan_reports_not_found_and_never_clicks_the_icon(
 
 
 async def test_a_refused_cursor_move_ends_the_scan_immediately(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Off Windows every move is refused - the scan must bail out rather than
     sleep its way up a region it can never influence."""
     app, fake = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _calibrate(app, pilot, monkeypatch)
+        main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         _clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
         monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda template, scene, **kw: None)
         monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: bool(moves.append((x, y))))
@@ -256,14 +278,17 @@ async def test_a_refused_cursor_move_ends_the_scan_immediately(
 
 
 async def test_hover_scan_is_opt_in_per_service(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With ``hover_scan`` off - the default - a static miss is simply a miss:
     the same not-found report as an exhausted scan, but the user's cursor is
     never touched."""
     app, fake = _make_app(tmp_path, profile_root, hover_scan=False)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _calibrate(app, pilot, monkeypatch)
+        main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
         monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda template, scene, **kw: None)
 
@@ -276,7 +301,10 @@ async def test_hover_scan_is_opt_in_per_service(
 
 
 async def test_the_scan_runs_off_the_ui_thread(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every stop blocks on a settle pause and a capture, so the scan must
     never execute on the thread painting the TUI."""
@@ -286,7 +314,7 @@ async def test_the_scan_runs_off_the_ui_thread(
     scan_threads: list[int] = []
     app, fake = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _calibrate(app, pilot, monkeypatch)
+        main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         _patch_flow_io(monkeypatch, fake)
 
         looks = {"n": 0}

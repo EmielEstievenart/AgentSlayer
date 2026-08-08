@@ -36,13 +36,10 @@ from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen
 
-MASTER_BUSY = ScreenRegion(10, 10, 40, 20)
 MASTER_BOX = ScreenRegion(10, 400, 300, 40)
 MASTER_NEWCHAT = ScreenRegion(10, 60, 80, 24)
-SUB_BUSY = ScreenRegion(900, 10, 40, 20)
 SUB_BOX = ScreenRegion(900, 400, 300, 40)
 SUB_NEWCHAT = ScreenRegion(900, 60, 80, 24)
-SUB_COPY = ScreenRegion(900, 300, 24, 24)
 SIZE = (110, 100)
 
 # Where each slot's new-chat button "is" on screen. The appearance is captured
@@ -160,28 +157,51 @@ async def _select_slot(app: AgentClipApp, pilot: Pilot, slot: AgentSlot) -> None
     await _wait_for(pilot, lambda: main._calibrating is slot, f"{slot} selected")
 
 
-async def _calibrate_master(app: AgentClipApp, pilot: Pilot, picker: _Picker) -> None:
-    """The master slot's own calibrations: its window and its busy element.
+async def _capture(
+    app: AgentClipApp, pilot: Pilot, seed: Callable[..., None], *kinds: TemplateKind
+) -> None:
+    """Give the SELECTED SERVICE these appearances, as a capture would.
 
-    Deliberately no appearance captures - those belong to the SERVICE and are
-    shared by both slots, so capturing one here would pre-satisfy the sub-agent
-    slot and hide what the sequence below is measuring.
+    The capture buttons live in the service editor (F2) now, so there is nothing
+    on the sidebar to press: the pixels go straight into the profile store and
+    the screen is told to re-read it - which is exactly the propagation path an
+    editor visit takes, ``_after_calibration`` seam included. That seam is the
+    point: readiness is composed from the slot AND the service, so a capture has
+    to be able to flip delegation on with no region being drawn.
+    """
+    main = app.main_screen
+    assert main is not None
+    seed(main.sidebar.service, *kinds, size=(24, 24))
+    main._profiles.clear()
+    main.update_config(app.app_config)
+    await pilot.pause()
+
+
+async def _calibrate_master(app: AgentClipApp, pilot: Pilot, picker: _Picker) -> None:
+    """The master slot's own calibration, which is now its window and nothing else.
+
+    Deliberately no appearances - those belong to the SERVICE and are shared by
+    both slots, so seeding one here would pre-satisfy the sub-agent slot and
+    hide what the sequence below is measuring.
     """
     await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_BOX)
-    await _calibrate(app, pilot, picker, "#capture-busy-btn", MASTER_BUSY)
 
 
-async def _calibrate_subagent(app: AgentClipApp, pilot: Pilot, picker: _Picker) -> None:
+async def _calibrate_subagent(
+    app: AgentClipApp, pilot: Pilot, picker: _Picker, seed: Callable[..., None]
+) -> None:
+    """Everything delegation needs: the sub-agent's drawn window, plus the
+    service appearances both slots share."""
     await _select_slot(app, pilot, AgentSlot.SUBAGENT)
     await _calibrate(app, pilot, picker, "#set-region-btn", SUB_BOX)
-    await _calibrate(app, pilot, picker, "#capture-busy-btn", SUB_BUSY)
-    await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_COPY)
-    await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_NEWCHAT)
+    await _capture(
+        app, pilot, seed, TemplateKind.BUSY, TemplateKind.COPY, TemplateKind.NEW_CHAT
+    )
     await _select_slot(app, pilot, AgentSlot.MASTER)
 
 
 async def test_delegation_is_unavailable_until_every_piece_is_calibrated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_templates: Callable[..., None]
 ) -> None:
     picker, _, _ = _patch_screen(monkeypatch)
     app = _make_app(tmp_path)
@@ -198,16 +218,16 @@ async def test_delegation_is_unavailable_until_every_piece_is_calibrated(
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_BOX)
         assert not main.delegation_available()
-        await _calibrate(app, pilot, picker, "#capture-busy-btn", SUB_BUSY)
+        await _capture(app, pilot, seed_templates, TemplateKind.BUSY)
         assert not main.delegation_available()
-        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_COPY)
+        await _capture(app, pilot, seed_templates, TemplateKind.COPY)
         assert not main.delegation_available()  # still no way to open a fresh chat
-        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_NEWCHAT)
+        await _capture(app, pilot, seed_templates, TemplateKind.NEW_CHAT)
         assert main.delegation_available()
 
 
 async def test_start_browser_chat_clicks_the_slot_and_retargets_the_automation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_templates: Callable[..., None]
 ) -> None:
     picker, clicks, probed = _patch_screen(monkeypatch)
     # One capture per tick, of the live slot's chat region: which rectangle the
@@ -225,7 +245,7 @@ async def test_start_browser_chat_clicks_the_slot_and_retargets_the_automation(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         await _calibrate_master(app, pilot, picker)
-        await _calibrate_subagent(app, pilot, picker)
+        await _calibrate_subagent(app, pilot, picker, seed_templates)
         await _wait_for(pilot, lambda: MASTER_BOX in captures, "the master poller is running")
         clicks.clear()
         probed.clear()
@@ -253,7 +273,7 @@ async def test_start_browser_chat_clicks_the_slot_and_retargets_the_automation(
 
 
 async def test_start_browser_chat_resets_the_finish_trigger(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_templates: Callable[..., None]
 ) -> None:
     """Verdicts describe a window: carrying the master's armed trigger into the
     sub-agent's chat could fire the auto-copy against a page that never ran."""
@@ -263,7 +283,7 @@ async def test_start_browser_chat_resets_the_finish_trigger(
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        await _calibrate_subagent(app, pilot, picker)
+        await _calibrate_subagent(app, pilot, picker, seed_templates)
 
         main._copy_armed = True
         main._copy_changed_streak = 1
@@ -278,7 +298,7 @@ async def test_start_browser_chat_resets_the_finish_trigger(
 
 
 async def test_a_mismatched_new_chat_button_changes_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_templates: Callable[..., None]
 ) -> None:
     """The page moved. Returning False *and having done nothing* is what lets
     the caller abort before any paste."""
@@ -288,7 +308,7 @@ async def test_a_mismatched_new_chat_button_changes_nothing(
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        await _calibrate_subagent(app, pilot, picker)
+        await _calibrate_subagent(app, pilot, picker, seed_templates)
         main._copy_armed = True
         clicks.clear()
 
@@ -300,7 +320,7 @@ async def test_a_mismatched_new_chat_button_changes_nothing(
 
 
 async def test_two_new_chat_buttons_in_the_region_are_refused_outright(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_templates: Callable[..., None]
 ) -> None:
     """Two windows of the same service under one drawn box carry the same
     button. Clicking either is a coin toss between two conversations - and the
@@ -316,7 +336,7 @@ async def test_two_new_chat_buttons_in_the_region_are_refused_outright(
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        await _calibrate_subagent(app, pilot, picker)
+        await _calibrate_subagent(app, pilot, picker, seed_templates)
         main._copy_armed = True
         clicks.clear()
 
@@ -330,7 +350,7 @@ async def test_two_new_chat_buttons_in_the_region_are_refused_outright(
 
 
 async def test_a_click_the_os_refused_changes_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_templates: Callable[..., None]
 ) -> None:
     """Verified fine, but the input never landed (not Windows): the chat may or
     may not be fresh, so the live slot must not move either."""
@@ -340,7 +360,7 @@ async def test_a_click_the_os_refused_changes_nothing(
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        await _calibrate_subagent(app, pilot, picker)
+        await _calibrate_subagent(app, pilot, picker, seed_templates)
         clicks.clear()
 
         assert await main.start_browser_chat(AgentSlot.SUBAGENT) is False
@@ -365,7 +385,7 @@ async def test_an_uncalibrated_slot_is_refused_without_touching_the_screen(
 
 
 async def test_a_drawn_window_without_a_new_chat_capture_is_refused_the_same_way(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seed_templates: Callable[..., None]
 ) -> None:
     """NOT_CALIBRATED has two causes - no window drawn, or no appearance
     captured - and the second must refuse just as absolutely: a drawn window
@@ -378,7 +398,7 @@ async def test_a_drawn_window_without_a_new_chat_capture_is_refused_the_same_way
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_BOX)
-        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_COPY)
+        await _capture(app, pilot, seed_templates, TemplateKind.COPY)
         clicks.clear()
         probed.clear()
 

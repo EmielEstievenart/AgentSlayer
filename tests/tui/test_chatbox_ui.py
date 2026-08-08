@@ -150,10 +150,10 @@ async def test_capturing_a_chat_box_files_it_under_the_service_and_saves_it(
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        assert "not captured" in _label(app, "#side-chatbox-ongoing")
+        assert "not captured" in _label(app, "#side-tpl-chatbox-ongoing")
         key = main._selected_service()
 
-        await _press(app, pilot, "#set-chatbox-ongoing-btn")
+        await _press(app, pilot, "#capture-chatbox-ongoing-btn")
         await _wait_for(
             pilot,
             lambda: main._active_profile().has(TemplateKind.CHATBOX_ONGOING),
@@ -163,7 +163,7 @@ async def test_capturing_a_chat_box_files_it_under_the_service_and_saves_it(
         template = main._active_profile().get(TemplateKind.CHATBOX_ONGOING)
         assert template is not None
         assert (template.width, template.height) == (ONGOING_BOX.width, ONGOING_BOX.height)
-        assert "400×90 · captured" in _label(app, "#side-chatbox-ongoing")
+        assert "400×90 · captured" in _label(app, "#side-tpl-chatbox-ongoing")
         # The other layout is a separate appearance, and no window was drawn.
         assert not main._active_profile().has(TemplateKind.CHATBOX_INITIAL)
         assert main._chat_region is None
@@ -185,7 +185,7 @@ async def test_the_captures_survive_a_restart(
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        await _press(app, pilot, "#set-chatbox-ongoing-btn")
+        await _press(app, pilot, "#capture-chatbox-ongoing-btn")
         await _wait_for(
             pilot,
             lambda: main._active_profile().has(TemplateKind.CHATBOX_ONGOING),
@@ -198,7 +198,7 @@ async def test_the_captures_survive_a_restart(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         assert main._active_profile().has(TemplateKind.CHATBOX_ONGOING)
-        assert "captured" in _label(again, "#side-chatbox-ongoing")
+        assert "captured" in _label(again, "#side-tpl-chatbox-ongoing")
 
 
 async def test_the_two_layouts_are_captured_separately(
@@ -213,13 +213,13 @@ async def test_the_two_layouts_are_captured_separately(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-chatbox-initial-btn")
+        await _press(app, pilot, "#capture-chatbox-initial-btn")
         await _wait_for(
             pilot,
             lambda: main._active_profile().has(TemplateKind.CHATBOX_INITIAL),
             "initial captured",
         )
-        await _press(app, pilot, "#set-chatbox-ongoing-btn")
+        await _press(app, pilot, "#capture-chatbox-ongoing-btn")
         await _wait_for(
             pilot,
             lambda: main._active_profile().has(TemplateKind.CHATBOX_ONGOING),
@@ -231,7 +231,7 @@ async def test_the_two_layouts_are_captured_separately(
         ongoing = profile.get(TemplateKind.CHATBOX_ONGOING)
         assert initial is not None and ongoing is not None
         assert initial.image != ongoing.image
-        assert "400×90 · captured" in _label(app, "#side-chatbox-initial")
+        assert "400×90 · captured" in _label(app, "#side-tpl-chatbox-initial")
 
 
 async def test_cancelled_pick_changes_nothing(
@@ -245,10 +245,10 @@ async def test_cancelled_pick_changes_nothing(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-chatbox-ongoing-btn")
+        await _press(app, pilot, "#capture-chatbox-ongoing-btn")
         await pilot.pause(0.2)
         assert not main._active_profile().has(TemplateKind.CHATBOX_ONGOING)
-        assert "not captured" in _label(app, "#side-chatbox-ongoing")
+        assert "not captured" in _label(app, "#side-tpl-chatbox-ongoing")
 
 
 async def test_picker_failure_is_reported_not_fatal(
@@ -265,10 +265,10 @@ async def test_picker_failure_is_reported_not_fatal(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-chatbox-initial-btn")
+        await _press(app, pilot, "#capture-chatbox-initial-btn")
         await pilot.pause(0.2)
         assert not main._active_profile().has(TemplateKind.CHATBOX_INITIAL)
-        assert "not captured" in _label(app, "#side-chatbox-initial")
+        assert "not captured" in _label(app, "#side-tpl-chatbox-initial")
 
 
 async def test_capture_failure_keeps_the_appearance_unknown(
@@ -287,10 +287,10 @@ async def test_capture_failure_keeps_the_appearance_unknown(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-chatbox-ongoing-btn")
+        await _press(app, pilot, "#capture-chatbox-ongoing-btn")
         await pilot.pause(0.2)
         assert not main._active_profile().has(TemplateKind.CHATBOX_ONGOING)
-        assert "not captured" in _label(app, "#side-chatbox-ongoing")
+        assert "not captured" in _label(app, "#side-tpl-chatbox-ongoing")
 
 
 async def test_a_second_picker_is_refused_while_an_overlay_is_open(
@@ -317,14 +317,14 @@ async def test_a_second_picker_is_refused_while_an_overlay_is_open(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-chatbox-ongoing-btn")
+        await _press(app, pilot, "#capture-chatbox-ongoing-btn")
         await _wait_for(pilot, lambda: overlay_open.is_set(), "first overlay up")
 
         # Every other picker button bounces off while the overlay is open.
-        await _press(app, pilot, "#set-chatbox-initial-btn")
+        await _press(app, pilot, "#capture-chatbox-initial-btn")
         await _press(app, pilot, "#set-region-btn")
-        await _press(app, pilot, "#set-idle-btn")
-        await _press(app, pilot, "#set-newchat-btn")
+        await _press(app, pilot, "#capture-idle-btn")
+        await _press(app, pilot, "#capture-new-chat-btn")
         await pilot.pause(0.2)
         assert picks == 1
 
@@ -337,7 +337,7 @@ async def test_a_second_picker_is_refused_while_an_overlay_is_open(
         assert not main._active_profile().has(TemplateKind.CHATBOX_INITIAL)
 
         # The guard releases once the overlay resolves: picking works again.
-        await _press(app, pilot, "#set-chatbox-initial-btn")
+        await _press(app, pilot, "#capture-chatbox-initial-btn")
         await _wait_for(pilot, lambda: picks == 2, "second picker allowed after the first closed")
 
 
@@ -351,11 +351,11 @@ async def _capture_both(app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.Mon
     await _draw_chat_region(app, pilot, monkeypatch)
     picked = [INITIAL_BOX, ONGOING_BOX]
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: picked.pop(0))
-    await _press(app, pilot, "#set-chatbox-initial-btn")
+    await _press(app, pilot, "#capture-chatbox-initial-btn")
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.CHATBOX_INITIAL), "initial captured"
     )
-    await _press(app, pilot, "#set-chatbox-ongoing-btn")
+    await _press(app, pilot, "#capture-chatbox-ongoing-btn")
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.CHATBOX_ONGOING), "ongoing captured"
     )

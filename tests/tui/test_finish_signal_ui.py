@@ -104,7 +104,7 @@ async def _arm_with_template(app: AgentClipApp, pilot: Pilot) -> MainScreen:
     main = app.main_screen
     assert main is not None
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-    await _press(app, pilot, "#set-copy-btn")
+    await _press(app, pilot, "#capture-copy-btn")
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
     )

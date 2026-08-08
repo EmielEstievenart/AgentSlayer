@@ -1,29 +1,27 @@
-"""Find the lowest copy-button icon inside a tall vertical strip of the screen.
+"""Is this little appearance anywhere inside this captured region, and where?
 
-The user calibrates once by boxing a chat's copy button; that little icon is the
-template. Every response since then stamps the same icon down the right-hand
-gutter of the transcript, so to click the NEWEST one we capture a same-width
-vertical band and look for the bottom-most place the template still matches
-(largest y). Multiple matches are the normal case, not an error.
+The one question the whole recognition model rests on. The user captures what a
+thing looks like once (a copy icon, a stop button, a chat input box) and draws
+one box around the browser window; everything after that is this search, run
+against a fresh capture of that window - so nothing is ever pinned to a
+remembered coordinate and the browser is free to move.
+
+A brute-force sweep of every (x, y) origin in a 1000×800 region is millions of
+offsets, which is not affordable on a poll timer. :class:`Template` therefore
+precomputes a handful of ANCHORs (short, visually busy byte runs from the
+quantised blue plane) and the search lets ``bytes.find`` locate them at C
+speed; only the few origins an anchor vouches for are ever compared pixel by
+pixel, in two stages - a 16-pixel sniff test, then the full strided comparison.
+
+Quantisation (v >> 5) is what makes an exact byte search survive anti-aliasing
+at all, and its residual risk is why there are eight anchors on eight different
+rows: a shade drifting across a bucket edge tends to move a whole row of the
+template at once, so the anchors sharing no row with the damage still find it.
 
 Pixel comparison is the house style from screen.busy: strided sampling with a
 fixed budget, per-channel tolerance on B/G/R, the undefined X byte skipped.
 Deliberately a pure function of its inputs - no capture, no ctypes, no OS - so
-it is unit-testable anywhere and cheap enough to run once per response.
-
-The second half of this module answers the harder question the same way but in
-two dimensions: "is this little appearance anywhere inside this whole chat
-region?" - the region is now the browser's chat area rather than a strip whose
-width the user matched to the icon, so nothing is pinned to a column and a
-brute-force sweep of every (x, y) is millions of offsets. :class:`Template`
-precomputes a handful of ANCHORs (short, visually busy byte runs from the
-quantised blue plane) and the search lets ``bytes.find`` locate them at C
-speed; only the few origins an anchor vouches for are ever compared pixel by
-pixel. Quantisation (v >> 5) is what makes an exact byte search survive
-anti-aliasing at all - and its residual risk is why there are eight anchors on
-eight different rows: a shade drifting across a bucket edge tends to move a
-whole row of the template at once, so the anchors that share no row with the
-damage still find it.
+it is unit-testable anywhere.
 """
 
 from __future__ import annotations
@@ -35,107 +33,15 @@ from agentclip.screen.region import ScreenRegion
 
 # A channel delta below this is anti-aliasing/theme noise, not a different icon.
 DEFAULT_TOLERANCE = 24
-# The template "matches" when no more than this fraction of sampled pixels differ.
-# Looser than busy's threshold: the icon sits on whatever text happens to be
-# behind it and hover states tint it.
+# The template "matches" when no more than this fraction of sampled pixels
+# differ. Looser than busy's threshold: an icon sits on whatever text happens to
+# be behind it and hover states tint it. Each TemplateKind overrides it with a
+# value suited to what it is (screen.profile).
 DEFAULT_MAX_DIFF = 0.08
-# Pixels compared per candidate offset. A tall band means hundreds of offsets,
-# so the per-offset cost is what keeps the whole scan affordable.
+# Pixels compared per verified candidate. A whole browser window yields many
+# anchor hits, so the per-candidate cost is what keeps a poll affordable.
 MAX_SAMPLES = 1024
 
-
-@dataclass(frozen=True, slots=True)
-class TemplateMatch:
-    """Where the template was found: ``y_offset`` is band-local (0 = band top)."""
-
-    y_offset: int
-    diff: float
-
-
-def _validate(template: RegionImage, band: RegionImage) -> None:
-    if template.width != band.width:
-        raise ValueError(f"width mismatch: template {template.width}, band {band.width}")
-    if template.width <= 0 or template.height <= 0:
-        raise ValueError("template has no area")
-    if band.height < template.height:
-        raise ValueError(
-            f"band ({band.height}px) is shorter than the template ({template.height}px)"
-        )
-    if len(template.pixels) < template.width * template.height * 4:
-        raise ValueError("template pixel buffer is truncated")
-    if len(band.pixels) < band.width * band.height * 4:
-        raise ValueError("band pixel buffer is truncated")
-
-
-def _diff_at(template: RegionImage, band: RegionImage, y_offset: int, tolerance: int) -> float:
-    """Diff fraction between the template and the band slice at ``y_offset``.
-
-    Inputs are assumed already validated. At most ``MAX_SAMPLES`` pixels are
-    compared, picked with a uniform stride over the template's row-major pixel
-    order - the same set of pixels at every offset, so the diffs are comparable.
-    """
-    total = template.width * template.height
-    step = 1 if total <= MAX_SAMPLES else -(-total // MAX_SAMPLES)
-    # Widths are equal, so a template pixel index maps onto the band by shifting
-    # whole rows: band index = y_offset * width + template index.
-    base = y_offset * band.width
-    left, right = memoryview(template.pixels), memoryview(band.pixels)
-    sampled = differing = 0
-    for index in range(0, total, step):
-        here = index * 4
-        there = (base + index) * 4
-        sampled += 1
-        # Byte 3 of each BGRX pixel is undefined in a GDI capture - skip it.
-        if (
-            abs(left[here] - right[there]) > tolerance
-            or abs(left[here + 1] - right[there + 1]) > tolerance
-            or abs(left[here + 2] - right[there + 2]) > tolerance
-        ):
-            differing += 1
-    return differing / sampled
-
-
-def match_at(
-    template: RegionImage,
-    band: RegionImage,
-    y_offset: int,
-    *,
-    tolerance: int = DEFAULT_TOLERANCE,
-) -> float:
-    """Fraction of sampled pixels that differ between the template and the band
-    slice starting at ``y_offset``. 0.0 is a pixel-perfect match.
-
-    Raises ValueError if the widths differ, the template is empty, a pixel
-    buffer is truncated, or the slice would run off either end of the band.
-    """
-    _validate(template, band)
-    if y_offset < 0 or y_offset + template.height > band.height:
-        raise ValueError(f"offset {y_offset} does not fit inside the band")
-    return _diff_at(template, band, y_offset, tolerance)
-
-
-def find_lowest_match(
-    template: RegionImage,
-    band: RegionImage,
-    *,
-    tolerance: int = DEFAULT_TOLERANCE,
-    max_diff: float = DEFAULT_MAX_DIFF,
-) -> TemplateMatch | None:
-    """The bottom-most offset where the template matches, or None if it never does.
-
-    Scanning bottom-up and returning the first hit is both the answer we want
-    (the newest response's copy button) and the cheap way to get it: a match
-    near the bottom ends the scan after a handful of offsets.
-    """
-    _validate(template, band)
-    for y_offset in range(band.height - template.height, -1, -1):
-        diff = _diff_at(template, band, y_offset, tolerance)
-        if diff <= max_diff:
-            return TemplateMatch(y_offset, diff)
-    return None
-
-
-# -- 2D search: find an appearance anywhere inside a region --------------------
 
 # Quantisation table for bytes.translate: 256 shades collapse to 8 buckets, so
 # an EXACT byte search tolerates the anti-aliasing and theme dithering that

@@ -70,7 +70,7 @@ def _make_app(tmp_path: Path, profile_root: Path) -> tuple[AgentClipApp, FakeCli
 
 def _copy_label(app: AgentClipApp) -> str:
     assert app.main_screen is not None
-    return str(app.main_screen.query_one("#side-copy", Static).render())
+    return str(app.main_screen.query_one("#side-tpl-copy", Static).render())
 
 
 async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
@@ -104,7 +104,7 @@ async def _calibrate(
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     await _press(app, pilot, "#set-region-btn")
     await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
-    await _press(app, pilot, "#set-copy-btn")
+    await _press(app, pilot, "#capture-copy-btn")
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
     )

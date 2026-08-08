@@ -78,7 +78,7 @@ def _make_app(tmp_path: Path, profile_root: Path) -> tuple[AgentClipApp, FakeCli
 
 def _newchat_label(app: AgentClipApp) -> str:
     assert app.main_screen is not None
-    return str(app.main_screen.query_one("#side-newchat", Static).render())
+    return str(app.main_screen.query_one("#side-tpl-new-chat", Static).render())
 
 
 async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
@@ -121,7 +121,7 @@ async def _capture_newchat(
         await _press(app, pilot, "#set-region-btn")
         await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: NEWCHAT_BOX)
-    await _press(app, pilot, "#set-newchat-btn")
+    await _press(app, pilot, "#capture-new-chat-btn")
     await _wait_for(
         pilot,
         lambda: main._active_profile().has(TemplateKind.NEW_CHAT),
@@ -162,7 +162,7 @@ async def test_capture_failure_keeps_it_unknown(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-newchat-btn")
+        await _press(app, pilot, "#capture-new-chat-btn")
         await pilot.pause(0.2)
         assert not main._active_profile().has(TemplateKind.NEW_CHAT)
         assert "not captured" in _newchat_label(app)

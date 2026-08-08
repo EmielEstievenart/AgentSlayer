@@ -84,7 +84,7 @@ def _make_app(tmp_path: Path, profile_root: Path) -> tuple[AgentClipApp, FakeCli
 
 def _copy_label(app: AgentClipApp) -> str:
     assert app.main_screen is not None
-    return str(app.main_screen.query_one("#side-copy", Static).render())
+    return str(app.main_screen.query_one("#side-tpl-copy", Static).render())
 
 
 async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
@@ -132,7 +132,7 @@ async def _capture_copy(app: AgentClipApp, pilot: Pilot) -> MainScreen:
     main = app.main_screen
     assert main is not None
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-    await _press(app, pilot, "#set-copy-btn")
+    await _press(app, pilot, "#capture-copy-btn")
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
     )
@@ -150,7 +150,7 @@ async def _armed(app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatc
     await _press(app, pilot, "#set-region-btn")
     await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: COPY_ICON)
-    await _press(app, pilot, "#set-copy-btn")
+    await _press(app, pilot, "#capture-copy-btn")
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
     )
@@ -192,7 +192,7 @@ async def test_cancelled_pick_changes_nothing(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-copy-btn")
+        await _press(app, pilot, "#capture-copy-btn")
         await pilot.pause(0.2)
         assert not main._active_profile().has(TemplateKind.COPY)
         assert "not captured" in _copy_label(app)
@@ -212,7 +212,7 @@ async def test_picker_failure_is_reported_not_fatal(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-copy-btn")
+        await _press(app, pilot, "#capture-copy-btn")
         await pilot.pause(0.2)
         assert not main._active_profile().has(TemplateKind.COPY)
         assert "not captured" in _copy_label(app)
@@ -232,7 +232,7 @@ async def test_capture_failure_keeps_the_appearance_unknown(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-copy-btn")
+        await _press(app, pilot, "#capture-copy-btn")
         await pilot.pause(0.2)
         assert not main._active_profile().has(TemplateKind.COPY)
         assert "not captured" in _copy_label(app)

@@ -190,7 +190,7 @@ async def test_switching_the_slot_repaints_the_window_but_not_the_appearances(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_REGION)
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", MASTER_REGION)
+        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", MASTER_REGION)
         assert MASTER_REGION.describe() in _label(app, "#side-region")
 
         # The sub-agent slot has no window drawn, so the per-slot rows read as
@@ -198,19 +198,19 @@ async def test_switching_the_slot_repaints_the_window_but_not_the_appearances(
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await pilot.pause()
         assert "not set" in _label(app, "#side-region")
-        assert "captured" in _label(app, "#side-newchat")
+        assert "captured" in _label(app, "#side-tpl-new-chat")
 
         # The copy button is the SERVICE's appearance, not this slot's, so it
         # reads the same from either slot - that sharing is the point.
-        await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
-        assert "captured" in _label(app, "#side-copy")
+        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_REGION)
+        assert "captured" in _label(app, "#side-tpl-copy")
 
         # ...and switching back restores the master's, from stored state.
         await _select_slot(app, pilot, AgentSlot.MASTER)
         await pilot.pause()
         assert MASTER_REGION.describe() in _label(app, "#side-region")
-        assert "captured" in _label(app, "#side-newchat")
-        assert "captured" in _label(app, "#side-copy")
+        assert "captured" in _label(app, "#side-tpl-new-chat")
+        assert "captured" in _label(app, "#side-tpl-copy")
         assert _label(app, "#side-slot-note") == SLOT_NOTE_MASTER
 
 
@@ -234,12 +234,12 @@ async def test_the_note_reports_what_delegation_is_still_missing(
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
         assert MISSING_CHAT_REGION not in _label(app, "#side-slot-note")
 
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_REGION)
         assert MISSING_NEWCHAT not in _label(app, "#side-slot-note")
 
         # A capture is a profile change, not a slot one - the ready-toast seam
         # has to notice it too, or delegation would silently stay "off".
-        await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_REGION)
         await _wait_for(
             pilot,
             lambda: _label(app, "#side-slot-note") == SLOT_NOTE_READY,
@@ -273,7 +273,7 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
         # service, whose answer is the same in either one.
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
         assert "SUB-AGENT window" in picker.prompts[-1]
-        await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#capture-busy-btn", SUB_REGION)
         assert "SUB-AGENT window" not in picker.prompts[-1]
 
 
@@ -297,7 +297,7 @@ async def test_the_slot_picker_is_never_locked_by_a_session(
         assert not main.sidebar.slot_select.disabled
 
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_REGION)
         assert main._active_profile().has(TemplateKind.NEW_CHAT)
 
 
@@ -317,7 +317,7 @@ async def test_new_keeps_both_slots_and_sends_the_pointers_home(
         await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_REGION)
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_REGION)
         main._live = AgentSlot.SUBAGENT  # as a delegation would leave it
 
         await _send(app, pilot, "Say hello.")
@@ -353,9 +353,9 @@ async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
 
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#capture-busy-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_REGION)
         await _wait_for(pilot, lambda: main.delegation_available(), "sub-agent slot ready")
 
         await main.clear_transcript()  # the /new teardown hook
@@ -384,7 +384,7 @@ async def test_the_new_browser_chat_button_targets_the_calibrating_slot(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_REGION)
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", MASTER_REGION)
+        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", MASTER_REGION)
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
 

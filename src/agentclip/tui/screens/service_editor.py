@@ -33,7 +33,9 @@ it currently differs - a no-op if it's already default).
 from __future__ import annotations
 
 import re
+from contextlib import suppress
 from dataclasses import replace
+from pathlib import Path
 
 from rich.text import Text
 from textual import on
@@ -50,10 +52,30 @@ from agentclip.config import (
     ServicePreset,
     default_services,
 )
+from agentclip.screen.profile_store import ProfileStoreError, delete_profile, load_profile
 from agentclip.tui.screens.confirm import ConfirmScreen
 
 _NEW_SENTINEL = "+add-new+"  # not a legal slug (contains '+'), so it can't collide with a key
 _SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+# The appearance line for a service with nothing captured yet.
+TEMPLATES_NONE = "appearance: nothing captured yet"
+
+
+def _templates_line(root: Path, key: str | None) -> str:
+    """One read-only line describing what this service LOOKS like.
+
+    The editor never captures anything - drawing a box needs the browser on
+    screen, which is a main-screen job - but it is where a user goes to reason
+    about a service, so "does this one know what its copy button looks like?"
+    has to be answerable here.
+    """
+    if key is None:
+        return TEMPLATES_NONE
+    captured = load_profile(root, key).captured
+    if not captured:
+        return TEMPLATES_NONE
+    names = ", ".join(kind.label for kind in captured)
+    return f"appearance: {len(captured)}/6 captured ({names})"
 
 
 def _select_options(services: dict[str, ServicePreset]) -> list[tuple[str, str]]:
@@ -70,8 +92,9 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
 
     BINDINGS = [Binding("escape", "close", "close")]
 
-    def __init__(self, config: Config) -> None:
+    def __init__(self, config: Config, profile_root: Path) -> None:
         super().__init__()
+        self._profile_root = profile_root
         self._services: dict[str, ServicePreset] = dict(config.services)
         self._initial_services: dict[str, ServicePreset] = dict(config.services)
         default_key = (
@@ -106,10 +129,15 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
                     yield Input(id="svc-total", placeholder="e.g. 500000")
                     yield Static(Text("Stale after (seconds unchanged)"), classes="side-title")
                     yield Input(id="svc-stable", placeholder="e.g. 2.0")
+                    yield Static(
+                        Text(_templates_line(self._profile_root, self._selected_key)),
+                        id="svc-templates",
+                    )
                     yield Static("", id="svc-error")
                     with Horizontal(id="svc-actions"):
                         yield Button("Add service", id="svc-add-btn", variant="primary")
                         yield Button("Reset to default", id="svc-reset-btn")
+                        yield Button("Forget appearance", id="svc-forget-templates-btn")
                         yield Button("Delete", id="svc-delete-btn", variant="error")
             yield Static(
                 "escape closes (applies valid edits) · built-ins: edit or reset, never delete",
@@ -153,6 +181,9 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
             total_input.value = str(preset.total_context_chars)
             stable_input.value = str(preset.stable_seconds)
         self._pending_new = None
+        self.query_one("#svc-templates", Static).update(
+            Text(_templates_line(self._profile_root, key))
+        )
         self._update_buttons()
         self._revalidate()
 
@@ -165,6 +196,13 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         )
         self.query_one("#svc-delete-btn", Button).display = (
             not is_new and key not in BUILTIN_SERVICE_KEYS
+        )
+        # Captures are per service, not per built-in-ness: any existing service
+        # with something captured can have it forgotten.
+        self.query_one("#svc-forget-templates-btn", Button).display = (
+            not is_new
+            and key is not None
+            and bool(load_profile(self._profile_root, key).captured)
         )
 
     # -- live validation --------------------------------------------------------
@@ -281,6 +319,38 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         if key is None or key not in BUILTIN_SERVICE_KEYS:
             return
         self._services[key] = default_services()[key]
+        self._load_service(key)
+
+    @on(Button.Pressed, "#svc-forget-templates-btn")
+    def _on_forget_templates(self, event: Button.Pressed) -> None:
+        # Same worker hand-off as action_close: push_screen_wait needs one.
+        event.stop()
+        self.run_worker(self._forget_templates_async(), group="forget", exclusive=True)
+
+    async def _forget_templates_async(self) -> None:
+        """Delete a service's captured appearances from disk, behind a confirm.
+
+        Deliberately separate from "Delete", which removes the *preset*: a user
+        whose browser theme changed wants to recapture, not to lose their size
+        settings.
+        """
+        key = self._selected_key
+        if key is None:
+            return
+        confirmed = await self.app.push_screen_wait(
+            ConfirmScreen(
+                f"Forget the {key} appearance?",
+                "The captured images of this service's buttons and chat box will be "
+                "deleted from disk. Its size settings are untouched, but every one "
+                "of those images has to be captured again from the main screen.",
+            )
+        )
+        if not confirmed:
+            return
+        # A profile we cannot delete simply reads as one that is still there:
+        # the readout is re-derived from disk either way.
+        with suppress(ProfileStoreError):
+            delete_profile(self._profile_root, key)
         self._load_service(key)
 
     @on(Button.Pressed, "#svc-delete-btn")

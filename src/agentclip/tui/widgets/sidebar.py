@@ -8,33 +8,38 @@ runs (a session's preset is fixed - its budget is baked into the engine) and
 unlocks again whenever the app is waiting for a new session's first message.
 
 The widget is dumb on purpose: it holds no session state, exposes ``service``
-(the chosen preset key), ``set_locked``, ``refresh_services``, ``update_region``,
-``update_template``, ``update_stale``, ``show_slot`` and the
-``show_paste_flash``/``hide_paste_flash`` pair; MainScreen owns every bit of
-routing, including the "Edit services..." button, the detector polling loop,
-the capture pickers + auto-copy-click flow and the "New browser chat" action. The paste flash is the
-one animated thing here - a deliberately obnoxious blinking banner that nags the
-user to Ctrl+V the outbound payload into the chat; the blink timer is pure
-presentation, so the dumb widget may own it.
+(the chosen preset key), ``set_locked``, ``refresh_services``, ``show_slot``,
+``show_profile``, ``update_region``, ``update_template``, ``update_stale`` and
+the ``show_paste_flash``/``hide_paste_flash`` pair; MainScreen owns every bit of
+routing. The paste flash is the one animated thing here - a deliberately
+obnoxious blinking banner that nags the user to Ctrl+V the outbound payload
+into the chat; the blink timer is pure presentation, so the dumb widget may own
+it.
 
-Every calibration below the AGENT SLOT picker belongs to *one* slot: the master
-chat, or the sub-agent chat a delegated run gets its own window in. The picker
-chooses which slot the buttons underneath write into, and ``show_slot``
-repaints the whole column from that slot's ``SlotCalibration`` in one go (the
-per-field ``update_*`` methods stay the primitives - a live probe readout has no
-business being re-derived from stored state). Unlike the service picker it is
-never locked: calibrating the sub-agent window mid-session is the normal way to
-use it.
+The column has exactly two kinds of row below the pickers, and keeping them
+visually apart is the whole design:
 
-Capture buttons come in pairs that mirror each other deliberately: the chat
-input box is captured TWICE (a fresh chat centres it, an ongoing one docks it
-at the bottom, and one appearance would be wrong half the time), and the finish
-detectors read from either end - something on screen only WHILE generating, and
-something on screen only while IDLE - so a service with both gets a reinforced
-verdict. The third detector has no button at all: the drawn chat region reading
-unchanged for long enough is a finished response, whatever a service's pixel
-cues do. Every status label carries the ``side-status`` class so the column
-reads as one list rather than a pile of one-off ids.
+* **CHAT WINDOW** - the one per-slot block. The AGENT SLOT picker above it
+  chooses which window "Set chat region..." writes into, and ``show_slot``
+  repaints the block from that slot in one go. Unlike the service picker it is
+  never locked: drawing the sub-agent window mid-session is the normal way to
+  reach delegation. The staleness readout lives here too, because the drawn
+  window IS that detector.
+* **APPEARANCE · <service>** - what the selected service looks like, shared by
+  both slots and persisted to disk. One "Capture <thing>..." button per
+  ``TemplateKind`` in declaration order, each with a status line, a
+  "4/6 captured" summary and a "Forget these templates" escape hatch. Every
+  button carries the ``capture-btn`` class and encodes its kind in its id
+  (``capture-<kind>-btn``), so MainScreen routes all six through one handler
+  instead of six near-identical ones.
+
+Two of the six mirror each other deliberately: the chat input box is captured
+TWICE (a fresh chat centres it, an ongoing one docks it at the bottom, and one
+appearance would be wrong half the time), and the busy/idle finish detectors
+read from either end - something on screen only WHILE generating, and something
+on screen only while IDLE - so a service with both gets a reinforced verdict.
+Every status label carries the ``side-status`` class so the column reads as one
+list rather than a pile of one-off ids.
 """
 
 from __future__ import annotations
@@ -70,24 +75,51 @@ TEMPLATE_UNSET = "not captured"
 STALE_UNSET = "no chat region - staleness check disabled"
 STALE_CALIBRATED = "watching the chat region"
 
-# Which Static shows each appearance's status. A mapping rather than a naming
-# convention for now: these ids predate the profile model and the block they
-# live in is restructured next.
-_TEMPLATE_STATUS_ID = {
-    TemplateKind.BUSY: "side-busy",
-    TemplateKind.IDLE: "side-idle",
-    TemplateKind.CHATBOX_INITIAL: "side-chatbox-initial",
-    TemplateKind.CHATBOX_ONGOING: "side-chatbox-ongoing",
-    TemplateKind.COPY: "side-copy",
-    TemplateKind.NEW_CHAT: "side-newchat",
-}
+# The APPEARANCE block is generated per TemplateKind, so its widget ids are a
+# naming convention rather than a table: MainScreen parses the kind back out of
+# a pressed button's id, which is what lets one handler serve all six.
+CAPTURE_CLASS = "capture-btn"
+
+
+def capture_button_id(kind: TemplateKind) -> str:
+    return f"capture-{kind}-btn"
+
+
+def template_status_id(kind: TemplateKind) -> str:
+    return f"side-tpl-{kind}"
+
+
+def kind_from_button_id(button_id: str | None) -> TemplateKind | None:
+    """The appearance a ``capture-btn`` press is about, or None if it is not one."""
+    if button_id is None or not button_id.startswith("capture-") or not button_id.endswith("-btn"):
+        return None
+    try:
+        return TemplateKind(button_id[len("capture-") : -len("-btn")])
+    except ValueError:
+        return None
+
+
+def template_status(profile: ServiceProfile, kind: TemplateKind) -> str:
+    """One appearance's resting line: its captured size, or the not-set default."""
+    template = profile.get(kind)
+    if template is None:
+        return TEMPLATE_UNSET
+    return f"{template.width}×{template.height} · captured"
 
 # The AGENT SLOT note, one line per state. The master slot has nothing to be
 # "ready" for - it is simply the chat the session runs in - so only the
 # sub-agent slot reports readiness, and it reports the gaps by name.
 SLOT_NOTE_MASTER = "the main agent's chat window"
+# The APPEARANCE block's heading names the service it belongs to, because that
+# is the one thing about it a user could otherwise get wrong: these captures
+# are not the slot's and not the app's.
+PROFILE_TITLE = "APPEARANCE · "
 SLOT_NOTE_READY = "delegation ON"
 SLOT_NOTE_MISSING = "delegation off · need: "
+
+
+def profile_title(key: str) -> str:
+    return PROFILE_TITLE + key
 
 
 def _slot_options() -> list[tuple[str, str]]:
@@ -143,6 +175,17 @@ class Sidebar(Vertical):
     }
     """
 
+    class ServiceChanged(Message):
+        """The user picked a different service.
+
+        Its appearances are a different set, so this is not a display-only
+        change: MainScreen reloads the profile behind it.
+        """
+
+        def __init__(self, key: str) -> None:
+            self.key = key
+            super().__init__()
+
     class SlotChanged(Message):
         """The user picked a different agent slot for the calibration buttons.
 
@@ -158,6 +201,12 @@ class Sidebar(Vertical):
         self._config = config
         self._project_root = project_root
         self._flash_timer: Timer | None = None
+        # The service the ServiceChanged message last reported. Textual fires
+        # Select.Changed when the initial value is set in compose, and again
+        # whenever refresh_services re-selects the same key - neither is a user
+        # switching services, and MainScreen restarts its detector worker on
+        # every one it hears about.
+        self._reported_service = self._default_service()
 
     def compose(self) -> ComposeResult:
         yield Static(Text(PASTE_FLASH_TEXT), id="side-paste-flash")
@@ -183,22 +232,17 @@ class Sidebar(Vertical):
         yield Static(Text("CHAT WINDOW"), classes="side-title")
         yield Button("Set chat region...", id="set-region-btn")
         yield Static(Text(_REGION_UNSET), id="side-region", classes="side-status")
-        yield Button("Capture start chat box...", id="set-chatbox-initial-btn")
-        yield Static(Text(TEMPLATE_UNSET), id="side-chatbox-initial", classes="side-status")
-        yield Button("Capture ongoing chat box...", id="set-chatbox-ongoing-btn")
-        yield Static(Text(TEMPLATE_UNSET), id="side-chatbox-ongoing", classes="side-status")
         yield Static(Text(STALE_UNSET), id="side-stale", classes="side-status")
-        yield Static(Text("REASONING"), classes="side-title")
-        yield Button("Capture busy indicator...", id="set-busy-btn")
-        yield Static(Text(TEMPLATE_UNSET), id="side-busy", classes="side-status")
-        yield Button("Capture idle indicator...", id="set-idle-btn")
-        yield Static(Text(TEMPLATE_UNSET), id="side-idle", classes="side-status")
-        yield Static(Text("COPY BUTTON"), classes="side-title")
-        yield Button("Capture copy button...", id="set-copy-btn")
-        yield Static(Text(TEMPLATE_UNSET), id="side-copy", classes="side-status")
-        yield Static(Text("NEW CHAT"), classes="side-title")
-        yield Button("Capture new-chat button...", id="set-newchat-btn")
-        yield Static(Text(TEMPLATE_UNSET), id="side-newchat", classes="side-status")
+        yield Static(Text(profile_title(self._default_service())), id="side-profile-title",
+                     classes="side-title")
+        for kind in TemplateKind:
+            yield Button(f"Capture {kind.label}...", id=capture_button_id(kind),
+                         classes=CAPTURE_CLASS)
+            yield Static(
+                Text(TEMPLATE_UNSET), id=template_status_id(kind), classes="side-status"
+            )
+        yield Static(Text(""), id="side-profile-note", classes="side-status")
+        yield Button("Forget these templates", id="forget-profile-btn")
         yield Button("New browser chat", id="newchat-btn")
         yield Static(Text(_HINT), classes="side-hint")
 
@@ -213,11 +257,17 @@ class Sidebar(Vertical):
 
     @on(Select.Changed, "#service-select")
     def _on_service_changed(self, event: Select.Changed) -> None:
-        # The caption is display only; MainScreen reads `service` when it starts a
-        # session, so the message keeps bubbling (nothing else listens today).
+        # The caption is display only. The domain event is re-posted because a
+        # different service means a different set of captured appearances -
+        # MainScreen has to reload the profile, repaint the APPEARANCE block and
+        # restart the detectors against it.
+        event.stop()
         value = event.value
         key = None if value is Select.NULL else str(value)
         self.query_one("#side-service-label", Static).update(Text(self._preset_caption(key)))
+        if key is not None and key != self._reported_service:
+            self._reported_service = key
+            self.post_message(self.ServiceChanged(key))
 
     def _default_service(self) -> str:
         """The configured default, or the first preset if the config is odd."""
@@ -304,15 +354,34 @@ class Sidebar(Vertical):
 
     # -- the service's captured appearances -----------------------------------
 
+    def show_profile(self, profile: ServiceProfile) -> None:
+        """Repaint the whole APPEARANCE block from one service's profile.
+
+        The counterpart of ``show_slot``, and the reason the two are separate
+        methods: they are repainted by different events. A slot switch changes
+        the block above and nothing here; a service switch or a fresh capture
+        changes this block and nothing there.
+        """
+        self.query_one("#side-profile-title", Static).update(Text(profile_title(profile.key)))
+        for kind in TemplateKind:
+            self.update_template(kind, template_status(profile, kind))
+        captured = profile.captured
+        note = f"{profile.describe()} · saved for {profile.key}"
+        self.query_one("#side-profile-note", Static).update(Text(note))
+        # Nothing to forget reads as a disabled button rather than a hidden one:
+        # the column must not reflow as the user captures things.
+        self.query_one("#forget-profile-btn", Button).disabled = not captured
+
     def update_template(self, kind: TemplateKind, text: str) -> None:
         """Repaint one appearance's status line.
 
         Display only, and deliberately text rather than data: the same Static
-        shows a stored fact for some kinds ("captured", with the size of the
-        box the user drew) and a live probe verdict for others (the busy/idle
-        detectors report every poll here), and only MainScreen knows which.
+        shows a stored fact most of the time ("captured", with the size of the
+        box the user drew) and a live verdict for the rest (the busy/idle
+        detectors report every poll here, the copy button reports every click
+        attempt), and only MainScreen knows which.
         """
-        self.query_one(f"#{_TEMPLATE_STATUS_ID[kind]}", Static).update(Text(text))
+        self.query_one(f"#{template_status_id(kind)}", Static).update(Text(text))
 
     # -- the staleness detector ---------------------------------------------------
 

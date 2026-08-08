@@ -161,15 +161,15 @@ async def _calibrate_master(app: AgentClipApp, pilot: Pilot, picker: _Picker) ->
     slot and hide what the sequence below is measuring.
     """
     await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_BOX)
-    await _calibrate(app, pilot, picker, "#set-busy-btn", MASTER_BUSY)
+    await _calibrate(app, pilot, picker, "#capture-busy-btn", MASTER_BUSY)
 
 
 async def _calibrate_subagent(app: AgentClipApp, pilot: Pilot, picker: _Picker) -> None:
     await _select_slot(app, pilot, AgentSlot.SUBAGENT)
     await _calibrate(app, pilot, picker, "#set-region-btn", SUB_BOX)
-    await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_BUSY)
-    await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_COPY)
-    await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_NEWCHAT)
+    await _calibrate(app, pilot, picker, "#capture-busy-btn", SUB_BUSY)
+    await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_COPY)
+    await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_NEWCHAT)
     await _select_slot(app, pilot, AgentSlot.MASTER)
 
 
@@ -191,11 +191,11 @@ async def test_delegation_is_unavailable_until_every_piece_is_calibrated(
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_BOX)
         assert not main.delegation_available()
-        await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_BUSY)
+        await _calibrate(app, pilot, picker, "#capture-busy-btn", SUB_BUSY)
         assert not main.delegation_available()
-        await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_COPY)
+        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_COPY)
         assert not main.delegation_available()  # still no way to open a fresh chat
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_NEWCHAT)
+        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_NEWCHAT)
         assert main.delegation_available()
 
 

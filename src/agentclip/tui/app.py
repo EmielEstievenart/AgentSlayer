@@ -241,7 +241,7 @@ class AgentClipApp(App[None]):
         width: 1fr;
         margin-top: 1;
     }
-    Sidebar #side-region, Sidebar #side-click, Sidebar #side-copy {
+    Sidebar #side-region {
         color: $text-muted;
     }
     Sidebar #side-paste-flash {
@@ -459,7 +459,9 @@ class AgentClipApp(App[None]):
         self.run_worker(self._open_service_editor(), group="settings", exclusive=True)
 
     async def _open_service_editor(self) -> None:
-        result = await self.push_screen_wait(ServiceEditorScreen(self.app_config))
+        result = await self.push_screen_wait(
+            ServiceEditorScreen(self.app_config, self.profile_root)
+        )
         if result is None:
             return  # closed with no changes - nothing to persist or propagate
         save_services(result, self._global_config_path)

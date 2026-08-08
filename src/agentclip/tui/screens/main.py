@@ -116,7 +116,12 @@ from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.picker import ScreenPickError, pick_region
 from agentclip.screen.presence import PresenceTracker
 from agentclip.screen.profile import ServiceProfile, TemplateKind
-from agentclip.screen.profile_store import ProfileStoreError, load_profile, save_template
+from agentclip.screen.profile_store import (
+    ProfileStoreError,
+    delete_profile,
+    load_profile,
+    save_template,
+)
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import (
     AgentSlot,
@@ -141,11 +146,12 @@ from agentclip.tui.widgets.action_panel import ActionPanel
 from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
+    CAPTURE_CLASS,
     ENTER_FLASH_TEXT,
     PASTE_FLASH_TEXT,
     STALE_CALIBRATED,
-    TEMPLATE_UNSET,
     Sidebar,
+    kind_from_button_id,
     slot_note,
 )
 from agentclip.tui.widgets.statusbar import StatusBar
@@ -162,6 +168,15 @@ _ELEMENT_CLICK_SETTLE_S = 0.05
 # Beat between opening a fresh browser chat and treating it as the live slot -
 # the page still has to render its (centred) input box. Tests shrink this.
 _NEW_CHAT_SETTLE_S = 0.4
+
+# What the user is asked to draw for a slot. It is the ONLY thing they draw
+# per window now, and it has to be generous rather than tight: everything else
+# is recognised inside it, including the new-chat button, which most chat sites
+# park in a sidebar outside the conversation column.
+_CHAT_REGION_PROMPT = (
+    "Drag a box around the WHOLE browser window hosting the chat - including its "
+    "sidebar, so the New Chat button is inside it · Esc cancels"
+)
 
 # The session view that always exists: the conversation the user started. Its
 # widget ids are the pre-tabs ones (``#transcript``) so every existing selector
@@ -507,6 +522,12 @@ class MainScreen(Screen[None]):
         separately by the caller (it needs the same Config)."""
         self._config = config
         self._controller.update_config(config)
+        # The editor can delete a service's captured appearances (and a service
+        # itself), so the per-run cache is no longer trustworthy - drop it and
+        # let the next read come off disk.
+        self._profiles.clear()
+        self._paint_profile()
+        self._after_calibration()
 
     def on_mount(self) -> None:
         self._panels[MASTER_VIEW] = self.query_one(f"#{_panel_id(MASTER_VIEW)}", TranscriptPanel)
@@ -1205,9 +1226,7 @@ class MainScreen(Screen[None]):
         try:
             region = await asyncio.to_thread(
                 pick_region,
-                prompt=self._slot_prompt(
-                    "Drag a box around the window that hosts the AI chatbot · Esc cancels"
-                ),
+                prompt=self._slot_prompt(_CHAT_REGION_PROMPT),
             )
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
@@ -1234,18 +1253,19 @@ class MainScreen(Screen[None]):
 
     # -- capturing what a service LOOKS like -----------------------------------
 
-    @on(Button.Pressed, "#set-chatbox-initial-btn")
-    def _on_capture_chatbox_initial(self, event: Button.Pressed) -> None:
-        event.stop()
-        self._start_capture(TemplateKind.CHATBOX_INITIAL)
+    @on(Button.Pressed, f".{CAPTURE_CLASS}")
+    def _on_capture_pressed(self, event: Button.Pressed) -> None:
+        """The one route into a capture, for all six appearances.
 
-    @on(Button.Pressed, "#set-chatbox-ongoing-btn")
-    def _on_capture_chatbox_ongoing(self, event: Button.Pressed) -> None:
+        The sidebar generates the APPEARANCE block per ``TemplateKind`` and
+        encodes the kind in each button's id, so the kind is parsed back out
+        here rather than duplicated in six near-identical handlers - adding a
+        seventh appearance means adding an enum member and nothing else.
+        """
         event.stop()
-        self._start_capture(TemplateKind.CHATBOX_ONGOING)
-
-    def _start_capture(self, kind: TemplateKind) -> None:
-        """Run one capture worker, unless an overlay is already up."""
+        kind = kind_from_button_id(event.button.id)
+        if kind is None:  # a .capture-btn with an id we do not recognise
+            return
         if self._refuse_second_picker():
             return
         self.run_worker(self._capture_template(kind), group="regionpick", exclusive=True)
@@ -1298,40 +1318,56 @@ class MainScreen(Screen[None]):
         # are free to restart it too, since it is rebuilt from scratch anyway.
         self._start_detector_worker()
 
-    # Appearances that have moved off the slot and into the service profile.
-    # Grows as each detector is migrated; the sidebar block follows last.
-    _PROFILE_KINDS: tuple[TemplateKind, ...] = (
-        TemplateKind.CHATBOX_INITIAL,
-        TemplateKind.CHATBOX_ONGOING,
-        TemplateKind.COPY,
-        TemplateKind.NEW_CHAT,
-        TemplateKind.BUSY,
-        TemplateKind.IDLE,
-    )
-
     def _paint_profile(self) -> None:
-        """Repaint every migrated appearance's status from the active profile."""
-        profile = self._active_profile()
+        """Repaint the whole APPEARANCE block from the active service's profile."""
         with suppress(NoMatches):
-            sidebar = self.sidebar
-            for kind in self._PROFILE_KINDS:
-                template = profile.get(kind)
-                sidebar.update_template(
-                    kind,
-                    f"{template.width}×{template.height} · captured"
-                    if template is not None
-                    else TEMPLATE_UNSET,
-                )
+            self.sidebar.show_profile(self._active_profile())
 
-    @on(Button.Pressed, "#set-busy-btn")
-    def _on_capture_busy(self, event: Button.Pressed) -> None:
-        event.stop()
-        self._start_capture(TemplateKind.BUSY)
+    @on(Sidebar.ServiceChanged)
+    def _on_service_changed(self, message: Sidebar.ServiceChanged) -> None:
+        """A different service is a different set of appearances.
 
-    @on(Button.Pressed, "#set-idle-btn")
-    def _on_capture_idle(self, event: Button.Pressed) -> None:
+        Everything downstream of "what does this service look like?" has to
+        follow: the APPEARANCE block, the slot's readiness note (half of which
+        is the profile), and the detector worker - which was built around the
+        old service's busy/idle templates and would otherwise keep hunting
+        them in the new one's window.
+        """
+        message.stop()
+        self._paint_profile()
+        self._after_calibration()
+        self._start_detector_worker()
+
+    @on(Button.Pressed, "#forget-profile-btn")
+    def _on_forget_profile(self, event: Button.Pressed) -> None:
         event.stop()
-        self._start_capture(TemplateKind.IDLE)
+        self.run_worker(self._forget_profile(), group="forgetprofile", exclusive=True)
+
+    async def _forget_profile(self) -> None:
+        """Drop every appearance captured for the active service, on disk and in
+        memory. Behind a confirm: it is a handful of drag-a-box ceremonies to
+        redo, and nothing else in the app can undo it."""
+        profile = self._active_profile()
+        if not profile.captured:
+            return
+        confirmed = await self.confirm(
+            f"Forget the {profile.key} appearance?",
+            f"{profile.describe()} for {profile.key} will be deleted from disk. "
+            "Every slot pointed at this service loses them, and they have to be "
+            "captured again.",
+        )
+        if not confirmed:
+            return
+        try:
+            await asyncio.to_thread(delete_profile, self._profile_root, profile.key)
+        except ProfileStoreError as exc:
+            self.notify(f"could not delete the {profile.key} profile: {exc}", severity="error")
+            return
+        profile.clear()
+        self._paint_profile()
+        self._after_calibration()
+        self._start_detector_worker()  # its busy/idle trackers are gone with them
+        self.notify(f"{profile.key} appearance forgotten")
 
     # -- finish-detector polling -----------------------------------------------
 
@@ -1573,11 +1609,6 @@ class MainScreen(Screen[None]):
 
     # -- the copy button + auto-copy-click -------------------------------------
 
-    @on(Button.Pressed, "#set-copy-btn")
-    def _on_capture_copy(self, event: Button.Pressed) -> None:
-        event.stop()
-        self._start_capture(TemplateKind.COPY)
-
     def _copy_status(self, text: str) -> None:
         """Repaint the copy button's status line, keeping its captured size in
         front of whatever the flow has to report."""
@@ -1740,11 +1771,6 @@ class MainScreen(Screen[None]):
         return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
 
     # -- the browser's new-chat button ------------------------------------------
-
-    @on(Button.Pressed, "#set-newchat-btn")
-    def _on_capture_newchat(self, event: Button.Pressed) -> None:
-        event.stop()
-        self._start_capture(TemplateKind.NEW_CHAT)
 
     def _newchat_status(self, text: str) -> None:
         """Repaint the new-chat button's status line, keeping its captured size

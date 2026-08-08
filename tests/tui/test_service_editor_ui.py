@@ -18,8 +18,11 @@ from __future__ import annotations
 import time
 import tomllib
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
+import pytest
+from textual.message import Message
 from textual.pilot import Pilot
 from textual.widgets import Button, Input, Select, Static
 
@@ -28,10 +31,11 @@ from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
-from agentclip.screen.profile_store import load_profile, save_template
+from agentclip.screen.profile_store import load_profile, profile_dir, save_template
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.service_editor import TEMPLATES_NONE, ServiceEditorScreen
+from agentclip.tui.widgets.sidebar import TEMPLATE_UNSET, Sidebar
 
 
 async def _wait_for(
@@ -60,6 +64,11 @@ def _make_app(tmp_path: Path, profile_root: Path) -> tuple[AgentClipApp, Path]:
         profile_root=profile_root,
     )
     return app, global_path
+
+
+def _label(app: AgentClipApp, widget_id: str) -> str:
+    assert app.main_screen is not None
+    return str(app.main_screen.query_one(widget_id, Static).render())
 
 
 def _image(size: int = 32) -> RegionImage:
@@ -329,6 +338,71 @@ async def test_editing_services_mid_session_does_not_unlock_the_sidebar(
         assert main.sidebar.service_select.disabled
 
 
+# -- the sidebar's side of the hand-off -------------------------------------
+
+
+def _watch_service_events(
+    monkeypatch: pytest.MonkeyPatch, sidebar: Sidebar
+) -> list[Sidebar.ServiceChanged]:
+    """Record every domain event this sidebar posts about the service picker."""
+    seen: list[Sidebar.ServiceChanged] = []
+    original = sidebar.post_message
+
+    def spy(message: Message) -> bool:
+        if isinstance(message, Sidebar.ServiceChanged):
+            seen.append(message)
+        return original(message)
+
+    monkeypatch.setattr(sidebar, "post_message", spy)
+    return seen
+
+
+async def test_refreshing_the_picker_is_silent_when_the_selection_survives(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``set_options`` resets the value to the first option before the selection
+    can be put back, so a plain rebuild announced two service switches for an
+    edit that changed nothing about which service is selected - each one a
+    profile reload, a readiness re-check and a detector restart."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        sidebar = main.sidebar
+        before = sidebar.service
+        seen = _watch_service_events(monkeypatch, sidebar)
+
+        sidebar.refresh_services(app.app_config)
+        await pilot.pause()
+
+        assert seen == []
+        assert sidebar.service == before
+
+
+async def test_refreshing_the_picker_reports_a_selection_it_had_to_drop(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The one case that IS a service switch: the selected preset was deleted,
+    so the picker falls back - and everything downstream of "what does this
+    service look like?" has to follow."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        sidebar = main.sidebar
+        gone = sidebar.service
+        seen = _watch_service_events(monkeypatch, sidebar)
+
+        services = {k: v for k, v in app.app_config.services.items() if k != gone}
+        sidebar.refresh_services(replace(app.app_config, services=services))
+        await pilot.pause()
+
+        assert [message.key for message in seen] == [sidebar.service]
+        assert sidebar.service != gone
+
+
 # -- the appearance readout -------------------------------------------------
 
 
@@ -392,6 +466,89 @@ async def test_forgetting_an_appearance_leaves_the_preset_alone(
         assert not load_profile(profile_root, "claude").captured
         assert TEMPLATES_NONE in str(editor.query_one("#svc-templates", Static).render())
         assert editor._services["claude"] == before  # the preset is untouched
+
+
+async def test_forgetting_an_appearance_reaches_the_main_screen(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The editor deletes the PNGs; the main screen is what caches them, paints
+    them and hunts for them. Without the deletion reaching it, the sidebar kept
+    saying "captured" and the poller kept looking for a template that was gone -
+    and closing with the presets untouched used to report exactly nothing."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    key = app.app_config.general.service
+    save_template(profile_root, key, TemplateKind.COPY, _image())
+
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        assert main._active_profile().has(TemplateKind.COPY)
+        assert "captured" in _label(app, "#side-tpl-copy")
+
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        editor.query_one("#svc-select", Select).value = key
+        await pilot.pause()
+
+        await pilot.click("#svc-forget-templates-btn")
+        await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen), "confirm shown")
+        await pilot.press("y")
+        await _wait_for(pilot, lambda: app.screen is editor, "back on the editor")
+
+        # Nothing about the presets changed - this close used to dismiss None.
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert not main._active_profile().has(TemplateKind.COPY)  # the cache was invalidated
+        assert _label(app, "#side-tpl-copy") == TEMPLATE_UNSET
+        assert not global_path.exists()  # no preset edit to persist
+
+
+async def test_deleting_a_service_takes_its_appearance_with_it(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """A deleted key is in no picker, so its folder of PNGs is unreachable from
+    anywhere in the app - leaving it behind is leaving litter no user can act on."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "+add-new+"
+        await pilot.pause()
+        editor.query_one("#svc-key", Input).value = "temp-svc"
+        await pilot.pause()
+        editor.query_one("#svc-label", Input).value = "Temp"
+        await pilot.pause()
+        editor.query_one("#svc-max", Input).value = "1000"
+        await pilot.pause()
+        editor.query_one("#svc-total", Input).value = "5000"
+        await pilot.pause()
+        await pilot.click("#svc-add-btn")
+        await pilot.pause()
+
+        save_template(profile_root, "temp-svc", TemplateKind.COPY, _image())
+        assert profile_dir(profile_root, "temp-svc").exists()
+
+        await pilot.click("#svc-delete-btn")
+        await pilot.pause()
+        assert "temp-svc" not in editor._services
+        assert not profile_dir(profile_root, "temp-svc").exists()
+
+        # ...and a reset is NOT a delete: it restores numbers, never captures.
+        save_template(profile_root, "claude", TemplateKind.COPY, _image())
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        await pilot.click("#svc-reset-btn")
+        await pilot.pause()
+        assert load_profile(profile_root, "claude").has(TemplateKind.COPY)
 
 
 async def test_declining_keeps_the_appearance(tmp_path: Path, profile_root: Path) -> None:

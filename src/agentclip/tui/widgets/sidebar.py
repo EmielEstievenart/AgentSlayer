@@ -202,10 +202,10 @@ class Sidebar(Vertical):
         self._project_root = project_root
         self._flash_timer: Timer | None = None
         # The service the ServiceChanged message last reported. Textual fires
-        # Select.Changed when the initial value is set in compose, and again
-        # whenever refresh_services re-selects the same key - neither is a user
-        # switching services, and MainScreen restarts its detector worker on
-        # every one it hears about.
+        # Select.Changed for the value compose sets as readily as for a user's
+        # pick, and MainScreen reloads a profile and restarts its detector
+        # worker on every one it hears about - so this is what keeps the
+        # widget's own writes from reading as a switch.
         self._reported_service = self._default_service()
 
     def compose(self) -> ComposeResult:
@@ -264,6 +264,16 @@ class Sidebar(Vertical):
         event.stop()
         value = event.value
         key = None if value is Select.NULL else str(value)
+        # Select.Changed is a *message*, so it arrives a turn or more after the
+        # value actually moved - and refresh_services moves it twice in one go
+        # (set_options resets the value to the first option before the previous
+        # selection can be put back). By the time the first of those is
+        # delivered it describes a selection that no longer exists, and acting
+        # on it would repaint the APPEARANCE block against the wrong service and
+        # point the detectors at it. An event whose value is no longer the
+        # picker's value is history, not a choice.
+        if key is not None and key != self.service:
+            return
         self.query_one("#side-service-label", Static).update(Text(self._preset_caption(key)))
         if key is not None and key != self._reported_service:
             self._reported_service = key
@@ -424,14 +434,29 @@ class Sidebar(Vertical):
     def refresh_services(self, config: Config | None = None) -> None:
         """Rebuild the options after the services table changed (service editor hook).
 
-        Keeps the current selection when that preset survived the edit.
+        Keeps the current selection when that preset survived the edit, and
+        reports a switch ONLY when it did not.
+
+        Both halves matter. ``set_options`` resets the value to the first option
+        before the line below can put the selection back, so the rebuild is a
+        round trip through Select's own value handling that says nothing about
+        what the user chose; left to speak for itself it announced two service
+        switches for an edit that changed nothing - a repaint against the wrong
+        profile, a spurious "sub-agent slot ready" toast, and two detector
+        restarts. The raw echoes are dropped by ``_on_service_changed`` (see
+        there), ``_reported_service`` is brought in line here so the surviving
+        selection cannot re-announce itself later, and the one real question -
+        is what is selected now a different service than before? - is answered
+        outright.
         """
         if config is not None:
             self._config = config
-        current = self.service
         select = self.service_select
+        before = self.service
         select.set_options(_service_options(self._config))
-        select.value = current if current in self._config.services else self._default_service()
-        self.query_one("#side-service-label", Static).update(
-            Text(self._preset_caption(self.service))
-        )
+        select.value = before if before in self._config.services else self._default_service()
+        after = self.service
+        self._reported_service = after
+        self.query_one("#side-service-label", Static).update(Text(self._preset_caption(after)))
+        if after != before:
+            self.post_message(self.ServiceChanged(after))

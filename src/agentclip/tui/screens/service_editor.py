@@ -14,10 +14,13 @@ then press "Add service" (enabled only once the candidate validates) - keys
 are one-time (immutable after creation), so committing them by an explicit
 action rather than continuously avoids collisions/half-typed keys.
 
-Escape closes: if the two size fields and label are currently valid for
-whatever is selected, the screen dismisses with the working ``services`` dict
-if it differs from what it opened with (``None`` if nothing changed - the
-caller then has nothing to persist). If the currently displayed field values
+Escape closes with a :class:`ServiceEdits` answer - or ``None`` when nothing
+changed at all, so the caller has nothing to do. Two independent things can
+change behind one escape and the caller has to act on either: the presets table
+(which it persists) and a service's captured appearances on disk (which
+"Forget appearance" and "Delete" have already removed, and which the main
+screen caches, paints and hunts for). A bare services dict could not say the
+second happened. If the currently displayed field values
 are invalid, nothing was ever applied to the working copy (invalid values are
 never committed), so there is no real "pending edit" to lose - but the visible
 text would vanish, which is surprising - so escape instead asks via the shared
@@ -25,16 +28,18 @@ text would vanish, which is surprising - so escape instead asks via the shared
 
 Deletion is only offered for non-built-in keys (the 12 shipped presets can be
 edited and reset, never removed - config.py's ``save_services`` needs the
-built-in set to know what NOT to write to disk). "Reset to default" restores a
-built-in preset's shipped values (available for any built-in, whether or not
-it currently differs - a no-op if it's already default).
+built-in set to know what NOT to write to disk). Deleting a preset takes its
+captured appearances with it: the key is gone from every picker, so the folder
+of PNGs behind it is unreachable from anywhere in the app. "Reset to default"
+restores a built-in preset's shipped values (available for any built-in,
+whether or not it currently differs - a no-op if it's already default) and
+touches no captures at all.
 """
 
 from __future__ import annotations
 
 import re
-from contextlib import suppress
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from rich.text import Text
@@ -52,6 +57,7 @@ from agentclip.config import (
     ServicePreset,
     default_services,
 )
+from agentclip.screen.profile import ServiceProfile
 from agentclip.screen.profile_store import ProfileStoreError, delete_profile, load_profile
 from agentclip.tui.screens.confirm import ConfirmScreen
 
@@ -61,7 +67,22 @@ _SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 TEMPLATES_NONE = "appearance: nothing captured yet"
 
 
-def _templates_line(root: Path, key: str | None) -> str:
+@dataclass(frozen=True, slots=True)
+class ServiceEdits:
+    """What one visit to the editor changed, as one answer.
+
+    ``services`` is the edited presets table, or None when the table came out
+    exactly as it went in - the caller then has nothing to persist.
+    ``profiles_changed`` is separate because captured appearances are deleted
+    from disk the moment the user confirms, not on close: the caller cannot
+    diff for it, and must reload/repaint/re-arm around it either way.
+    """
+
+    services: dict[str, ServicePreset] | None
+    profiles_changed: bool
+
+
+def _templates_line(profile: ServiceProfile | None) -> str:
     """One read-only line describing what this service LOOKS like.
 
     The editor never captures anything - drawing a box needs the browser on
@@ -69,13 +90,10 @@ def _templates_line(root: Path, key: str | None) -> str:
     about a service, so "does this one know what its copy button looks like?"
     has to be answerable here.
     """
-    if key is None:
+    if profile is None or not profile.captured:
         return TEMPLATES_NONE
-    captured = load_profile(root, key).captured
-    if not captured:
-        return TEMPLATES_NONE
-    names = ", ".join(kind.label for kind in captured)
-    return f"appearance: {len(captured)}/6 captured ({names})"
+    names = ", ".join(kind.label for kind in profile.captured)
+    return f"appearance: {profile.describe()} ({names})"
 
 
 def _select_options(services: dict[str, ServicePreset]) -> list[tuple[str, str]]:
@@ -87,8 +105,8 @@ def _select_options(services: dict[str, ServicePreset]) -> list[tuple[str, str]]
     return opts
 
 
-class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
-    """Dismisses with the edited services table, or ``None`` if nothing changed."""
+class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
+    """Dismisses with a :class:`ServiceEdits`, or ``None`` if nothing changed."""
 
     BINDINGS = [Binding("escape", "close", "close")]
 
@@ -97,6 +115,11 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         self._profile_root = profile_root
         self._services: dict[str, ServicePreset] = dict(config.services)
         self._initial_services: dict[str, ServicePreset] = dict(config.services)
+        # Set the moment a profile folder is actually removed from disk. Not
+        # derivable on close (the deletion already happened), and the caller
+        # has to hear about it: it caches profiles, paints them, and hunts for
+        # the templates it thinks are there.
+        self._profiles_changed = False
         default_key = (
             config.general.service
             if config.general.service in self._services
@@ -130,7 +153,7 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
                     yield Static(Text("Stale after (seconds unchanged)"), classes="side-title")
                     yield Input(id="svc-stable", placeholder="e.g. 2.0")
                     yield Static(
-                        Text(_templates_line(self._profile_root, self._selected_key)),
+                        Text(_templates_line(self._profile(self._selected_key))),
                         id="svc-templates",
                     )
                     yield Static("", id="svc-error")
@@ -154,6 +177,15 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         event.stop()
         value = str(event.value)
         self._load_service(None if value == _NEW_SENTINEL else value)
+
+    def _profile(self, key: str | None) -> ServiceProfile | None:
+        """``key``'s captured appearances, read from disk. None for "+ Add new".
+
+        Read once per selection and passed along: two readouts here are views of
+        the same folder, and reading it twice per click is two decodes of every
+        PNG a service has.
+        """
+        return None if key is None else load_profile(self._profile_root, key)
 
     def _load_service(self, key: str | None) -> None:
         self._selected_key = key
@@ -181,13 +213,12 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
             total_input.value = str(preset.total_context_chars)
             stable_input.value = str(preset.stable_seconds)
         self._pending_new = None
-        self.query_one("#svc-templates", Static).update(
-            Text(_templates_line(self._profile_root, key))
-        )
-        self._update_buttons()
+        profile = self._profile(key)
+        self.query_one("#svc-templates", Static).update(Text(_templates_line(profile)))
+        self._update_buttons(profile)
         self._revalidate()
 
-    def _update_buttons(self) -> None:
+    def _update_buttons(self, profile: ServiceProfile | None) -> None:
         is_new = self._selected_key is None
         key = self._selected_key
         self.query_one("#svc-add-btn", Button).display = is_new
@@ -200,9 +231,7 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         # Captures are per service, not per built-in-ness: any existing service
         # with something captured can have it forgotten.
         self.query_one("#svc-forget-templates-btn", Button).display = (
-            not is_new
-            and key is not None
-            and bool(load_profile(self._profile_root, key).captured)
+            profile is not None and bool(profile.captured)
         )
 
     # -- live validation --------------------------------------------------------
@@ -348,9 +377,14 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         if not confirmed:
             return
         # A profile we cannot delete simply reads as one that is still there:
-        # the readout is re-derived from disk either way.
-        with suppress(ProfileStoreError):
+        # the readout is re-derived from disk either way, and only a deletion
+        # that really happened is worth telling the caller about.
+        try:
             delete_profile(self._profile_root, key)
+        except ProfileStoreError:
+            pass
+        else:
+            self._profiles_changed = True
         self._load_service(key)
 
     @on(Button.Pressed, "#svc-delete-btn")
@@ -360,6 +394,16 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         if key is None or key in BUILTIN_SERVICE_KEYS or key not in self._services:
             return
         del self._services[key]
+        # The captures go with it. Nothing in the app can reach a profile whose
+        # service key is gone - it is in no picker, so it can neither be
+        # selected, searched for, nor forgotten - so leaving the folder behind
+        # is leaving a pile of PNGs no user can ever act on again.
+        try:
+            delete_profile(self._profile_root, key)
+        except ProfileStoreError:
+            pass
+        else:
+            self._profiles_changed = True
         next_key = next(iter(sorted(self._services)))
         self._refresh_select_options(next_key)
 
@@ -389,4 +433,7 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
             if not discard:
                 return
         changed = self._services != self._initial_services
-        self.dismiss(self._services if changed else None)
+        if not changed and not self._profiles_changed:
+            self.dismiss(None)  # nothing happened here at all
+            return
+        self.dismiss(ServiceEdits(self._services if changed else None, self._profiles_changed))

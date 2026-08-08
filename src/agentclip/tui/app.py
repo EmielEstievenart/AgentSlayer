@@ -459,19 +459,33 @@ class AgentClipApp(App[None]):
         self.run_worker(self._open_service_editor(), group="settings", exclusive=True)
 
     async def _open_service_editor(self) -> None:
+        """Persist and propagate whatever the editor changed.
+
+        Two independent kinds of change come back (see ``ServiceEdits``): the
+        presets table, which is ours to write to config.toml, and captured
+        appearances the editor already deleted from disk. The second still has
+        to reach MainScreen - it caches profiles per run, paints them in the
+        sidebar and hunts for them on a poll timer - so the propagation below
+        runs for either, not only for a preset edit.
+        """
         result = await self.push_screen_wait(
             ServiceEditorScreen(self.app_config, self.profile_root)
         )
         if result is None:
             return  # closed with no changes - nothing to persist or propagate
-        save_services(result, self._global_config_path)
-        new_config = replace(self.app_config, services=result)
-        self.app_config = new_config
+        if result.services is not None:
+            save_services(result.services, self._global_config_path)
+            self.app_config = replace(self.app_config, services=result.services)
         main = self.main_screen
         if main is not None:
-            main.update_config(new_config)
-            main.sidebar.refresh_services(new_config)
-        self.notify("service presets saved", timeout=4)
+            # Drops the profile cache, repaints the APPEARANCE block and
+            # rebuilds the detector poller around what is left.
+            main.update_config(self.app_config)
+            main.sidebar.refresh_services(self.app_config)
+        self.notify(
+            "service presets saved" if result.services is not None else "appearance forgotten",
+            timeout=4,
+        )
 
     def action_preferences(self) -> None:
         # Bound directly to the F4 key, so Textual dispatches it OUTSIDE a

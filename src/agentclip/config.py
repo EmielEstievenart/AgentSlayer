@@ -179,6 +179,13 @@ def caps_for_budget(budget_chars: int) -> BudgetCaps:
 @dataclass(frozen=True, slots=True)
 class GeneralConfig:
     service: str = "chatgpt-attach"
+    # Which service the SUB-AGENT window tab starts on (tui.md 1.6). The two
+    # browser windows AgentClip drives are independently pointed at a service -
+    # a big-context chat for the conversation you steer, a cheap fast one for
+    # delegated sub-tasks - so the sub-agent tab needs a preset of its own.
+    # Blank means "the same one as the master tab's", which is what makes this
+    # key invisible to anybody who does not want two services.
+    subagent_service: str = ""
     chars_per_token: int = 3  # code-like payloads tokenize at ~3 chars/token
     theme: str = DEFAULT_THEME
 
@@ -434,6 +441,16 @@ def load_config(
         warnings.append(f"config: unknown service preset {service!r}; using 'unknown'")
         service = "unknown"
 
+    # The sub-agent window's service. Blank (the default) is not an error - it
+    # means "whatever the master tab is on", so the key can simply be absent.
+    subagent_service = _take_str(general_t, "subagent_service", "", "general", warnings)
+    if subagent_service and subagent_service not in services:
+        warnings.append(
+            f"config: unknown subagent_service preset {subagent_service!r}; "
+            "using the master's service"
+        )
+        subagent_service = ""
+
     provider = _take_str(clipboard_t, "provider", "auto", "clipboard", warnings)
     if provider not in ("auto", "copykitten", "pyperclip", "manual"):
         warnings.append(f"config: unknown clipboard provider {provider!r}; using 'auto'")
@@ -447,6 +464,7 @@ def load_config(
     return Config(
         general=GeneralConfig(
             service=service,
+            subagent_service=subagent_service,
             chars_per_token=_take_int(general_t, "chars_per_token", 3, 1, 10, "general", warnings),
             theme=theme,
         ),

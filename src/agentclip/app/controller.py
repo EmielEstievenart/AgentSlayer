@@ -230,6 +230,9 @@ class SessionController:
         # switch every routing decision reads (clipboard, /abort, labels).
         self._active: SessionRef | None = None
         self._sub: SessionRef | None = None
+        # The service every sub-agent of THIS session runs on, taken from
+        # SessionSpec at bootstrap (see _arm_session). Empty between sessions.
+        self._subagent_service = ""
         self._sub_index = 0  # numbers the sub-1, sub-2, ... transcript tabs
         # Where a parked sub-run waits for its chat's next reply. The master
         # never uses it: its replies arrive as flows, not as awaited values.
@@ -642,6 +645,11 @@ class SessionController:
             chat_name=engine.chat_name,
         )
         self._preset = self._config.services.get(spec.service, self._config.preset())
+        # Frozen here for the same reason the master's preset is: the sub-agent
+        # window's picker is locked for the whole session, so a delegation
+        # started at turn 30 must build its Engine from the service the user had
+        # chosen when the session armed - not from whatever the view says now.
+        self._subagent_service = spec.subagent_service or spec.service
         self._stats = SessionStats(service=spec.service)
         await self._view.add_user(spec.task)
         await self._copy_outbound(out)
@@ -926,7 +934,15 @@ class SessionController:
         engine = await asyncio.to_thread(
             self._engine_factory,
             EngineRequest(
-                service=master.stats.service or self._config.general.service,
+                # The SUB-AGENT window's own service, not the master's: the two
+                # tabs are pointed at a service each, and the sub-agent's paste
+                # budget, stillness window and captured appearances all have to
+                # come from the chat it is actually going to run in.
+                service=(
+                    self._subagent_service
+                    or master.stats.service
+                    or self._config.general.service
+                ),
                 role="subagent",
                 allow_delegate=False,  # nesting is excluded by construction
                 parent_chat_name=master.ref.chat_name,
@@ -1138,10 +1154,12 @@ class SessionController:
         self._engine = None
         self._chat_name = None
         # A sub-run cannot be live here (/new is refused mid-turn), but the
-        # numbering restarts with the session: the view drops the sub tabs too.
+        # numbering restarts with the session: the view clears the sub-agent
+        # window's transcript along with the master's.
         self._active = None
         self._sub = None
         self._sub_index = 0
+        self._subagent_service = ""  # the next session's spec chooses again
         self._reply_future = None
         self._sub_aborting = False
         self._preset = None

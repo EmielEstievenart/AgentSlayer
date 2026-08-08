@@ -15,10 +15,24 @@ Role = Literal["master", "subagent"]
 
 @dataclass(frozen=True, slots=True)
 class SessionSpec:
-    """What the New-Session prompt returns: the task plus the chosen service preset."""
+    """What the New-Session prompt returns: the task plus a service preset per role.
+
+    Two services, not one, because AgentClip drives two browser windows and the
+    user picks a service *per window tab* (tui.md 1.6) - a big-context chat for
+    the conversation they steer, something cheap and fast for delegated
+    sub-tasks. Both are frozen for the session's life, which is why they travel
+    together in the spec rather than being pulled from the view mid-run: the
+    master's budget is baked into its Engine at bootstrap, and the sub-agent
+    tab's picker is locked for exactly as long.
+
+    ``subagent_service`` is blank when the sub-agent window is on the same
+    service as the master's, so a front-end that has no second picker (and every
+    test that predates one) can keep building a one-service spec.
+    """
 
     task: str
     service: str
+    subagent_service: str = ""
 
 
 @dataclass(frozen=True, slots=True)

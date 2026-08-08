@@ -187,16 +187,22 @@ class TranscriptPanel(VerticalScroll):
         lines += ["", "---", ""]
         return ("\n".join(lines) + "\n" + self.render_events()).rstrip() + "\n"
 
-    def render_events(self) -> str:
-        """Just this panel's events, with no document header.
+    def render_events(self, start: int = 0, end: int | None = None) -> str:
+        """This panel's events (or a slice of them), with no document header.
 
-        Split out of ``render_log`` because an export is per *session view*: the
-        master panel renders the whole document and each sub-agent panel is
-        appended to it under its own heading (MainScreen.render_log), so one
-        exported log carries the entire delegation tree.
+        Split out of ``render_log`` because an export is per *run*, not per
+        panel: the master window's panel renders the whole document and each
+        sub-agent RUN is appended under its own heading (MainScreen.render_log).
+        Since the sub-agent window's panel now outlives its runs and simply
+        accumulates them, the slice is what keeps the export per-run - the
+        screen remembers where each run's events start and end in ``event_log``
+        (which is never pruned, so those indices stay valid) and asks for that
+        window of it. Merging the runs instead would produce one heading over
+        five unrelated sub-tasks, which is exactly what makes an export
+        unreadable.
         """
         lines: list[str] = []
-        for ev in self.event_log:
+        for ev in self.event_log[start:end]:
             lines.append(f"## [{ev.time}] {ev.headline}")
             lines.append("")
             body = ev.body.rstrip("\n")

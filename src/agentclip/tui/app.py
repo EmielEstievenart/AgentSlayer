@@ -349,6 +349,13 @@ class AgentClipApp(App[None]):
     #svc-body {
         height: auto;
     }
+    /* Vertical defaults to height: 1fr, which made the auto-height body (and so
+       the whole modal) stretch to the max-height cap and push the hint line off
+       the bottom. The columns are as tall as their content; the tallest sets
+       the box. */
+    #svc-body > Vertical {
+        height: auto;
+    }
     #svc-list-col {
         width: 32;
         margin-right: 2;

@@ -120,11 +120,12 @@ Opened via `F2` (`AgentClipApp.action_settings`) or the sidebar's "Edit services
 ```
 ServiceEditorScreen(ModalScreen)  .modal-box, id=service-editor-box (width 112, max-height 95%)
 ├── Static "SERVICE EDITOR"                     .title
-├── Horizontal                    id=svc-body
+├── Horizontal                    id=svc-body   # each column height:auto (Vertical defaults to 1fr, which
+│                                               # stretched the box to the max-height cap and pushed the hint off)
 │   ├── Vertical                  id=svc-list-col   (width 32)
 │   │   ├── Static "Services"                   .side-title
 │   │   ├── Select[str]           id=svc-select      # "key (builtin|custom)" rows + "+ Add new service..."
-│   │   ├── Static "DETECTION · response is finished when"   .side-title
+│   │   ├── Static "DETECTION · finished when"   .side-title
 │   │   ├── Checkbox              id=svc-signal-busy   # "reasoning icon disappears"  → finish_signals "busy"
 │   │   ├── Checkbox              id=svc-signal-idle   # "send icon appears"          → finish_signals "idle"
 │   │   ├── Checkbox              id=svc-signal-stale  # "screen stops changing"      → finish_signals "stale"

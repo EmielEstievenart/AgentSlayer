@@ -242,8 +242,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                         allow_blank=False,
                         id="svc-select",
                     )
-                    yield Static(Text("DETECTION · response is finished when"),
-                                 classes="side-title")
+                    yield Static(Text("DETECTION · finished when"), classes="side-title")
                     for signal in FINISH_SIGNALS:
                         yield Checkbox(
                             SIGNAL_LABELS[signal], id=signal_checkbox_id(signal), compact=True

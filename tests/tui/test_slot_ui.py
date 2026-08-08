@@ -205,7 +205,7 @@ async def test_the_note_reports_what_delegation_is_still_missing(
         await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
         assert "new-chat button" not in _label(app, "#side-slot-note")
 
-        await _calibrate(app, pilot, picker, "#set-chatbox-ongoing-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
         await _wait_for(
@@ -234,8 +234,6 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         for button in (
             "#set-region-btn",
-            "#set-chatbox-initial-btn",
-            "#set-chatbox-ongoing-btn",
             "#set-busy-btn",
             "#set-idle-btn",
             "#set-copy-btn",
@@ -321,7 +319,7 @@ async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
 
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#set-chatbox-ongoing-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
         await _wait_for(pilot, lambda: main.delegation_available(), "sub-agent slot ready")

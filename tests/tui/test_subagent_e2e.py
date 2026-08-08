@@ -198,12 +198,12 @@ async def _select_slot(app: AgentClipApp, pilot: Pilot, slot: AgentSlot) -> None
 
 
 async def _calibrate_both_slots(app: AgentClipApp, pilot: Pilot, picker: _Picker) -> None:
-    await _calibrate(app, pilot, picker, "#set-chatbox-ongoing-btn", MASTER_BOX)
+    await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_BOX)
     await _calibrate(app, pilot, picker, "#set-busy-btn", MASTER_BUSY)
     await _calibrate(app, pilot, picker, "#set-copy-btn", MASTER_COPY)
     await _calibrate(app, pilot, picker, "#set-newchat-btn", MASTER_NEWCHAT)
     await _select_slot(app, pilot, AgentSlot.SUBAGENT)
-    await _calibrate(app, pilot, picker, "#set-chatbox-ongoing-btn", SUB_BOX)
+    await _calibrate(app, pilot, picker, "#set-region-btn", SUB_BOX)
     await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_BUSY)
     await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_COPY)
     await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_NEWCHAT)

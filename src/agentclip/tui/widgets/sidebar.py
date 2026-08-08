@@ -9,7 +9,7 @@ unlocks again whenever the app is waiting for a new session's first message.
 
 The widget is dumb on purpose: it holds no session state, exposes ``service``
 (the chosen preset key), ``set_locked``, ``refresh_services``, ``update_region``,
-``update_chatbox``, ``update_busy``, ``update_idle``, ``update_copy``,
+``update_template``, ``update_busy``, ``update_idle``, ``update_copy``,
 ``update_newchat``, ``show_slot`` and the ``show_paste_flash``/``hide_paste_flash``
 pair; MainScreen owns every bit of routing, including the "Edit services..."
 button, the busy/idle polling loop, the "Set copy button..." picker +
@@ -52,6 +52,7 @@ from textual.timer import Timer
 from textual.widgets import Button, Select, Static
 
 from agentclip.config import Config
+from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, SlotCalibration
 
@@ -60,7 +61,11 @@ PASTE_FLASH_TEXT = ">>> PRESS CTRL+V <<<\nin the chat, then send"
 ENTER_FLASH_TEXT = ">>> PRESS ENTER <<<\nreply pasted - just send it"
 _FLASH_BLINK_S = 0.4
 _REGION_UNSET = "not set - alt-tab to the chat yourself"
-_CHATBOX_UNSET = "not set - clicks fall back to the chat region"
+# What an appearance the service profile does not hold yet reads as. One line
+# for all of them: they are captured the same way and lost the same way, and
+# the per-kind advice belongs on the picker prompt (TemplateKind.prompt), where
+# the user is actually being asked to draw the box.
+TEMPLATE_UNSET = "not captured"
 # What an uncalibrated detector reads before the user draws it.
 BUSY_UNSET = "not calibrated - set while the model is generating"
 IDLE_UNSET = "not calibrated - set while the chat is idle"
@@ -73,13 +78,16 @@ BUSY_CALIBRATED = "calibrated - watching"
 IDLE_CALIBRATED = "calibrated - watching"
 STALE_CALIBRATED = "calibrated - watching"
 
-# Which chat input box a calibration describes: a fresh chat centres the box,
-# an ongoing one docks it at the bottom. Keys of the ``#side-chatbox-*`` labels.
-CHATBOX_INITIAL = "initial"
-CHATBOX_ONGOING = "ongoing"
-_CHATBOX_CAPTION = {
-    CHATBOX_INITIAL: "fresh-chat input box",
-    CHATBOX_ONGOING: "ongoing-chat input box",
+# Which Static shows each appearance's status. A mapping rather than a naming
+# convention for now: these ids predate the profile model and the block they
+# live in is restructured next.
+_TEMPLATE_STATUS_ID = {
+    TemplateKind.BUSY: "side-busy",
+    TemplateKind.IDLE: "side-idle",
+    TemplateKind.CHATBOX_INITIAL: "side-chatbox-initial",
+    TemplateKind.CHATBOX_ONGOING: "side-chatbox-ongoing",
+    TemplateKind.COPY: "side-copy",
+    TemplateKind.NEW_CHAT: "side-newchat",
 }
 
 # The AGENT SLOT note, one line per state. The master slot has nothing to be
@@ -179,10 +187,10 @@ class Sidebar(Vertical):
         yield Static(Text("CHAT WINDOW"), classes="side-title")
         yield Button("Set chat region...", id="set-region-btn")
         yield Static(Text(_REGION_UNSET), id="side-region", classes="side-status")
-        yield Button("Set initial chatbox...", id="set-chatbox-initial-btn")
-        yield Static(Text(_CHATBOX_UNSET), id="side-chatbox-initial", classes="side-status")
-        yield Button("Set ongoing chatbox...", id="set-chatbox-ongoing-btn")
-        yield Static(Text(_CHATBOX_UNSET), id="side-chatbox-ongoing", classes="side-status")
+        yield Button("Capture start chat box...", id="set-chatbox-initial-btn")
+        yield Static(Text(TEMPLATE_UNSET), id="side-chatbox-initial", classes="side-status")
+        yield Button("Capture ongoing chat box...", id="set-chatbox-ongoing-btn")
+        yield Static(Text(TEMPLATE_UNSET), id="side-chatbox-ongoing", classes="side-status")
         yield Static(Text("REASONING"), classes="side-title")
         yield Button("Set busy region...", id="set-busy-btn")
         yield Static(Text(BUSY_UNSET), id="side-busy", classes="side-status")
@@ -268,8 +276,11 @@ class Sidebar(Vertical):
     def show_slot(self, cal: SlotCalibration) -> None:
         """Repaint every calibration readout from one slot's stored state.
 
-        Called when the slot picker moves and on session teardown - the whole
-        column is a view of ``cal`` and nothing else. The live detector
+        Called when the slot picker moves and on session teardown - every
+        readout below is a view of ``cal`` and nothing else. The captured
+        appearances are deliberately NOT repainted here: they belong to the
+        service, not to a window, so switching slots must not change what they
+        say (``update_template`` is their only entry point). The live detector
         readouts (``update_busy``/``update_idle``) fall back to a static
         "calibrated" line here: a probe verdict belongs to whichever slot the
         automation is actually driving, and re-deriving one from stored pixels
@@ -280,12 +291,6 @@ class Sidebar(Vertical):
             select.value = str(cal.slot)
         self.query_one("#side-slot-note", Static).update(Text(slot_note(cal)))
         self.update_region(cal.chat_region)
-        self.update_chatbox(
-            CHATBOX_INITIAL, cal.chatbox_initial.region if cal.chatbox_initial else None
-        )
-        self.update_chatbox(
-            CHATBOX_ONGOING, cal.chatbox_ongoing.region if cal.chatbox_ongoing else None
-        )
         self.update_busy(BUSY_CALIBRATED if cal.busy_baseline is not None else BUSY_UNSET)
         self.update_idle(IDLE_CALIBRATED if cal.idle_baseline is not None else IDLE_UNSET)
         self.update_stale(STALE_CALIBRATED if cal.stale_region is not None else STALE_UNSET)
@@ -309,16 +314,17 @@ class Sidebar(Vertical):
         text = f"{region.describe()} · chatbot window" if region is not None else _REGION_UNSET
         self.query_one("#side-region", Static).update(Text(text))
 
-    # -- the two chat input boxes ---------------------------------------------
+    # -- the service's captured appearances -----------------------------------
 
-    def update_chatbox(self, kind: str, region: ScreenRegion | None) -> None:
-        """Show one of the session's calibrated chat input boxes - ``kind`` is
-        ``CHATBOX_INITIAL`` (fresh chat, box centred) or ``CHATBOX_ONGOING``
-        (box docked at the bottom). Display only: MainScreen owns the
-        calibration snapshots and decides which one is live at click time."""
-        caption = _CHATBOX_CAPTION[kind]
-        text = f"{region.describe()} · {caption}" if region is not None else _CHATBOX_UNSET
-        self.query_one(f"#side-chatbox-{kind}", Static).update(Text(text))
+    def update_template(self, kind: TemplateKind, text: str) -> None:
+        """Repaint one appearance's status line.
+
+        Display only, and deliberately text rather than data: the same Static
+        shows a stored fact for some kinds ("captured", with the size of the
+        box the user drew) and a live probe verdict for others (the busy/idle
+        detectors report every poll here), and only MainScreen knows which.
+        """
+        self.query_one(f"#{_TEMPLATE_STATUS_ID[kind]}", Static).update(Text(text))
 
     # -- the two finish detectors -----------------------------------------------
 

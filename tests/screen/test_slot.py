@@ -37,7 +37,7 @@ def _ready(slot: AgentSlot = AgentSlot.SUBAGENT) -> SlotCalibration:
     """Every piece ``can_delegate`` insists on, and nothing more."""
     return SlotCalibration(
         slot,
-        chatbox_ongoing=_element(),
+        chat_region=REGION,
         busy_region=REGION,
         busy_baseline=_image(),
         copy_region=REGION,
@@ -65,11 +65,11 @@ def test_new_slots_gives_one_empty_calibration_per_slot() -> None:
     assert slots[AgentSlot.SUBAGENT].chat_region is None
 
 
-def test_any_of_the_three_click_targets_makes_a_paste_possible() -> None:
-    """The whole chat window is the documented last resort, so it counts."""
+def test_the_drawn_chat_window_is_what_makes_a_paste_possible() -> None:
+    """The input box is found inside it by appearance, so the window is the
+    only thing that has to be drawn."""
     assert SlotCalibration(AgentSlot.MASTER, chat_region=REGION).can_paste
-    assert SlotCalibration(AgentSlot.MASTER, chatbox_initial=_element()).can_paste
-    assert SlotCalibration(AgentSlot.MASTER, chatbox_ongoing=_element()).can_paste
+    assert not SlotCalibration(AgentSlot.MASTER).can_paste
 
 
 def test_either_detector_is_enough_to_know_the_model_stopped() -> None:
@@ -94,7 +94,7 @@ def test_can_delegate_needs_all_four_pieces() -> None:
 
 def test_each_missing_piece_is_named_and_blocks_delegation() -> None:
     cases = {
-        MISSING_CHATBOX: {"chatbox_ongoing": None},
+        MISSING_CHATBOX: {"chat_region": None},
         MISSING_FINISH: {"busy_baseline": None},
         MISSING_COPY: {"copy_template": None},
         MISSING_NEWCHAT: {"new_chat": None},
@@ -109,8 +109,6 @@ def test_each_missing_piece_is_named_and_blocks_delegation() -> None:
 
 def test_clear_empties_everything_but_keeps_the_slot_identity() -> None:
     cal = _ready(AgentSlot.SUBAGENT)
-    cal.chat_region = REGION
-    cal.chatbox_initial = _element()
     cal.idle_region = REGION
     cal.idle_baseline = _image()
     cal.stale_region = REGION

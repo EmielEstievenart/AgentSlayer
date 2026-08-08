@@ -48,10 +48,13 @@ watches, so evaluation is suspended while it runs (``_flow_running``) and the
 stale tracker forgets its history when the flow ends - without that the flow
 would read as a fresh generation and re-fire itself forever.
 
-Three calibrations are ``CalibratedElement``s (region + snapshot) rather than
-bare regions, because their whole job is "is this still the thing I was pointed
-at?": the two chat input boxes (a fresh chat centres its box, an ongoing one
-docks it at the bottom) and the browser's new-chat button.
+The chat input box is not a stored location at all any more: the two layouts a
+service can show (a fresh chat centres its box, an ongoing one docks it at the
+bottom) are *appearances* captured once per service (``screen.profile``) and
+searched for INSIDE the drawn chat region on the spot (``_find``). Moving or
+resizing the browser therefore costs nothing. The new-chat button is still a
+``CalibratedElement`` (region + snapshot) - "is this still the thing I was
+pointed at?" - until it moves the same way.
 
 Every one of those calibrations belongs to an *agent slot*
 (:mod:`agentclip.screen.slot`), not to the screen: MASTER is the chat the
@@ -111,12 +114,17 @@ from agentclip.screen.focus import (
 from agentclip.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
 from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.picker import ScreenPickError, pick_region
-from agentclip.screen.profile import ServiceProfile
-from agentclip.screen.profile_store import load_profile
+from agentclip.screen.profile import ServiceProfile, TemplateKind
+from agentclip.screen.profile_store import ProfileStoreError, load_profile, save_template
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, SlotCalibration, new_slots
 from agentclip.screen.stale import StaleProbe, StaleState, StaleTracker
-from agentclip.screen.template import TemplateMatch, find_lowest_match
+from agentclip.screen.template import (
+    TemplateMatch,
+    find_in_region,
+    find_lowest_match,
+    match_rect,
+)
 from agentclip.tui.messages import BusyProbed, ClipboardCaptured, IdleProbed, StaleProbed
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.summary import SummaryScreen
@@ -126,12 +134,11 @@ from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
     BUSY_CALIBRATED,
-    CHATBOX_INITIAL,
-    CHATBOX_ONGOING,
     ENTER_FLASH_TEXT,
     IDLE_CALIBRATED,
     PASTE_FLASH_TEXT,
     STALE_CALIBRATED,
+    TEMPLATE_UNSET,
     Sidebar,
 )
 from agentclip.tui.widgets.statusbar import StatusBar
@@ -337,13 +344,13 @@ class MainScreen(Screen[None]):
         self._focused_panel = MASTER_VIEW
         self._sessions: dict[str, SessionRef] = {}  # view id -> its identity, for labels/export
         # Every user-drawn calibration, one set per agent slot: the chat window
-        # itself (last-resort click target, and the vertical span of the
-        # copy-button search band), the input box calibrated TWICE ("Set initial
-        # chatbox..." / "Set ongoing chatbox...", because a fresh chat centres
-        # the box and an ongoing one docks it at the bottom), the two finish
-        # detectors, the copy button and the new-chat button. Calibrations
-        # describe where the service's windows are, not what one conversation
-        # said, so they survive /new; only the pointers below reset.
+        # itself (where appearances are searched for, the last-resort click
+        # target, and the vertical span of the copy-button search band), the
+        # two finish detectors, the copy button and the new-chat button.
+        # Calibrations describe where the service's windows are, not what one
+        # conversation said, so they survive /new; only the pointers below
+        # reset. What the service LOOKS like lives in ``_profiles`` instead -
+        # captured once, shared by both slots, persisted across runs.
         #
         # ``_calibrating`` is the slot the sidebar's pickers write into;
         # ``_live`` is the slot the automation (paste click, detector poller,
@@ -416,22 +423,6 @@ class MainScreen(Screen[None]):
     @_chat_region.setter
     def _chat_region(self, value: ScreenRegion | None) -> None:
         self._slots[AgentSlot.MASTER].chat_region = value
-
-    @property
-    def _chatbox_initial(self) -> CalibratedElement | None:
-        return self._slots[AgentSlot.MASTER].chatbox_initial
-
-    @_chatbox_initial.setter
-    def _chatbox_initial(self, value: CalibratedElement | None) -> None:
-        self._slots[AgentSlot.MASTER].chatbox_initial = value
-
-    @property
-    def _chatbox_ongoing(self) -> CalibratedElement | None:
-        return self._slots[AgentSlot.MASTER].chatbox_ongoing
-
-    @_chatbox_ongoing.setter
-    def _chatbox_ongoing(self, value: CalibratedElement | None) -> None:
-        self._slots[AgentSlot.MASTER].chatbox_ongoing = value
 
     @property
     def _busy_region(self) -> ScreenRegion | None:
@@ -571,6 +562,8 @@ class MainScreen(Screen[None]):
         self._paint_status()
         self._update_composer()
         self._sync_sidebar()
+        # Appearances captured on a previous run are already usable: show them.
+        self._paint_profile()
         self._remember_own_window()  # the user just launched us - focus is our terminal
         self._controller.start()
 
@@ -895,31 +888,74 @@ class MainScreen(Screen[None]):
         with suppress(NoMatches):
             self.sidebar.show_paste_flash(ENTER_FLASH_TEXT if pasted else PASTE_FLASH_TEXT)
 
+    async def _find(
+        self,
+        kind: TemplateKind,
+        slot: AgentSlot | None = None,
+        *,
+        scene: RegionImage | None = None,
+    ) -> ScreenRegion | None:
+        """Where ``kind`` is on screen right now, in absolute coordinates.
+
+        The one primitive behind every "is it there / click it" question. It
+        looks *inside the drawn chat region* for the ACTIVE SERVICE's captured
+        appearance, which is the whole point of the profile model: the user
+        drew one box per window, and everything inside it is recognised rather
+        than remembered, so moving or resizing the browser costs nothing.
+
+        ``scene`` lets a caller that already captured the chat region reuse the
+        frame, so several appearances can be hunted in one picture of one
+        instant. None is returned - never raised - for every way this can come
+        up empty: no chat region drawn, no such appearance captured, the
+        capture failed, or it simply is not on screen.
+        """
+        cal = self._slots[slot] if slot is not None else self.live
+        region = cal.chat_region
+        if region is None:
+            return None
+        template = self._active_profile().get(kind)
+        if template is None:
+            return None
+        if scene is None:
+            try:
+                scene = await asyncio.to_thread(capture_region, region)
+            except CaptureError:
+                return None
+        match = await asyncio.to_thread(
+            find_in_region, template, scene, max_diff=kind.max_diff
+        )
+        if match is None:
+            return None
+        return match_rect(region, template, match)
+
     async def _chatbox_region(self) -> ScreenRegion | None:
         """Which chat input box to poke right now, or None if none is known.
 
         A fresh chat centres its input box and an ongoing one docks it at the
-        bottom, so the two calibrations are asked which of them is actually on
-        screen: capture each region and compare it against its own snapshot.
-        Ongoing goes first - mid-session it is the common case, and asking it
-        first means the usual path costs exactly one capture.
+        bottom, so both appearances are hunted in ONE capture of the live chat
+        region - the two layouts are mutually exclusive, so whichever is found
+        is the one on screen. Ongoing goes first: mid-session it is the common
+        case, and the search stops at the first hit.
 
-        When neither matches (the page is mid-transition, or a dialog covers
-        it) we still return a target rather than giving up: the ongoing box if
-        calibrated, else the initial one, else the whole chat window. Clicking
-        a stale-looking chatbox is recoverable; not clicking at all means the
-        paste never lands.
+        When neither is found (the page is mid-transition, a dialog covers it,
+        or the service has no chat box captured at all) the whole chat window
+        is the answer rather than nothing: clicking a window is recoverable,
+        not clicking at all means the paste never lands.
 
         Always the LIVE slot: mid-delegation this is the sub-agent's window.
         """
-        live = self.live
-        for element in (live.chatbox_ongoing, live.chatbox_initial):
-            if element is not None and await asyncio.to_thread(probe_element, element):
-                return element.region
-        fallback = live.chatbox_ongoing or live.chatbox_initial
-        if fallback is not None:
-            return fallback.region
-        return live.chat_region
+        region = self.live.chat_region
+        if region is None:
+            return None
+        try:
+            scene: RegionImage | None = await asyncio.to_thread(capture_region, region)
+        except CaptureError:
+            return region
+        for kind in (TemplateKind.CHATBOX_ONGOING, TemplateKind.CHATBOX_INITIAL):
+            found = await self._find(kind, scene=scene)
+            if found is not None:
+                return found
+        return region
 
     async def _click_after_response(self) -> bool:
         """The payload is on the clipboard - poke the chat (when something is
@@ -1226,67 +1262,89 @@ class MainScreen(Screen[None]):
             "outbound copies click it until a chatbox is calibrated"
         )
 
-    # -- the two chat input boxes ----------------------------------------------
+    # -- capturing what a service LOOKS like -----------------------------------
 
     @on(Button.Pressed, "#set-chatbox-initial-btn")
-    def _on_set_chatbox_initial(self, event: Button.Pressed) -> None:
+    def _on_capture_chatbox_initial(self, event: Button.Pressed) -> None:
         event.stop()
-        if self._refuse_second_picker():
-            return
-        self.run_worker(
-            self._pick_chatbox(
-                CHATBOX_INITIAL,
-                "Drag a box around the chat input box AS IT SITS IN A FRESH CHAT "
-                "(centred, no messages yet) · Esc cancels",
-            ),
-            group="regionpick",
-            exclusive=True,
-        )
+        self._start_capture(TemplateKind.CHATBOX_INITIAL)
 
     @on(Button.Pressed, "#set-chatbox-ongoing-btn")
-    def _on_set_chatbox_ongoing(self, event: Button.Pressed) -> None:
+    def _on_capture_chatbox_ongoing(self, event: Button.Pressed) -> None:
         event.stop()
+        self._start_capture(TemplateKind.CHATBOX_ONGOING)
+
+    def _start_capture(self, kind: TemplateKind) -> None:
+        """Run one capture worker, unless an overlay is already up."""
         if self._refuse_second_picker():
             return
-        self.run_worker(
-            self._pick_chatbox(
-                CHATBOX_ONGOING,
-                "Drag a box around the chat input box AS IT SITS IN AN ONGOING CHAT "
-                "(docked at the bottom) · Esc cancels",
-            ),
-            group="regionpick",
-            exclusive=True,
-        )
+        self.run_worker(self._capture_template(kind), group="regionpick", exclusive=True)
 
-    async def _pick_chatbox(self, kind: str, prompt: str) -> None:
-        """Draw-a-box overlay around one of the two chat input box layouts, then
-        snapshot it: the pixels are how the click resolver later recognises
-        which layout is actually on screen (``_chatbox_region``)."""
+    async def _capture_template(self, kind: TemplateKind) -> None:
+        """Draw a box around ``kind`` and file the pixels under the SERVICE.
+
+        The one capture path for every appearance. The prompt comes from the
+        kind (screen.profile) rather than from here, because what makes a good
+        capture is a fact about the appearance and must read identically
+        wherever it is asked for; and there is no slot prefix, because the
+        answer is the same whichever window the user drew it in.
+
+        A save failure is reported but the template is kept in memory: the
+        appearance works for this run, it just will not survive a restart -
+        losing the capture as well would be strictly worse.
+        """
         try:
-            region = await asyncio.to_thread(pick_region, prompt=self._slot_prompt(prompt))
+            region = await asyncio.to_thread(pick_region, prompt=kind.prompt)
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
             return
         finally:
             self._picker_open = False
         if region is None:
-            self.notify(f"{kind} chatbox unchanged (selection cancelled)")
+            self.notify(f"{kind.label} unchanged (selection cancelled)")
             return
         try:
-            template = await asyncio.to_thread(capture_region, region)
+            image = await asyncio.to_thread(capture_region, region)
         except CaptureError as exc:
-            self.notify(f"could not capture the {kind} chatbox: {exc}", severity="error")
+            self.notify(f"could not capture the {kind.label}: {exc}", severity="error")
             return
-        element = CalibratedElement(region, template)
-        if kind == CHATBOX_ONGOING:
-            self.calibrating.chatbox_ongoing = element
-        else:
-            self.calibrating.chatbox_initial = element
+        profile = self._active_profile()
+        try:
+            profile.put(kind, image)
+        except ValueError as exc:
+            self.notify(f"that {kind.label} cannot be searched for: {exc}", severity="error")
+            return
+        try:
+            await asyncio.to_thread(save_template, self._profile_root, profile.key, kind, image)
+        except ProfileStoreError as exc:
+            self.notify(
+                f"{kind.label} captured, but not saved for next time: {exc}", severity="error"
+            )
         self._region_click_warned = False
-        with suppress(NoMatches):
-            self.sidebar.update_chatbox(kind, region)
-        self.notify(f"{kind} chatbox calibrated ({region.describe()})")
+        self._paint_profile()
+        self.notify(f"{kind.label} captured for {profile.key} ({region.describe()})")
         self._after_calibration()
+
+    # Appearances that have moved off the slot and into the service profile.
+    # Grows as each detector is migrated; the sidebar block follows last.
+    _PROFILE_KINDS: tuple[TemplateKind, ...] = (
+        TemplateKind.CHATBOX_INITIAL,
+        TemplateKind.CHATBOX_ONGOING,
+    )
+
+    def _paint_profile(self) -> None:
+        """Repaint every migrated appearance's status from the active profile."""
+        profile = self._active_profile()
+        with suppress(NoMatches):
+            sidebar = self.sidebar
+            for kind in self._PROFILE_KINDS:
+                template = profile.get(kind)
+                sidebar.update_template(
+                    kind,
+                    f"{template.width}×{template.height} · captured"
+                    if template is not None
+                    else TEMPLATE_UNSET,
+                )
 
     @on(Button.Pressed, "#set-busy-btn")
     def _on_set_busy_region(self, event: Button.Pressed) -> None:

@@ -72,19 +72,21 @@ class SlotCalibration:
     type's: the busy baseline is captured while the model generates, so a match
     means "still going". The stale detector is a bare region with no stored
     baseline at all - its tracker's first polled frame IS the baseline, and
-    every later frame is compared to the one before it. The chat boxes and the
-    new-chat button are genuine "is this still the thing I was pointed at?"
-    questions, hence ``CalibratedElement``.
+    every later frame is compared to the one before it. The new-chat button is
+    a genuine "is this still the thing I was pointed at?" question, hence
+    ``CalibratedElement``.
+
+    The chat input boxes used to live here too. They don't any more: which
+    layout is on screen is answered by searching the SERVICE's captured
+    appearance inside ``chat_region`` (screen.profile), so the only thing that
+    is per window is the box the user drew.
     """
 
     slot: AgentSlot = AgentSlot.MASTER
-    # The whole browser window hosting the chat: last-resort click target and
-    # the vertical span of the copy-button search band.
+    # The whole browser window hosting the chat: where every appearance is
+    # searched for, the last-resort click target, and the vertical span of the
+    # copy-button search band.
     chat_region: ScreenRegion | None = None
-    # The chat input box, calibrated twice: a fresh chat centres it, an ongoing
-    # one docks it at the bottom.
-    chatbox_initial: CalibratedElement | None = None
-    chatbox_ongoing: CalibratedElement | None = None
     # Calibrated WHILE generating: a later match means "still generating".
     busy_region: ScreenRegion | None = None
     busy_baseline: RegionImage | None = None
@@ -105,8 +107,6 @@ class SlotCalibration:
     def clear(self) -> None:
         """Forget every calibration. The slot identity stays."""
         self.chat_region = None
-        self.chatbox_initial = None
-        self.chatbox_ongoing = None
         self.busy_region = None
         self.busy_baseline = None
         self.idle_region = None
@@ -118,13 +118,13 @@ class SlotCalibration:
 
     @property
     def can_paste(self) -> bool:
-        """Is there anywhere to click before sending Ctrl+V? Either calibrated
-        chat box, or the whole chat window as the last resort."""
-        return (
-            self.chatbox_ongoing is not None
-            or self.chatbox_initial is not None
-            or self.chat_region is not None
-        )
+        """Is there anywhere to click before sending Ctrl+V?
+
+        The drawn chat window, and nothing else: the input box is found by
+        searching the service's captured appearance inside it, and failing that
+        the window itself is the click target.
+        """
+        return self.chat_region is not None
 
     @property
     def can_finish(self) -> bool:

@@ -97,6 +97,12 @@ def _patch_screen(monkeypatch: pytest.MonkeyPatch) -> _Picker:
     monkeypatch.setattr(main_mod, "pick_region", picker)
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: True)
+    # No live poller: nothing here is about the finish detectors, and its stale
+    # readout rewrites a wrapping line in the sidebar on its own schedule -
+    # which reflows every button below it, so a probe landing between a click's
+    # mouse-down and mouse-up moves the button out from under the pointer and
+    # the press is silently lost. (The poller itself is test_stale_detector_ui's.)
+    monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
 
     async def fake_find(
         self: MainScreen,

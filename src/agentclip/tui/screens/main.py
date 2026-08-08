@@ -528,6 +528,12 @@ class MainScreen(Screen[None]):
         self._profiles.clear()
         self._paint_profile()
         self._after_calibration()
+        # Everything the running poller was built from can have just changed:
+        # the preset's ``stable_seconds`` (baked into the stale tracker's tick
+        # count at start) and the busy/idle appearances behind it (the editor
+        # can forget them). Without this restart an edited stillness window only
+        # took effect on the next unrelated recalibration.
+        self._start_detector_worker()
 
     def on_mount(self) -> None:
         self._panels[MASTER_VIEW] = self.query_one(f"#{_panel_id(MASTER_VIEW)}", TranscriptPanel)
@@ -1244,8 +1250,13 @@ class MainScreen(Screen[None]):
         self._after_calibration()
         # The drawn window is where every appearance is searched for AND the
         # staleness detector's whole calibration, so the poller has to be
-        # rebuilt around it.
-        self._start_detector_worker()
+        # rebuilt around it - but ONLY when the window just drawn is the one the
+        # poller is watching. Drawing the sub-agent's window mid-session is the
+        # normal way to reach delegation, and restarting there would throw away
+        # the master's in-flight streaks (and its trackers' previous frames) for
+        # a window the automation is not driving.
+        if self._calibrating is self._live:
+            self._start_detector_worker()
         self.notify(
             f"chat region set ({region.describe()}) - the chatbot window; "
             "everything is recognised inside it"
@@ -1282,41 +1293,55 @@ class MainScreen(Screen[None]):
         A save failure is reported but the template is kept in memory: the
         appearance works for this run, it just will not survive a restart -
         losing the capture as well would be strictly worse.
+
+        The overlay guard is held for the WHOLE method, not just the pick: the
+        bookkeeping after it (store, save, repaint, restart) runs in an
+        exclusive worker, so a second capture press mid-save would cancel this
+        one halfway - a template in memory that never reached disk, or a repaint
+        that never happened. Held, that press is refused instead.
         """
         try:
-            region = await asyncio.to_thread(pick_region, prompt=kind.prompt)
-        except ScreenPickError as exc:
-            self.notify(str(exc), severity="error")
-            return
+            try:
+                region = await asyncio.to_thread(pick_region, prompt=kind.prompt)
+            except ScreenPickError as exc:
+                self.notify(str(exc), severity="error")
+                return
+            if region is None:
+                self.notify(f"{kind.label} unchanged (selection cancelled)")
+                return
+            try:
+                image = await asyncio.to_thread(capture_region, region)
+            except CaptureError as exc:
+                self.notify(f"could not capture the {kind.label}: {exc}", severity="error")
+                return
+            profile = self._active_profile()
+            try:
+                profile.put(kind, image)
+            except ValueError as exc:
+                self.notify(f"that {kind.label} cannot be searched for: {exc}", severity="error")
+                return
+            try:
+                await asyncio.to_thread(
+                    save_template, self._profile_root, profile.key, kind, image
+                )
+            except ProfileStoreError as exc:
+                self.notify(
+                    f"{kind.label} captured, but not saved for next time: {exc}", severity="error"
+                )
+            self._region_click_warned = False
+            self._paint_profile()
+            self.notify(f"{kind.label} captured for {profile.key} ({region.describe()})")
+            self._after_calibration()
+            # Only the busy/idle appearances are things the poller hunts, and
+            # they are the service's - so they change what it hunts whichever
+            # slot the sidebar is pointed at. The other four (copy, new-chat,
+            # both chat boxes) are looked for on demand, so capturing one while
+            # calibrating the sub-agent window must not disturb the master's
+            # live poller mid-generation.
+            if kind in (TemplateKind.BUSY, TemplateKind.IDLE):
+                self._start_detector_worker()
         finally:
             self._picker_open = False
-        if region is None:
-            self.notify(f"{kind.label} unchanged (selection cancelled)")
-            return
-        try:
-            image = await asyncio.to_thread(capture_region, region)
-        except CaptureError as exc:
-            self.notify(f"could not capture the {kind.label}: {exc}", severity="error")
-            return
-        profile = self._active_profile()
-        try:
-            profile.put(kind, image)
-        except ValueError as exc:
-            self.notify(f"that {kind.label} cannot be searched for: {exc}", severity="error")
-            return
-        try:
-            await asyncio.to_thread(save_template, self._profile_root, profile.key, kind, image)
-        except ProfileStoreError as exc:
-            self.notify(
-                f"{kind.label} captured, but not saved for next time: {exc}", severity="error"
-            )
-        self._region_click_warned = False
-        self._paint_profile()
-        self.notify(f"{kind.label} captured for {profile.key} ({region.describe()})")
-        self._after_calibration()
-        # A new busy/idle appearance changes what the poller hunts; the others
-        # are free to restart it too, since it is rebuilt from scratch anyway.
-        self._start_detector_worker()
 
     def _paint_profile(self) -> None:
         """Repaint the whole APPEARANCE block from the active service's profile."""
@@ -1439,7 +1464,9 @@ class MainScreen(Screen[None]):
             if idle_template is not None
             else None
         )
-        stale = StaleTracker(region, required_ticks=ticks, capture=capture_region)
+        # No ``capture=``: the loop below takes the tick's single capture and
+        # hands it to ``observe``, so this tracker never captures for itself.
+        stale = StaleTracker(region, required_ticks=ticks)
         self._busy_tracker, self._idle_tracker, self._stale_tracker = busy, idle, stale
         self._active_detectors = tuple(
             name
@@ -1488,8 +1515,25 @@ class MainScreen(Screen[None]):
         active = self._active_detectors
         return bool(active) and detector == active[-1]
 
+    def _ghost(self, detector: str) -> bool:
+        """Is this verdict from a detector the CURRENT poller does not run?
+
+        Cancelling a thread worker only raises a flag: the loop it interrupts
+        still finishes the tick it was in and posts its verdicts, which land
+        AFTER ``_start_detector_worker`` cleared the ``_*_seen`` flags. When the
+        new detector set is smaller (a forgotten busy appearance, a service
+        switch) those leftovers are verdicts about a detector that no longer
+        exists - and a leaked "still generating" one re-arms the trigger every
+        time, wedging the auto-copy shut for good. Dropping them is safe in the
+        other direction too: a ghost from a detector that IS still running is
+        simply refreshed by the next tick, a poll interval later.
+        """
+        return detector not in self._active_detectors
+
     def on_busy_probed(self, message: BusyProbed) -> None:
         message.stop()
+        if self._ghost("busy"):
+            return
         with suppress(NoMatches):
             self.sidebar.update_template(TemplateKind.BUSY, _format_busy_probe(message.probe))
         self._busy_seen = True
@@ -1499,6 +1543,8 @@ class MainScreen(Screen[None]):
 
     def on_idle_probed(self, message: IdleProbed) -> None:
         message.stop()
+        if self._ghost("idle"):
+            return
         with suppress(NoMatches):
             self.sidebar.update_template(TemplateKind.IDLE, _format_idle_probe(message.probe))
         self._idle_seen = True
@@ -1508,6 +1554,8 @@ class MainScreen(Screen[None]):
 
     def on_stale_probed(self, message: StaleProbed) -> None:
         message.stop()
+        if self._ghost("stale"):
+            return
         with suppress(NoMatches):
             self.sidebar.update_stale(_format_stale_probe(message.probe))
         self._stale_seen = True

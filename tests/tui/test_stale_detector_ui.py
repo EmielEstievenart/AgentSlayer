@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.capture import CaptureError, RegionImage
+from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, can_finish
 from agentclip.tui.app import AgentClipApp
@@ -148,6 +150,25 @@ def _freeze_detector(monkeypatch: pytest.MonkeyPatch) -> list[None]:
 
     monkeypatch.setattr(MainScreen, "_start_detector_worker", fake_start)
     return starts
+
+
+def _record_stale_ticks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the ``required_ticks`` every StaleTracker the poller builds gets.
+
+    The stillness window is a preset field converted to ticks of the poll
+    cadence ONCE, when the poller starts - so this list is both "how many times
+    was the poller rebuilt" and "what did each rebuild believe", which is
+    exactly what an edited ``stable_seconds`` has to change.
+    """
+    ticks: list[int] = []
+    real = main_mod.StaleTracker
+
+    def spy(region: ScreenRegion, **kwargs: Any) -> Any:
+        ticks.append(int(kwargs["required_ticks"]))
+        return real(region, **kwargs)
+
+    monkeypatch.setattr(main_mod, "StaleTracker", spy)
+    return ticks
 
 
 def _record_notifications(monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -380,6 +401,79 @@ async def test_new_keeps_the_window_and_restarts_the_poller(
         assert main._detector_worker is not worker
         # The fresh poller really is watching: a new verdict lands post-/new.
         await _wait_for(pilot, lambda: "GENERATING" in _stale_label(app), "polling resumed")
+
+
+async def test_editing_the_stillness_window_rebuilds_the_poller(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``stable_seconds`` is baked into the tracker's tick count at poller
+    start, so adopting an edited Config has to restart it - otherwise the new
+    value sat unused until some unrelated recalibration happened to rebuild it."""
+    _patch_picker(monkeypatch, poll_s=0.02)
+    ticks = _record_stale_ticks(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: len(ticks) == 1, "poller built for the drawn window")
+        assert ticks == [100]  # the 2.0 s default at a 0.02 s cadence
+
+        key = main._selected_service()
+        services = dict(main._config.services)
+        services[key] = replace(services[key], stable_seconds=6.0)
+        main.update_config(replace(main._config, services=services))
+
+        await _wait_for(pilot, lambda: len(ticks) == 2, "poller rebuilt for the edited preset")
+        assert ticks[-1] == 300
+
+
+async def test_calibrating_the_subagent_slot_spares_the_masters_poller(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The master chat can be mid-generation while the user draws the sub-agent
+    window, and a restart would throw its streaks (and its trackers' previous
+    frames) away. Only what the poller actually hunts may rebuild it: the live
+    slot's window, and the busy/idle appearances."""
+    picker = _patch_picker(monkeypatch)
+    starts = _freeze_detector(monkeypatch)
+    _record_notifications(monkeypatch)  # toasts would cover the buttons
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._chat_region == REGION, "master region adopted")
+        assert starts == [None]  # the live slot's own window: rebuilt
+
+        await _select_slot(app, pilot, AgentSlot.SUBAGENT)
+        picker.region = SUB_REGION
+        await pilot.pause(_CLICK_CHAIN_S)
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(
+            pilot,
+            lambda: main._slots[AgentSlot.SUBAGENT].chat_region == SUB_REGION,
+            "sub-agent region adopted",
+        )
+        await _press(app, pilot, "#capture-copy-btn")
+        await _wait_for(
+            pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy captured"
+        )
+        await pilot.pause(0.2)  # a restart would have landed by now
+        assert starts == [None]  # neither touched the window the poller watches
+        assert main._live is AgentSlot.MASTER
+
+        # The busy appearance IS one of the things the poller hunts, and it is
+        # the service's - so capturing it rebuilds whichever slot is live.
+        await _press(app, pilot, "#capture-busy-btn")
+        await _wait_for(
+            pilot, lambda: starts == [None, None], "poller rebuilt for the new busy appearance"
+        )
+        assert main._active_profile().has(TemplateKind.BUSY)
 
 
 async def test_no_window_means_no_poller_at_all(

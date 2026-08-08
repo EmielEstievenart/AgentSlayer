@@ -504,6 +504,43 @@ async def test_the_flow_wrapper_lifts_the_suspension_so_it_can_refire(
         await _wait_for(pilot, lambda: len(calls) == 2, "flow fired again")
 
 
+# -- verdicts from a detector that no longer runs ---------------------------------
+
+
+async def test_a_ghost_verdict_from_a_dropped_detector_cannot_wedge_the_trigger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cancelling the poller only raises a flag: the loop it interrupts still
+    finishes its tick and posts it, AFTER the restart cleared the verdicts. When
+    the new detector set is smaller (a forgotten busy appearance, a service
+    switch) that leftover "still generating" used to re-arm the trigger on every
+    later tick, and the auto-copy could never fire again."""
+    _patch_copy_picker(monkeypatch)
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _detectors(main, "busy", "stale")
+
+        await _busy(main, pilot, BusyState.MATCH)  # the model is generating
+        await _stale(main, pilot, StaleState.CHANGING)
+        assert main._copy_armed is True
+
+        # The restart, as _start_detector_worker performs it: the busy detector
+        # is gone, and every verdict it produced went with it.
+        main._busy_seen = False
+        main._busy_finished = None
+        _detectors(main, "stale")
+
+        # ...and now the cancelled loop's last BusyProbed lands anyway.
+        await _busy(main, pilot, BusyState.MATCH)
+        assert main._busy_seen is False  # the ghost recorded nothing
+
+        await _stale(main, pilot, StaleState.STALE, ticks=4)
+        await _stale(main, pilot, StaleState.STALE, ticks=5)
+        await _wait_for(pilot, lambda: len(calls) == 1, "flow fires on the stale detector alone")
+
+
 # -- no template ------------------------------------------------------------------
 
 

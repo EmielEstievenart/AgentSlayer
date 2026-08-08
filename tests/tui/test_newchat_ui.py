@@ -122,10 +122,12 @@ async def _capture_newchat(
         await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: NEWCHAT_BOX)
     await _press(app, pilot, "#capture-new-chat-btn")
+    # The LABEL, not the in-memory profile: the profile is populated before the
+    # save and the repaint, so waiting on it can outrun the sidebar.
     await _wait_for(
         pilot,
-        lambda: main._active_profile().has(TemplateKind.NEW_CHAT),
-        "new-chat button captured",
+        lambda: "180×36 · captured" in _newchat_label(app),
+        "new-chat button captured and painted",
     )
 
 

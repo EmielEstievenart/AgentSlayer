@@ -3,7 +3,9 @@
 Claude's chat only renders a response's copy button while the pointer is over
 that response, so the cheap static capture of the chat region finds nothing.
 The flow then walks the real cursor up the chat region, re-capturing after each
-stop, and stops at the FIRST frame the icon appears in.
+stop, and stops at the FIRST frame the icon appears in - but only for a service
+whose preset asked for it (``ServicePreset.hover_scan``, off by default, since
+the scan takes the user's mouse over and most chats do not need it).
 
 Everything that touches the OS - picker, capture, cursor move, click, focus -
 is monkeypatched at its use site (agentclip.tui.screens.main), including the
@@ -16,6 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -53,10 +56,20 @@ async def _wait_for(
     raise AssertionError(f"timed out waiting for {what}")
 
 
-def _make_app(tmp_path: Path, profile_root: Path) -> tuple[AgentClipApp, FakeClipboard]:
+def _make_app(
+    tmp_path: Path, profile_root: Path, *, hover_scan: bool = True
+) -> tuple[AgentClipApp, FakeClipboard]:
     project = tmp_path / "project"
     project.mkdir(exist_ok=True)
     config = load_config(project, global_config_path=project / "no-such-global.toml")
+    # The hover scan is opt-in per service (``ServicePreset.hover_scan``, off by
+    # default - it drives the user's real mouse), and this whole suite is about
+    # what a service that DID opt in gets, so every preset here has it on. The
+    # off case lives in test_hover_scan_is_opt_in_per_service below.
+    config = replace(
+        config,
+        services={key: replace(p, hover_scan=hover_scan) for key, p in config.services.items()},
+    )
     fake = FakeClipboard()
     app = AgentClipApp(
         config=config,
@@ -240,6 +253,26 @@ async def test_a_refused_cursor_move_ends_the_scan_immediately(
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
         assert len(moves) == 1
+
+
+async def test_hover_scan_is_opt_in_per_service(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With ``hover_scan`` off - the default - a static miss is simply a miss:
+    the same not-found report as an exhausted scan, but the user's cursor is
+    never touched."""
+    app, fake = _make_app(tmp_path, profile_root, hover_scan=False)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrate(app, pilot, monkeypatch)
+        clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
+        monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda template, scene, **kw: None)
+
+        await _fire(main, pilot)
+        await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
+
+        assert moves == []  # the cursor stayed where the user left it
+        assert "hover" not in _copy_label(app)
+        assert clicks == [CHAT_REGION]  # only the focus poke, never the icon
 
 
 async def test_the_scan_runs_off_the_ui_thread(

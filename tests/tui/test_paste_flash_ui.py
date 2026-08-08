@@ -2,9 +2,10 @@
 
 The banner turns on the moment an outbound payload lands on the clipboard
 (``copy_outbound``) and keeps blinking until something proves the moment
-passed: the busy region reports the model generating again (the paste landed),
-a new clipboard capture arrives (the conversation moved on without it), or the
-session is reset. The blink itself is a timer toggling a CSS class - display
+passed: a detector ARMS the auto-copy trigger, i.e. the send is provably
+detected (the busy region matching, or the chat region moving enough for long
+enough - a caret blink does not count), a new clipboard capture arrives (the
+conversation moved on without it), or the session is reset. The blink itself is a timer toggling a CSS class - display
 on/off is the observable contract, so that is what these tests pin down.
 
 ``copy_outbound`` also auto-pastes (sends Ctrl+V) once the focus click lands,
@@ -29,8 +30,9 @@ from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.region import ScreenRegion
+from agentclip.screen.stale import StaleProbe, StaleState
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed, ClipboardCaptured
+from agentclip.tui.messages import BusyProbed, ClipboardCaptured, StaleProbed
 from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import ENTER_FLASH_TEXT, PASTE_FLASH_TEXT
 
@@ -153,6 +155,44 @@ async def test_busy_match_turns_the_flash_off(tmp_path: Path) -> None:
         main.post_message(BusyProbed(BusyProbe(BusyState.CHANGED, 0.4)))
         await pilot.pause()
         assert _flash(app).display is False
+
+
+async def test_a_caret_sized_stale_change_leaves_the_flash_up(tmp_path: Path) -> None:
+    """The banner is asking for the Enter keystroke, so it may only come down
+    once the send is provably detected. A blinking caret in the composer is a
+    CHANGING stale probe with a tiny diff - if that took the nag down, the user
+    would stop being told to press Enter before they had."""
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 55)) as pilot:
+        main = await _ready(app, pilot)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert _flash(app).display is True
+
+        main._active_detectors = ("stale",)
+        for _ in range(main_mod.SEND_ARM_TICKS + 2):
+            main.post_message(StaleProbed(StaleProbe(StaleState.CHANGING, 0.001, 0)))
+            await pilot.pause()
+        assert _flash(app).display is True
+        assert main._copy_armed is False
+
+
+async def test_a_sustained_stale_change_turns_the_flash_off(tmp_path: Path) -> None:
+    """...and once the region really does start moving - the message sent, the
+    answer streaming in - the nag has done its job and goes away with the arm."""
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 55)) as pilot:
+        main = await _ready(app, pilot)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert _flash(app).display is True
+
+        main._active_detectors = ("stale",)
+        for _ in range(main_mod.SEND_ARM_TICKS):
+            main.post_message(StaleProbed(StaleProbe(StaleState.CHANGING, 0.5, 0)))
+            await pilot.pause()
+        await _wait_for(pilot, lambda: _flash(app).display is False, "flash hidden on arm")
+        assert main._copy_armed is True
 
 
 async def test_clipboard_capture_turns_the_flash_off(tmp_path: Path) -> None:

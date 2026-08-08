@@ -5,8 +5,10 @@ generates (found = generating), the idle one only while the chat is idle
 (found = finished), and the stale detector needs no appearance at all - the
 chat region unchanged long enough (STALE) means finished, still moving
 (CHANGING) means generating. MainScreen folds whichever are running into one
-verdict - anything saying "generating" arms the trigger, and it fires only
-once EVERY live detector says "finished" on two consecutive polls.
+verdict - a busy/idle "generating" arms the trigger on the spot, a stale one
+only as part of a sustained large delta (``SEND_ARM_MIN_DIFF`` for
+``SEND_ARM_TICKS`` consecutive probes), and it fires only once EVERY live
+detector says "finished" on two consecutive polls.
 
 ``BusyProbed`` / ``IdleProbed`` / ``StaleProbed`` are the documented
 injectable path for the poller (tui/messages.py); posting them is equivalent
@@ -17,7 +19,8 @@ several posts, in that order - and ``_detectors`` is how each test says which
 subset the poller would have been built with.
 
 Covered: busy only, idle only (inverted), both (reinforced - one detector
-alone can never fire it), stale only and stale vetoing the others, plus the
+alone can never fire it), stale only and stale vetoing the others, the
+send-arming rule that keeps a caret blink from arming the trigger, plus the
 flow suspension that stops the auto-copy flow's own scrolling from re-firing
 the trigger.
 """
@@ -134,9 +137,24 @@ async def _idle(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
     await pilot.pause()
 
 
-async def _stale(main: MainScreen, pilot: Pilot, state: StaleState, ticks: int = 0) -> None:
-    main.post_message(StaleProbed(StaleProbe(state, 0.01, ticks)))
+async def _stale(
+    main: MainScreen, pilot: Pilot, state: StaleState, ticks: int = 0, diff: float = 0.001
+) -> None:
+    main.post_message(StaleProbed(StaleProbe(state, diff, ticks)))
     await pilot.pause()
+
+
+async def _stale_send(main: MainScreen, pilot: Pilot) -> None:
+    """The stale detector watching the user's message actually get sent.
+
+    Staleness alone arms the trigger only on a SUSTAINED LARGE delta -
+    ``SEND_ARM_TICKS`` consecutive CHANGING probes each over
+    ``SEND_ARM_MIN_DIFF`` - because a caret blink or a mouse-over between
+    AgentClip's paste and the user's Enter is a CHANGING probe too, and arming
+    on one of those fired the auto-copy at a reply-less screen.
+    """
+    for _ in range(main_mod.SEND_ARM_TICKS):
+        await _stale(main, pilot, StaleState.CHANGING, diff=main_mod.SEND_ARM_MIN_DIFF)
 
 
 async def _tick(main: MainScreen, pilot: Pilot, busy: BusyState, idle: BusyState) -> None:
@@ -359,11 +377,12 @@ async def test_a_busy_probe_alone_never_closes_a_dual_tick(
 # -- the stale detector -----------------------------------------------------------
 
 
-async def test_stale_only_arms_on_changing_and_fires_on_two_stale_ticks(
+async def test_stale_only_arms_on_a_sustained_change_and_fires_on_two_stale_ticks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The third detector works alone: CHANGING (the response region moving)
-    is "generating", STALE is "finished" - the same arm/streak rules."""
+    """The third detector works alone: a sustained large CHANGING run (the
+    response region really moving) is "generating", STALE is "finished" - the
+    same streak rules from there on."""
     _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
@@ -371,7 +390,7 @@ async def test_stale_only_arms_on_changing_and_fires_on_two_stale_ticks(
         main = await _arm_with_template(app, pilot)
         _detectors(main, "stale")
 
-        await _stale(main, pilot, StaleState.CHANGING)  # generating -> armed
+        await _stale_send(main, pilot)  # generating -> armed
         assert main._copy_armed is True
         await _stale(main, pilot, StaleState.STALE, ticks=4)
         await pilot.pause(0.1)
@@ -468,7 +487,7 @@ async def test_evaluation_is_suspended_while_the_flow_runs(
         _detectors(main, "stale")
 
         main._flow_running = True  # as if _evaluate_finish just fired the flow
-        await _stale(main, pilot, StaleState.CHANGING)
+        await _stale_send(main, pilot)
         await _stale(main, pilot, StaleState.STALE, ticks=4)
         await _stale(main, pilot, StaleState.STALE, ticks=5)
         await pilot.pause(0.1)
@@ -476,7 +495,7 @@ async def test_evaluation_is_suspended_while_the_flow_runs(
         assert main._copy_armed is False  # nothing was even armed
 
         main._flow_running = False  # the flow's finally
-        await _stale(main, pilot, StaleState.CHANGING)
+        await _stale_send(main, pilot)
         assert main._copy_armed is True
 
 
@@ -492,16 +511,108 @@ async def test_the_flow_wrapper_lifts_the_suspension_so_it_can_refire(
         main = await _arm_with_template(app, pilot)
         _detectors(main, "stale")
 
-        await _stale(main, pilot, StaleState.CHANGING)
+        await _stale_send(main, pilot)
         await _stale(main, pilot, StaleState.STALE, ticks=4)
         await _stale(main, pilot, StaleState.STALE, ticks=5)
         await _wait_for(pilot, lambda: len(calls) == 1, "flow fired once")
         await _wait_for(pilot, lambda: not main._flow_running, "suspension lifted")
 
-        await _stale(main, pilot, StaleState.CHANGING)  # next generation
+        await _stale_send(main, pilot)  # next generation
         await _stale(main, pilot, StaleState.STALE, ticks=4)
         await _stale(main, pilot, StaleState.STALE, ticks=5)
         await _wait_for(pilot, lambda: len(calls) == 2, "flow fired again")
+
+
+# -- send-arming: what it takes for staleness alone to arm the trigger ------------
+
+
+async def test_small_stale_deltas_never_arm_and_a_still_screen_never_fires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE bug this rule closes: between AgentClip's paste and the user's Enter
+    the composer's caret blinks and the mouse drifts, which the stale detector
+    reports as CHANGING with a tiny diff. Arming on that made the still,
+    reply-less pre-Enter screen read as a finished response - auto-copy fired
+    and harvested nothing."""
+    _patch_copy_picker(monkeypatch)
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _detectors(main, "stale")
+
+        for _ in range(6):  # well past SEND_ARM_TICKS
+            await _stale(main, pilot, StaleState.CHANGING, diff=0.001)
+        assert main._copy_armed is False
+
+        for ticks in range(2, 8):  # ...and the screen going still fires nothing
+            await _stale(main, pilot, StaleState.STALE, ticks=ticks)
+        await pilot.pause(0.1)
+        assert calls == []
+
+
+async def test_a_sustained_large_delta_takes_exactly_send_arm_ticks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_copy_picker(monkeypatch)
+    _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _detectors(main, "stale")
+
+        for _ in range(main_mod.SEND_ARM_TICKS - 1):
+            await _stale(main, pilot, StaleState.CHANGING, diff=0.5)
+            assert main._copy_armed is False  # not sustained yet
+
+        await _stale(main, pilot, StaleState.CHANGING, diff=0.5)
+        assert main._copy_armed is True
+
+
+async def test_one_small_delta_restarts_the_large_delta_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Consecutive" is literal: a quiet frame in the middle means what came
+    before it was not one sustained change, and the count starts over."""
+    _patch_copy_picker(monkeypatch)
+    _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _detectors(main, "stale")
+
+        for _ in range(main_mod.SEND_ARM_TICKS - 1):
+            await _stale(main, pilot, StaleState.CHANGING, diff=0.5)
+        await _stale(main, pilot, StaleState.CHANGING, diff=0.001)  # a caret blink
+        assert main._stale_arm_streak == 0
+
+        for _ in range(main_mod.SEND_ARM_TICKS - 1):
+            await _stale(main, pilot, StaleState.CHANGING, diff=0.5)
+        assert main._copy_armed is False  # the interruption cost a full restart
+
+        await _stale(main, pilot, StaleState.CHANGING, diff=0.5)
+        assert main._copy_armed is True
+
+
+async def test_a_busy_verdict_still_arms_on_a_single_tick(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Icon evidence is not de-bounced: the reasoning indicator being on screen
+    is something only a real generation produces, so one frame is enough - and
+    the sustained-delta rule must not slow that down."""
+    _patch_copy_picker(monkeypatch)
+    _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _detectors(main, "busy", "stale")
+
+        # A tick where only the busy icon says "generating": the stale diff is
+        # caret-sized, so it could never arm on its own.
+        await _busy(main, pilot, BusyState.MATCH)
+        await _stale(main, pilot, StaleState.CHANGING, diff=0.001)
+        assert main._copy_armed is True
+        assert main._stale_arm_streak == 0
 
 
 # -- verdicts from a detector that no longer runs ---------------------------------

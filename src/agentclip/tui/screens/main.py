@@ -27,10 +27,11 @@ captures via the thread-safe ``post_message(ClipboardCaptured)`` -> the controll
 The controller's flow coroutines run via ``spawn`` (also ``run_worker``), so Textual
 cancels everything on unmount. The finish detectors are the same shape: ONE
 thread worker takes a single capture of the live chat region per tick and
-hands it to whichever detectors the active service supports - a busy tracker
-if it has a busy appearance captured, an idle one if it has an idle
-appearance, and the stale tracker always - bridging ``BusyProbed`` /
-``IdleProbed`` / ``StaleProbed`` back to the UI.
+hands it to whichever detectors the active service ASKS FOR and can run - its
+``finish_signals`` checklist picks from busy/idle/stale, and the two icon
+detectors additionally need their appearance captured - bridging ``BusyProbed``
+/ ``IdleProbed`` / ``StaleProbed`` back to the UI. An empty set means no worker
+at all and a sidebar line saying finish detection is off.
 
 Their combined verdict drives the copy-button auto-click (``_evaluate_finish``):
 the busy appearance is on screen only WHILE the model generates, so finding it
@@ -39,13 +40,17 @@ is idle, so finding it means "finished"; and the stale detector needs no
 appearance at all - the drawn chat region reading unchanged for the preset's
 ``stable_seconds`` means "finished". That last one is the service-agnostic
 fallback for chats whose busy/idle cues are unreliable, and the reason one
-drawn box is already a working finish detector. Any detector saying
-"generating" arms the trigger; it fires only once EVERY running detector says
-"finished" on two consecutive ticks - with more than one running, that
-agreement is the whole point of having them. Firing runs ``_auto_copy_flow``:
-click the live chat input box, scroll to the bottom, find the newest (lowest)
-copy-button icon anywhere in the drawn region - falling back to a hover scan
-for chats that only render the icon under the pointer - click it, and let the
+drawn box is already a working finish detector. A busy/idle "generating"
+verdict arms the trigger on the spot; a stale one has to be a sustained large
+delta (``SEND_ARM_MIN_DIFF``/``SEND_ARM_TICKS``) before it counts, or the caret
+blinking between AgentClip's paste and the user's Enter arms it and the still,
+reply-less screen then fires it. Either way it fires only once EVERY running
+detector says "finished" on two consecutive ticks - with more than one running,
+that agreement is the whole point of having them. Firing runs
+``_auto_copy_flow``: click the live chat input box, scroll to the bottom, find
+the newest (lowest) copy-button icon anywhere in the drawn region - falling
+back, for services whose preset opts into ``hover_scan``, to a hover scan for
+chats that only render the icon under the pointer - click it, and let the
 clipboard watcher ingest the copy. The flow itself scrolls and hover-scans the
 very screen those detectors watch, so evaluation is suspended while it runs
 (``_flow_running``) and every tracker forgets its history when the flow ends -
@@ -159,6 +164,7 @@ from agentclip.tui.widgets.sidebar import (
     ENTER_FLASH_TEXT,
     PASTE_FLASH_TEXT,
     STALE_CALIBRATED,
+    STALE_OFF,
     Sidebar,
     kind_from_button_id,
     slot_note,
@@ -171,6 +177,24 @@ if TYPE_CHECKING:  # only for the action_settings hand-off; importing it for rea
 
 # Finish-detector poll cadence (tests monkeypatch this to something tiny).
 _BUSY_POLL_S = 0.5
+# What it takes for the STALE detector alone to arm the auto-copy trigger, i.e.
+# to claim it has watched the user's message actually get sent.
+#
+# The busy/idle detectors arm on one frame, because a reasoning icon appearing
+# is evidence nothing else produces. Frame-to-frame change is not: after
+# AgentClip pastes the outbound text the user still has to press Enter, and in
+# that window a blinking caret or a mouse-over highlight makes the region
+# "change" by a handful of pixels. Arming on that, then reading the still
+# pre-Enter screen as finished, fires the auto-copy at a chat with no reply in
+# it at all - the exact bug these two constants exist to close.
+#
+# So a CHANGING verdict must be BIG and SUSTAINED: 2% of the sampled pixels
+# (caret blink and hover tints are orders of magnitude below; a prompt landing
+# in the transcript and the reasoning UI unfolding are far above) on
+# SEND_ARM_TICKS consecutive stale probes - ~1.5 s at the 0.5 s cadence, longer
+# than any repaint and shorter than any answer.
+SEND_ARM_MIN_DIFF = 0.02
+SEND_ARM_TICKS = 3
 # Hover pause before clicking a calibrated element, for the same reason the copy
 # click settles: web UIs paint their buttons on hover.
 _ELEMENT_CLICK_SETTLE_S = 0.05
@@ -446,6 +470,12 @@ class MainScreen(Screen[None]):
         self._busy_finished: bool | None = None
         self._idle_finished: bool | None = None
         self._stale_finished: bool | None = None
+        # The latest stale probe's frame-to-frame differing fraction, and the run
+        # of consecutive stale probes whose diff cleared SEND_ARM_MIN_DIFF. Only
+        # such a run may arm the auto-copy trigger on staleness alone - see
+        # ``_evaluate_finish``.
+        self._stale_diff: float | None = None
+        self._stale_arm_streak = 0
         # The live detectors, kept on self so the auto-copy flow's finally can
         # reset them: the flow drives the very window they watch, so the frames
         # (and streaks) it leaves behind must not count as history.
@@ -1485,12 +1515,15 @@ class MainScreen(Screen[None]):
         all of them as the same ERROR instead of some seeing a frame and
         others not.
 
-        What runs is composed from the drawn window plus the ACTIVE SERVICE's
-        appearances: a busy tracker if that service has a busy indicator
-        captured, an idle tracker if it has an idle one, and the stale tracker
-        ALWAYS - a drawn region is a finish detector all by itself, needing no
-        cue to trust. With no region drawn there is nothing to watch and no
-        worker at all.
+        What runs is composed from the drawn window, the ACTIVE SERVICE's
+        ``finish_signals`` checklist, and its captured appearances: a busy
+        tracker if the checklist asks for one AND a busy indicator is captured,
+        an idle tracker on the same terms, and the stale tracker if the
+        checklist asks for it (it needs no capture - a drawn region is a finish
+        detector all by itself). With no region drawn there is nothing to watch
+        and no worker at all; with nothing runnable the worker is likewise not
+        started, and the stale readout says so rather than sitting on a stale
+        "watching" line while auto-copy quietly never fires.
 
         ``_active_detectors`` records which of them will post, in the fixed
         busy -> idle -> stale order, which is what makes the last one the
@@ -1510,6 +1543,9 @@ class MainScreen(Screen[None]):
         # does not un-observe.
         self._busy_seen = self._idle_seen = self._stale_seen = False
         self._busy_finished = self._idle_finished = self._stale_finished = None
+        # A half-built large-delta run belongs to the tracker that produced it.
+        self._stale_diff = None
+        self._stale_arm_streak = 0
         self._busy_tracker = None
         self._idle_tracker = None
         self._stale_tracker = None
@@ -1518,9 +1554,11 @@ class MainScreen(Screen[None]):
         if region is None:
             return
         profile = self._active_profile()
-        ticks = max(1, round(self._active_preset().stable_seconds / _BUSY_POLL_S))
-        busy_template = profile.get(TemplateKind.BUSY)
-        idle_template = profile.get(TemplateKind.IDLE)
+        preset = self._active_preset()
+        signals = preset.finish_signals
+        ticks = max(1, round(preset.stable_seconds / _BUSY_POLL_S))
+        busy_template = profile.get(TemplateKind.BUSY) if "busy" in signals else None
+        idle_template = profile.get(TemplateKind.IDLE) if "idle" in signals else None
         busy = (
             PresenceTracker(
                 busy_template,
@@ -1543,13 +1581,22 @@ class MainScreen(Screen[None]):
         )
         # No ``capture=``: the loop below takes the tick's single capture and
         # hands it to ``observe``, so this tracker never captures for itself.
-        stale = StaleTracker(region, required_ticks=ticks)
+        stale = StaleTracker(region, required_ticks=ticks) if "stale" in signals else None
         self._busy_tracker, self._idle_tracker, self._stale_tracker = busy, idle, stale
         self._active_detectors = tuple(
             name
             for name, tracker in (("busy", busy), ("idle", idle), ("stale", stale))
             if tracker is not None
         )
+        if not self._active_detectors:
+            # The service's checklist is empty, or asks only for appearances it
+            # has none of. Say so where the stale verdict would go: an unexplained
+            # silent readout is indistinguishable from a detector that is simply
+            # never finding anything, and the consequence (auto-copy will never
+            # fire) is invisible until the user waits for a copy that never comes.
+            with suppress(NoMatches):
+                self.sidebar.update_stale(STALE_OFF)
+            return
 
         def loop() -> None:
             worker = get_current_worker()
@@ -1562,7 +1609,8 @@ class MainScreen(Screen[None]):
                     self.post_message(BusyProbed(busy.observe(scene)))
                 if idle is not None:
                     self.post_message(IdleProbed(idle.observe(scene)))
-                self.post_message(StaleProbed(stale.observe(scene)))
+                if stale is not None:
+                    self.post_message(StaleProbed(stale.observe(scene)))
                 # Sleep in short increments so cancellation lands promptly.
                 remaining = _BUSY_POLL_S
                 while remaining > 0 and not worker.is_cancelled:
@@ -1637,6 +1685,7 @@ class MainScreen(Screen[None]):
             self.sidebar.update_stale(_format_stale_probe(message.probe))
         self._stale_seen = True
         self._stale_finished = _stale_verdict(message.probe)
+        self._stale_diff = message.probe.diff
         if self._finish_tick_closed_by("stale"):
             self._evaluate_finish()
 
@@ -1644,8 +1693,17 @@ class MainScreen(Screen[None]):
         """Fold every live detector's latest verdict into one "the model
         stopped" decision, once per poll tick.
 
-        * ANY detector saying "generating" arms the auto-copy trigger and stops
-          the paste nag - the payload demonstrably went in.
+        * ANY detector saying "generating" breaks the finished-streak.
+        * A busy/idle detector saying "generating" also ARMS the auto-copy
+          trigger, immediately, and stops the paste nag - a reasoning icon on
+          screen is evidence nothing else produces.
+        * The STALE detector saying "generating" arms it only as part of a
+          sustained large delta: ``SEND_ARM_TICKS`` consecutive probes whose
+          diff clears ``SEND_ARM_MIN_DIFF``. A caret blinking in the composer,
+          or a mouse-over highlight, is a CHANGING verdict too - and arming on
+          one of those between AgentClip's paste and the user's Enter meant the
+          still, reply-less pre-Enter screen then read as a finished response
+          and fired the auto-copy at nothing.
         * The trigger fires only when EVERY live detector says "finished" on
           two consecutive ticks. With one detector that is today's
           MATCH-then-two-CHANGED rule; with both it is the agreement the second
@@ -1675,12 +1733,27 @@ class MainScreen(Screen[None]):
             verdicts.append(self._stale_finished)
         if not verdicts:
             return
+        # Roll the large-delta run forward on every tick the stale detector
+        # reported, so "consecutive" really means consecutive: a small-diff
+        # CHANGING (and a STALE or an ERROR) breaks it.
+        if self._stale_seen:
+            big_delta = (
+                self._stale_finished is False
+                and self._stale_diff is not None
+                and self._stale_diff >= SEND_ARM_MIN_DIFF
+            )
+            self._stale_arm_streak = self._stale_arm_streak + 1 if big_delta else 0
         if any(verdict is False for verdict in verdicts):
-            self._copy_armed = True
             self._copy_changed_streak = 0
-            # The model is generating again - the Ctrl+V landed, stop nagging.
-            with suppress(NoMatches):
-                self.sidebar.hide_paste_flash()
+            icon_evidence = (self._busy_seen and self._busy_finished is False) or (
+                self._idle_seen and self._idle_finished is False
+            )
+            if icon_evidence or self._stale_arm_streak >= SEND_ARM_TICKS:
+                self._copy_armed = True
+                # The send demonstrably happened - the Ctrl+V landed and the
+                # user pressed Enter, so stop nagging them to.
+                with suppress(NoMatches):
+                    self.sidebar.hide_paste_flash()
             return
         if not all(verdict is True for verdict in verdicts) or not self._copy_armed:
             self._copy_changed_streak = 0
@@ -1690,6 +1763,7 @@ class MainScreen(Screen[None]):
             return
         self._copy_armed = False
         self._copy_changed_streak = 0
+        self._stale_arm_streak = 0
         self._flow_running = True
         self.run_worker(self._run_auto_copy_flow(), group="copyflow", exclusive=True)
 
@@ -1713,6 +1787,10 @@ class MainScreen(Screen[None]):
             for tracker in (self._busy_tracker, self._idle_tracker, self._stale_tracker):
                 if tracker is not None:
                     tracker.reset()
+            # Same reasoning for the send-arming run: whatever large deltas the
+            # flow's own scrolling produced say nothing about the user sending.
+            self._stale_diff = None
+            self._stale_arm_streak = 0
 
     def _reset_finish_trigger(self) -> None:
         """Forget every detector verdict and the auto-copy arm.
@@ -1729,6 +1807,8 @@ class MainScreen(Screen[None]):
         self._busy_finished = None
         self._idle_finished = None
         self._stale_finished = None
+        self._stale_diff = None
+        self._stale_arm_streak = 0
         self._copy_armed = False
         self._copy_changed_streak = 0
 
@@ -1804,9 +1884,13 @@ class MainScreen(Screen[None]):
         match = await asyncio.to_thread(
             find_lowest_in_region, template, scene, max_diff=TemplateKind.COPY.max_diff
         )
-        if match is None:
-            # Nothing in the static frame: the chat may only paint the icon
-            # under the pointer, so try again while hovering up the region.
+        if match is None and self._active_preset().hover_scan:
+            # Nothing in the static frame: this service is one of the chats that
+            # only paint the icon under the pointer, so try again while hovering
+            # up the region. Opt-in per service (``hover_scan``) because the scan
+            # drives the user's real mouse across the screen - worth it where it
+            # is the only way to find the icon, gratuitous everywhere else, where
+            # a static miss simply means the icon is not there.
             self._copy_status("hover-scanning")
             match = await asyncio.to_thread(self._hover_scan_for_copy, region, template)
         if match is None:

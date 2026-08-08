@@ -3,8 +3,11 @@
 It is the one finish detector that needs no captured cue at all: a chat region
 that has stopped changing frame to frame is a finished response, whatever a
 particular service's pixel cues do. So drawing the chat window IS its whole
-calibration - and, because that window is drawn anyway for everything else, it
-means every slot has a working finish detector from the first drag.
+calibration - and, because that window is drawn anyway for everything else, and
+because it is what every service's ``finish_signals`` checklist ships ticked, it
+means every slot has a working finish detector from the first drag. Ticked, not
+unconditional: the last section here covers a service that opts out of it (or of
+finish detection altogether).
 
 The overlay, the GDI capture and the poll cadence are monkeypatched at their
 use site (``main_mod.*``) - the autouse OS gate in tests/conftest.py fails
@@ -34,7 +37,7 @@ from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, can_finish
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen
-from agentclip.tui.widgets.sidebar import STALE_CALIBRATED, STALE_UNSET
+from agentclip.tui.widgets.sidebar import STALE_CALIBRATED, STALE_OFF, STALE_UNSET
 
 REGION = ScreenRegion(1000, 200, 600, 500)
 SUB_REGION = ScreenRegion(120, 60, 400, 300)
@@ -474,6 +477,129 @@ async def test_calibrating_the_subagent_slot_spares_the_masters_poller(
             pilot, lambda: starts == [None, None], "poller rebuilt for the new busy appearance"
         )
         assert main._active_profile().has(TemplateKind.BUSY)
+
+
+# -- the per-service finish-signal checklist ---------------------------------------
+
+
+def _with_signals(main: MainScreen, *signals: str, hover_scan: bool = False) -> None:
+    """Rewrite the ACTIVE service's checklist and adopt the edited config.
+
+    ``finish_signals`` is a per-service preset field, so this is exactly what
+    the (not-yet-built) editor checkbox will do - and ``update_config`` is the
+    documented path that restarts the poller against it."""
+    key = main._selected_service()
+    services = dict(main._config.services)
+    services[key] = replace(services[key], finish_signals=signals, hover_scan=hover_scan)
+    main.update_config(replace(main._config, services=services))
+
+
+async def test_an_empty_checklist_runs_nothing_and_says_so(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A service whose checklist asks for no detector gets no poller at all -
+    and the readout has to say why, because "auto-copy never fires" is
+    otherwise indistinguishable from a detector that never finds anything."""
+    _patch_picker(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+
+        _with_signals(main)  # nothing ticked
+        await pilot.pause()
+        assert main._active_detectors == ()
+        assert main._detector_worker is None
+        assert _stale_label(app) == STALE_OFF
+
+
+async def test_stale_is_opt_out_not_unconditional(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Staleness is what every service ships with, but it is a checklist entry
+    like the others: unticked with nothing else captured, nothing runs."""
+    _patch_picker(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        assert main._active_preset().finish_signals == ("stale",)
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._active_detectors == ("stale",), "stale running")
+
+        _with_signals(main, "busy")  # ticked, but nothing captured to match on
+        await pilot.pause()
+        assert main._active_detectors == ()
+        assert _stale_label(app) == STALE_OFF
+
+
+async def test_a_ticked_detector_needs_its_appearance_captured(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checklist says what the service is allowed to use; the profile says
+    what it can actually see. Both, or the detector does not run."""
+    _patch_picker(monkeypatch)
+    _record_notifications(monkeypatch)  # toasts would cover the buttons
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await pilot.pause(_CLICK_CHAIN_S)
+        await _press(app, pilot, "#capture-busy-btn")
+        await _wait_for(
+            pilot, lambda: main._active_profile().has(TemplateKind.BUSY), "busy captured"
+        )
+        # Captured but not ticked: the default checklist is stale-only.
+        assert main._active_detectors == ("stale",)
+
+        _with_signals(main, "busy", "stale")
+        await _wait_for(
+            pilot, lambda: main._active_detectors == ("busy", "stale"), "busy joined the poll"
+        )
+        assert main._finish_tick_closed_by("stale")  # still the canonical last
+
+        _with_signals(main, "busy")
+        await _wait_for(pilot, lambda: main._active_detectors == ("busy",), "stale dropped")
+        assert main._finish_tick_closed_by("busy")
+
+
+async def test_an_unticked_stale_detector_posts_no_stale_verdicts(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The tick's message sequence follows the built set, so an unticked
+    detector must be silent rather than merely ignored."""
+    _patch_picker(monkeypatch)
+    _record_notifications(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: "GENERATING" in _stale_label(app), "a stale probe arrives")
+        await pilot.pause(_CLICK_CHAIN_S)
+        await _press(app, pilot, "#capture-busy-btn")
+        await _wait_for(
+            pilot, lambda: main._active_profile().has(TemplateKind.BUSY), "busy captured"
+        )
+
+        _with_signals(main, "busy")
+        await _wait_for(pilot, lambda: main._active_detectors == ("busy",), "busy alone")
+        assert main._stale_tracker is None
+        main._stale_seen = False
+        await pilot.pause(0.2)  # several ticks at the 0.02 s cadence
+        assert main._stale_seen is False
 
 
 async def test_no_window_means_no_poller_at_all(

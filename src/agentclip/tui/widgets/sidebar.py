@@ -74,6 +74,12 @@ TEMPLATE_UNSET = "not captured"
 # live verdict the poller paints over them.
 STALE_UNSET = "no chat region - staleness check disabled"
 STALE_CALIBRATED = "watching the chat region"
+# ...plus one more, which is not about the stale detector at all: the service's
+# finish-signal checklist leaves NOTHING running (empty, or asking only for
+# appearances it has none of). It goes here because this is the line the finish
+# verdict is read off, and "auto-copy will never fire" has to be visible
+# somewhere other than in a copy that never arrives.
+STALE_OFF = "finish detection off for this service"
 
 # The APPEARANCE block is generated per TemplateKind, so its widget ids are a
 # naming convention rather than a table: MainScreen parses the kind back out of

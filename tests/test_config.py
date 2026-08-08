@@ -17,6 +17,8 @@ from agentclip.config import (
     DEFAULT_STABLE_SECONDS,
     DEFAULT_THEME,
     ServicePreset,
+    default_global_config_path,
+    default_profile_dir,
     default_services,
     load_config,
     save_services,
@@ -465,3 +467,11 @@ def test_save_theme_creates_missing_parent_dirs(tmp_path: Path) -> None:
     assert nested.exists()
     raw = tomllib.loads(nested.read_text(encoding="utf-8"))
     assert raw["general"]["theme"] == "claude-warm"
+
+
+def test_default_profile_dir_sits_beside_the_global_config() -> None:
+    """Appearance profiles are app state, so they live in the same config home
+    the screen layer is handed as a plain path (it may not import platformdirs)."""
+    profiles = default_profile_dir()
+    assert profiles.name == "profiles"
+    assert profiles.parent == default_global_config_path().parent

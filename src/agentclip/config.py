@@ -218,6 +218,16 @@ def default_global_config_path() -> Path:
     return Path(platformdirs.user_config_dir("agentclip")) / "config.toml"
 
 
+def default_profile_dir() -> Path:
+    """Where per-service appearance profiles live (screen.profile_store).
+
+    Resolved here rather than in the screen layer: that layer takes its root as
+    a parameter (it may not import platformdirs), and this is the one place
+    that already knows the app's config home.
+    """
+    return Path(platformdirs.user_config_dir("agentclip")) / "profiles"
+
+
 def _deep_merge(base: dict, override: dict) -> dict:
     out = dict(base)
     for key, value in override.items():

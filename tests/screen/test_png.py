@@ -8,6 +8,7 @@ hands back 0 - neither value means anything to a comparison in this layer.
 from __future__ import annotations
 
 import struct
+import tracemalloc
 import zlib
 
 import pytest
@@ -173,6 +174,68 @@ def test_corrupt_compressed_data_raises() -> None:
             SIGNATURE,
             make_chunk(b"IHDR", header),
             make_chunk(b"IDAT", b"not zlib"),
+            make_chunk(b"IEND", b""),
+        )
+    )
+    with pytest.raises(PngError):
+        decode_png(data)
+
+
+def test_a_multi_row_rgb_image_decodes_row_by_row() -> None:
+    """Three rows of RGB: the stride a hand-saved icon actually arrives with,
+    and where an off-by-one in the filter byte would show up as a skew."""
+    rows = [
+        bytes((10, 20, 30, 40, 50, 60)),
+        bytes((70, 80, 90, 100, 110, 120)),
+        bytes((130, 140, 150, 160, 170, 180)),
+    ]
+    image = decode_png(handmade(2, 3, b"".join(b"\x00" + row for row in rows), colour=2))
+    assert (image.width, image.height) == (2, 3)
+    assert bgr(image) == [
+        (30, 20, 10),
+        (60, 50, 40),
+        (90, 80, 70),
+        (120, 110, 100),
+        (150, 140, 130),
+        (180, 170, 160),
+    ]
+
+
+def test_a_decompression_bomb_is_just_another_unreadable_png() -> None:
+    """A megabyte of zeros compresses to nothing and expands to a gigabyte. The
+    decoder must never allocate what a header asks for on faith: this is a
+    PngError like any other corrupt file, not a MemoryError that would blow
+    straight through load_profile's never-raises contract."""
+    bomb = zlib.compress(b"\x00" * (64 << 20))
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 6, 0, 0, 0)  # claims a 1x1 image
+    data = b"".join(
+        (
+            SIGNATURE,
+            make_chunk(b"IHDR", header),
+            make_chunk(b"IDAT", bomb),
+            make_chunk(b"IEND", b""),
+        )
+    )
+    tracemalloc.start()
+    try:
+        with pytest.raises(PngError):
+            decode_png(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 8 << 20, "the decoder expanded the whole bomb before rejecting it"
+
+
+def test_a_header_claiming_more_pixels_than_it_has_raises() -> None:
+    """The bomb the other way round: an enormous header over a tiny IDAT, which
+    is what a crafted file uses to make the decoder reserve the gigabyte."""
+    tiny = zlib.compress(b"\x00" * 16)
+    header = struct.pack(">IIBBBBB", 40_000, 40_000, 8, 6, 0, 0, 0)
+    data = b"".join(
+        (
+            SIGNATURE,
+            make_chunk(b"IHDR", header),
+            make_chunk(b"IDAT", tiny),
             make_chunk(b"IEND", b""),
         )
     )

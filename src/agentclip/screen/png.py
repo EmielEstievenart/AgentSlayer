@@ -29,6 +29,12 @@ _COLOUR_RGBA = 6
 # zlib level 6 is the default trade: a 40x40 icon compresses in microseconds and
 # the file size difference against level 9 is noise at this scale.
 _COMPRESS_LEVEL = 6
+# The biggest frame this decoder will materialise (an 8K screen, twice over).
+# A captured appearance is an icon or a chat box; a header claiming more than a
+# desktop's worth of pixels is corrupt or hostile, and either way the answer is
+# the same. Without a ceiling here the decompression bound below is whatever
+# the file asks for, which is no bound at all.
+_MAX_PIXELS = 64_000_000
 
 
 class PngError(Exception):
@@ -121,15 +127,25 @@ def decode_png(data: bytes) -> RegionImage:
         raise PngError("interlaced PNGs are not supported")
     if not idat:
         raise PngError("PNG has no image data")
-
-    try:
-        raw = zlib.decompress(bytes(idat))
-    except zlib.error as exc:
-        raise PngError(f"corrupt PNG image data: {exc}") from exc
+    if width * height > _MAX_PIXELS:
+        raise PngError(f"PNG is implausibly large ({width}x{height})")
 
     channels = 4 if colour == _COLOUR_RGBA else 3
     stride = width * channels
-    if len(raw) != height * (stride + 1):
+    expected = height * (stride + 1)  # one filter byte in front of each scanline
+
+    # Decompressed with a ceiling of exactly what the header describes, never
+    # zlib.decompress. A few hundred crafted bytes expand to gigabytes and cost
+    # a MemoryError, which is not a PngError - and profile_store.load_profile's
+    # "never raises" contract is written in terms of PngError. Anything that
+    # does not land on exactly the expected size (too much, too little, or a
+    # stream that never ended) is simply a file this module cannot read.
+    decompressor = zlib.decompressobj()
+    try:
+        raw = decompressor.decompress(bytes(idat), expected)
+    except zlib.error as exc:
+        raise PngError(f"corrupt PNG image data: {exc}") from exc
+    if not decompressor.eof or decompressor.unconsumed_tail or len(raw) != expected:
         raise PngError("PNG pixel count does not match its header")
 
     body = bytearray()

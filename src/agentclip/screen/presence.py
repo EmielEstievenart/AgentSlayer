@@ -40,7 +40,10 @@ from agentclip.screen.template import (
 
 # Four ticks at the TUI's 0.5 s cadence: two seconds of agreement before a
 # response is declared finished. Same default, and same reasoning, as the stale
-# detector's DEFAULT_REQUIRED_TICKS.
+# detector's DEFAULT_REQUIRED_TICKS - though not quite the same count: a tick
+# here is one observation, while a stale tick is one frame-to-frame COMPARISON,
+# so StaleTracker needs N + 1 frames to reach N of them and this tracker flips
+# on the Nth.
 DEFAULT_REQUIRED_TICKS = 4
 
 

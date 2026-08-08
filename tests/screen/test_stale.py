@@ -114,6 +114,25 @@ def test_reset_forgets_the_frame_and_the_streak() -> None:
     assert tracker.poll().stable_ticks == 1
 
 
+def test_a_supplied_frame_is_used_instead_of_capturing() -> None:
+    """Several detectors share one tick's capture of the same region: passing
+    the frame in is both cheaper and makes them judge the same instant."""
+    captures = 0
+
+    def capture(region: ScreenRegion) -> RegionImage:
+        nonlocal captures
+        captures += 1
+        return WHITE
+
+    tracker = StaleTracker(REGION, required_ticks=1, capture=capture)
+    assert tracker.poll(BLACK).state is StaleState.CHANGING  # first frame
+    assert tracker.poll(BLACK) == StaleProbe(StaleState.STALE, 0.0, 1)
+    assert captures == 0
+    # ...and an omitted frame still captures, comparing against what was fed in.
+    assert tracker.poll() == StaleProbe(StaleState.CHANGING, 1.0, 0)
+    assert captures == 1
+
+
 def test_noise_below_max_diff_still_counts_as_quiet() -> None:
     """A blinking caret or a hover glow is a handful of pixels in a whole
     response region - well under STALE_MAX_DIFF, so it must not hold the

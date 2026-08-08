@@ -88,8 +88,14 @@ class StaleTracker:
         self._last: RegionImage | None = None
         self._streak = 0
 
-    def poll(self) -> StaleProbe:
-        """Capture the region and fold it into the streak. Never raises.
+    def poll(self, frame: RegionImage | None = None) -> StaleProbe:
+        """Fold the region's current pixels into the streak. Never raises.
+
+        ``frame`` is the caller's own capture of the region, for when several
+        detectors watch the same rectangle on the same tick: capturing once and
+        handing the frame round is cheaper, and - more importantly - makes
+        every detector judge the same instant instead of three moments of a
+        moving screen. Omit it and the tracker captures for itself.
 
         A capture failure keeps the streak AND the stored frame - the same
         blip-tolerance as the busy prober: one bad frame must not silently
@@ -98,10 +104,13 @@ class StaleTracker:
         stillness would let a chat that was idle at calibration time read as
         "finished" without any generation ever observed.
         """
-        try:
-            current = self._capture(self._region)
-        except CaptureError:
-            return StaleProbe(StaleState.ERROR, None, self._streak)
+        if frame is not None:
+            current = frame
+        else:
+            try:
+                current = self._capture(self._region)
+            except CaptureError:
+                return StaleProbe(StaleState.ERROR, None, self._streak)
         previous, self._last = self._last, current  # roll the frame forward
         if previous is None:
             self._streak = 0

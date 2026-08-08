@@ -1,8 +1,9 @@
-"""Headless tests for the per-service ``total_context_chars`` and
-``stable_seconds`` fields and the service-editor persistence path
-(``save_services``): TOML merge/validation, round-tripping through load_config,
-minimal-diff writes, and the atomic-write mechanics. No Textual here - the pilot
-tests for the editor UI itself live in tests/tui/test_service_editor_ui.py."""
+"""Headless tests for the per-service detection fields (``total_context_chars``,
+``stable_seconds``, ``finish_signals``, ``hover_scan``) and the service-editor
+persistence path (``save_services``): TOML merge/validation, round-tripping
+through load_config, minimal-diff writes, and the atomic-write mechanics. No
+Textual here - the pilot tests for the editor UI itself live in
+tests/tui/test_service_editor_ui.py."""
 
 from __future__ import annotations
 
@@ -14,13 +15,16 @@ import pytest
 
 from agentclip.config import (
     BUILTIN_SERVICE_KEYS,
+    DEFAULT_FINISH_SIGNALS,
     DEFAULT_STABLE_SECONDS,
     DEFAULT_THEME,
+    FINISH_SIGNALS,
     ServicePreset,
     default_global_config_path,
     default_profile_dir,
     default_services,
     load_config,
+    normalize_finish_signals,
     save_services,
     save_theme,
 )
@@ -189,6 +193,109 @@ def test_a_bad_stable_seconds_does_not_poison_the_rest_of_the_preset(
     assert cfg.services["claude"].stable_seconds == DEFAULT_STABLE_SECONDS
 
 
+# -- finish_signals + hover_scan (the per-service detection checklist) ---------
+
+
+def test_every_builtin_ships_the_stale_only_checklist_and_no_hover_scan() -> None:
+    """Staleness is what a freshly drawn window can already do; the hover scan
+    takes the user's mouse over, so nobody gets it without asking."""
+    assert DEFAULT_FINISH_SIGNALS == ("stale",)
+    assert FINISH_SIGNALS == ("busy", "idle", "stale")
+    for key, preset in default_services().items():
+        assert preset.finish_signals == DEFAULT_FINISH_SIGNALS, key
+        assert preset.hover_scan is False, key
+
+
+def test_a_bare_preset_defaults_its_detection_fields() -> None:
+    preset = ServicePreset("k", "K", 1_000, 5_000)
+    assert preset.finish_signals == DEFAULT_FINISH_SIGNALS
+    assert preset.hover_scan is False
+
+
+def test_normalize_finish_signals_drops_dedupes_and_orders() -> None:
+    assert normalize_finish_signals(["stale", "busy", "busy", "nope", ""]) == ("busy", "stale")
+    assert normalize_finish_signals([]) == ()
+    assert normalize_finish_signals(["idle", "stale", "busy"]) == FINISH_SIGNALS
+
+
+def test_load_config_reads_a_finish_signals_override(project: Path, global_path: Path) -> None:
+    global_path.write_text(
+        '[services.claude]\nfinish_signals = ["stale", "busy"]\n', encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].finish_signals == ("busy", "stale")  # canonical order
+    assert not cfg.warnings
+
+
+def test_load_config_accepts_an_empty_finish_signals_list(project: Path, global_path: Path) -> None:
+    """Legal, and distinct from an absent key: "never detect a finish here"."""
+    global_path.write_text("[services.claude]\nfinish_signals = []\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].finish_signals == ()
+    assert not cfg.warnings
+
+
+def test_load_config_drops_unknown_finish_signals_and_warns(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        '[services.claude]\nfinish_signals = ["busy", "telepathy", "busy"]\n', encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].finish_signals == ("busy",)
+    assert any("telepathy" in w for w in cfg.warnings)
+
+
+def test_load_config_rejects_a_non_list_finish_signals(project: Path, global_path: Path) -> None:
+    global_path.write_text('[services.claude]\nfinish_signals = "stale"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].finish_signals == DEFAULT_FINISH_SIGNALS
+    assert any("finish_signals" in w and "list of strings" in w for w in cfg.warnings)
+
+
+def test_load_config_reads_a_hover_scan_override(project: Path, global_path: Path) -> None:
+    global_path.write_text("[services.claude]\nhover_scan = true\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].hover_scan is True
+    assert not cfg.warnings
+
+
+def test_load_config_rejects_a_non_boolean_hover_scan(project: Path, global_path: Path) -> None:
+    global_path.write_text('[services.claude]\nhover_scan = "yes"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].hover_scan is False
+    assert any("hover_scan" in w and "true/false" in w for w in cfg.warnings)
+
+
+def test_a_config_written_before_the_detection_fields_still_loads(
+    project: Path, global_path: Path
+) -> None:
+    """The exact five-key table earlier versions wrote: it must come back with
+    the new fields at their defaults and nothing to complain about."""
+    global_path.write_text(
+        '[services.claude]\nlabel = "Claude.ai"\nmax_paste_chars = 30000\n'
+        "total_context_chars = 700000\nwrap_blocks_in_fence = true\nattachment_note = true\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].max_paste_chars == 30_000
+    assert cfg.services["claude"].finish_signals == DEFAULT_FINISH_SIGNALS
+    assert cfg.services["claude"].hover_scan is False
+    assert not cfg.warnings
+
+
+def test_load_config_new_service_gets_the_default_detection_fields(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        '[services.mycustom]\nlabel = "My Custom"\nmax_paste_chars = 5000\n', encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["mycustom"].finish_signals == DEFAULT_FINISH_SIGNALS
+    assert cfg.services["mycustom"].hover_scan is False
+    assert not cfg.warnings
+
+
 # -- save_services: round trip + minimal diff ----------------------------------
 
 
@@ -317,6 +424,95 @@ def test_save_services_stable_seconds_alone_is_enough_to_write_a_builtin(
 
     assert set(raw["services"]) == {"gemini"}
     assert raw["services"]["gemini"]["stable_seconds"] == 0.5
+
+
+def test_save_then_load_round_trips_the_detection_fields(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(
+        services["claude"], finish_signals=("busy", "idle"), hover_scan=True
+    )
+
+    save_services(services, global_path)
+    cfg2 = load_config(project, global_config_path=global_path)
+
+    assert cfg2.services["claude"].finish_signals == ("busy", "idle")
+    assert cfg2.services["claude"].hover_scan is True
+    assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings
+
+
+def test_save_then_load_round_trips_an_empty_checklist(project: Path, global_path: Path) -> None:
+    """"Detect nothing here" is a setting, not an absence - it has to survive
+    the write, or the preset would silently go back to detecting staleness."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], finish_signals=())
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"]["finish_signals"] == []
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"].finish_signals == ()
+    assert not cfg2.warnings
+
+
+def test_save_services_writes_the_detection_fields_only_when_they_differ(
+    project: Path, global_path: Path
+) -> None:
+    """They arrived after the other six: a preset whose user never touched them
+    must still be written exactly as earlier versions wrote it."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], max_paste_chars=30_000)
+
+    save_services(services, global_path)
+    claude = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
+    assert "finish_signals" not in claude
+    assert "hover_scan" not in claude
+
+    services["claude"] = replace(
+        services["claude"], finish_signals=("busy", "stale"), hover_scan=True
+    )
+    save_services(services, global_path)
+    claude = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
+    assert claude["finish_signals"] == ["busy", "stale"]
+    assert claude["hover_scan"] is True
+
+
+def test_save_services_hover_scan_alone_is_enough_to_write_a_builtin(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["gemini"] = replace(services["gemini"], hover_scan=True)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+
+    assert set(raw["services"]) == {"gemini"}
+    assert raw["services"]["gemini"]["hover_scan"] is True
+
+
+def test_save_services_omits_a_custom_services_default_detection_fields(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["my-llm"] = ServicePreset("my-llm", "My LLM", 8_000, 300_000)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert "finish_signals" not in raw["services"]["my-llm"]
+    assert "hover_scan" not in raw["services"]["my-llm"]
+
+    services["my-llm"] = replace(services["my-llm"], finish_signals=("idle",), hover_scan=True)
+    save_services(services, global_path)
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["my-llm"] == services["my-llm"]
 
 
 def test_save_services_deleting_a_custom_key_removes_it_from_the_file(

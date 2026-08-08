@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import tempfile
 import tomllib
+from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -80,6 +81,29 @@ DEFAULT_THEME = "textual-dark"
 # differs: a service that pauses mid-answer needs a longer stillness window.
 DEFAULT_STABLE_SECONDS = 2.0
 
+# Which finish detectors a service is allowed to run, in the canonical order the
+# poller builds (and posts) them in - the same order tui/screens/main.py relies
+# on to know which message closes a tick:
+#   "busy"  - the reasoning/stop icon disappearing (needs a BUSY capture)
+#   "idle"  - the send icon reappearing (needs an IDLE capture)
+#   "stale" - the drawn chat region going still (needs no capture at all)
+# A checklist rather than a mode: they reinforce each other, and which of them a
+# particular chat UI can be trusted about is a property of the service.
+FINISH_SIGNALS: tuple[str, ...] = ("busy", "idle", "stale")
+# Staleness alone is what every freshly drawn window can already do, so it is
+# what a service ships with. An EMPTY checklist is legal and means "never detect
+# a finish for this service" - the user drives the copy button themselves.
+DEFAULT_FINISH_SIGNALS: tuple[str, ...] = ("stale",)
+
+
+def normalize_finish_signals(values: Iterable[str]) -> tuple[str, ...]:
+    """Drop unknown entries, dedupe, and return them in :data:`FINISH_SIGNALS`
+    order, so a hand-written (or future editor-written) checklist can never make
+    the poller build a detector it does not know, nor post two verdicts for one
+    detector, nor shuffle the order that decides which message closes a tick."""
+    chosen = {value for value in values if value in FINISH_SIGNALS}
+    return tuple(name for name in FINISH_SIGNALS if name in chosen)
+
 
 @dataclass(frozen=True, slots=True)
 class ServicePreset:
@@ -90,6 +114,13 @@ class ServicePreset:
     wrap_blocks_in_fence: bool = True
     attachment_note: bool = True
     stable_seconds: float = DEFAULT_STABLE_SECONDS  # stale detector: stillness = finished
+    # Which of FINISH_SIGNALS this service's poller may run (see above).
+    finish_signals: tuple[str, ...] = DEFAULT_FINISH_SIGNALS
+    # May the auto-copy flow glide the real cursor up the chat region hunting a
+    # copy icon that only renders under the pointer? Off by default: it is a
+    # visible, slow takeover of the user's mouse, and only some chats (Claude's)
+    # need it at all.
+    hover_scan: bool = False
 
 
 def default_services() -> dict[str, ServicePreset]:
@@ -298,6 +329,31 @@ def _take_str_list(table: dict, key: str, default: tuple[str, ...], ctx: str, wa
     return tuple(value)
 
 
+def _take_finish_signals(
+    table: dict, default: tuple[str, ...], ctx: str, warnings: list[str]
+) -> tuple[str, ...]:
+    """Read a finish-detector checklist, normalized (see
+    :func:`normalize_finish_signals`). An empty list is a legal answer - it says
+    "no finish detection for this service" - so it is not confused with an
+    absent key; entries that name no detector are dropped with a warning, since
+    a typo'd checklist silently doing less than the user asked for is exactly
+    the failure that leaves auto-copy mysteriously dead."""
+    value = table.get("finish_signals")
+    if value is None:
+        return default
+    if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
+        warnings.append(f"config: [{ctx}] finish_signals must be a list of strings; using defaults")
+        return default
+    signals = normalize_finish_signals(value)
+    unknown = sorted({x for x in value if x not in FINISH_SIGNALS})
+    if unknown:
+        warnings.append(
+            f"config: [{ctx}] finish_signals: unknown detector(s) {', '.join(unknown)}; "
+            f"known: {', '.join(FINISH_SIGNALS)}"
+        )
+    return signals
+
+
 def load_config(
     project_root: Path,
     *,
@@ -358,6 +414,13 @@ def load_config(
                 ctx,
                 warnings,
             ),
+            finish_signals=_take_finish_signals(
+                table,
+                base.finish_signals if base else DEFAULT_FINISH_SIGNALS,
+                ctx,
+                warnings,
+            ),
+            hover_scan=_take_bool(table, "hover_scan", base.hover_scan if base else False, ctx, warnings),
         )
         if preset.max_paste_chars > preset.total_context_chars:
             warnings.append(
@@ -466,9 +529,19 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
         # custom key, from the dataclass default): the field arrived after the
         # five above, and a file whose user never touched the stale knob should
         # stay byte-for-byte what earlier versions wrote.
-        base_stable = defaults[key].stable_seconds if key in defaults else DEFAULT_STABLE_SECONDS
+        base = defaults.get(key)
+        base_stable = base.stable_seconds if base else DEFAULT_STABLE_SECONDS
         if preset.stable_seconds != base_stable:
             services_table[key]["stable_seconds"] = preset.stable_seconds
+        # Same rule for the detection knobs, which arrived later still: written
+        # only when the user has actually moved them off the built-in. An empty
+        # checklist is a real setting ("detect nothing here"), so it is written
+        # as `finish_signals = []` rather than omitted.
+        base_signals = base.finish_signals if base else DEFAULT_FINISH_SIGNALS
+        if preset.finish_signals != base_signals:
+            services_table[key]["finish_signals"] = list(preset.finish_signals)
+        if preset.hover_scan != (base.hover_scan if base else False):
+            services_table[key]["hover_scan"] = preset.hover_scan
 
     data = dict(data)
     if services_table:

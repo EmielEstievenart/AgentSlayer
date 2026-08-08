@@ -15,7 +15,6 @@ from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import (
     MISSING_CHATBOX,
     MISSING_COPY,
-    MISSING_FINISH,
     MISSING_NEWCHAT,
     AgentSlot,
     SlotCalibration,
@@ -46,12 +45,7 @@ def _image(region: ScreenRegion = REGION) -> RegionImage:
 def _ready(slot: AgentSlot = AgentSlot.SUBAGENT) -> SlotCalibration:
     """Every piece of ``can_delegate`` the SLOT owns, and nothing more - the
     copy button is the profile's half (``_profile(*CAPTURED)``)."""
-    return SlotCalibration(
-        slot,
-        chat_region=REGION,
-        busy_region=REGION,
-        busy_baseline=_image(),
-    )
+    return SlotCalibration(slot, chat_region=REGION)
 
 
 def test_a_fresh_slot_can_do_nothing() -> None:
@@ -62,8 +56,7 @@ def test_a_fresh_slot_can_do_nothing() -> None:
     assert not can_delegate(cal, empty)
     assert missing(cal, empty) == (
         MISSING_CHATBOX,
-        MISSING_FINISH,
-        MISSING_COPY,
+            MISSING_COPY,
         MISSING_NEWCHAT,
     )
 
@@ -86,19 +79,11 @@ def test_the_drawn_chat_window_is_what_makes_a_paste_possible() -> None:
     assert not SlotCalibration(AgentSlot.MASTER).can_paste
 
 
-def test_either_detector_is_enough_to_know_the_model_stopped() -> None:
-    busy = SlotCalibration(AgentSlot.MASTER, busy_region=REGION, busy_baseline=_image())
-    idle = SlotCalibration(AgentSlot.MASTER, idle_region=REGION, idle_baseline=_image())
-    assert busy.can_finish
-    assert idle.can_finish
-    # The baseline is what the poller needs - a region without one is nothing.
-    assert not SlotCalibration(AgentSlot.MASTER, busy_region=REGION).can_finish
-
-
-def test_a_stale_region_alone_is_also_a_finish_detector() -> None:
-    """The stability detector stores NO baseline - its tracker's first polled
-    frame is the baseline - so unlike busy/idle a bare region is enough."""
-    assert SlotCalibration(AgentSlot.MASTER, stale_region=REGION).can_finish
+def test_the_drawn_window_is_a_finish_detector_by_itself() -> None:
+    """The stability detector needs no captured cue at all - a rectangle that
+    stops changing is a finished response - so the drawn window IS it."""
+    assert SlotCalibration(AgentSlot.MASTER, chat_region=REGION).can_finish
+    assert not SlotCalibration(AgentSlot.MASTER).can_finish
 
 
 def test_can_delegate_needs_all_four_pieces() -> None:
@@ -117,7 +102,6 @@ def test_each_missing_piece_is_named_and_blocks_delegation() -> None:
             {"chat_region": None},
             (MISSING_CHATBOX, MISSING_COPY, MISSING_NEWCHAT),
         ),
-        "finish detector": ({"busy_baseline": None}, (MISSING_FINISH,)),
 
     }
     for label, (patch, expected) in cases.items():
@@ -134,16 +118,12 @@ def test_each_missing_piece_is_named_and_blocks_delegation() -> None:
 
 def test_clear_empties_everything_but_keeps_the_slot_identity() -> None:
     cal = _ready(AgentSlot.SUBAGENT)
-    cal.idle_region = REGION
-    cal.idle_baseline = _image()
-    cal.stale_region = REGION
     cal.clear()
     assert cal.slot is AgentSlot.SUBAGENT
     assert not can_delegate(cal, _profile(*CAPTURED))
     assert missing(cal, _profile(*CAPTURED)) == (
         MISSING_CHATBOX,
-        MISSING_FINISH,
-        MISSING_COPY,
+            MISSING_COPY,
         MISSING_NEWCHAT,
     )
     assert cal == SlotCalibration(AgentSlot.SUBAGENT)

@@ -31,7 +31,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
 
@@ -53,7 +52,6 @@ class AgentSlot(StrEnum):
 # readout and (later) as the body of the error the master agent gets back when
 # it calls ``delegate`` against an uncalibrated slot.
 MISSING_CHATBOX = "chat box"
-MISSING_FINISH = "finish detector"
 MISSING_COPY = "copy button"
 MISSING_NEWCHAT = "new-chat button"
 
@@ -67,43 +65,24 @@ class SlotCalibration:
     the same windows needs no re-drawing. ``clear`` empties the whole set at
     once for when the windows themselves are gone.
 
-    The busy/idle finish detectors are region + baseline pairs rather than
-    fixed regions because their comparison is the *inverse* of a search: the
-    busy baseline is captured while the model generates, so a match means
-    "still going". The stale detector is a bare region with no stored baseline
-    at all - its tracker's first polled frame IS the baseline, and every later
-    frame is compared to the one before it.
-
-    The chat input boxes and the new-chat button used to live here too. They
-    don't any more: where they are is answered by searching the SERVICE's
-    captured appearance inside ``chat_region`` (screen.profile), so the only
-    thing that is per window is the box the user drew.
+    The chat boxes, the two finish detectors, the copy button and the new-chat
+    button all used to live here. None of them do any more: what they look like
+    belongs to the SERVICE (screen.profile) and where they are is answered by
+    searching that appearance inside ``chat_region`` on the spot. What is left
+    is the one genuinely per-window fact - the box the user drew - which is
+    also why a second window costs exactly one drag.
     """
 
     slot: AgentSlot = AgentSlot.MASTER
     # The whole browser window hosting the chat: where every appearance is
-    # searched for, the last-resort click target, and the vertical span of the
-    # copy-button search band.
+    # searched for, the last-resort click target, and - all by itself - the
+    # stability ("stale") finish detector, since a region that has stopped
+    # changing is a finished response whatever the service's pixel cues do.
     chat_region: ScreenRegion | None = None
-    # Calibrated WHILE generating: a later match means "still generating".
-    busy_region: ScreenRegion | None = None
-    busy_baseline: RegionImage | None = None
-    # Calibrated while IDLE: a later match means "finished".
-    idle_region: ScreenRegion | None = None
-    idle_baseline: RegionImage | None = None
-    # The response area itself, for the stability ("stale") detector: once it
-    # stops changing frame to frame the model is done. No baseline stored -
-    # the poller's tracker keeps its own previous frame.
-    stale_region: ScreenRegion | None = None
 
     def clear(self) -> None:
         """Forget every calibration. The slot identity stays."""
         self.chat_region = None
-        self.busy_region = None
-        self.busy_baseline = None
-        self.idle_region = None
-        self.idle_baseline = None
-        self.stale_region = None
 
     @property
     def can_paste(self) -> bool:
@@ -117,14 +96,14 @@ class SlotCalibration:
 
     @property
     def can_finish(self) -> bool:
-        """Can we tell when the model stopped? Any one detector is enough. For
-        busy/idle the baseline is what the poller actually needs, so that is
-        what is checked; the stale detector needs only its region."""
-        return (
-            self.busy_baseline is not None
-            or self.idle_baseline is not None
-            or self.stale_region is not None
-        )
+        """Can we tell when the model stopped?
+
+        The drawn window is enough on its own: the stale detector needs no
+        captured cue at all, only a rectangle to watch stop changing. Busy and
+        idle appearances reinforce that verdict when the service has them, but
+        neither is required.
+        """
+        return self.chat_region is not None
 
 
 # Readiness is no longer a property of the slot alone: half the answer is what
@@ -168,8 +147,6 @@ def missing(cal: SlotCalibration, profile: ServiceProfile) -> tuple[str, ...]:
     gaps: list[str] = []
     if not cal.can_paste:
         gaps.append(MISSING_CHATBOX)
-    if not cal.can_finish:
-        gaps.append(MISSING_FINISH)
     if not can_copy(cal, profile):
         gaps.append(MISSING_COPY)
     if not _findable(cal, profile, TemplateKind.NEW_CHAT):

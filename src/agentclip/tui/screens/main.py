@@ -101,7 +101,7 @@ from agentclip.config import Config, ServicePreset
 from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnapshot
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
-from agentclip.screen.busy import BusyProbe, BusyState, probe_busy
+from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import CaptureError, RegionImage, capture_region
 from agentclip.screen.focus import (
     click_region,
@@ -114,6 +114,7 @@ from agentclip.screen.focus import (
 from agentclip.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
 from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.picker import ScreenPickError, pick_region
+from agentclip.screen.presence import PresenceTracker
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.profile_store import ProfileStoreError, load_profile, save_template
 from agentclip.screen.region import ScreenRegion
@@ -140,9 +141,7 @@ from agentclip.tui.widgets.action_panel import ActionPanel
 from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
-    BUSY_CALIBRATED,
     ENTER_FLASH_TEXT,
-    IDLE_CALIBRATED,
     PASTE_FLASH_TEXT,
     STALE_CALIBRATED,
     TEMPLATE_UNSET,
@@ -383,10 +382,16 @@ class MainScreen(Screen[None]):
         self._busy_finished: bool | None = None
         self._idle_finished: bool | None = None
         self._stale_finished: bool | None = None
-        # The live stale tracker, kept on self so the auto-copy flow's finally
-        # can reset it: the flow scrolls the very region the tracker watches,
-        # so the frame (and streak) it leaves behind must not count as history.
+        # The live detectors, kept on self so the auto-copy flow's finally can
+        # reset them: the flow drives the very window they watch, so the frames
+        # (and streaks) it leaves behind must not count as history.
+        # ``_active_detectors`` is which of them the current worker posts, in
+        # the fixed busy -> idle -> stale order - the seam that says which
+        # message closes a tick (``_finish_tick_closed_by``).
+        self._busy_tracker: PresenceTracker | None = None
+        self._idle_tracker: PresenceTracker | None = None
         self._stale_tracker: StaleTracker | None = None
+        self._active_detectors: tuple[str, ...] = ()
         # True from the moment _evaluate_finish fires the auto-copy flow until
         # the flow's finally: evaluation is suspended meanwhile, because the
         # flow's own scrolling/hover-scanning reads as "generating" to the
@@ -434,46 +439,6 @@ class MainScreen(Screen[None]):
     @_chat_region.setter
     def _chat_region(self, value: ScreenRegion | None) -> None:
         self._slots[AgentSlot.MASTER].chat_region = value
-
-    @property
-    def _busy_region(self) -> ScreenRegion | None:
-        return self._slots[AgentSlot.MASTER].busy_region
-
-    @_busy_region.setter
-    def _busy_region(self, value: ScreenRegion | None) -> None:
-        self._slots[AgentSlot.MASTER].busy_region = value
-
-    @property
-    def _busy_baseline(self) -> RegionImage | None:
-        return self._slots[AgentSlot.MASTER].busy_baseline
-
-    @_busy_baseline.setter
-    def _busy_baseline(self, value: RegionImage | None) -> None:
-        self._slots[AgentSlot.MASTER].busy_baseline = value
-
-    @property
-    def _idle_region(self) -> ScreenRegion | None:
-        return self._slots[AgentSlot.MASTER].idle_region
-
-    @_idle_region.setter
-    def _idle_region(self, value: ScreenRegion | None) -> None:
-        self._slots[AgentSlot.MASTER].idle_region = value
-
-    @property
-    def _idle_baseline(self) -> RegionImage | None:
-        return self._slots[AgentSlot.MASTER].idle_baseline
-
-    @_idle_baseline.setter
-    def _idle_baseline(self, value: RegionImage | None) -> None:
-        self._slots[AgentSlot.MASTER].idle_baseline = value
-
-    @property
-    def _stale_region(self) -> ScreenRegion | None:
-        return self._slots[AgentSlot.MASTER].stale_region
-
-    @_stale_region.setter
-    def _stale_region(self, value: ScreenRegion | None) -> None:
-        self._slots[AgentSlot.MASTER].stale_region = value
 
     # -- layout ---------------------------------------------------------------
 
@@ -1251,10 +1216,15 @@ class MainScreen(Screen[None]):
         self._region_click_warned = False
         with suppress(NoMatches):
             self.sidebar.update_region(region)
+            self.sidebar.update_stale(STALE_CALIBRATED)
         self._after_calibration()
+        # The drawn window is where every appearance is searched for AND the
+        # staleness detector's whole calibration, so the poller has to be
+        # rebuilt around it.
+        self._start_detector_worker()
         self.notify(
             f"chat region set ({region.describe()}) - the chatbot window; "
-            "outbound copies click it until a chatbox is calibrated"
+            "everything is recognised inside it"
         )
 
     # -- capturing what a service LOOKS like -----------------------------------
@@ -1319,6 +1289,9 @@ class MainScreen(Screen[None]):
         self._paint_profile()
         self.notify(f"{kind.label} captured for {profile.key} ({region.describe()})")
         self._after_calibration()
+        # A new busy/idle appearance changes what the poller hunts; the others
+        # are free to restart it too, since it is rebuilt from scratch anyway.
+        self._start_detector_worker()
 
     # Appearances that have moved off the slot and into the service profile.
     # Grows as each detector is migrated; the sidebar block follows last.
@@ -1327,6 +1300,8 @@ class MainScreen(Screen[None]):
         TemplateKind.CHATBOX_ONGOING,
         TemplateKind.COPY,
         TemplateKind.NEW_CHAT,
+        TemplateKind.BUSY,
+        TemplateKind.IDLE,
     )
 
     def _paint_profile(self) -> None:
@@ -1344,178 +1319,105 @@ class MainScreen(Screen[None]):
                 )
 
     @on(Button.Pressed, "#set-busy-btn")
-    def _on_set_busy_region(self, event: Button.Pressed) -> None:
+    def _on_capture_busy(self, event: Button.Pressed) -> None:
         event.stop()
-        if self._refuse_second_picker():
-            return
-        self.run_worker(self._pick_busy_region(), group="busyregionpick", exclusive=True)
-
-    async def _pick_busy_region(self) -> None:
-        """Draw-a-box overlay around the chat's busy/stop indicator, calibrated
-        WHILE the model is generating - the drawn region's pixels right now
-        become the baseline every later poll is compared against."""
-        try:
-            region = await asyncio.to_thread(
-                pick_region,
-                prompt=self._slot_prompt(
-                    "Drag a box around the busy/stop indicator WHILE the model "
-                    "is generating · Esc cancels"
-                ),
-            )
-        except ScreenPickError as exc:
-            self.notify(str(exc), severity="error")
-            return
-        finally:
-            self._picker_open = False
-        if region is None:
-            self.notify("busy region unchanged (cancelled)")
-            return
-        try:
-            baseline = await asyncio.to_thread(capture_region, region)
-        except CaptureError as exc:
-            self.notify(f"could not capture the busy region: {exc}", severity="error")
-            return
-        self.calibrating.busy_region = region
-        self.calibrating.busy_baseline = baseline
-        self._busy_seen = False
-        self._busy_finished = None
-        with suppress(NoMatches):
-            self.sidebar.update_busy(BUSY_CALIBRATED)
-        self.notify(f"busy region calibrated ({region.describe()})")
-        self._after_calibration()
-        self._start_detector_worker()
+        self._start_capture(TemplateKind.BUSY)
 
     @on(Button.Pressed, "#set-idle-btn")
-    def _on_set_idle_region(self, event: Button.Pressed) -> None:
+    def _on_capture_idle(self, event: Button.Pressed) -> None:
         event.stop()
-        if self._refuse_second_picker():
-            return
-        self.run_worker(self._pick_idle_region(), group="busyregionpick", exclusive=True)
-
-    async def _pick_idle_region(self) -> None:
-        """Draw-a-box overlay around an element that looks DIFFERENT while the
-        model generates (the send/voice button is the usual one), calibrated
-        while the chat is IDLE - so a later match means "finished".
-
-        The mirror image of the busy region, and useful on its own for chats
-        that have no visible stop indicator. Calibrating both is the point of
-        the feature: the auto-copy only fires when they agree."""
-        try:
-            region = await asyncio.to_thread(
-                pick_region,
-                prompt=self._slot_prompt(
-                    "Drag a box around an element that CHANGES while generating "
-                    "(e.g. the send button), WHILE the chat is idle · Esc cancels"
-                ),
-            )
-        except ScreenPickError as exc:
-            self.notify(str(exc), severity="error")
-            return
-        finally:
-            self._picker_open = False
-        if region is None:
-            self.notify("idle element unchanged (cancelled)")
-            return
-        try:
-            baseline = await asyncio.to_thread(capture_region, region)
-        except CaptureError as exc:
-            self.notify(f"could not capture the idle element: {exc}", severity="error")
-            return
-        self.calibrating.idle_region = region
-        self.calibrating.idle_baseline = baseline
-        self._idle_seen = False
-        self._idle_finished = None
-        with suppress(NoMatches):
-            self.sidebar.update_idle(IDLE_CALIBRATED)
-        self.notify(f"idle element calibrated ({region.describe()})")
-        self._after_calibration()
-        self._start_detector_worker()
-
-    @on(Button.Pressed, "#set-stale-btn")
-    def _on_set_stale_region(self, event: Button.Pressed) -> None:
-        event.stop()
-        if self._refuse_second_picker():
-            return
-        self.run_worker(self._pick_stale_region(), group="busyregionpick", exclusive=True)
-
-    async def _pick_stale_region(self) -> None:
-        """Draw-a-box overlay around the response area itself, for the third
-        finish detector: "unchanged for stable_seconds" means the model is
-        done. Unlike the busy/idle pickers there is NO baseline capture here -
-        the tracker's first polled frame is the baseline, and every later frame
-        is compared to the one before it - which is what makes this detector
-        service-agnostic: it trusts no particular pixel cue, only stillness."""
-        try:
-            region = await asyncio.to_thread(
-                pick_region,
-                prompt=self._slot_prompt(
-                    "Drag a box around the RESPONSE area (where the answer "
-                    "text appears) · Esc cancels"
-                ),
-            )
-        except ScreenPickError as exc:
-            self.notify(str(exc), severity="error")
-            return
-        finally:
-            self._picker_open = False
-        if region is None:
-            self.notify("response region unchanged (cancelled)")
-            return
-        self.calibrating.stale_region = region
-        self._stale_seen = False
-        self._stale_finished = None
-        with suppress(NoMatches):
-            self.sidebar.update_stale(STALE_CALIBRATED)
-        self.notify(f"response region calibrated ({region.describe()})")
-        self._after_calibration()
-        self._start_detector_worker()
+        self._start_capture(TemplateKind.IDLE)
 
     # -- finish-detector polling -----------------------------------------------
 
     def _start_detector_worker(self) -> None:
-        """Mirrors ``_start_watcher``: one thread worker polling whichever
-        detectors are calibrated and bridging each verdict back to the UI via
-        ``post_message``. It replaces any previous run, so a recalibration
-        mid-session cannot leave two loops polling different regions.
+        """Mirrors ``_start_watcher``: one thread worker watching the live
+        slot's chat region and bridging each verdict back to the UI via
+        ``post_message``. It replaces any previous run, so a recapture or a
+        slot move mid-session cannot leave two loops watching two windows.
 
-        The probe order within a tick is fixed - busy, then idle, then stale -
-        which is what makes the LAST calibrated one the tick's closing message
-        (see ``_finish_tick_closed_by``).
+        ONE capture per tick, shared by every detector. That is not only
+        cheaper: the three verdicts then describe the same instant of a moving
+        screen rather than three moments of it, and a failed capture reaches
+        all of them as the same ERROR instead of some seeing a frame and
+        others not.
 
-        It always polls the LIVE slot, and the regions are read once here rather
-        than per tick: restarting the worker is how the poller follows the live
-        slot across a delegation, so an in-flight loop must keep watching the
-        window it was started for. The stale tracker is likewise built once per
-        run - it carries the previous frame and the stillness streak, and both
-        describe one window - with its "stable for N seconds" wish converted to
-        ticks of the poll cadence here, from the active service preset (kept on
-        ``self._stale_tracker`` so the auto-copy flow can reset it)."""
+        What runs is composed from the drawn window plus the ACTIVE SERVICE's
+        appearances: a busy tracker if that service has a busy indicator
+        captured, an idle tracker if it has an idle one, and the stale tracker
+        ALWAYS - a drawn region is a finish detector all by itself, needing no
+        cue to trust. With no region drawn there is nothing to watch and no
+        worker at all.
+
+        ``_active_detectors`` records which of them will post, in the fixed
+        busy -> idle -> stale order, which is what makes the last one the
+        tick's closing message (see ``_finish_tick_closed_by``). Everything is
+        read once here rather than per tick: restarting the worker is how the
+        poller follows the live slot across a delegation, so an in-flight loop
+        must keep watching the window it was started for. The trackers are
+        likewise built once per run - they carry streaks and a previous frame,
+        and all of that describes one window - with the "stable for N seconds"
+        wish converted to ticks of the poll cadence here, from the active
+        service preset.
+        """
         self._stop_detector_worker()
-        live = self.live
-        busy_region, busy_baseline = live.busy_region, live.busy_baseline
-        idle_region, idle_baseline = live.idle_region, live.idle_baseline
-        stale_region = live.stale_region
-        tracker: StaleTracker | None = None
-        if stale_region is not None:
-            stable_seconds = self._active_preset().stable_seconds
-            tracker = StaleTracker(
-                stale_region,
-                required_ticks=max(1, round(stable_seconds / _BUSY_POLL_S)),
-                capture=capture_region,
-            )
-        self._stale_tracker = tracker
-        if busy_baseline is None and idle_baseline is None and stale_region is None:
+        # Every tracker is rebuilt below, so the verdicts they produced belong
+        # to detectors that no longer exist. The trigger's ARM survives: it
+        # records that the model was generating, which recapturing a button
+        # does not un-observe.
+        self._busy_seen = self._idle_seen = self._stale_seen = False
+        self._busy_finished = self._idle_finished = self._stale_finished = None
+        self._busy_tracker = None
+        self._idle_tracker = None
+        self._stale_tracker = None
+        self._active_detectors = ()
+        region = self.live.chat_region
+        if region is None:
             return
+        profile = self._active_profile()
+        ticks = max(1, round(self._active_preset().stable_seconds / _BUSY_POLL_S))
+        busy_template = profile.get(TemplateKind.BUSY)
+        idle_template = profile.get(TemplateKind.IDLE)
+        busy = (
+            PresenceTracker(
+                busy_template,
+                found_is_busy=True,
+                required_ticks=ticks,
+                max_diff=TemplateKind.BUSY.max_diff,
+            )
+            if busy_template is not None
+            else None
+        )
+        idle = (
+            PresenceTracker(
+                idle_template,
+                found_is_busy=False,
+                required_ticks=ticks,
+                max_diff=TemplateKind.IDLE.max_diff,
+            )
+            if idle_template is not None
+            else None
+        )
+        stale = StaleTracker(region, required_ticks=ticks, capture=capture_region)
+        self._busy_tracker, self._idle_tracker, self._stale_tracker = busy, idle, stale
+        self._active_detectors = tuple(
+            name
+            for name, tracker in (("busy", busy), ("idle", idle), ("stale", stale))
+            if tracker is not None
+        )
 
         def loop() -> None:
             worker = get_current_worker()
             while not worker.is_cancelled:
-                if busy_region is not None and busy_baseline is not None:
-                    self.post_message(BusyProbed(probe_busy(busy_baseline, busy_region)))
-                if idle_region is not None and idle_baseline is not None:
-                    self.post_message(IdleProbed(probe_busy(idle_baseline, idle_region)))
-                if tracker is not None:
-                    self.post_message(StaleProbed(tracker.poll()))
+                try:
+                    scene: RegionImage | None = capture_region(region)
+                except CaptureError:
+                    scene = None  # every detector hears about it the same way
+                if busy is not None:
+                    self.post_message(BusyProbed(busy.observe(scene)))
+                if idle is not None:
+                    self.post_message(IdleProbed(idle.observe(scene)))
+                self.post_message(StaleProbed(stale.observe(scene)))
                 # Sleep in short increments so cancellation lands promptly.
                 remaining = _BUSY_POLL_S
                 while remaining > 0 and not worker.is_cancelled:
@@ -1533,26 +1435,22 @@ class MainScreen(Screen[None]):
             self._detector_worker = None
 
     def _finish_tick_closed_by(self, detector: str) -> bool:
-        """Is ``detector``'s message the tick's LAST, given what is calibrated?
+        """Is ``detector``'s message the tick's LAST, given what is running?
 
-        The poller posts busy -> idle -> stale each tick, skipping whatever is
-        uncalibrated, and the combined verdict must fold exactly once per tick
-        - on the closing message - or a half-reported tick could arm or fire
-        on one detector's word while another's is still in flight. So each
-        handler closes the tick only when no later-in-order detector is
-        calibrated to close it instead.
+        The poller posts busy -> idle -> stale each tick, skipping whichever
+        detector it was not built with, and the combined verdict must fold
+        exactly once per tick - on the closing message - or a half-reported
+        tick could arm or fire on one detector's word while another's is still
+        in flight. ``_active_detectors`` is that build order, so the closer is
+        simply its last entry.
         """
-        live = self.live
-        if detector == "busy":
-            return live.idle_baseline is None and live.stale_region is None
-        if detector == "idle":
-            return live.stale_region is None
-        return True  # stale is last in the order; nothing can follow it
+        active = self._active_detectors
+        return bool(active) and detector == active[-1]
 
     def on_busy_probed(self, message: BusyProbed) -> None:
         message.stop()
         with suppress(NoMatches):
-            self.sidebar.update_busy(_format_busy_probe(message.probe))
+            self.sidebar.update_template(TemplateKind.BUSY, _format_busy_probe(message.probe))
         self._busy_seen = True
         self._busy_finished = _busy_verdict(message.probe)
         if self._finish_tick_closed_by("busy"):
@@ -1561,7 +1459,7 @@ class MainScreen(Screen[None]):
     def on_idle_probed(self, message: IdleProbed) -> None:
         message.stop()
         with suppress(NoMatches):
-            self.sidebar.update_idle(_format_idle_probe(message.probe))
+            self.sidebar.update_template(TemplateKind.IDLE, _format_idle_probe(message.probe))
         self._idle_seen = True
         self._idle_finished = _idle_verdict(message.probe)
         if self._finish_tick_closed_by("idle"):
@@ -1643,8 +1541,12 @@ class MainScreen(Screen[None]):
             await self._auto_copy_flow()
         finally:
             self._flow_running = False
-            if self._stale_tracker is not None:
-                self._stale_tracker.reset()
+            # The flow clicks, scrolls and hover-scans the very window all
+            # three detectors watch, so every streak it leaves behind describes
+            # the flow's own mouse work rather than the model's.
+            for tracker in (self._busy_tracker, self._idle_tracker, self._stale_tracker):
+                if tracker is not None:
+                    tracker.reset()
 
     def _reset_finish_trigger(self) -> None:
         """Forget every detector verdict and the auto-copy arm.

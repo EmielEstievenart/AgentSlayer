@@ -1,19 +1,20 @@
 """Pilot tests for the combined finish signal that fires the auto-copy flow.
 
-Three detectors: the busy element was calibrated WHILE the model generated
-(MATCH = generating), the idle element while the chat was idle (MATCH =
-finished), and the stale detector needs no calibration pixels at all - the
-response region unchanged long enough (STALE) means finished, still moving
-(CHANGING) means generating. MainScreen folds whichever are live into one
+Three detectors: the busy appearance is on screen only WHILE the model
+generates (found = generating), the idle one only while the chat is idle
+(found = finished), and the stale detector needs no appearance at all - the
+chat region unchanged long enough (STALE) means finished, still moving
+(CHANGING) means generating. MainScreen folds whichever are running into one
 verdict - anything saying "generating" arms the trigger, and it fires only
 once EVERY live detector says "finished" on two consecutive polls.
 
 ``BusyProbed`` / ``IdleProbed`` / ``StaleProbed`` are the documented
 injectable path for the poller (tui/messages.py); posting them is equivalent
 to a poll completing, so these tests drive the state machine without the real
-poller thread. A tick is *closed* by the LAST calibrated detector in the fixed
-busy -> idle -> stale order, so a multi-detector tick is several posts, in
-that order.
+poller thread. A tick is *closed* by the LAST entry in ``_active_detectors``
+(the fixed busy -> idle -> stale build order), so a multi-detector tick is
+several posts, in that order - and ``_detectors`` is how each test says which
+subset the poller would have been built with.
 
 Covered: busy only, idle only (inverted), both (reinforced - one detector
 alone can never fire it), stale only and stale vetoing the others, plus the
@@ -46,10 +47,6 @@ from agentclip.tui.screens.main import MainScreen
 
 COPY_REGION = ScreenRegion(1830, 612, 24, 24)
 TEMPLATE = RegionImage(width=24, height=24, pixels=b"\x00" * (24 * 24 * 4))
-IDLE_REGION = ScreenRegion(900, 980, 40, 40)
-IDLE_BASELINE = RegionImage(width=40, height=40, pixels=b"\x00" * (40 * 40 * 4))
-STALE_REGION = ScreenRegion(1000, 200, 600, 500)
-
 SIZE = (110, 100)
 
 
@@ -111,25 +108,20 @@ async def _arm_with_template(app: AgentClipApp, pilot: Pilot) -> MainScreen:
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
     )
+    _detectors(main, "busy")  # the default for these tests; each overrides it
     return main
 
 
-def _calibrate_idle_detector(main: MainScreen) -> None:
-    """Mark the idle detector calibrated without going through the picker.
+def _detectors(main: MainScreen, *names: str) -> None:
+    """Declare which detectors the (stubbed-out) poller would be posting.
 
-    Pressing the button would also start the real poller, whose probes would
-    race the sequence each test injects. What the tick-closing rule actually
-    depends on is the calibrated baseline, so that is what is set.
+    ``_active_detectors`` is the seam the tick-closing rule reads: the poller
+    builds it once from the drawn window plus the service's appearances, in the
+    fixed busy -> idle -> stale order, and the LAST entry is what closes a
+    tick. Setting it directly is how these tests drive any subset without a
+    real poller thread racing the sequence they inject.
     """
-    main._idle_region = IDLE_REGION
-    main._idle_baseline = IDLE_BASELINE
-
-
-def _calibrate_stale_detector(main: MainScreen) -> None:
-    """Mark the stale detector calibrated without going through the picker,
-    for the same reason as ``_calibrate_idle_detector``: the tick-closing rule
-    only depends on the calibrated region."""
-    main._stale_region = STALE_REGION
+    main._active_detectors = names
 
 
 async def _busy(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
@@ -213,6 +205,7 @@ async def test_idle_only_arms_on_changed_and_fires_on_two_matches(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
+        _detectors(main, "idle")
 
         await _idle(main, pilot, BusyState.CHANGED)  # generating -> armed
         assert main._copy_armed is True
@@ -239,6 +232,7 @@ async def test_idle_only_never_fires_without_a_generation_first(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
+        _detectors(main, "idle")
 
         for _ in range(5):
             await _idle(main, pilot, BusyState.MATCH)
@@ -257,7 +251,7 @@ async def test_both_fire_only_when_they_agree_for_two_ticks(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_idle_detector(main)
+        _detectors(main, "busy", "idle")
 
         # Generating: busy matches its mid-generation baseline, idle does not.
         await _tick(main, pilot, BusyState.MATCH, BusyState.CHANGED)
@@ -287,7 +281,7 @@ async def test_both_one_detector_alone_can_never_fire_it(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_idle_detector(main)
+        _detectors(main, "busy", "idle")
 
         await _tick(main, pilot, BusyState.MATCH, BusyState.CHANGED)
         for _ in range(4):
@@ -311,7 +305,7 @@ async def test_both_either_detector_can_arm_the_trigger(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_idle_detector(main)
+        _detectors(main, "busy", "idle")
 
         # Only the idle element notices; the busy element says "finished".
         await _tick(main, pilot, BusyState.CHANGED, BusyState.CHANGED)
@@ -330,7 +324,7 @@ async def test_both_an_error_on_either_side_breaks_the_streak(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_idle_detector(main)
+        _detectors(main, "busy", "idle")
 
         await _tick(main, pilot, BusyState.MATCH, BusyState.CHANGED)
         await _tick(main, pilot, BusyState.CHANGED, BusyState.MATCH)
@@ -354,7 +348,7 @@ async def test_a_busy_probe_alone_never_closes_a_dual_tick(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_idle_detector(main)
+        _detectors(main, "busy", "idle")
 
         for _ in range(4):
             await _busy(main, pilot, BusyState.MATCH)
@@ -375,7 +369,7 @@ async def test_stale_only_arms_on_changing_and_fires_on_two_stale_ticks(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_stale_detector(main)
+        _detectors(main, "stale")
 
         await _stale(main, pilot, StaleState.CHANGING)  # generating -> armed
         assert main._copy_armed is True
@@ -402,7 +396,7 @@ async def test_stale_never_fires_without_a_change_observed_first(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_stale_detector(main)
+        _detectors(main, "stale")
 
         for ticks in range(5):
             await _stale(main, pilot, StaleState.STALE, ticks=ticks + 2)
@@ -413,15 +407,15 @@ async def test_stale_never_fires_without_a_change_observed_first(
 async def test_stale_saying_changing_vetoes_the_other_detectors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With busy + stale calibrated, the busy element going quiet while the
-    response region is still moving is not a finish - and with stale
-    calibrated, ``StaleProbed`` (not ``BusyProbed``) closes the tick."""
+    """With busy + stale running, the busy indicator going away while the chat
+    region is still moving is not a finish - and with stale running,
+    ``StaleProbed`` (not ``BusyProbed``) closes the tick."""
     _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_stale_detector(main)
+        _detectors(main, "busy", "stale")
 
         await _busy(main, pilot, BusyState.MATCH)
         await _stale(main, pilot, StaleState.CHANGING)
@@ -446,13 +440,13 @@ async def test_a_busy_probe_alone_never_closes_a_tick_with_stale_calibrated(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Stale is last in the fixed busy -> idle -> stale order, so once it is
-    calibrated nothing earlier in the order may fold the verdict."""
+    running nothing earlier in the order may fold the verdict."""
     _patch_copy_picker(monkeypatch)
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_stale_detector(main)
+        _detectors(main, "busy", "stale")
 
         for _ in range(4):
             await _busy(main, pilot, BusyState.MATCH)
@@ -471,7 +465,7 @@ async def test_evaluation_is_suspended_while_the_flow_runs(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_stale_detector(main)
+        _detectors(main, "stale")
 
         main._flow_running = True  # as if _evaluate_finish just fired the flow
         await _stale(main, pilot, StaleState.CHANGING)
@@ -496,7 +490,7 @@ async def test_the_flow_wrapper_lifts_the_suspension_so_it_can_refire(
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _arm_with_template(app, pilot)
-        _calibrate_stale_detector(main)
+        _detectors(main, "stale")
 
         await _stale(main, pilot, StaleState.CHANGING)
         await _stale(main, pilot, StaleState.STALE, ticks=4)

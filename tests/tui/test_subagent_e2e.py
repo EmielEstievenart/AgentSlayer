@@ -35,7 +35,6 @@ from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.engine.engine import Engine
-from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
@@ -146,7 +145,9 @@ def patched(monkeypatch: pytest.MonkeyPatch, trace: list[tuple[str, object]]) ->
         return newchat_at[cal.slot] if kind is TemplateKind.NEW_CHAT else cal.chat_region
 
     monkeypatch.setattr(MainScreen, "_find", fake_find)
-    monkeypatch.setattr(main_mod, "probe_busy", lambda *a: BusyProbe(BusyState.MATCH, 0.0))
+    # The finish detectors are not what this test is about, and a live poller
+    # would fire the auto-copy flow into the middle of the traced sequence.
+    monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
     monkeypatch.setattr(main_mod, "send_paste", lambda: True)
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
     monkeypatch.setattr(main_mod, "foreground_window", lambda: None)

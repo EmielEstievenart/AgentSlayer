@@ -116,6 +116,17 @@ def _patch_picker(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_mod, "capture_region", _frame)
 
 
+def _freeze_detector(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub the poller out and let each test declare what it would be posting.
+
+    The real poller would watch the drawn chat region and interleave its own
+    stale verdicts with the busy sequence these tests inject, which is a race,
+    not a test. ``_active_detectors`` is the seam that says which message
+    closes a tick, so setting it directly is the whole substitution.
+    """
+    monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
+
+
 async def _capture_copy(app: AgentClipApp, pilot: Pilot) -> MainScreen:
     """Wait for the composer, then capture the copy button's appearance."""
     main = app.main_screen
@@ -125,11 +136,13 @@ async def _capture_copy(app: AgentClipApp, pilot: Pilot) -> MainScreen:
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
     )
+    main._active_detectors = ("busy",)
     return main
 
 
 async def _armed(app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatch) -> MainScreen:
     """Everything the flow needs: the drawn chat window and the captured icon."""
+    _freeze_detector(monkeypatch)
     main = app.main_screen
     assert main is not None
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
@@ -141,6 +154,7 @@ async def _armed(app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatc
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
     )
+    main._active_detectors = ("busy",)
     return main
 
 

@@ -259,9 +259,13 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
         assert "SUB-AGENT window" not in picker.prompts[-1]
 
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
-        for button in ("#set-region-btn", "#set-busy-btn", "#set-idle-btn"):
-            await _calibrate(app, pilot, picker, button, SUB_REGION)
-            assert "SUB-AGENT window" in picker.prompts[-1], button
+        # The chat region is the ONLY per-slot picker left, so it is the only
+        # prompt that can name a window - every other button asks about the
+        # service, whose answer is the same in either one.
+        await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
+        assert "SUB-AGENT window" in picker.prompts[-1]
+        await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_REGION)
+        assert "SUB-AGENT window" not in picker.prompts[-1]
 
 
 async def test_the_slot_picker_is_never_locked_by_a_session(

@@ -143,6 +143,9 @@ async def test_busy_match_turns_the_flash_off(tmp_path: Path) -> None:
         await pilot.pause()
         assert _flash(app).display is True
 
+        # Only a detector the poller was actually built with closes a tick, so
+        # say the busy tracker is the live one before injecting its verdict.
+        main._active_detectors = ("busy",)
         main.post_message(BusyProbed(BusyProbe(BusyState.MATCH, 0.01)))
         await _wait_for(pilot, lambda: _flash(app).display is False, "flash hidden on MATCH")
 

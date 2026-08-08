@@ -9,10 +9,10 @@ unlocks again whenever the app is waiting for a new session's first message.
 
 The widget is dumb on purpose: it holds no session state, exposes ``service``
 (the chosen preset key), ``set_locked``, ``refresh_services``, ``update_region``,
-``update_template``, ``update_busy``, ``update_idle``, ``show_slot`` and the
-``show_paste_flash``/``hide_paste_flash`` pair; MainScreen owns every bit of routing, including the "Edit services..."
-button, the busy/idle polling loop, the "Set copy button..." picker +
-auto-copy-click flow and the "New browser chat" action. The paste flash is the
+``update_template``, ``update_stale``, ``show_slot`` and the
+``show_paste_flash``/``hide_paste_flash`` pair; MainScreen owns every bit of
+routing, including the "Edit services..." button, the detector polling loop,
+the capture pickers + auto-copy-click flow and the "New browser chat" action. The paste flash is the
 one animated thing here - a deliberately obnoxious blinking banner that nags the
 user to Ctrl+V the outbound payload into the chat; the blink timer is pure
 presentation, so the dumb widget may own it.
@@ -26,16 +26,15 @@ business being re-derived from stored state). Unlike the service picker it is
 never locked: calibrating the sub-agent window mid-session is the normal way to
 use it.
 
-Calibration buttons come in pairs that mirror each other deliberately: the chat
-input box is calibrated TWICE (a fresh chat centres it, an ongoing one docks it
-at the bottom, and one fixed click point would be wrong half the time), and the
-finish detector is calibrated from either end (an element that changes while
-generating, an element that changes while idle, or both for a reinforced
-verdict) - plus a third, service-agnostic angle: the response region itself,
-which reads as finished once it stops changing frame to frame (for services
-whose busy/idle pixel cues are unreliable). Every calibration status label
-carries the ``side-status`` class so the column reads as one list rather than
-a pile of one-off ids.
+Capture buttons come in pairs that mirror each other deliberately: the chat
+input box is captured TWICE (a fresh chat centres it, an ongoing one docks it
+at the bottom, and one appearance would be wrong half the time), and the finish
+detectors read from either end - something on screen only WHILE generating, and
+something on screen only while IDLE - so a service with both gets a reinforced
+verdict. The third detector has no button at all: the drawn chat region reading
+unchanged for long enough is a finished response, whatever a service's pixel
+cues do. Every status label carries the ``side-status`` class so the column
+reads as one list rather than a pile of one-off ids.
 """
 
 from __future__ import annotations
@@ -65,15 +64,11 @@ _REGION_UNSET = "not set - alt-tab to the chat yourself"
 # the per-kind advice belongs on the picker prompt (TemplateKind.prompt), where
 # the user is actually being asked to draw the box.
 TEMPLATE_UNSET = "not captured"
-# What an uncalibrated detector reads before the user draws it.
-BUSY_UNSET = "not calibrated - set while the model is generating"
-IDLE_UNSET = "not calibrated - set while the chat is idle"
-STALE_UNSET = "not set - staleness check disabled"
-# What a detector reads before (or instead of) a live probe verdict: fresh from
-# the picker, and after a slot switch repaints from stored state.
-BUSY_CALIBRATED = "calibrated - watching"
-IDLE_CALIBRATED = "calibrated - watching"
-STALE_CALIBRATED = "calibrated - watching"
+# The stale detector has nothing to capture - it watches the drawn window stop
+# changing - so its readout has only these two resting states, plus whatever
+# live verdict the poller paints over them.
+STALE_UNSET = "no chat region - staleness check disabled"
+STALE_CALIBRATED = "watching the chat region"
 
 # Which Static shows each appearance's status. A mapping rather than a naming
 # convention for now: these ids predate the profile model and the block they
@@ -192,13 +187,12 @@ class Sidebar(Vertical):
         yield Static(Text(TEMPLATE_UNSET), id="side-chatbox-initial", classes="side-status")
         yield Button("Capture ongoing chat box...", id="set-chatbox-ongoing-btn")
         yield Static(Text(TEMPLATE_UNSET), id="side-chatbox-ongoing", classes="side-status")
-        yield Static(Text("REASONING"), classes="side-title")
-        yield Button("Set busy region...", id="set-busy-btn")
-        yield Static(Text(BUSY_UNSET), id="side-busy", classes="side-status")
-        yield Button("Set idle button...", id="set-idle-btn")
-        yield Static(Text(IDLE_UNSET), id="side-idle", classes="side-status")
-        yield Button("Set response region...", id="set-stale-btn")
         yield Static(Text(STALE_UNSET), id="side-stale", classes="side-status")
+        yield Static(Text("REASONING"), classes="side-title")
+        yield Button("Capture busy indicator...", id="set-busy-btn")
+        yield Static(Text(TEMPLATE_UNSET), id="side-busy", classes="side-status")
+        yield Button("Capture idle indicator...", id="set-idle-btn")
+        yield Static(Text(TEMPLATE_UNSET), id="side-idle", classes="side-status")
         yield Static(Text("COPY BUTTON"), classes="side-title")
         yield Button("Capture copy button...", id="set-copy-btn")
         yield Static(Text(TEMPLATE_UNSET), id="side-copy", classes="side-status")
@@ -278,23 +272,22 @@ class Sidebar(Vertical):
         """Repaint every calibration readout from one slot's stored state.
 
         Called when the slot picker moves and on session teardown - every
-        readout below is a view of ``cal`` and nothing else. The captured
-        appearances are deliberately NOT repainted here: they belong to the
-        service, not to a window, so switching slots must not change what they
-        say (``update_template`` is their only entry point). The live detector
-        readouts (``update_busy``/``update_idle``) fall back to a static
-        "calibrated" line here: a probe verdict belongs to whichever slot the
-        automation is actually driving, and re-deriving one from stored pixels
-        would be a lie.
+        readout below is a view of ``cal`` and nothing else, which after the
+        slot reduction means the drawn window and the staleness detector that
+        rides on it. The captured appearances are deliberately NOT repainted
+        here: they belong to the service, not to a window, so switching slots
+        must not change what they say (``update_template`` is their only entry
+        point). The stale line falls back to a static "watching" here rather
+        than a live verdict: a probe belongs to whichever slot the automation
+        is actually driving, and re-deriving one from a stored region would be
+        a lie.
         """
         select = self.slot_select
         if select.value != str(cal.slot):
             select.value = str(cal.slot)
         self.update_slot_note(note)
         self.update_region(cal.chat_region)
-        self.update_busy(BUSY_CALIBRATED if cal.busy_baseline is not None else BUSY_UNSET)
-        self.update_idle(IDLE_CALIBRATED if cal.idle_baseline is not None else IDLE_UNSET)
-        self.update_stale(STALE_CALIBRATED if cal.stale_region is not None else STALE_UNSET)
+        self.update_stale(STALE_CALIBRATED if cal.chat_region is not None else STALE_UNSET)
 
     def update_slot_note(self, note: str) -> None:
         """Repaint just the readiness line (after a single calibration landed)."""
@@ -321,25 +314,15 @@ class Sidebar(Vertical):
         """
         self.query_one(f"#{_TEMPLATE_STATUS_ID[kind]}", Static).update(Text(text))
 
-    # -- the two finish detectors -----------------------------------------------
-
-    def update_busy(self, text: str) -> None:
-        """Repaint the live busy-element readout (display only; MainScreen owns the
-        detector loop and formats the text - MATCH/CHANGED/ERROR, or the
-        not-calibrated default)."""
-        self.query_one("#side-busy", Static).update(Text(text))
-
-    def update_idle(self, text: str) -> None:
-        """Repaint the live idle-element readout. Same loop, opposite polarity:
-        this element was calibrated while the chat was idle, so MATCH means the
-        response has finished (display only; MainScreen formats the text)."""
-        self.query_one("#side-idle", Static).update(Text(text))
+    # -- the staleness detector ---------------------------------------------------
 
     def update_stale(self, text: str) -> None:
-        """Repaint the live stale-detector readout - the response region's
+        """Repaint the live stale-detector readout - the chat region's
         frame-to-frame stability, where "unchanged long enough" means the
-        response has finished (display only; MainScreen owns the tracker and
-        formats the text - CHANGING/STALE/ERROR, or the not-set default)."""
+        response has finished. Readout only: there is no button, because the
+        drawn chat region IS this detector's whole calibration (display only;
+        MainScreen owns the tracker and formats the text - CHANGING/STALE/
+        ERROR, or the no-region default)."""
         self.query_one("#side-stale", Static).update(Text(text))
 
     # -- the paste flash --------------------------------------------------------

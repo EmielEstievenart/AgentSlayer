@@ -1,21 +1,17 @@
-"""Busy detection: comparing a fresh capture against the calibration baseline."""
+"""How different are two captures of the same rectangle (``diff_fraction``).
+
+The sampler every finish detector compares with. Pure - no screen, no state -
+so the tolerance, the sample budget and the ignored X byte are all pinned down
+here; the detectors that actually look at the screen are tested in
+test_presence.py and test_stale.py.
+"""
 
 from __future__ import annotations
 
 import pytest
 
-from agentclip.screen import busy
-from agentclip.screen.busy import (
-    DEFAULT_TOLERANCE,
-    BusyProbe,
-    BusyState,
-    diff_fraction,
-    probe_busy,
-)
-from agentclip.screen.capture import CaptureError, RegionImage
-from agentclip.screen.region import ScreenRegion
-
-REGION = ScreenRegion(120, 240, 32, 24)
+from agentclip.screen.busy import DEFAULT_TOLERANCE, diff_fraction
+from agentclip.screen.capture import RegionImage
 
 
 def solid(width: int, height: int, colour: tuple[int, int, int] = (0, 0, 0)) -> RegionImage:
@@ -63,35 +59,3 @@ def test_large_region_is_sampled_but_stays_accurate() -> None:
     half = bytes((0, 0, 0, 0)) * (width * height // 2)
     changed = RegionImage(width, height, half + bytes((255, 255, 255, 0)) * (width * height // 2))
     assert diff_fraction(baseline, changed) == pytest.approx(0.5, abs=0.1)
-
-
-def test_probe_matches_when_the_region_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
-    baseline = solid(32, 24, (7, 7, 7))
-    monkeypatch.setattr(busy, "capture_region", lambda region: solid(32, 24, (7, 7, 7)))
-    assert probe_busy(baseline, REGION) == BusyProbe(BusyState.MATCH, 0.0)
-
-
-def test_probe_reports_changed(monkeypatch: pytest.MonkeyPatch) -> None:
-    baseline = solid(32, 24, (0, 0, 0))
-    monkeypatch.setattr(busy, "capture_region", lambda region: solid(32, 24, (255, 255, 255)))
-    probe = probe_busy(baseline, REGION)
-    assert probe.state is BusyState.CHANGED
-    assert probe.diff == 1.0
-
-
-def test_probe_reports_error_when_capture_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(region: ScreenRegion) -> RegionImage:
-        raise CaptureError("no display")
-
-    monkeypatch.setattr(busy, "capture_region", boom)
-    assert probe_busy(solid(32, 24), REGION) == BusyProbe(BusyState.ERROR, None)
-
-
-def test_probe_honours_max_diff(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One differing pixel in a small region is enough to exceed the default."""
-    baseline = solid(4, 4, (0, 0, 0))
-    pixels = bytearray(baseline.pixels)
-    pixels[0] = 255
-    monkeypatch.setattr(busy, "capture_region", lambda region: RegionImage(4, 4, bytes(pixels)))
-    assert probe_busy(baseline, REGION).state is BusyState.CHANGED
-    assert probe_busy(baseline, REGION, max_diff=0.5).state is BusyState.MATCH

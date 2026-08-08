@@ -88,14 +88,30 @@ class StaleTracker:
         self._last: RegionImage | None = None
         self._streak = 0
 
-    def poll(self, frame: RegionImage | None = None) -> StaleProbe:
-        """Fold the region's current pixels into the streak. Never raises.
+    def observe(self, frame: RegionImage | None) -> StaleProbe:
+        """Fold a frame the CALLER captured into the streak. Never raises.
 
-        ``frame`` is the caller's own capture of the region, for when several
-        detectors watch the same rectangle on the same tick: capturing once and
-        handing the frame round is cheaper, and - more importantly - makes
-        every detector judge the same instant instead of three moments of a
-        moving screen. Omit it and the tracker captures for itself.
+        The shared-capture sibling of :meth:`poll`, and the same shape as
+        ``PresenceTracker.observe``: when several detectors watch the same
+        rectangle on the same tick, one capture is taken and handed round -
+        cheaper, and (more importantly) it makes every detector judge the same
+        instant rather than three moments of a moving screen.
+
+        ``None`` means that shared capture failed, and it deliberately reads
+        exactly like this tracker's own capture failing: ERROR, with the streak
+        AND the stored frame intact. Anything else would let one dropped frame
+        either restart the stillness clock on an in-flight finish or - worse -
+        compare two frames taken either side of a gap as if they were adjacent.
+        """
+        if frame is None:
+            return StaleProbe(StaleState.ERROR, None, self._streak)
+        return self._fold(frame)
+
+    def poll(self, frame: RegionImage | None = None) -> StaleProbe:
+        """Capture the region and fold it into the streak. Never raises.
+
+        ``frame`` short-circuits the capture (see :meth:`observe`, which is the
+        clearer spelling when the caller always has a frame).
 
         A capture failure keeps the streak AND the stored frame - the same
         blip-tolerance as the busy prober: one bad frame must not silently
@@ -105,12 +121,14 @@ class StaleTracker:
         "finished" without any generation ever observed.
         """
         if frame is not None:
-            current = frame
-        else:
-            try:
-                current = self._capture(self._region)
-            except CaptureError:
-                return StaleProbe(StaleState.ERROR, None, self._streak)
+            return self._fold(frame)
+        try:
+            current = self._capture(self._region)
+        except CaptureError:
+            return StaleProbe(StaleState.ERROR, None, self._streak)
+        return self._fold(current)
+
+    def _fold(self, current: RegionImage) -> StaleProbe:
         previous, self._last = self._last, current  # roll the frame forward
         if previous is None:
             self._streak = 0

@@ -29,7 +29,6 @@ import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
-from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
@@ -204,13 +203,15 @@ async def test_start_browser_chat_clicks_the_slot_and_retargets_the_automation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     picker, clicks, probed = _patch_screen(monkeypatch)
-    baselines: list[RegionImage] = []
+    # One capture per tick, of the live slot's chat region: which rectangle the
+    # poller is capturing IS which window it is watching.
+    captures: list[ScreenRegion] = []
 
-    def record_probe(baseline: RegionImage, region: ScreenRegion) -> BusyProbe:
-        baselines.append(baseline)
-        return BusyProbe(BusyState.MATCH, 0.0)
+    def record_capture(region: ScreenRegion) -> RegionImage:
+        captures.append(region)
+        return _frame(region)
 
-    monkeypatch.setattr(main_mod, "probe_busy", record_probe)
+    monkeypatch.setattr(main_mod, "capture_region", record_capture)
     app = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
@@ -218,9 +219,7 @@ async def test_start_browser_chat_clicks_the_slot_and_retargets_the_automation(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         await _calibrate_master(app, pilot, picker)
         await _calibrate_subagent(app, pilot, picker)
-        await _wait_for(
-            pilot, lambda: _frame(MASTER_BUSY) in baselines, "the master poller is running"
-        )
+        await _wait_for(pilot, lambda: MASTER_BOX in captures, "the master poller is running")
         clicks.clear()
         probed.clear()
 
@@ -230,20 +229,18 @@ async def test_start_browser_chat_clicks_the_slot_and_retargets_the_automation(
         assert clicks == [SUB_NEWCHAT]
         assert main._live is AgentSlot.SUBAGENT
         assert main._calibrating is AgentSlot.MASTER  # the sidebar stays where it was
-        # The poller followed the live slot onto the sub-agent's busy element.
-        await _wait_for(
-            pilot, lambda: _frame(SUB_BUSY) in baselines, "the poller retargeted"
-        )
+        # The poller followed the live slot onto the sub-agent's window.
+        await _wait_for(pilot, lambda: SUB_BOX in captures, "the poller retargeted")
         # ...and the paste click now goes into the sub-agent's chat box.
         assert await main._chatbox_region() == SUB_BOX
 
         main.end_browser_chat()
         assert main._live is AgentSlot.MASTER
         assert await main._chatbox_region() == MASTER_BOX
-        marker = len(baselines)
+        marker = len(captures)
         await _wait_for(
             pilot,
-            lambda: _frame(MASTER_BUSY) in baselines[marker:],
+            lambda: MASTER_BOX in captures[marker:],
             "the poller returned to the master",
         )
 

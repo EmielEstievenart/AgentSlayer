@@ -1,10 +1,16 @@
-"""Busy detection: does a screen region still look like it did at calibration?
+"""How different are two captures of the same rectangle, and what a verdict is.
 
-The user calibrates WHILE the model is generating (the region typically shows
-the chat's stop-button square). As long as a fresh capture matches the
-calibration baseline the model is still reasoning; when it stops matching the
-response has finished. Nothing acts on the verdict yet - the TUI only displays
-it (tui.md, sidebar).
+The pixel comparison (``diff_fraction``) and the vocabulary every finish
+detector answers in (``BusyState`` / ``BusyProbe``) live here. Nothing in this
+module looks at the screen any more: the detectors that do are
+:mod:`agentclip.screen.presence` (is this appearance visible anywhere in the
+chat region?) and :mod:`agentclip.screen.stale` (has the chat region stopped
+changing?), and both report their verdicts in these types.
+
+``BusyState`` keeps its historical names because the polarity is the caller's
+to assign: MATCH means "still generating" for a busy-time appearance and
+"finished" for an idle-time one, which is exactly the reading the TUI's
+``_busy_verdict`` / ``_idle_verdict`` already give them.
 """
 
 from __future__ import annotations
@@ -12,8 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from agentclip.screen.capture import CaptureError, RegionImage, capture_region
-from agentclip.screen.region import ScreenRegion
+from agentclip.screen.capture import RegionImage
 
 # A channel delta below this is anti-aliasing/theme noise, not a real change.
 DEFAULT_TOLERANCE = 24
@@ -79,18 +84,3 @@ def diff_fraction(
     return differing / sampled
 
 
-def probe_busy(
-    baseline: RegionImage,
-    region: ScreenRegion,
-    *,
-    tolerance: int = DEFAULT_TOLERANCE,
-    max_diff: float = DEFAULT_MAX_DIFF,
-) -> BusyProbe:
-    """Capture ``region`` now and compare against ``baseline``. Never raises."""
-    try:
-        current = capture_region(region)
-    except CaptureError:
-        return BusyProbe(BusyState.ERROR, None)
-    diff = diff_fraction(baseline, current, tolerance=tolerance)
-    state = BusyState.MATCH if diff <= max_diff else BusyState.CHANGED
-    return BusyProbe(state, diff)

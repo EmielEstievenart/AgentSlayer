@@ -77,10 +77,14 @@ src/agentclip/
 │   ├── picker.py          # spawns the child (works frozen and from source), parses its stdout
 │   ├── capture.py         # GDI BitBlt/GetDIBits screen-region grab (ctypes) -> RegionImage
 │   ├── focus.py           # Windows SetCursorPos+SendInput click/scroll into a region; window focus snap-back (ctypes)
-│   ├── element.py         # CalibratedElement (region + snapshot) + probe_element: "still the thing I was pointed at?"
 │   ├── busy.py            # baseline-vs-fresh-capture diff -> BusyState (MATCH/CHANGED/ERROR)
-│   ├── slot.py            # AgentSlot (MASTER/SUBAGENT) + SlotCalibration: one calibration set per chat window
-│   └── template.py        # bottom-up vertical-band scan for a captured icon -> lowest match
+│   ├── stale.py           # StaleTracker: frame-to-frame stability of a region -> StaleState
+│   ├── presence.py        # PresenceTracker: is this appearance on screen? de-bounced -> BusyProbe
+│   ├── png.py             # stdlib zlib/struct PNG encode/decode, for persisting templates
+│   ├── profile.py         # TemplateKind + ServiceProfile: what a SERVICE looks like (not where)
+│   ├── profile_store.py   # one folder of PNGs + a manifest per service; load never raises
+│   ├── slot.py            # AgentSlot (MASTER/SUBAGENT) + SlotCalibration: the drawn window per slot
+│   └── template.py        # anchor-based 2D search for an appearance inside a captured region
 │
 └── tui/
     ├── app.py             # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)

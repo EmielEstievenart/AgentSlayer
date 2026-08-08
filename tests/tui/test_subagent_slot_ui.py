@@ -31,9 +31,11 @@ from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import RegionImage
+from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.screens.main import MainScreen
 
 MASTER_BUSY = ScreenRegion(10, 10, 40, 20)
 MASTER_BOX = ScreenRegion(10, 400, 300, 40)
@@ -43,6 +45,11 @@ SUB_BOX = ScreenRegion(900, 400, 300, 40)
 SUB_NEWCHAT = ScreenRegion(900, 60, 80, 24)
 SUB_COPY = ScreenRegion(900, 300, 24, 24)
 SIZE = (110, 100)
+
+# Where each slot's new-chat button "is" on screen. The appearance is captured
+# once for the SERVICE, but it is searched for inside each slot's own drawn
+# window, so the two slots resolve it to two different rectangles.
+NEWCHAT_AT = {AgentSlot.MASTER: MASTER_NEWCHAT, AgentSlot.SUBAGENT: SUB_NEWCHAT}
 
 
 def _frame(region: ScreenRegion) -> RegionImage:
@@ -97,11 +104,24 @@ def _patch_screen(
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "_NEW_CHAT_SETTLE_S", 0.01)
     monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
-    monkeypatch.setattr(
-        main_mod,
-        "probe_element",
-        lambda element: bool(probed.append(element.region)) or probe_ok,
-    )
+    async def fake_find(
+        self: MainScreen,
+        kind: TemplateKind,
+        slot: AgentSlot | None = None,
+        *,
+        scene: RegionImage | None = None,
+    ) -> ScreenRegion | None:
+        """Stand-in for the in-region appearance search (screen.template's job,
+        tested there): records the attempt and answers where each slot's copy
+        of ``kind`` sits."""
+        cal = self._slots[slot] if slot is not None else self.live
+        if cal.chat_region is None or not self._active_profile().has(kind):
+            return None
+        rect = NEWCHAT_AT[cal.slot] if kind is TemplateKind.NEW_CHAT else cal.chat_region
+        probed.append(rect)
+        return rect if probe_ok else None
+
+    monkeypatch.setattr(MainScreen, "_find", fake_find)
     monkeypatch.setattr(
         main_mod,
         "click_region",
@@ -135,9 +155,14 @@ async def _select_slot(app: AgentClipApp, pilot: Pilot, slot: AgentSlot) -> None
 
 
 async def _calibrate_master(app: AgentClipApp, pilot: Pilot, picker: _Picker) -> None:
+    """The master slot's own calibrations: its window and its busy element.
+
+    Deliberately no appearance captures - those belong to the SERVICE and are
+    shared by both slots, so capturing one here would pre-satisfy the sub-agent
+    slot and hide what the sequence below is measuring.
+    """
     await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_BOX)
     await _calibrate(app, pilot, picker, "#set-busy-btn", MASTER_BUSY)
-    await _calibrate(app, pilot, picker, "#set-newchat-btn", MASTER_NEWCHAT)
 
 
 async def _calibrate_subagent(app: AgentClipApp, pilot: Pilot, picker: _Picker) -> None:
@@ -160,7 +185,7 @@ async def test_delegation_is_unavailable_until_every_piece_is_calibrated(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         assert not main.delegation_available()
 
-        # A fully calibrated MASTER slot does nothing for delegation.
+        # A calibrated MASTER window does nothing for delegation.
         await _calibrate_master(app, pilot, picker)
         assert not main.delegation_available()
 

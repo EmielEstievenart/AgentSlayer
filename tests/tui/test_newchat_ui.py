@@ -1,14 +1,17 @@
-"""Pilot tests for the new-chat calibration + action (sidebar "NEW CHAT").
+"""Pilot tests for the new-chat button: captured per SERVICE, found in the
+drawn chat region, clicked where it actually is.
 
-Two buttons: "Set new-chat button..." snapshots the browser's new-chat control
-into a CalibratedElement, and "New browser chat" verifies that snapshot still
-matches before clicking it and handing focus back to AgentClip. Picker,
-capture, element probe, click and focus are monkeypatched at their use site
+Two buttons: "Capture new-chat button..." files what the browser's new-chat
+control looks like into the active service's profile, and "New browser chat"
+searches for it inside the calibrating slot's chat region and clicks the match.
+Picker, capture, search, click and focus are monkeypatched at their use site
 (agentclip.tui.screens.main).
 
-The verify step is the point: a browser that re-laid itself out would otherwise
-get a click wherever those pixels used to be, so a mismatch warns and clicks
-nothing at all.
+The find step is the point, and it now buys two things at once: a browser that
+re-laid itself out or moved gets clicked *where the button is* rather than
+where it used to be, and a button that genuinely is not on screen gets no click
+at all. The three failures stay three different stories - nothing captured,
+not on screen, and the OS refusing the click.
 """
 
 from __future__ import annotations
@@ -26,11 +29,20 @@ from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.capture import CaptureError, RegionImage
-from agentclip.screen.element import CalibratedElement
+from agentclip.screen.profile import TemplateKind
+from agentclip.screen.profile_store import load_profile
 from agentclip.screen.region import ScreenRegion
+from agentclip.screen.template import RegionMatch, Template
 from agentclip.tui.app import AgentClipApp
 
-NEWCHAT_REGION = ScreenRegion(120, 90, 180, 36)
+CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
+NEWCHAT_BOX = ScreenRegion(120, 90, 180, 36)
+# Where the button "is" inside the chat region, and the absolute rect that
+# implies - the click has to land on the second one, never the first.
+FOUND = RegionMatch(x=40, y=24, diff=0.02)
+CLICK_TARGET = ScreenRegion(
+    CHAT_REGION.left + FOUND.x, CHAT_REGION.top + FOUND.y, NEWCHAT_BOX.width, NEWCHAT_BOX.height
+)
 SIZE = (110, 100)
 
 
@@ -49,9 +61,9 @@ async def _wait_for(
     raise AssertionError(f"timed out waiting for {what}")
 
 
-def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard]:
+def _make_app(tmp_path: Path, profile_root: Path) -> tuple[AgentClipApp, FakeClipboard]:
     project = tmp_path / "project"
-    project.mkdir()
+    project.mkdir(exist_ok=True)
     config = load_config(project, global_config_path=project / "no-such-global.toml")
     fake = FakeClipboard()
     app = AgentClipApp(
@@ -59,6 +71,7 @@ def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard]:
         provider=fake,
         engine_factory=make_engine_factory(lambda: app.app_config, project),
         project_root=project,
+        profile_root=profile_root,
     )
     return app, fake
 
@@ -84,37 +97,66 @@ async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
     await pilot.press("enter")
 
 
-def _patch_picker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: NEWCHAT_REGION)
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
+def _patch_found(monkeypatch: pytest.MonkeyPatch, match: RegionMatch | None) -> list[RegionImage]:
+    """Say whether the captured button is on screen, and record every search."""
+    scenes: list[RegionImage] = []
+
+    def fake_find(template: Template, scene: RegionImage, **kw: object) -> RegionMatch | None:
+        scenes.append(scene)
+        return match
+
+    monkeypatch.setattr(main_mod, "find_in_region", fake_find)
+    return scenes
 
 
-async def test_calibration_snapshots_the_button_and_updates_the_sidebar(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def _capture_newchat(
+    app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatch, *, region: bool = True
 ) -> None:
-    _patch_picker(monkeypatch)
-    app, _ = _make_app(tmp_path)
+    """Draw the chat window (optional) and capture the new-chat appearance."""
+    main = app.main_screen
+    assert main is not None
+    monkeypatch.setattr(main_mod, "capture_region", _frame)
+    if region:
+        monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: CHAT_REGION)
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
+    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: NEWCHAT_BOX)
+    await _press(app, pilot, "#set-newchat-btn")
+    await _wait_for(
+        pilot,
+        lambda: main._active_profile().has(TemplateKind.NEW_CHAT),
+        "new-chat button captured",
+    )
+
+
+async def test_capturing_the_button_files_it_under_the_service(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _ = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        assert "not set" in _newchat_label(app)
+        assert "not captured" in _newchat_label(app)
+        key = main._selected_service()
 
-        await _press(app, pilot, "#set-newchat-btn")
-        await _wait_for(pilot, lambda: main._newchat is not None, "new-chat button calibrated")
-        assert main._newchat == CalibratedElement(NEWCHAT_REGION, _frame(NEWCHAT_REGION))
-        assert "180×36 at (120, 90)" in _newchat_label(app)
+        await _capture_newchat(app, pilot, monkeypatch, region=False)
+        template = main._active_profile().get(TemplateKind.NEW_CHAT)
+        assert template is not None
+        assert (template.width, template.height) == (180, 36)
+        assert "180×36 · captured" in _newchat_label(app)
+        assert load_profile(profile_root, key).has(TemplateKind.NEW_CHAT)
 
 
-async def test_capture_failure_keeps_it_uncalibrated(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_capture_failure_keeps_it_unknown(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     def boom(region: ScreenRegion) -> RegionImage:
         raise CaptureError("screen capture is not implemented yet")
 
-    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: NEWCHAT_REGION)
+    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: NEWCHAT_BOX)
     monkeypatch.setattr(main_mod, "capture_region", boom)
-    app, _ = _make_app(tmp_path)
+    app, _ = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -122,19 +164,19 @@ async def test_capture_failure_keeps_it_uncalibrated(
 
         await _press(app, pilot, "#set-newchat-btn")
         await pilot.pause(0.2)
-        assert main._newchat is None
-        assert "not set" in _newchat_label(app)
+        assert not main._active_profile().has(TemplateKind.NEW_CHAT)
+        assert "not captured" in _newchat_label(app)
 
 
-async def test_the_action_verifies_clicks_and_hands_focus_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_the_action_finds_it_clicks_it_and_hands_focus_back(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _patch_picker(monkeypatch)
+    """The click lands on the match's absolute rectangle, not on the box the
+    user happened to drag - that is the whole difference."""
     events: list[str] = []
     clicks: list[tuple[ScreenRegion, float]] = []
     focus_calls: list[int] = []
     monkeypatch.setattr(main_mod, "foreground_window", lambda: 4242)
-    monkeypatch.setattr(main_mod, "probe_element", lambda element: events.append("probe") or True)
     monkeypatch.setattr(
         main_mod,
         "click_region",
@@ -148,111 +190,134 @@ async def test_the_action_verifies_clicks_and_hands_focus_back(
         lambda handle: bool(focus_calls.append(handle)) or bool(events.append("focus")) or True,
     )
 
-    app, _ = _make_app(tmp_path)
+    app, _ = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         assert main._own_window == 4242  # recorded at mount
 
-        await _press(app, pilot, "#set-newchat-btn")
-        await _wait_for(pilot, lambda: main._newchat is not None, "new-chat button calibrated")
+        await _capture_newchat(app, pilot, monkeypatch)
+        scenes = _patch_found(monkeypatch, FOUND)
+        clicks.clear()
+        events.clear()
 
         await _press(app, pilot, "#newchat-btn")
         await _wait_for(pilot, lambda: focus_calls == [4242], "focus snapped back")
 
         assert "clicked" in _newchat_label(app)
-        assert clicks == [(NEWCHAT_REGION, 0.05)]
-        assert events[-3:] == ["probe", "click", "focus"]  # verify, then click, then snap back
+        assert clicks == [(CLICK_TARGET, 0.05)]
+        assert events == ["click", "focus"]  # find, then click, then snap back
+        # The button was hunted in the chat region, not anywhere else.
+        assert [(scene.width, scene.height) for scene in scenes] == [
+            (CHAT_REGION.width, CHAT_REGION.height)
+        ]
 
 
-async def test_a_mismatch_warns_and_clicks_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_not_on_screen_warns_and_clicks_nothing(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The page moved: clicking blind could hit anything, so nothing is clicked."""
-    _patch_picker(monkeypatch)
+    """The page moved on: clicking blind could hit anything, so nothing is."""
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(main_mod, "probe_element", lambda element: False)
-    monkeypatch.setattr(
-        main_mod, "click_region", lambda region, **kw: clicks.append(region) or True
-    )
-    app, _ = _make_app(tmp_path)
+    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
+
+    app, _ = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-newchat-btn")
-        await _wait_for(pilot, lambda: main._newchat is not None, "new-chat button calibrated")
+        await _capture_newchat(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, None)
+        clicks.clear()
 
         await _press(app, pilot, "#newchat-btn")
-        await _wait_for(pilot, lambda: "mismatch" in _newchat_label(app), "mismatch reported")
+        await _wait_for(pilot, lambda: "not on screen" in _newchat_label(app), "miss reported")
         assert clicks == []
-        assert main._newchat is not None  # kept, so the user can redraw or retry
+        # The capture is kept, so the user can retry once the page settles.
+        assert main._active_profile().has(TemplateKind.NEW_CHAT)
 
 
 async def test_a_refused_click_is_reported_separately(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Verified fine but the OS swallowed the input (not Windows): a different
-    story to tell than "this is no longer the new-chat button"."""
-    _patch_picker(monkeypatch)
+    """Found fine but the OS swallowed the input (not Windows): a different
+    story to tell than "this button is not on screen"."""
     focus_calls: list[int] = []
-    monkeypatch.setattr(main_mod, "probe_element", lambda element: True)
     monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: False)
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: focus_calls.append(handle) or True)
-    app, _ = _make_app(tmp_path)
+
+    app, _ = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-newchat-btn")
-        await _wait_for(pilot, lambda: main._newchat is not None, "new-chat button calibrated")
+        await _capture_newchat(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND)
 
         await _press(app, pilot, "#newchat-btn")
         await _wait_for(pilot, lambda: "did not land" in _newchat_label(app), "refusal reported")
         assert focus_calls == []  # leave the browser focused so the user can click
 
 
-async def test_the_action_without_a_calibration_clicks_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_nothing_captured_means_nothing_is_even_searched_for(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clicks: list[ScreenRegion] = []
-    probes: list[object] = []
-    monkeypatch.setattr(main_mod, "probe_element", lambda element: probes.append(element) or True)
-    monkeypatch.setattr(
-        main_mod, "click_region", lambda region, **kw: clicks.append(region) or True
-    )
-    app, _ = _make_app(tmp_path)
+    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
+    scenes = _patch_found(monkeypatch, FOUND)
+
+    app, _ = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        assert main._newchat is None
+        assert not main._active_profile().has(TemplateKind.NEW_CHAT)
 
         await _press(app, pilot, "#newchat-btn")
         await pilot.pause(0.3)
         assert clicks == []
-        assert probes == []
-        assert "not set" in _newchat_label(app)  # the toast is the only feedback
+        assert scenes == []
+        assert "not captured" in _newchat_label(app)  # the toast is the only feedback
 
 
-async def test_new_preserves_the_calibration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_no_chat_region_means_nowhere_to_look(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The snapshot describes where the browser's new-chat button is, not what
-    the finished session said - /new must not make the user re-draw it (and the
-    verify-before-click step already guards against a window that moved)."""
-    _patch_picker(monkeypatch)
-    app, _ = _make_app(tmp_path)
+    """The appearance is captured but the slot has no window drawn - the same
+    "go calibrate" branch, because there is nowhere to search."""
+    clicks: list[ScreenRegion] = []
+    app, _ = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        await _press(app, pilot, "#set-newchat-btn")
-        await _wait_for(pilot, lambda: main._newchat is not None, "new-chat button calibrated")
+        await _capture_newchat(app, pilot, monkeypatch, region=False)
+        scenes = _patch_found(monkeypatch, FOUND)
+        monkeypatch.setattr(
+            main_mod, "click_region", lambda region, **kw: clicks.append(region) or True
+        )
+
+        await _press(app, pilot, "#newchat-btn")
+        await pilot.pause(0.3)
+        assert clicks == []
+        assert scenes == []
+
+
+async def test_new_preserves_the_capture(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The appearance describes the service, not what the finished session
+    said - /new must not make the user recapture it."""
+    app, _ = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _capture_newchat(app, pilot, monkeypatch)
 
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
@@ -260,6 +325,5 @@ async def test_new_preserves_the_calibration(
 
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
-        assert main._newchat is not None
-        assert main._newchat.region == NEWCHAT_REGION
-        assert "180×36 at (120, 90)" in _newchat_label(app)
+        assert main._active_profile().has(TemplateKind.NEW_CHAT)
+        assert "180×36 · captured" in _newchat_label(app)

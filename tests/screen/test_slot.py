@@ -10,7 +10,6 @@ sub-run halfway through.
 from __future__ import annotations
 
 from agentclip.screen.capture import RegionImage
-from agentclip.screen.element import CalibratedElement
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import (
@@ -36,26 +35,22 @@ def _profile(*kinds: TemplateKind) -> ServiceProfile:
     return profile
 
 
-CAPTURED = TemplateKind.COPY
+# The appearances a ready slot needs on top of its drawn window.
+CAPTURED = (TemplateKind.COPY, TemplateKind.NEW_CHAT)
 
 
 def _image(region: ScreenRegion = REGION) -> RegionImage:
     return RegionImage(region.width, region.height, b"\x00" * (region.width * region.height * 4))
 
 
-def _element(region: ScreenRegion = REGION) -> CalibratedElement:
-    return CalibratedElement(region, _image(region))
-
-
 def _ready(slot: AgentSlot = AgentSlot.SUBAGENT) -> SlotCalibration:
     """Every piece of ``can_delegate`` the SLOT owns, and nothing more - the
-    copy button is the profile's half (``_profile(CAPTURED)``)."""
+    copy button is the profile's half (``_profile(*CAPTURED)``)."""
     return SlotCalibration(
         slot,
         chat_region=REGION,
         busy_region=REGION,
         busy_baseline=_image(),
-        new_chat=_element(),
     )
 
 
@@ -109,8 +104,8 @@ def test_a_stale_region_alone_is_also_a_finish_detector() -> None:
 def test_can_delegate_needs_all_four_pieces() -> None:
     """Three of them are the slot's; the copy button is the SERVICE's, which is
     exactly why readiness is a function of the pair."""
-    assert can_delegate(_ready(), _profile(CAPTURED))
-    assert missing(_ready(), _profile(CAPTURED)) == ()
+    assert can_delegate(_ready(), _profile(*CAPTURED))
+    assert missing(_ready(), _profile(*CAPTURED)) == ()
     assert not can_delegate(_ready(), ServiceProfile("chatgpt"))
 
 
@@ -118,19 +113,23 @@ def test_each_missing_piece_is_named_and_blocks_delegation() -> None:
     cases: dict[str, tuple[dict[str, object], tuple[str, ...]]] = {
         # Losing the window loses the copy button with it: the icon is hunted
         # INSIDE the drawn region, so there is nowhere to look without one.
-        "chat window": ({"chat_region": None}, (MISSING_CHATBOX, MISSING_COPY)),
+        "chat window": (
+            {"chat_region": None},
+            (MISSING_CHATBOX, MISSING_COPY, MISSING_NEWCHAT),
+        ),
         "finish detector": ({"busy_baseline": None}, (MISSING_FINISH,)),
-        "new-chat button": ({"new_chat": None}, (MISSING_NEWCHAT,)),
+
     }
     for label, (patch, expected) in cases.items():
         cal = _ready()
         for field, value in patch.items():
             setattr(cal, field, value)
-        assert not can_delegate(cal, _profile(CAPTURED)), label
-        assert missing(cal, _profile(CAPTURED)) == expected, label
+        assert not can_delegate(cal, _profile(*CAPTURED)), label
+        assert missing(cal, _profile(*CAPTURED)) == expected, label
 
-    # The copy button is the profile's half of the same question.
-    assert missing(_ready(), ServiceProfile("chatgpt")) == (MISSING_COPY,)
+    # The copy and new-chat buttons are the profile's half of the same question.
+    assert missing(_ready(), ServiceProfile("chatgpt")) == (MISSING_COPY, MISSING_NEWCHAT)
+    assert missing(_ready(), _profile(TemplateKind.COPY)) == (MISSING_NEWCHAT,)
 
 
 def test_clear_empties_everything_but_keeps_the_slot_identity() -> None:
@@ -140,8 +139,8 @@ def test_clear_empties_everything_but_keeps_the_slot_identity() -> None:
     cal.stale_region = REGION
     cal.clear()
     assert cal.slot is AgentSlot.SUBAGENT
-    assert not can_delegate(cal, _profile(CAPTURED))
-    assert missing(cal, ServiceProfile("chatgpt")) == (
+    assert not can_delegate(cal, _profile(*CAPTURED))
+    assert missing(cal, _profile(*CAPTURED)) == (
         MISSING_CHATBOX,
         MISSING_FINISH,
         MISSING_COPY,

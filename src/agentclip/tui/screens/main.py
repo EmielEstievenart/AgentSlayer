@@ -52,9 +52,10 @@ The chat input box is not a stored location at all any more: the two layouts a
 service can show (a fresh chat centres its box, an ongoing one docks it at the
 bottom) are *appearances* captured once per service (``screen.profile``) and
 searched for INSIDE the drawn chat region on the spot (``_find``). Moving or
-resizing the browser therefore costs nothing. The new-chat button is still a
-``CalibratedElement`` (region + snapshot) - "is this still the thing I was
-pointed at?" - until it moves the same way.
+resizing the browser therefore costs nothing.
+The browser's new-chat button works the same way: captured once per service,
+found inside the chat region and clicked where it actually is
+(``_click_profile_element``).
 
 Every one of those calibrations belongs to an *agent slot*
 (:mod:`agentclip.screen.slot`), not to the screen: MASTER is the chat the
@@ -102,7 +103,6 @@ from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.busy import BusyProbe, BusyState, probe_busy
 from agentclip.screen.capture import CaptureError, RegionImage, capture_region
-from agentclip.screen.element import CalibratedElement, probe_element
 from agentclip.screen.focus import (
     click_region,
     focus_window,
@@ -179,16 +179,19 @@ def _panel_id(view_id: str) -> str:
 
 
 class ElementClick(Enum):
-    """Outcome of the verify-then-click primitive (``_click_calibrated_element``).
+    """Outcome of the find-then-click primitive (``_click_profile_element``).
 
-    Three states, not a bool: "the element no longer looks like its snapshot"
-    (nothing was clicked - the user must recalibrate) is a different story to
-    tell than "we clicked and the OS refused" (Windows-only input).
+    Four states, not a bool, because the three failures are three different
+    things to tell the user: nothing to look for or nowhere to look
+    (NOT_CALIBRATED - go capture it), it is simply not on screen (MISMATCH -
+    nothing was clicked, and clicking blind is never the answer), or we clicked
+    and the OS refused (NOT_CLICKED - Windows-only input).
     """
 
     CLICKED = "clicked"
-    MISMATCH = "mismatch"  # verified against the snapshot and refused to click
-    NOT_CLICKED = "not_clicked"  # verified fine, but the click did not land
+    MISMATCH = "mismatch"  # not on screen right now; refused to click
+    NOT_CLICKED = "not_clicked"  # found fine, but the click did not land
+    NOT_CALIBRATED = "not_calibrated"  # no chat region drawn, or nothing captured
 
 
 def _fmt_k(chars: int) -> str:
@@ -471,14 +474,6 @@ class MainScreen(Screen[None]):
     @_stale_region.setter
     def _stale_region(self, value: ScreenRegion | None) -> None:
         self._slots[AgentSlot.MASTER].stale_region = value
-
-    @property
-    def _newchat(self) -> CalibratedElement | None:
-        return self._slots[AgentSlot.MASTER].new_chat
-
-    @_newchat.setter
-    def _newchat(self, value: CalibratedElement | None) -> None:
-        self._slots[AgentSlot.MASTER].new_chat = value
 
     # -- layout ---------------------------------------------------------------
 
@@ -1331,6 +1326,7 @@ class MainScreen(Screen[None]):
         TemplateKind.CHATBOX_INITIAL,
         TemplateKind.CHATBOX_ONGOING,
         TemplateKind.COPY,
+        TemplateKind.NEW_CHAT,
     )
 
     def _paint_profile(self) -> None:
@@ -1814,62 +1810,42 @@ class MainScreen(Screen[None]):
                     return True
         return False
 
-    # -- calibrated elements: the reusable verify-then-click -------------------
+    # -- profile elements: the reusable find-then-click -------------------------
 
-    async def _click_calibrated_element(
-        self, element: CalibratedElement, *, settle_s: float = _ELEMENT_CLICK_SETTLE_S
+    async def _click_profile_element(
+        self, slot: AgentSlot, kind: TemplateKind, *, settle_s: float = _ELEMENT_CLICK_SETTLE_S
     ) -> ElementClick:
-        """Check the element still looks like its calibration snapshot, and only
-        then click its centre.
+        """Find ``kind`` inside ``slot``'s chat region right now, and click it.
 
-        The primitive every programmatic click on a ``CalibratedElement`` goes
-        through (the new-chat button today, the sub-agent slots later): a
-        browser that re-laid itself out, scrolled, or opened a dialog would
-        otherwise get a click wherever those pixels used to be. Refusing is
+        The primitive every programmatic click on a service appearance goes
+        through. It replaces "click where those pixels used to be" with "click
+        where they *are*", which is both safer and the reason the browser may
+        move: a page that re-laid itself out, scrolled, or opened a dialog
+        simply reads as not-on-screen and gets no click at all. Refusing is
         always the safe answer - the user can click it themselves.
         """
-        if not await asyncio.to_thread(probe_element, element):
+        if self._slots[slot].chat_region is None or not self._active_profile().has(kind):
+            return ElementClick.NOT_CALIBRATED
+        found = await self._find(kind, slot)
+        if found is None:
             return ElementClick.MISMATCH
-        clicked = await asyncio.to_thread(click_region, element.region, settle_s=settle_s)
+        clicked = await asyncio.to_thread(click_region, found, settle_s=settle_s)
         return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
 
     # -- the browser's new-chat button ------------------------------------------
 
     @on(Button.Pressed, "#set-newchat-btn")
-    def _on_set_newchat(self, event: Button.Pressed) -> None:
+    def _on_capture_newchat(self, event: Button.Pressed) -> None:
         event.stop()
-        if self._refuse_second_picker():
-            return
-        self.run_worker(self._pick_newchat(), group="regionpick", exclusive=True)
+        self._start_capture(TemplateKind.NEW_CHAT)
 
-    async def _pick_newchat(self) -> None:
-        """Draw-a-box overlay around the browser's "new chat" control, snapshotted
-        so every later click can verify it is still that control."""
-        try:
-            region = await asyncio.to_thread(
-                pick_region,
-                prompt=self._slot_prompt(
-                    "Drag a TIGHT box around the browser's NEW CHAT button · Esc cancels"
-                ),
-            )
-        except ScreenPickError as exc:
-            self.notify(str(exc), severity="error")
-            return
-        finally:
-            self._picker_open = False
-        if region is None:
-            self.notify("new-chat button unchanged (selection cancelled)")
-            return
-        try:
-            template = await asyncio.to_thread(capture_region, region)
-        except CaptureError as exc:
-            self.notify(f"could not capture the new-chat button: {exc}", severity="error")
-            return
-        self.calibrating.new_chat = CalibratedElement(region, template)
+    def _newchat_status(self, text: str) -> None:
+        """Repaint the new-chat button's status line, keeping its captured size
+        in front of whatever the last click attempt has to report."""
         with suppress(NoMatches):
-            self.sidebar.update_newchat(f"{region.describe()} · set")
-        self.notify(f"new-chat button calibrated ({region.describe()})")
-        self._after_calibration()
+            template = self._active_profile().get(TemplateKind.NEW_CHAT)
+            size = f"{template.width}×{template.height} · " if template is not None else ""
+            self.sidebar.update_template(TemplateKind.NEW_CHAT, f"{size}{text}")
 
     @on(Button.Pressed, "#newchat-btn")
     def _on_newchat(self, event: Button.Pressed) -> None:
@@ -1879,40 +1855,36 @@ class MainScreen(Screen[None]):
     async def _new_browser_chat(self) -> None:
         """Click the browser's new-chat button, then hand focus back here.
 
-        The *calibrating* slot's button, so the user can test either window's
-        control from the same place the sidebar is pointed at. It never moves
-        the live slot - that is ``start_browser_chat``'s job alone.
+        The *calibrating* slot's window, so the user can test either one from
+        the same place the sidebar is pointed at. It never moves the live slot -
+        that is ``start_browser_chat``'s job alone.
 
-        Verified first: on a mismatch nothing is clicked and the user is told to
-        recalibrate, because the alternative is a blind click somewhere in a
-        browser window."""
-        element = self.calibrating.new_chat
-        if element is None:
+        Located first: if the button is not on screen nothing is clicked, because
+        the alternative is a blind click somewhere in a browser window."""
+        outcome = await self._click_profile_element(self._calibrating, TemplateKind.NEW_CHAT)
+        if outcome is ElementClick.NOT_CALIBRATED:
             self.notify(
-                'calibrate the browser\'s new-chat button first ("Set new-chat button...")',
+                'capture the browser\'s new-chat button first ("Capture new-chat button...") '
+                "and draw the chat window it lives in",
                 severity="warning",
             )
             return
-        outcome = await self._click_calibrated_element(element)
         if outcome is ElementClick.MISMATCH:
             self.notify(
-                "the new-chat button no longer looks like its calibration - nothing "
-                "was clicked; redraw it",
+                "the new-chat button is not on screen in the chat window - nothing "
+                "was clicked; recapture it or redraw the window",
                 severity="warning",
             )
-            with suppress(NoMatches):
-                self.sidebar.update_newchat(f"{element.describe()} · mismatch - not clicked")
+            self._newchat_status("not on screen - not clicked")
             return
         if outcome is ElementClick.NOT_CLICKED:
             self.notify(
                 "the new-chat click did not land (it is Windows-only) - start the chat yourself",
                 severity="warning",
             )
-            with suppress(NoMatches):
-                self.sidebar.update_newchat(f"{element.describe()} · click did not land")
+            self._newchat_status("click did not land")
             return
-        with suppress(NoMatches):
-            self.sidebar.update_newchat(f"{element.describe()} · clicked")
+        self._newchat_status("clicked")
         self.notify("new browser chat opened")
         # Same beat as the auto-copy flow: let the click register before focus
         # moves away, then bring the user back to AgentClip.
@@ -1954,18 +1926,17 @@ class MainScreen(Screen[None]):
         master chat would corrupt that conversation irrecoverably, so every
         failure here is a refusal rather than a best effort.
         """
-        element = self._slots[slot].new_chat
-        if element is None:
+        outcome = await self._click_profile_element(slot, TemplateKind.NEW_CHAT)
+        if outcome is ElementClick.NOT_CALIBRATED:
             self.notify(
                 f"the {slot.label} chat's new-chat button is not calibrated - "
                 "nothing was clicked",
                 severity="error",
             )
             return False
-        outcome = await self._click_calibrated_element(element)
         if outcome is not ElementClick.CLICKED:
             reason = (
-                "no longer looks like its calibration"
+                "is not on screen"
                 if outcome is ElementClick.MISMATCH
                 else "could not be clicked (it is Windows-only)"
             )

@@ -9,8 +9,8 @@ unlocks again whenever the app is waiting for a new session's first message.
 
 The widget is dumb on purpose: it holds no session state, exposes ``service``
 (the chosen preset key), ``set_locked``, ``refresh_services``, ``update_region``,
-``update_template``, ``update_busy``, ``update_idle``, ``update_newchat``, ``show_slot`` and the ``show_paste_flash``/``hide_paste_flash``
-pair; MainScreen owns every bit of routing, including the "Edit services..."
+``update_template``, ``update_busy``, ``update_idle``, ``show_slot`` and the
+``show_paste_flash``/``hide_paste_flash`` pair; MainScreen owns every bit of routing, including the "Edit services..."
 button, the busy/idle polling loop, the "Set copy button..." picker +
 auto-copy-click flow and the "New browser chat" action. The paste flash is the
 one animated thing here - a deliberately obnoxious blinking banner that nags the
@@ -69,7 +69,6 @@ TEMPLATE_UNSET = "not captured"
 BUSY_UNSET = "not calibrated - set while the model is generating"
 IDLE_UNSET = "not calibrated - set while the chat is idle"
 STALE_UNSET = "not set - staleness check disabled"
-NEWCHAT_UNSET = "not set - calibrate the browser's new-chat button"
 # What a detector reads before (or instead of) a live probe verdict: fresh from
 # the picker, and after a slot switch repaints from stored state.
 BUSY_CALIBRATED = "calibrated - watching"
@@ -204,8 +203,8 @@ class Sidebar(Vertical):
         yield Button("Capture copy button...", id="set-copy-btn")
         yield Static(Text(TEMPLATE_UNSET), id="side-copy", classes="side-status")
         yield Static(Text("NEW CHAT"), classes="side-title")
-        yield Button("Set new-chat button...", id="set-newchat-btn")
-        yield Static(Text(NEWCHAT_UNSET), id="side-newchat", classes="side-status")
+        yield Button("Capture new-chat button...", id="set-newchat-btn")
+        yield Static(Text(TEMPLATE_UNSET), id="side-newchat", classes="side-status")
         yield Button("New browser chat", id="newchat-btn")
         yield Static(Text(_HINT), classes="side-hint")
 
@@ -296,9 +295,6 @@ class Sidebar(Vertical):
         self.update_busy(BUSY_CALIBRATED if cal.busy_baseline is not None else BUSY_UNSET)
         self.update_idle(IDLE_CALIBRATED if cal.idle_baseline is not None else IDLE_UNSET)
         self.update_stale(STALE_CALIBRATED if cal.stale_region is not None else STALE_UNSET)
-        self.update_newchat(
-            f"{cal.new_chat.describe()} · set" if cal.new_chat is not None else NEWCHAT_UNSET
-        )
 
     def update_slot_note(self, note: str) -> None:
         """Repaint just the readiness line (after a single calibration landed)."""
@@ -372,14 +368,6 @@ class Sidebar(Vertical):
 
     def _blink_paste_flash(self) -> None:
         self.query_one("#side-paste-flash", Static).toggle_class("flash-alt")
-
-    # -- the new-chat button ------------------------------------------------------
-
-    def update_newchat(self, text: str) -> None:
-        """Repaint the new-chat readout (display only; MainScreen owns the
-        calibrated element and the "New browser chat" action - formats the text
-        as "set", "clicked", "mismatch", or the not-set default)."""
-        self.query_one("#side-newchat", Static).update(Text(text))
 
     def refresh_services(self, config: Config | None = None) -> None:
         """Rebuild the options after the services table changed (service editor hook).

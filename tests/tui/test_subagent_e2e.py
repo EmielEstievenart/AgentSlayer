@@ -37,6 +37,7 @@ from agentclip.config import load_config
 from agentclip.engine.engine import Engine
 from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import RegionImage
+from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
@@ -132,7 +133,19 @@ def patched(monkeypatch: pytest.MonkeyPatch, trace: list[tuple[str, object]]) ->
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "_NEW_CHAT_SETTLE_S", 0.01)
     monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.05)
-    monkeypatch.setattr(main_mod, "probe_element", lambda element: True)
+
+    # Stand-in for the in-region appearance search (screen.template's job,
+    # tested there): each slot resolves the SERVICE's captured new-chat button
+    # to its own window's copy of it.
+    newchat_at = {AgentSlot.MASTER: MASTER_NEWCHAT, AgentSlot.SUBAGENT: SUB_NEWCHAT}
+
+    async def fake_find(self, kind, slot=None, *, scene=None):
+        cal = self._slots[slot] if slot is not None else self.live
+        if cal.chat_region is None or not self._active_profile().has(kind):
+            return None
+        return newchat_at[cal.slot] if kind is TemplateKind.NEW_CHAT else cal.chat_region
+
+    monkeypatch.setattr(MainScreen, "_find", fake_find)
     monkeypatch.setattr(main_mod, "probe_busy", lambda *a: BusyProbe(BusyState.MATCH, 0.0))
     monkeypatch.setattr(main_mod, "send_paste", lambda: True)
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)

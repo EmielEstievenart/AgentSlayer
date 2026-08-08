@@ -30,9 +30,11 @@ from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.capture import RegionImage
+from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import SLOT_NOTE_MASTER, SLOT_NOTE_READY
 
 MASTER_REGION = ScreenRegion(10, 20, 300, 400)
@@ -88,8 +90,24 @@ def _patch_screen(monkeypatch: pytest.MonkeyPatch) -> _Picker:
     picker = _Picker()
     monkeypatch.setattr(main_mod, "pick_region", picker)
     monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "probe_element", lambda element: True)
     monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: True)
+
+    async def fake_find(
+        self: MainScreen,
+        kind: TemplateKind,
+        slot: AgentSlot | None = None,
+        *,
+        scene: RegionImage | None = None,
+    ) -> ScreenRegion | None:
+        """Stand-in for the in-region appearance search: every captured
+        appearance is "found" filling the searched slot's own window, which is
+        what makes a shared capture resolve to two different rectangles."""
+        cal = self._slots[slot] if slot is not None else self.live
+        if cal.chat_region is None or not self._active_profile().has(kind):
+            return None
+        return cal.chat_region
+
+    monkeypatch.setattr(MainScreen, "_find", fake_find)
     return picker
 
 
@@ -169,11 +187,12 @@ async def test_switching_the_slot_repaints_every_readout(
         await _calibrate(app, pilot, picker, "#set-newchat-btn", MASTER_REGION)
         assert MASTER_REGION.describe() in _label(app, "#side-region")
 
-        # The sub-agent slot is empty, so its column reads as uncalibrated...
+        # The sub-agent slot has no window drawn, so the per-slot rows read as
+        # unset - but the captured appearances are the service's and stay put.
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await pilot.pause()
         assert "not set" in _label(app, "#side-region")
-        assert "not set" in _label(app, "#side-newchat")
+        assert "captured" in _label(app, "#side-newchat")
 
         # The copy button is the SERVICE's appearance, not this slot's, so it
         # reads the same from either slot - that sharing is the point.
@@ -184,7 +203,7 @@ async def test_switching_the_slot_repaints_every_readout(
         await _select_slot(app, pilot, AgentSlot.MASTER)
         await pilot.pause()
         assert MASTER_REGION.describe() in _label(app, "#side-region")
-        assert MASTER_REGION.describe() in _label(app, "#side-newchat")
+        assert "captured" in _label(app, "#side-newchat")
         assert "captured" in _label(app, "#side-copy")
         assert _label(app, "#side-slot-note") == SLOT_NOTE_MASTER
 
@@ -204,10 +223,12 @@ async def test_the_note_reports_what_delegation_is_still_missing(
         assert "new-chat button" in note
         assert "copy button" in note
 
+        # The window has to be drawn first: an appearance with nowhere to be
+        # searched for is not yet a usable piece of the slot.
+        await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
         assert "new-chat button" not in _label(app, "#side-slot-note")
 
-        await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
         await _wait_for(
@@ -238,12 +259,7 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
         assert "SUB-AGENT window" not in picker.prompts[-1]
 
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
-        for button in (
-            "#set-region-btn",
-            "#set-busy-btn",
-            "#set-idle-btn",
-            "#set-newchat-btn",
-        ):
+        for button in ("#set-region-btn", "#set-busy-btn", "#set-idle-btn"):
             await _calibrate(app, pilot, picker, button, SUB_REGION)
             assert "SUB-AGENT window" in picker.prompts[-1], button
 
@@ -269,7 +285,7 @@ async def test_the_slot_picker_is_never_locked_by_a_session(
 
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
-        assert main._slots[AgentSlot.SUBAGENT].new_chat is not None
+        assert main._active_profile().has(TemplateKind.NEW_CHAT)
 
 
 async def test_new_keeps_both_slots_and_sends_the_pointers_home(
@@ -300,7 +316,7 @@ async def test_new_keeps_both_slots_and_sends_the_pointers_home(
 
         assert main._slots[AgentSlot.MASTER].chat_region == MASTER_REGION
         assert main._slots[AgentSlot.SUBAGENT].chat_region == SUB_REGION
-        assert main._slots[AgentSlot.SUBAGENT].new_chat is not None
+        assert main._active_profile().has(TemplateKind.NEW_CHAT)
         assert main._calibrating is AgentSlot.MASTER
         assert main._live is AgentSlot.MASTER
         assert main.sidebar.slot_select.value == str(AgentSlot.MASTER)
@@ -323,8 +339,8 @@ async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_REGION)
         await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
         await _wait_for(pilot, lambda: main.delegation_available(), "sub-agent slot ready")
@@ -340,7 +356,9 @@ async def test_the_new_browser_chat_button_targets_the_calibrating_slot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The button is how the user *tests* a calibration, so it follows the
-    sidebar - and it never moves the live slot."""
+    sidebar - and it never moves the live slot. The appearance is the service's
+    (captured once), but it is searched for in the CALIBRATING slot's window,
+    which is what sends the click to the sub-agent's."""
     picker = _patch_screen(monkeypatch)
     clicks: list[ScreenRegion] = []
     monkeypatch.setattr(
@@ -352,9 +370,10 @@ async def test_the_new_browser_chat_button_targets_the_calibrating_slot(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
+        await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_REGION)
         await _calibrate(app, pilot, picker, "#set-newchat-btn", MASTER_REGION)
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
-        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
 
         await _press(app, pilot, "#newchat-btn")
         await _wait_for(pilot, lambda: clicks == [SUB_REGION], "the sub-agent's button clicked")

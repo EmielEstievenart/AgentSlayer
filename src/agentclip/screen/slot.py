@@ -32,7 +32,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from agentclip.screen.capture import RegionImage
-from agentclip.screen.element import CalibratedElement
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
 
@@ -69,18 +68,16 @@ class SlotCalibration:
     once for when the windows themselves are gone.
 
     The busy/idle finish detectors are region + baseline pairs rather than
-    ``CalibratedElement``s because their comparison is the *inverse* of that
-    type's: the busy baseline is captured while the model generates, so a match
-    means "still going". The stale detector is a bare region with no stored
-    baseline at all - its tracker's first polled frame IS the baseline, and
-    every later frame is compared to the one before it. The new-chat button is
-    a genuine "is this still the thing I was pointed at?" question, hence
-    ``CalibratedElement``.
+    fixed regions because their comparison is the *inverse* of a search: the
+    busy baseline is captured while the model generates, so a match means
+    "still going". The stale detector is a bare region with no stored baseline
+    at all - its tracker's first polled frame IS the baseline, and every later
+    frame is compared to the one before it.
 
-    The chat input boxes used to live here too. They don't any more: which
-    layout is on screen is answered by searching the SERVICE's captured
-    appearance inside ``chat_region`` (screen.profile), so the only thing that
-    is per window is the box the user drew.
+    The chat input boxes and the new-chat button used to live here too. They
+    don't any more: where they are is answered by searching the SERVICE's
+    captured appearance inside ``chat_region`` (screen.profile), so the only
+    thing that is per window is the box the user drew.
     """
 
     slot: AgentSlot = AgentSlot.MASTER
@@ -98,8 +95,6 @@ class SlotCalibration:
     # stops changing frame to frame the model is done. No baseline stored -
     # the poller's tracker keeps its own previous frame.
     stale_region: ScreenRegion | None = None
-    # The browser's "new chat" control, verified before every click.
-    new_chat: CalibratedElement | None = None
 
     def clear(self) -> None:
         """Forget every calibration. The slot identity stays."""
@@ -109,7 +104,6 @@ class SlotCalibration:
         self.idle_region = None
         self.idle_baseline = None
         self.stale_region = None
-        self.new_chat = None
 
     @property
     def can_paste(self) -> bool:
@@ -141,13 +135,15 @@ class SlotCalibration:
 # captured appearance for free.
 
 
-def can_copy(cal: SlotCalibration, profile: ServiceProfile) -> bool:
-    """Can the reply be harvested without the user clicking anything?
+def _findable(cal: SlotCalibration, profile: ServiceProfile, kind: TemplateKind) -> bool:
+    """Can ``kind`` be located in this slot? Both halves are needed: a window
+    to search in, and a captured appearance to search for."""
+    return cal.chat_region is not None and profile.has(kind)
 
-    Both halves: a window to search (the copy icon is hunted inside the chat
-    region) and a captured icon to search for.
-    """
-    return cal.chat_region is not None and profile.has(TemplateKind.COPY)
+
+def can_copy(cal: SlotCalibration, profile: ServiceProfile) -> bool:
+    """Can the reply be harvested without the user clicking anything?"""
+    return _findable(cal, profile, TemplateKind.COPY)
 
 
 def can_delegate(cal: SlotCalibration, profile: ServiceProfile) -> bool:
@@ -156,7 +152,12 @@ def can_delegate(cal: SlotCalibration, profile: ServiceProfile) -> bool:
     All four, deliberately: a fresh chat to run in, somewhere to paste, a way
     to know the reply is done, and a way to copy it back out.
     """
-    return cal.new_chat is not None and cal.can_paste and cal.can_finish and can_copy(cal, profile)
+    return (
+        _findable(cal, profile, TemplateKind.NEW_CHAT)
+        and cal.can_paste
+        and cal.can_finish
+        and can_copy(cal, profile)
+    )
 
 
 def missing(cal: SlotCalibration, profile: ServiceProfile) -> tuple[str, ...]:
@@ -171,7 +172,7 @@ def missing(cal: SlotCalibration, profile: ServiceProfile) -> tuple[str, ...]:
         gaps.append(MISSING_FINISH)
     if not can_copy(cal, profile):
         gaps.append(MISSING_COPY)
-    if cal.new_chat is None:
+    if not _findable(cal, profile, TemplateKind.NEW_CHAT):
         gaps.append(MISSING_NEWCHAT)
     return tuple(gaps)
 

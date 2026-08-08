@@ -377,7 +377,10 @@ async def test_one_handler_serves_every_capture_button(
             )
 
         assert main._active_profile().captured == tuple(TemplateKind)
-        assert "6/6 captured" in _label(app, "#side-profile-note")
+        # The block repaints after the disk write, which is off the event loop.
+        await _wait_for(
+            pilot, lambda: "6/6 captured" in _label(app, "#side-profile-note"), "the block repainted"
+        )
         assert main._selected_service() in _label(app, "#side-profile-title")
 
 

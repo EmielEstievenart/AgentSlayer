@@ -20,6 +20,7 @@ from agentclip.config import (
     DEFAULT_THEME,
     Config,
     default_global_config_path,
+    default_profile_dir,
     save_services,
     save_theme,
 )
@@ -402,6 +403,7 @@ class AgentClipApp(App[None]):
         engine_factory: Callable[[EngineRequest], Engine],
         project_root: Path,
         global_config_path: Path | None = None,
+        profile_root: Path | None = None,
     ) -> None:
         super().__init__()
         self.app_config = config
@@ -413,6 +415,13 @@ class AgentClipApp(App[None]):
         # path so they never touch the user's actual config.
         self._global_config_path = (
             global_config_path if global_config_path is not None else default_global_config_path()
+        )
+        # Where per-service appearance profiles live (screen.profile_store).
+        # Same shape and same reason as global_config_path: a real default the
+        # app run uses, overridable so no test ever writes into (or reads from)
+        # the user's captured templates.
+        self.profile_root = (
+            profile_root if profile_root is not None else default_profile_dir()
         )
         self.main_screen: MainScreen | None = None
 
@@ -426,7 +435,11 @@ class AgentClipApp(App[None]):
         self.theme = wanted if wanted in self.available_themes else DEFAULT_THEME
 
         self.main_screen = MainScreen(
-            self.app_config, self.provider, self.engine_factory, self.project_root
+            self.app_config,
+            self.provider,
+            self.engine_factory,
+            self.project_root,
+            self.profile_root,
         )
         self.push_screen(self.main_screen)
         for warning in self.app_config.warnings:

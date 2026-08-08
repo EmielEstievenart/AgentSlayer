@@ -111,6 +111,8 @@ from agentclip.screen.focus import (
 from agentclip.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
 from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.picker import ScreenPickError, pick_region
+from agentclip.screen.profile import ServiceProfile
+from agentclip.screen.profile_store import load_profile
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, SlotCalibration, new_slots
 from agentclip.screen.stale import StaleProbe, StaleState, StaleTracker
@@ -305,11 +307,16 @@ class MainScreen(Screen[None]):
         provider: ClipboardProvider,
         engine_factory: Callable[[EngineRequest], Engine],
         project_root: Path,
+        profile_root: Path,
     ) -> None:
         super().__init__()
         self._config = config
         self._provider = provider
         self._project_root = project_root
+        # Where each service's captured appearances live on disk, and the
+        # per-run cache of the ones already read back (see ``_profile``).
+        self._profile_root = profile_root
+        self._profiles: dict[str, ServiceProfile] = {}
         self._self_writes = SelfWriteSet()
         self._watch_worker: Worker[None] | None = None
         self._snap: StatusSnapshot | None = None  # mirrors SessionView.snapshot (read by tests)
@@ -1110,6 +1117,32 @@ class MainScreen(Screen[None]):
         from here at poller start: streaming cadence is a property of the
         service being driven, not of AgentClip."""
         return self._config.services.get(self._selected_service()) or self._config.preset()
+
+    # -- service profiles (what the service LOOKS like) ------------------------
+
+    def _profile(self, key: str) -> ServiceProfile:
+        """``key``'s captured appearances, read from disk once per app run.
+
+        Cached because a profile is a handful of decoded PNGs plus their anchor
+        tables, and every capture button, every detector restart and every
+        readiness question asks for it again. ``load_profile`` never raises, so
+        an unreadable profile simply caches as an empty one.
+        """
+        profile = self._profiles.get(key)
+        if profile is None:
+            profile = load_profile(self._profile_root, key)
+            self._profiles[key] = profile
+        return profile
+
+    def _active_profile(self) -> ServiceProfile:
+        """The profile of the service currently being driven.
+
+        Resolved exactly like ``_active_preset``: through the sidebar's picker,
+        which a running session locks to that session's service - so mid-session
+        this is the session's profile and between sessions it is whatever the
+        user has selected to calibrate against.
+        """
+        return self._profile(self._selected_service())
 
     # -- sidebar --------------------------------------------------------------
 

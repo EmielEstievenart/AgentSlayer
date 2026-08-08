@@ -33,6 +33,7 @@ from enum import StrEnum
 
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.element import CalibratedElement
+from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
 
 
@@ -97,10 +98,6 @@ class SlotCalibration:
     # stops changing frame to frame the model is done. No baseline stored -
     # the poller's tracker keeps its own previous frame.
     stale_region: ScreenRegion | None = None
-    # One copy-button icon: the click target and the template searched for in a
-    # vertical band when the newest response's button has moved.
-    copy_region: ScreenRegion | None = None
-    copy_template: RegionImage | None = None
     # The browser's "new chat" control, verified before every click.
     new_chat: CalibratedElement | None = None
 
@@ -112,8 +109,6 @@ class SlotCalibration:
         self.idle_region = None
         self.idle_baseline = None
         self.stale_region = None
-        self.copy_region = None
-        self.copy_template = None
         self.new_chat = None
 
     @property
@@ -137,35 +132,48 @@ class SlotCalibration:
             or self.stale_region is not None
         )
 
-    @property
-    def can_copy(self) -> bool:
-        """Can the reply be harvested without the user clicking anything?"""
-        return self.copy_template is not None
 
-    @property
-    def can_delegate(self) -> bool:
-        """Is this slot ready to host a full unattended sub-agent run?
+# Readiness is no longer a property of the slot alone: half the answer is what
+# the SERVICE looks like (the copy button today, more of it shortly), and that
+# lives in a ServiceProfile shared by both slots. So the rules move out of the
+# dataclass and become functions of the pair - which also keeps them honest
+# about the fact that pointing a second slot at the same service inherits every
+# captured appearance for free.
 
-        All four, deliberately: a fresh chat to run in, somewhere to paste, a way
-        to know the reply is done, and a way to copy it back out.
-        """
-        return self.new_chat is not None and self.can_paste and self.can_finish and self.can_copy
 
-    def missing(self) -> tuple[str, ...]:
-        """The gaps between this slot and ``can_delegate``, in calibration order.
+def can_copy(cal: SlotCalibration, profile: ServiceProfile) -> bool:
+    """Can the reply be harvested without the user clicking anything?
 
-        Empty exactly when ``can_delegate`` is True.
-        """
-        gaps: list[str] = []
-        if not self.can_paste:
-            gaps.append(MISSING_CHATBOX)
-        if not self.can_finish:
-            gaps.append(MISSING_FINISH)
-        if not self.can_copy:
-            gaps.append(MISSING_COPY)
-        if self.new_chat is None:
-            gaps.append(MISSING_NEWCHAT)
-        return tuple(gaps)
+    Both halves: a window to search (the copy icon is hunted inside the chat
+    region) and a captured icon to search for.
+    """
+    return cal.chat_region is not None and profile.has(TemplateKind.COPY)
+
+
+def can_delegate(cal: SlotCalibration, profile: ServiceProfile) -> bool:
+    """Is this slot ready to host a full unattended sub-agent run?
+
+    All four, deliberately: a fresh chat to run in, somewhere to paste, a way
+    to know the reply is done, and a way to copy it back out.
+    """
+    return cal.new_chat is not None and cal.can_paste and cal.can_finish and can_copy(cal, profile)
+
+
+def missing(cal: SlotCalibration, profile: ServiceProfile) -> tuple[str, ...]:
+    """The gaps between this slot and ``can_delegate``, in calibration order.
+
+    Empty exactly when ``can_delegate`` is True.
+    """
+    gaps: list[str] = []
+    if not cal.can_paste:
+        gaps.append(MISSING_CHATBOX)
+    if not cal.can_finish:
+        gaps.append(MISSING_FINISH)
+    if not can_copy(cal, profile):
+        gaps.append(MISSING_COPY)
+    if cal.new_chat is None:
+        gaps.append(MISSING_NEWCHAT)
+    return tuple(gaps)
 
 
 def new_slots() -> dict[AgentSlot, SlotCalibration]:

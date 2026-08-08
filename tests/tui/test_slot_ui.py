@@ -175,15 +175,17 @@ async def test_switching_the_slot_repaints_every_readout(
         assert "not set" in _label(app, "#side-region")
         assert "not set" in _label(app, "#side-newchat")
 
+        # The copy button is the SERVICE's appearance, not this slot's, so it
+        # reads the same from either slot - that sharing is the point.
         await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
-        assert SUB_REGION.describe() in _label(app, "#side-copy")
+        assert "captured" in _label(app, "#side-copy")
 
         # ...and switching back restores the master's, from stored state.
         await _select_slot(app, pilot, AgentSlot.MASTER)
         await pilot.pause()
         assert MASTER_REGION.describe() in _label(app, "#side-region")
         assert MASTER_REGION.describe() in _label(app, "#side-newchat")
-        assert "not set" in _label(app, "#side-copy")
+        assert "captured" in _label(app, "#side-copy")
         assert _label(app, "#side-slot-note") == SLOT_NOTE_MASTER
 
 
@@ -220,7 +222,11 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Both slots share the picker code, so the prompt is the only thing that
-    tells the user which browser window to point at."""
+    tells the user which browser window to point at.
+
+    Only the per-slot pickers say it: capturing an appearance is a question
+    about the SERVICE, and the answer is the same whichever window it is drawn
+    in - a slot prefix there would be a lie."""
     picker = _patch_screen(monkeypatch)
     app = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
@@ -236,7 +242,6 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
             "#set-region-btn",
             "#set-busy-btn",
             "#set-idle-btn",
-            "#set-copy-btn",
             "#set-newchat-btn",
         ):
             await _calibrate(app, pilot, picker, button, SUB_REGION)

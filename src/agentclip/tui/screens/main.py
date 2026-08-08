@@ -117,12 +117,19 @@ from agentclip.screen.picker import ScreenPickError, pick_region
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.profile_store import ProfileStoreError, load_profile, save_template
 from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import AgentSlot, SlotCalibration, new_slots
+from agentclip.screen.slot import (
+    AgentSlot,
+    SlotCalibration,
+    can_delegate,
+    missing,
+    new_slots,
+)
 from agentclip.screen.stale import StaleProbe, StaleState, StaleTracker
 from agentclip.screen.template import (
-    TemplateMatch,
+    RegionMatch,
+    Template,
     find_in_region,
-    find_lowest_match,
+    find_lowest_in_region,
     match_rect,
 )
 from agentclip.tui.messages import BusyProbed, ClipboardCaptured, IdleProbed, StaleProbed
@@ -140,6 +147,7 @@ from agentclip.tui.widgets.sidebar import (
     STALE_CALIBRATED,
     TEMPLATE_UNSET,
     Sidebar,
+    slot_note,
 )
 from agentclip.tui.widgets.statusbar import StatusBar
 from agentclip.tui.widgets.transcript import TranscriptPanel
@@ -465,22 +473,6 @@ class MainScreen(Screen[None]):
         self._slots[AgentSlot.MASTER].stale_region = value
 
     @property
-    def _copy_region(self) -> ScreenRegion | None:
-        return self._slots[AgentSlot.MASTER].copy_region
-
-    @_copy_region.setter
-    def _copy_region(self, value: ScreenRegion | None) -> None:
-        self._slots[AgentSlot.MASTER].copy_region = value
-
-    @property
-    def _copy_template(self) -> RegionImage | None:
-        return self._slots[AgentSlot.MASTER].copy_template
-
-    @_copy_template.setter
-    def _copy_template(self, value: RegionImage | None) -> None:
-        self._slots[AgentSlot.MASTER].copy_template = value
-
-    @property
     def _newchat(self) -> CalibratedElement | None:
         return self._slots[AgentSlot.MASTER].new_chat
 
@@ -667,11 +659,11 @@ class MainScreen(Screen[None]):
         self._live = AgentSlot.MASTER
         # Re-derive rather than clear: the sub-agent slot is still calibrated,
         # and _after_calibration's one-shot toast must not re-fire after /new.
-        self._delegation_ready = self._slots[AgentSlot.SUBAGENT].can_delegate
+        self._delegation_ready = self.delegation_available()
         self._reset_finish_trigger()
         self._start_detector_worker()
         with suppress(NoMatches):
-            self.sidebar.show_slot(self.calibrating)
+            self.sidebar.show_slot(self.calibrating, self._slot_note())
             self.sidebar.hide_paste_flash()
         with suppress(NoMatches):
             await self.transcript.clear_events()
@@ -1190,7 +1182,15 @@ class MainScreen(Screen[None]):
         message.stop()
         self._calibrating = message.slot
         with suppress(NoMatches):
-            self.sidebar.show_slot(self.calibrating)
+            self.sidebar.show_slot(self.calibrating, self._slot_note())
+
+    def _slot_note(self) -> str:
+        """The sidebar's readiness line for the slot being calibrated.
+
+        Composed here, not in the sidebar, because it takes both halves of the
+        answer: the slot's drawn window and the active service's appearances.
+        """
+        return slot_note(self.calibrating, self._active_profile())
 
     def _slot_prompt(self, prompt: str) -> str:
         """Both slots share the picker code, so the sub-agent's prompts have to
@@ -1204,9 +1204,9 @@ class MainScreen(Screen[None]):
         and tell the user once when the sub-agent slot becomes usable - the
         delegate tool is baked into the bootstrap, so it only reaches the model
         on the next /new."""
-        ready = self._slots[AgentSlot.SUBAGENT].can_delegate
+        ready = self.delegation_available()
         with suppress(NoMatches):
-            self.sidebar.update_slot_note(self.calibrating)
+            self.sidebar.update_slot_note(self._slot_note())
         if ready and not self._delegation_ready:
             self.notify("sub-agent slot ready - /new to give the model the delegate tool")
         self._delegation_ready = ready
@@ -1330,6 +1330,7 @@ class MainScreen(Screen[None]):
     _PROFILE_KINDS: tuple[TemplateKind, ...] = (
         TemplateKind.CHATBOX_INITIAL,
         TemplateKind.CHATBOX_ONGOING,
+        TemplateKind.COPY,
     )
 
     def _paint_profile(self) -> None:
@@ -1625,7 +1626,7 @@ class MainScreen(Screen[None]):
             self._copy_changed_streak = 0
             return
         self._copy_changed_streak += 1
-        if self._copy_changed_streak < 2 or self.live.copy_template is None:
+        if self._copy_changed_streak < 2 or not self._active_profile().has(TemplateKind.COPY):
             return
         self._copy_armed = False
         self._copy_changed_streak = 0
@@ -1667,154 +1668,98 @@ class MainScreen(Screen[None]):
         self._copy_armed = False
         self._copy_changed_streak = 0
 
-    # -- the copy-button region + auto-copy-click ------------------------------
+    # -- the copy button + auto-copy-click -------------------------------------
 
     @on(Button.Pressed, "#set-copy-btn")
-    def _on_set_copy_region(self, event: Button.Pressed) -> None:
+    def _on_capture_copy(self, event: Button.Pressed) -> None:
         event.stop()
-        if self._refuse_second_picker():
-            return
-        self.run_worker(self._pick_copy_region(), group="regionpick", exclusive=True)
+        self._start_capture(TemplateKind.COPY)
 
-    async def _pick_copy_region(self) -> None:
-        """Draw-a-box overlay around ONE copy-button icon; the drawn region is
-        both the click target and (via an immediate capture) the template the
-        auto-copy flow later searches a vertical band for."""
-        try:
-            region = await asyncio.to_thread(
-                pick_region,
-                prompt=self._slot_prompt(
-                    "Drag a TIGHT box around ONE copy button icon (pick the "
-                    "one under the last response, while the page is idle) · Esc cancels"
-                ),
-            )
-        except ScreenPickError as exc:
-            self.notify(str(exc), severity="error")
-            return
-        finally:
-            self._picker_open = False
-        if region is None:
-            self.notify("copy button unchanged (selection cancelled)")
-            return
-        try:
-            template = await asyncio.to_thread(capture_region, region)
-        except CaptureError as exc:
-            self.notify(f"could not capture the copy button: {exc}", severity="error")
-            return
-        self.calibrating.copy_region = region
-        self.calibrating.copy_template = template
+    def _copy_status(self, text: str) -> None:
+        """Repaint the copy button's status line, keeping its captured size in
+        front of whatever the flow has to report."""
         with suppress(NoMatches):
-            self.sidebar.update_copy(f"{region.describe()} · set")
-        hint = (
-            ""
-            if self.calibrating.chat_region is not None
-            else " - set a chat region too for a full-height scan"
-        )
-        self.notify(f"copy button set ({region.describe()}){hint}")
-        self._after_calibration()
+            template = self._active_profile().get(TemplateKind.COPY)
+            size = f"{template.width}×{template.height} · " if template is not None else ""
+            self.sidebar.update_template(TemplateKind.COPY, f"{size}{text}")
 
-    def _copy_search_band(self, copy_region: ScreenRegion, template: RegionImage) -> ScreenRegion:
-        """Same left/width as the copy region; the vertical span is the union
-        of the chat and copy regions when a chat region is drawn (the whole
-        transcript column), else just the copy region itself. Falls back to
-        the copy region alone if the union would still be shorter than the
-        template (a same-width band can never be narrower)."""
-        chat = self.live.chat_region
-        if chat is None:
-            return copy_region
-        top = min(chat.top, copy_region.top)
-        bottom = max(chat.top + chat.height, copy_region.top + copy_region.height)
-        height = bottom - top
-        if height < template.height:
-            return copy_region
-        return ScreenRegion(copy_region.left, top, copy_region.width, height)
-
-    def _hover_scan_for_copy(
-        self, band: ScreenRegion, template: RegionImage
-    ) -> TemplateMatch | None:
-        """Walk the real cursor up ``band`` and stop at the FIRST place the copy
-        icon appears, or None if it never does.
+    def _hover_scan_for_copy(self, region: ScreenRegion, template: Template) -> RegionMatch | None:
+        """Walk the real cursor up ``region`` and stop at the FIRST frame the
+        copy icon appears in, or None if it never does.
 
         Claude's chat only renders a response's copy button while the pointer is
         over that response, so the cheap static capture finds nothing there no
-        matter how well calibrated it is. Bottom-up (screen.hover picks the
+        matter how good the template is. Bottom-up (screen.hover picks the
         stops) because the newest response - the one we want - is at the bottom,
         so the usual answer is one or two stops in.
 
-        Blocking by design: a cursor move, a settle pause and a capture + band
+        Blocking by design: a cursor move, a settle pause and a capture + region
         scan per stop. Runs in a worker thread, never on the UI thread. Any
-        failure (unsupported platform, a capture that fails, a band that stops
-        fitting the template) ends the scan, which the caller reports the same
-        way as "not found" - a scan that cannot see is not a scan that found
-        nothing.
+        failure (unsupported platform, a capture that fails) ends the scan,
+        which the caller reports the same way as "not found" - a scan that
+        cannot see is not a scan that found nothing.
         """
-        for x, y in hover_scan_points(band):
+        for x, y in hover_scan_points(region):
             if not move_cursor(x, y):
                 return None
             time.sleep(_HOVER_STEP_DELAY_S)
             try:
-                match = find_lowest_match(template, capture_region(band))
-            except (CaptureError, ValueError):
+                scene = capture_region(region)
+            except CaptureError:
                 return None
+            match = find_lowest_in_region(
+                template, scene, max_diff=TemplateKind.COPY.max_diff
+            )
             if match is not None:
                 return match
         return None
 
     async def _auto_copy_flow(self) -> None:
         """Fired once by ``_evaluate_finish`` when the detectors agree reasoning
-        finished: focus the browser, snap the transcript to the bottom, then hunt
-        a vertical band for the newest (lowest) copy-button icon and click it -
-        the clipboard watcher ingests the resulting copy on its own."""
-        live = self.live
-        copy_region = live.copy_region
-        template = live.copy_template
-        if copy_region is None or template is None:
+        finished: focus the browser, snap the transcript to the bottom, then look
+        for the newest (lowest) copy-button icon anywhere in the chat region and
+        click it - the clipboard watcher ingests the resulting copy on its own.
+
+        The search is the whole chat region, not a same-width band beneath a
+        remembered icon: the icon appears once per response down the transcript,
+        and *lowest inside the window the user drew* is the same answer without
+        anyone having to remember a column.
+        """
+        region = self.live.chat_region
+        template = self._active_profile().get(TemplateKind.COPY)
+        if region is None or template is None:
             return
 
-        await self._click_after_response()  # the live chatbox, else the chat region
+        await self._click_after_response()  # the live chat box, else the chat region
         await asyncio.sleep(0.15)
 
-        scroll_target = live.chat_region or await self._chatbox_region() or copy_region
-        await asyncio.to_thread(scroll_region, scroll_target, -40)
+        await asyncio.to_thread(scroll_region, region, -40)
         await asyncio.sleep(0.4)  # let the page settle/render after the flick
 
-        band = self._copy_search_band(copy_region, template)
         try:
-            band_img = await asyncio.to_thread(capture_region, band)
+            scene = await asyncio.to_thread(capture_region, region)
         except CaptureError as exc:
-            self.notify(f"could not capture the copy-button band: {exc}", severity="error")
-            with suppress(NoMatches):
-                self.sidebar.update_copy(f"{copy_region.describe()} · capture failed")
+            self.notify(f"could not capture the chat region: {exc}", severity="error")
+            self._copy_status("capture failed")
             return
-        try:
-            match = find_lowest_match(template, band_img)
-        except ValueError as exc:
-            self.notify(f"copy-button search failed: {exc}", severity="error")
-            with suppress(NoMatches):
-                self.sidebar.update_copy(f"{copy_region.describe()} · search failed")
-            return
+        match = await asyncio.to_thread(
+            find_lowest_in_region, template, scene, max_diff=TemplateKind.COPY.max_diff
+        )
         if match is None:
             # Nothing in the static frame: the chat may only paint the icon
-            # under the pointer, so try again while hovering up the band.
-            with suppress(NoMatches):
-                self.sidebar.update_copy(f"{copy_region.describe()} · hover-scanning")
-            match = await asyncio.to_thread(self._hover_scan_for_copy, band, template)
+            # under the pointer, so try again while hovering up the region.
+            self._copy_status("hover-scanning")
+            match = await asyncio.to_thread(self._hover_scan_for_copy, region, template)
         if match is None:
             self.notify("copy button not found on screen", severity="warning")
-            with suppress(NoMatches):
-                self.sidebar.update_copy(f"{copy_region.describe()} · not found")
+            self._copy_status("not found")
             return
 
-        target = ScreenRegion(
-            copy_region.left, band.top + match.y_offset, copy_region.width, template.height
-        )
+        target = match_rect(region, template, match)
         clicked = await self._verified_copy_click(target)
         if clicked:
             self.notify(f"copy button clicked (diff {match.diff:.2f})")
-            with suppress(NoMatches):
-                self.sidebar.update_copy(
-                    f"{copy_region.describe()} · clicked (diff {match.diff:.2f})"
-                )
+            self._copy_status(f"clicked (diff {match.diff:.2f})")
             # The response is on its way to the clipboard - hand focus back to
             # AgentClip so the user watches the ingest here, not the browser. A
             # short beat first so the click registers before focus moves away.
@@ -1829,8 +1774,7 @@ class MainScreen(Screen[None]):
             "copy click did not take - click the response's copy button yourself",
             severity="warning",
         )
-        with suppress(NoMatches):
-            self.sidebar.update_copy(f"{copy_region.describe()} · click did not take")
+        self._copy_status("click did not take")
 
     # Small offsets from the matched rect, still inside a ~24 px icon.
     _COPY_CLICK_OFFSETS = ((0, 0), (-3, -3), (3, 3))
@@ -1986,7 +1930,7 @@ class MainScreen(Screen[None]):
         half-calibrated slot must read as unavailable rather than strand a
         sub-run halfway through.
         """
-        return self._slots[AgentSlot.SUBAGENT].can_delegate
+        return can_delegate(self._slots[AgentSlot.SUBAGENT], self._active_profile())
 
     def delegation_missing(self) -> tuple[str, ...]:
         """The calibrations still standing between here and ``can_delegate``.
@@ -1996,7 +1940,7 @@ class MainScreen(Screen[None]):
         the controller cannot import ``screen`` to ask, and should not have to
         know what a "new-chat button" is.
         """
-        return self._slots[AgentSlot.SUBAGENT].missing()
+        return missing(self._slots[AgentSlot.SUBAGENT], self._active_profile())
 
     async def start_browser_chat(self, slot: AgentSlot) -> bool:
         """Open a fresh browser chat in ``slot`` and make it the live one.

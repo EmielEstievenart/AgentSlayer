@@ -9,8 +9,7 @@ unlocks again whenever the app is waiting for a new session's first message.
 
 The widget is dumb on purpose: it holds no session state, exposes ``service``
 (the chosen preset key), ``set_locked``, ``refresh_services``, ``update_region``,
-``update_template``, ``update_busy``, ``update_idle``, ``update_copy``,
-``update_newchat``, ``show_slot`` and the ``show_paste_flash``/``hide_paste_flash``
+``update_template``, ``update_busy``, ``update_idle``, ``update_newchat``, ``show_slot`` and the ``show_paste_flash``/``hide_paste_flash``
 pair; MainScreen owns every bit of routing, including the "Edit services..."
 button, the busy/idle polling loop, the "Set copy button..." picker +
 auto-copy-click flow and the "New browser chat" action. The paste flash is the
@@ -52,9 +51,9 @@ from textual.timer import Timer
 from textual.widgets import Button, Select, Static
 
 from agentclip.config import Config
-from agentclip.screen.profile import TemplateKind
+from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import AgentSlot, SlotCalibration
+from agentclip.screen.slot import AgentSlot, SlotCalibration, can_delegate, missing
 
 _HINT = "F3 hides this column · F2 settings · F1 help"
 PASTE_FLASH_TEXT = ">>> PRESS CTRL+V <<<\nin the chat, then send"
@@ -70,7 +69,6 @@ TEMPLATE_UNSET = "not captured"
 BUSY_UNSET = "not calibrated - set while the model is generating"
 IDLE_UNSET = "not calibrated - set while the chat is idle"
 STALE_UNSET = "not set - staleness check disabled"
-COPY_UNSET = "not set - auto-copy-click disabled"
 NEWCHAT_UNSET = "not set - calibrate the browser's new-chat button"
 # What a detector reads before (or instead of) a live probe verdict: fresh from
 # the picker, and after a slot switch repaints from stored state.
@@ -102,13 +100,17 @@ def _slot_options() -> list[tuple[str, str]]:
     return [(slot.label, str(slot)) for slot in AgentSlot]
 
 
-def slot_note(cal: SlotCalibration) -> str:
-    """The one-line readiness readout under the slot picker."""
+def slot_note(cal: SlotCalibration, profile: ServiceProfile) -> str:
+    """The one-line readiness readout under the slot picker.
+
+    Two inputs because readiness has two halves now: the box this slot's window
+    was drawn as, and what the service it is pointed at looks like.
+    """
     if cal.slot is AgentSlot.MASTER:
         return SLOT_NOTE_MASTER
-    if cal.can_delegate:
+    if can_delegate(cal, profile):
         return SLOT_NOTE_READY
-    return SLOT_NOTE_MISSING + ", ".join(cal.missing())
+    return SLOT_NOTE_MISSING + ", ".join(missing(cal, profile))
 
 
 def _short_root(project_root: Path) -> str:
@@ -199,8 +201,8 @@ class Sidebar(Vertical):
         yield Button("Set response region...", id="set-stale-btn")
         yield Static(Text(STALE_UNSET), id="side-stale", classes="side-status")
         yield Static(Text("COPY BUTTON"), classes="side-title")
-        yield Button("Set copy button...", id="set-copy-btn")
-        yield Static(Text(COPY_UNSET), id="side-copy", classes="side-status")
+        yield Button("Capture copy button...", id="set-copy-btn")
+        yield Static(Text(TEMPLATE_UNSET), id="side-copy", classes="side-status")
         yield Static(Text("NEW CHAT"), classes="side-title")
         yield Button("Set new-chat button...", id="set-newchat-btn")
         yield Static(Text(NEWCHAT_UNSET), id="side-newchat", classes="side-status")
@@ -273,7 +275,7 @@ class Sidebar(Vertical):
             return
         self.post_message(self.SlotChanged(AgentSlot(str(event.value))))
 
-    def show_slot(self, cal: SlotCalibration) -> None:
+    def show_slot(self, cal: SlotCalibration, note: str) -> None:
         """Repaint every calibration readout from one slot's stored state.
 
         Called when the slot picker moves and on session teardown - every
@@ -289,21 +291,18 @@ class Sidebar(Vertical):
         select = self.slot_select
         if select.value != str(cal.slot):
             select.value = str(cal.slot)
-        self.query_one("#side-slot-note", Static).update(Text(slot_note(cal)))
+        self.update_slot_note(note)
         self.update_region(cal.chat_region)
         self.update_busy(BUSY_CALIBRATED if cal.busy_baseline is not None else BUSY_UNSET)
         self.update_idle(IDLE_CALIBRATED if cal.idle_baseline is not None else IDLE_UNSET)
         self.update_stale(STALE_CALIBRATED if cal.stale_region is not None else STALE_UNSET)
-        self.update_copy(
-            f"{cal.copy_region.describe()} · set" if cal.copy_region is not None else COPY_UNSET
-        )
         self.update_newchat(
             f"{cal.new_chat.describe()} · set" if cal.new_chat is not None else NEWCHAT_UNSET
         )
 
-    def update_slot_note(self, cal: SlotCalibration) -> None:
+    def update_slot_note(self, note: str) -> None:
         """Repaint just the readiness line (after a single calibration landed)."""
-        self.query_one("#side-slot-note", Static).update(Text(slot_note(cal)))
+        self.query_one("#side-slot-note", Static).update(Text(note))
 
     # -- the chat region ------------------------------------------------------
 
@@ -373,14 +372,6 @@ class Sidebar(Vertical):
 
     def _blink_paste_flash(self) -> None:
         self.query_one("#side-paste-flash", Static).toggle_class("flash-alt")
-
-    # -- the copy-button region -------------------------------------------------
-
-    def update_copy(self, text: str) -> None:
-        """Repaint the copy-button readout (display only; MainScreen owns the
-        region/template state and the auto-copy-click flow - formats the text
-        as "set", "clicked", "not found", or the not-set default)."""
-        self.query_one("#side-copy", Static).update(Text(text))
 
     # -- the new-chat button ------------------------------------------------------
 

@@ -37,6 +37,7 @@ from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import RegionImage
+from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.stale import StaleProbe, StaleState
 from agentclip.tui.app import AgentClipApp
@@ -101,13 +102,15 @@ def _patch_flow(monkeypatch: pytest.MonkeyPatch) -> list[None]:
 
 
 async def _arm_with_template(app: AgentClipApp, pilot: Pilot) -> MainScreen:
-    """The trigger refuses to fire without a copy-button template, so every
-    test here calibrates one first."""
+    """The trigger refuses to fire without a copy-button appearance, so every
+    test here captures one first (into the active service's profile)."""
     main = app.main_screen
     assert main is not None
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
     await _press(app, pilot, "#set-copy-btn")
-    await _wait_for(pilot, lambda: main._copy_template is not None, "template captured")
+    await _wait_for(
+        pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
+    )
     return main
 
 
@@ -510,7 +513,7 @@ async def test_the_flow_wrapper_lifts_the_suspension_so_it_can_refire(
 # -- no template ------------------------------------------------------------------
 
 
-async def test_nothing_fires_without_a_copy_template(
+async def test_nothing_fires_without_a_captured_copy_button(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     calls = _patch_flow(monkeypatch)
@@ -519,7 +522,7 @@ async def test_nothing_fires_without_a_copy_template(
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        assert main._copy_template is None
+        assert not main._active_profile().has(TemplateKind.COPY)
 
         await _busy(main, pilot, BusyState.MATCH)
         await _busy(main, pilot, BusyState.CHANGED)

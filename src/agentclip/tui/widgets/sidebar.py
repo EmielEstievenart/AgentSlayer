@@ -345,11 +345,12 @@ class Sidebar(Vertical):
         Called when the slot picker moves and on session teardown - every
         readout below is a view of ``cal`` and nothing else, which after the
         slot reduction means the drawn window and the staleness detector that
-        rides on it. The captured appearances are deliberately NOT repainted
-        here: they belong to the service, not to a window, so switching slots
-        must not change what they say (``update_template`` is their only entry
-        point). The stale line falls back to a static "watching" here rather
-        than a live verdict: a probe belongs to whichever slot the automation
+        rides on it. The appearance summary is deliberately NOT repainted here:
+        it belongs to the service, not to a window, so switching slots must not
+        change what it says (``show_profile`` is its only entry point, and it is
+        driven by service switches). The stale line falls back to a static
+        "watching" here rather than a live verdict: a probe belongs to
+        whichever slot the automation
         is actually driving, and re-deriving one from a stored region would be
         a lie.
         """

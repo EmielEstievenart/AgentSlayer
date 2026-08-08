@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from math import gcd
 
 from agentclip.screen.capture import RegionImage
 
@@ -43,6 +44,31 @@ class BusyProbe:
     diff: float | None
 
 
+def sample_step(total: int, budget: int, width: int) -> int:
+    """The stride that walks ``total`` row-major pixels in at most ``budget``
+    samples - nudged up until it is coprime with ``width``.
+
+    Coprimality is the whole point, and skipping it is a silent sensor
+    failure rather than a rounding error. A stride that shares a factor with
+    the row length lands on the same handful of columns forever: over a
+    1280-wide region at 16384 samples the raw stride is 80, and 80 divides
+    1280, so the "spread over the whole image" sample is 16 of the 1280
+    columns - a change confined to the other 1264 reads as no change at all
+    (a paragraph appearing in a chat, to the stale detector). With the stride
+    bumped to the next coprime value the walk visits every column in turn, for
+    the price of a few samples.
+
+    Only the image geometry decides it, never the caller's position in it, so
+    two frames - or two candidate origins - always compare the same pixels.
+    """
+    if total <= budget:
+        return 1
+    step = -(-total // budget)  # ceil: at most `budget` samples
+    while gcd(step, width) > 1:
+        step += 1
+    return step
+
+
 def diff_fraction(
     a: RegionImage,
     b: RegionImage,
@@ -57,9 +83,10 @@ def diff_fraction(
     At most ``max_samples`` pixels are compared (default ``MAX_SAMPLES``, so
     every existing caller keeps its exact sampling), picked with a uniform
     stride over the row-major pixel order so the sample spreads across the
-    whole image (and is the same set of pixels on every probe). The stale
-    detector passes a denser budget: it must notice a single appended text
-    line inside a full response region, which the default stride can step
+    whole image (and is the same set of pixels on every probe - see
+    :func:`sample_step` for why that stride is coprime with the width). The
+    stale detector passes a denser budget: it must notice a single appended
+    text line inside a full response region, which the default stride can step
     right over.
     """
     if a.width != b.width or a.height != b.height:
@@ -68,7 +95,7 @@ def diff_fraction(
     if total <= 0 or len(a.pixels) < total * 4 or len(b.pixels) < total * 4:
         return 1.0
 
-    step = 1 if total <= max_samples else -(-total // max_samples)
+    step = sample_step(total, max_samples, a.width)
     left, right = memoryview(a.pixels), memoryview(b.pixels)
     sampled = differing = 0
     for index in range(0, total, step):

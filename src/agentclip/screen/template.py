@@ -26,8 +26,10 @@ it is unit-testable anywhere.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 
+from agentclip.screen.busy import sample_step
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.region import ScreenRegion
 
@@ -54,15 +56,31 @@ ANCHOR_LEN = 8
 # Eight anchors on eight different rows: the fallback that keeps a match
 # findable when quantisation damage takes some rows out (see module docstring).
 ANCHOR_COUNT = 8
-# Stage-1 sniff test on a candidate origin: 16 pixels, at most 4 allowed to
-# differ. Cheap enough to run on thousands of candidates, selective enough that
-# almost none of them reach the full comparison.
-PROBE_COUNT = 16
+# Stage-1 sniff test on a candidate origin: 16 pixels on a 4x4 grid over the
+# template, at most 4 allowed to differ. Cheap enough to run on thousands of
+# candidates, selective enough that almost none of them reach the full
+# comparison - as long as the 16 pixels actually spread out. A grid rather than
+# a strided walk of the row-major order for exactly that reason: any stride
+# sharing a factor with the template width probes one column sixteen times
+# (a 24x16 icon, at a stride of 24, sniffs nothing but column 0), and half of
+# an icon can then be wrong without a single probe noticing.
+_PROBE_GRID = 4
+PROBE_COUNT = _PROBE_GRID * _PROBE_GRID
 PROBE_FAIL_MAX = 4
 # A flat scene (a blank page, a solid panel) makes every anchor match almost
 # everywhere. The cap turns that pathological case into bounded work instead of
-# a hang; a real appearance is found long before 512 hits of one anchor.
+# a hang; a real appearance is found long before 512 hits of one anchor. Only
+# candidates that survive the cheap rejections count against it (see
+# _candidate_origins): junk hits must not be able to spend the budget.
 MAX_CANDIDATES_PER_ANCHOR = 512
+# Ceiling on stage-2 comparisons in one search. The per-anchor cap already
+# bounds the candidate list, but a scene tiled with the template (a gallery of
+# identical copy buttons) makes every one of those candidates a REAL match that
+# the cheap probe rightly waves through, and 4096 full comparisons is a second
+# of a poll interval. Candidates arrive bottom-most first, so the budget is
+# spent where the answer to both questions this module is asked - is it there?
+# where is the newest one? - actually lives.
+MAX_VERIFICATIONS = 256
 # How much of the template is inspected when choosing anchors. Bounds
 # Template.build for a wide template (a chat input box is ~800px across)
 # without changing what it picks for a small icon.
@@ -166,27 +184,48 @@ class Template:
                 scored.append((-_window_score(plane[base + x : base + x + ANCHOR_LEN]), y, x))
         scored.sort()
 
-        def anchor_at(y: int, x: int) -> Anchor:
+        def needle_at(y: int, x: int) -> bytes:
             start = y * width + x
-            return Anchor(x, y, plane[start : start + ANCHOR_LEN])
+            return plane[start : start + ANCHOR_LEN]
 
+        # Eight anchors are eight independent chances to find the appearance,
+        # which they only are if they are eight different needles: a two-colour
+        # icon's most "distinctive" window is the same alternating run wherever
+        # it is read, and eight anchors carrying it search one place eight
+        # times. So a needle already taken disqualifies the window - without
+        # spending the row, so the row's next-best window still gets a turn.
         anchors: list[Anchor] = []
+        needles: set[bytes] = set()
+        taken: set[tuple[int, int]] = set()
         taken_rows: set[int] = set()
-        for _, y, x in scored:  # one per row first: spread the bets vertically
-            if y in taken_rows:
-                continue
-            taken_rows.add(y)
-            anchors.append(anchor_at(y, x))
-            if len(anchors) == ANCHOR_COUNT:
-                return cls(image, tuple(anchors))
-        taken = {(a.dy, a.dx) for a in anchors}
-        for _, y, x in scored:  # a short template runs out of rows: reuse them
-            if (y, x) in taken:
-                continue
-            taken.add((y, x))
-            anchors.append(anchor_at(y, x))
-            if len(anchors) == ANCHOR_COUNT:
-                break
+
+        def sweep(*, fresh_row: bool, fresh_needle: bool) -> bool:
+            """Take the best-scoring windows that meet both conditions.
+            True once ANCHOR_COUNT anchors have been chosen."""
+            for _, y, x in scored:
+                if (y, x) in taken or (fresh_row and y in taken_rows):
+                    continue
+                needle = needle_at(y, x)
+                if fresh_needle and needle in needles:
+                    continue
+                taken.add((y, x))
+                taken_rows.add(y)
+                needles.add(needle)
+                anchors.append(Anchor(x, y, needle))
+                if len(anchors) == ANCHOR_COUNT:
+                    return True
+            return False
+
+        # In preference order: a new row AND a new needle; then a new needle on
+        # a row already used (a short template runs out of rows); then a new
+        # row carrying a needle already taken; then anything left. The last two
+        # are the flat panel and the two-tone glyph, which simply do not
+        # contain ANCHOR_COUNT distinct needles - and a duplicate anchor on a
+        # fresh row still buys the row redundancy quantisation damage needs.
+        for fresh_needle in (True, False):
+            for fresh_row in (True, False):
+                if sweep(fresh_row=fresh_row, fresh_needle=fresh_needle):
+                    return cls(image, tuple(anchors))
         return cls(image, tuple(anchors))
 
 
@@ -195,31 +234,30 @@ def _fits(template: RegionImage, scene: RegionImage, x: int, y: int) -> bool:
 
 
 def _probe_at(template: RegionImage, scene: RegionImage, x: int, y: int, tolerance: int) -> bool:
-    """Stage 1: do PROBE_COUNT spread-out pixels agree at this origin?
+    """Stage 1: do the PROBE_COUNT grid pixels agree at this origin?
 
-    Returns as soon as too many have failed - on a flat scene thousands of
-    anchor hits are rejected here, and each must cost a handful of comparisons,
-    not a full sample budget.
+    The grid is the centre of each cell of a _PROBE_GRID x _PROBE_GRID division
+    of the template, so both halves and both bands are always represented -
+    whatever the template's shape. Returns as soon as too many have failed: on
+    a flat scene thousands of anchor hits are rejected here, and each must cost
+    a handful of comparisons, not a full sample budget.
     """
-    total = template.width * template.height
-    step = max(1, total // PROBE_COUNT)
     left, right = memoryview(template.pixels), memoryview(scene.pixels)
     failed = 0
-    for probe in range(PROBE_COUNT):
-        index = probe * step
-        if index >= total:
-            break
-        ty, tx = divmod(index, template.width)
-        here = index * 4
-        there = ((y + ty) * scene.width + (x + tx)) * 4
-        if (
-            abs(left[here] - right[there]) > tolerance
-            or abs(left[here + 1] - right[there + 1]) > tolerance
-            or abs(left[here + 2] - right[there + 2]) > tolerance
-        ):
-            failed += 1
-            if failed > PROBE_FAIL_MAX:
-                return False
+    for row in range(_PROBE_GRID):
+        ty = (2 * row + 1) * template.height // (2 * _PROBE_GRID)
+        for column in range(_PROBE_GRID):
+            tx = (2 * column + 1) * template.width // (2 * _PROBE_GRID)
+            here = (ty * template.width + tx) * 4
+            there = ((y + ty) * scene.width + (x + tx)) * 4
+            if (
+                abs(left[here] - right[there]) > tolerance
+                or abs(left[here + 1] - right[there + 1]) > tolerance
+                or abs(left[here + 2] - right[there + 2]) > tolerance
+            ):
+                failed += 1
+                if failed > PROBE_FAIL_MAX:
+                    return False
     return True
 
 
@@ -227,10 +265,13 @@ def _diff_at_xy(template: RegionImage, scene: RegionImage, x: int, y: int, toler
     """Stage 2: the strided full comparison of ``_diff_at``, at a 2D origin.
 
     Same sampling discipline (at most MAX_SAMPLES pixels, uniform stride over
-    the template's row-major order), so diffs stay comparable between offsets.
+    the template's row-major order), so diffs stay comparable between offsets -
+    including the stride's coprimality with the width, which for a template as
+    wide as a chat input box is the difference between reading every column and
+    reading sixteen of them (busy.sample_step).
     """
     total = template.width * template.height
-    step = 1 if total <= MAX_SAMPLES else -(-total // MAX_SAMPLES)
+    step = sample_step(total, MAX_SAMPLES, template.width)
     left, right = memoryview(template.pixels), memoryview(scene.pixels)
     sampled = differing = 0
     for index in range(0, total, step):
@@ -249,7 +290,21 @@ def _diff_at_xy(template: RegionImage, scene: RegionImage, x: int, y: int, toler
 
 
 def _candidate_origins(template: Template, scene: RegionImage) -> list[tuple[int, int]]:
-    """Every template origin the anchors vouch for, in anchor then scan order.
+    """Every template origin the anchors vouch for, bottom-most first.
+
+    Two properties earn their keep here, and both are about what happens when
+    MAX_CANDIDATES_PER_ANCHOR binds - which is precisely when the scene is
+    repetitive enough for the search to need help:
+
+    * The sweep runs BACKWARDS (``bytes.rfind``), so the candidates that
+      survive the cap are the lowest ones. That is the answer
+      find_lowest_in_region is looking for outright, and for find_in_region it
+      biases the search toward the bottom of a chat, where the buttons live.
+    * Only candidates that survive the cheap rejections - row-wrapped runs,
+      origins the scene cannot hold, origins another anchor already proposed -
+      count against the cap. A repetitive banner across the top of a page
+      produces thousands of hits that are nothing; letting them spend the
+      budget blinds the search to the real appearance below them.
 
     Empty (rather than an exception) when the scene cannot hold the template: a
     resized browser window is a normal runtime condition, not a bug.
@@ -264,36 +319,55 @@ def _candidate_origins(template: Template, scene: RegionImage) -> list[tuple[int
     origins: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
     for anchor in template.anchors:
-        hits = 0
-        position = 0
-        while hits < MAX_CANDIDATES_PER_ANCHOR:
-            index = plane.find(anchor.needle, position)
+        # Outside this band the anchor's own offset already puts the template
+        # off the edge of the scene, so a hit there cannot become a candidate
+        # however the rest of it looks - skip the two dead bands wholesale
+        # rather than examining a flat scene's worth of hits inside them.
+        first = anchor.dy * width + anchor.dx
+        last = (anchor.dy + scene.height - template.height) * width + (
+            anchor.dx + scene.width - template.width
+        )
+        end = min(len(plane), last + ANCHOR_LEN)
+        kept = 0
+        while kept < MAX_CANDIDATES_PER_ANCHOR:
+            index = plane.rfind(anchor.needle, first, end)
             if index < 0:
                 break
-            position = index + 1
-            hits += 1
+            # One short of this hit, so overlapping runs are still found and
+            # the window always shrinks (no way to sit on the same hit twice).
+            end = index + ANCHOR_LEN - 1
             y, x = divmod(index, width)
             if x + ANCHOR_LEN > width:
                 continue  # the run straddles two rows: not a horizontal match
             origin = (x - anchor.dx, y - anchor.dy)
-            if origin in seen or not _fits(template.image, scene, *origin):
+            if origin in seen:
                 continue
-            seen.add(origin)
+            seen.add(origin)  # including the misfits: judged once, not per anchor
+            if not _fits(template.image, scene, *origin):
+                continue
             origins.append(origin)
+            kept += 1
     return origins
 
 
-def _verified(
+def _verify(
     template: Template, scene: RegionImage, tolerance: int, max_diff: float
-) -> list[RegionMatch]:
-    matches: list[RegionMatch] = []
+) -> Iterator[RegionMatch]:
+    """Candidates that pass both stages, lazily, in candidate order.
+
+    Lazy so the presence question can stop at the first one, and shared so the
+    stage-2 budget (MAX_VERIFICATIONS) means the same thing to every caller.
+    """
+    budget = MAX_VERIFICATIONS
     for x, y in _candidate_origins(template, scene):
         if not _probe_at(template.image, scene, x, y, tolerance):
             continue
+        if budget <= 0:
+            return
+        budget -= 1
         diff = _diff_at_xy(template.image, scene, x, y, tolerance)
         if diff <= max_diff:
-            matches.append(RegionMatch(x, y, diff))
-    return matches
+            yield RegionMatch(x, y, diff)
 
 
 def match_at_xy(
@@ -330,17 +404,12 @@ def find_in_region(
 ) -> RegionMatch | None:
     """The first place the template matches, or None. Never raises.
 
-    "First" is anchor order, not reading order - callers that only ask *is it
-    there?* (is the stop button on screen?) want the early exit, and for a
-    presence question any verified occurrence answers it.
+    "First" is candidate order - each anchor's hits from the bottom up - not
+    reading order: callers that only ask *is it there?* (is the stop button on
+    screen?) want the early exit, and for a presence question any verified
+    occurrence answers it.
     """
-    for x, y in _candidate_origins(template, scene):
-        if not _probe_at(template.image, scene, x, y, tolerance):
-            continue
-        diff = _diff_at_xy(template.image, scene, x, y, tolerance)
-        if diff <= max_diff:
-            return RegionMatch(x, y, diff)
-    return None
+    return next(_verify(template, scene, tolerance, max_diff), None)
 
 
 def find_lowest_in_region(
@@ -354,9 +423,11 @@ def find_lowest_in_region(
 
     The copy button's question: every response stamps one, and the newest is
     the lowest. No early exit is possible - the answer is only known once every
-    candidate has been judged.
+    candidate has been judged - which is why the candidates arrive bottom-most
+    first: if a repetitive scene exhausts a budget, what is left is the part of
+    the scene this question cares about.
     """
-    matches = _verified(template, scene, tolerance, max_diff)
+    matches = list(_verify(template, scene, tolerance, max_diff))
     if not matches:
         return None
     return max(matches, key=lambda match: (match.y, match.x))
@@ -371,7 +442,7 @@ def find_all_in_region(
     limit: int = 64,
 ) -> list[RegionMatch]:
     """Every match, top-to-bottom then left-to-right, at most ``limit``. Never raises."""
-    matches = _verified(template, scene, tolerance, max_diff)
+    matches = list(_verify(template, scene, tolerance, max_diff))
     matches.sort(key=lambda match: (match.y, match.x))
     return matches[:limit]
 

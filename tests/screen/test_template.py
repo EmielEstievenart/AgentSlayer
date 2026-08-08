@@ -15,11 +15,13 @@ import time
 
 import pytest
 
+from agentclip.screen import template as template_module
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.template import (
     ANCHOR_COUNT,
     ANCHOR_LEN,
+    DEFAULT_TOLERANCE,
     RegionMatch,
     Template,
     find_all_in_region,
@@ -68,6 +70,31 @@ def paste(scene: RegionImage, patch: RegionImage, x: int, y: int) -> RegionImage
     for ty in range(patch.height):
         start = ((y + ty) * scene.width + x) * 4
         pixels[start : start + row] = patch.pixels[ty * row : (ty + 1) * row]
+    return RegionImage(scene.width, scene.height, bytes(pixels))
+
+
+def tiled(patch: RegionImage, across: int, down: int) -> RegionImage:
+    """``patch`` repeated edge to edge - a gallery of identical buttons."""
+    row = patch.width * 4
+    band = b"".join(patch.pixels[y * row : (y + 1) * row] * across for y in range(patch.height))
+    return RegionImage(patch.width * across, patch.height * down, band * down)
+
+
+def needle_banner(scene: RegionImage, template: Template, rows_each: int = 4) -> RegionImage:
+    """``scene`` with every anchor's needle tiled across rows at the very top.
+
+    The pathological page: a repetitive banner (a striped header, a table rule)
+    whose quantised blue plane happens to carry the exact runs the anchors look
+    for, hundreds of times per row, ABOVE the appearance that is really there.
+    """
+    pixels = bytearray(scene.pixels)
+    row = 0
+    for anchor in template.anchors:
+        for _ in range(rows_each):
+            for x in range(scene.width):
+                # mid-bucket, so the byte quantises back to the needle's value
+                pixels[(row * scene.width + x) * 4] = anchor.needle[x % ANCHOR_LEN] * 32 + 16
+            row += 1
     return RegionImage(scene.width, scene.height, bytes(pixels))
 
 
@@ -228,12 +255,96 @@ def test_a_shade_crossing_a_quantisation_bucket_edge_is_still_found() -> None:
     rows is what saves the match: the drift here hits the top four rows, and
     the anchors below them still propose the right origin - where the
     per-channel tolerance (3 << 24) sees a perfect match. (The green channel
-    steps per row only so that the right origin is the ONLY one that verifies.)
+    steps per row AND per pixel only so that the right origin is the ONLY one
+    that verifies - a horizontally flat patch would also verify one column to
+    either side of it.)
     """
-    patch = stack(*[solid(24, 1, (96, (row * 30) % 256, 96)) for row in range(20)])
+
+    def band(row: int) -> RegionImage:
+        return RegionImage(
+            24, 1, b"".join(bytes((96, (row * 30 + x * 40) % 256, 96, 0)) for x in range(24))
+        )
+
+    patch = stack(*[band(row) for row in range(20)])
     drifted = shifted(patch, -3, rows=range(4))
     scene = paste(solid(200, 150, (200, 40, 40)), drifted, 60, 30)
     assert find_in_region(Template.build(patch), scene) == RegionMatch(60, 30, 0.0)
+
+
+# -- repetitive scenes: what the candidate cap must not cost --------------------
+
+
+def test_a_repetitive_banner_does_not_hide_the_match_below_it() -> None:
+    """The cap is a cost bound, not a search order. Hundreds of anchor hits in
+    a banner across the top of the page are all junk - they propose origins the
+    scene cannot even hold - and they must not spend the budget that the real
+    appearance, lower down the page, needs."""
+    patch = noise(40, 40, seed=2)
+    template = Template.build(patch)
+    scene = needle_banner(paste(noise(1200, 900, seed=1), patch, 1000, 800), template)
+    assert match_at_xy(patch, scene, 1000, 800) == 0.0  # it is right there
+    assert find_in_region(template, scene) == RegionMatch(1000, 800, 0.0)
+    assert find_lowest_in_region(template, scene) == RegionMatch(1000, 800, 0.0)
+
+
+def test_find_lowest_in_a_scene_tiled_with_the_template() -> None:
+    """625 occurrences, one candidate budget: the ones that survive it have to
+    be the bottom-most, because the bottom-most is the whole question."""
+    patch = noise(40, 40, seed=2)
+    scene = tiled(patch, 25, 25)
+    found = find_lowest_in_region(Template.build(patch), scene)
+    assert found is not None and (found.x, found.y) == (960, 960)
+
+
+def test_a_tiled_scene_stays_within_a_poll_interval() -> None:
+    """Every candidate in a tiled scene is a real match, so the cheap probe
+    cannot thin them out - the stage-2 budget is what keeps this affordable."""
+    patch = noise(40, 40, seed=2)
+    scene = tiled(patch, 25, 25)
+    template = Template.build(patch)
+    started = time.monotonic()
+    find_lowest_in_region(template, scene)
+    assert time.monotonic() - started < 1.0
+
+
+def test_the_cheap_probe_rejects_a_candidate_whose_right_half_is_wrong() -> None:
+    """Stage 1 earns its place by rejecting, and it only can if its 16 pixels
+    spread over the template: a probe walking the row-major order at a stride
+    of the width would sniff column 0 sixteen times and wave this through."""
+    icon = noise(24, 16, seed=2)
+    half_wrong = paste(icon, noise(12, 16, seed=9), 12, 0)
+    assert template_module._probe_at(icon, icon, 0, 0, DEFAULT_TOLERANCE)
+    assert not template_module._probe_at(icon, half_wrong, 0, 0, DEFAULT_TOLERANCE)
+
+
+# -- sampling: the strided comparison must actually see the whole template ------
+
+
+def test_a_chatbox_sized_template_is_compared_across_every_column() -> None:
+    """A chat input box is ~640px across, where a 1024-sample stride works out
+    at 40 - a divisor of 640, so the "spread" sample walks 16 of the 640
+    columns. A scene that repaints everything between them is not a match."""
+    chatbox = solid(640, 64, (10, 10, 10))
+    pixels = bytearray(chatbox.pixels)
+    for index in range(640 * 64):
+        if index % 640 % 8:  # every column the coarsest aliased lattice skips
+            pixels[index * 4 : index * 4 + 3] = bytes((110, 110, 110))
+    repainted = RegionImage(640, 64, bytes(pixels))
+    assert match_at_xy(chatbox, repainted, 0, 0) > 0.5
+
+
+def test_build_picks_distinct_needles_for_a_two_colour_icon() -> None:
+    """Eight anchors are eight independent chances only if they are eight
+    different needles. A two-tone glyph's most distinctive window is the same
+    alternating run wherever it is read, and eight copies of it search one
+    pattern eight times over."""
+    pixels = bytearray()
+    for y in range(20):
+        for x in range(40):
+            on = ((x * 3 + y * 5) % 11) < 5
+            pixels += bytes((255, 255, 255, 0)) if on else bytes((0, 0, 0, 0))
+    icon = Template.build(RegionImage(40, 20, bytes(pixels)))
+    assert len({anchor.needle for anchor in icon.anchors}) == ANCHOR_COUNT
 
 
 def test_a_full_screen_search_is_fast_enough_to_poll() -> None:

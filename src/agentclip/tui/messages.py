@@ -4,8 +4,9 @@
 to the MainScreen is equivalent to the watcher thread capturing protocol text
 from the OS clipboard.
 
-``BusyProbed`` and ``IdleProbed`` are the same shape for the two finish
-detectors the poller thread runs (one poll of each per tick, busy first):
+``BusyProbed``, ``IdleProbed`` and ``StaleProbed`` are the three finish
+detectors' poll results, posted in a FIXED order within each poller tick:
+busy first, then idle, then stale.
 
 * ``BusyProbed`` carries the *busy* element's verdict. That element was
   calibrated WHILE the model was generating, so MATCH means "still generating"
@@ -13,12 +14,17 @@ detectors the poller thread runs (one poll of each per tick, busy first):
 * ``IdleProbed`` carries the *idle* element's verdict. That element was
   calibrated while the chat was IDLE, so the reading is inverted: MATCH means
   "finished", CHANGED means "generating".
+* ``StaleProbed`` carries the *stale* tracker's verdict for the response
+  region: CHANGING means "generating", STALE (unchanged for the required run
+  of polls) means "finished". No calibration baseline - stability is relative
+  to the previous frame.
 
-Posting either directly is equivalent to that detector's poll completing, and
-is how the tests drive MainScreen's combined finish logic. When both detectors
-are calibrated the tick is *closed* by ``IdleProbed`` - MainScreen evaluates
-the combined verdict once per tick, on the closing message - so a test
-exercising the dual-detector path must post both, busy first.
+Posting any of them directly is equivalent to that detector's poll completing,
+and is how the tests drive MainScreen's combined finish logic. Whatever subset
+of the three is calibrated, the tick is *closed* by the LAST calibrated
+detector in the busy -> idle -> stale order - MainScreen evaluates the
+combined verdict exactly once per tick, on the closing message - so a test
+exercising a multi-detector path must post the whole tick, in order.
 """
 
 from __future__ import annotations
@@ -26,6 +32,7 @@ from __future__ import annotations
 from textual.message import Message
 
 from agentclip.screen.busy import BusyProbe
+from agentclip.screen.stale import StaleProbe
 
 
 class ClipboardCaptured(Message):
@@ -48,5 +55,13 @@ class IdleProbed(Message):
     """One poll of the idle element (MATCH = finished), or injected by tests."""
 
     def __init__(self, probe: BusyProbe) -> None:
+        self.probe = probe
+        super().__init__()
+
+
+class StaleProbed(Message):
+    """One poll of the stale tracker (STALE = finished), or injected by tests."""
+
+    def __init__(self, probe: StaleProbe) -> None:
         self.probe = probe
         super().__init__()

@@ -9,7 +9,7 @@ ones spawn a tkinter overlay, read GDI pixels and move the OS cursor.
 
 What we verify: button -> picker -> snapshot -> sidebar label + session state,
 the resolution rule (ongoing asked first, then initial, then a fallback chain
-ending at the chat window), and the session-scoped reset on /new.
+ending at the chat window), and the calibrations surviving /new.
 """
 
 from __future__ import annotations
@@ -421,7 +421,11 @@ async def test_nothing_calibrated_means_no_click(
 # -- session teardown ------------------------------------------------------------
 
 
-async def test_new_resets_both_chatboxes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_new_preserves_both_chatboxes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The chatboxes describe where the service's input boxes are, not what the
+    finished session said - /new must not make the user re-draw them."""
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
     _patch_two_picks(monkeypatch)
@@ -441,13 +445,15 @@ async def test_new_resets_both_chatboxes(tmp_path: Path, monkeypatch: pytest.Mon
 
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
-        assert main._chatbox_initial is None
-        assert main._chatbox_ongoing is None
-        assert "not set" in _label(app, "#side-chatbox-initial")
-        assert "not set" in _label(app, "#side-chatbox-ongoing")
+        assert main._chatbox_initial is not None
+        assert main._chatbox_initial.region == INITIAL_BOX
+        assert main._chatbox_ongoing is not None
+        assert main._chatbox_ongoing.region == ONGOING_BOX
+        assert INITIAL_BOX.describe() in _label(app, "#side-chatbox-initial")
+        assert ONGOING_BOX.describe() in _label(app, "#side-chatbox-ongoing")
 
-        # With nothing calibrated, the next bootstrap copies without clicking.
+        # The surviving calibrations mean the next bootstrap clicks again.
         await _send(app, pilot, "Fresh session task.")
-        await _wait_for(pilot, lambda: main.session_active, "second session armed")
+        await _wait_for(pilot, lambda: len(clicks) == 2, "second bootstrap clicked")
         await _wait_for(pilot, lambda: not main.busy, "second session flow settled")
-        assert clicks == [ONGOING_BOX]
+        assert clicks == [ONGOING_BOX, ONGOING_BOX]

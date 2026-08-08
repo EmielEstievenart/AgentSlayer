@@ -38,14 +38,24 @@ class BusyProbe:
     diff: float | None
 
 
-def diff_fraction(a: RegionImage, b: RegionImage, *, tolerance: int = DEFAULT_TOLERANCE) -> float:
+def diff_fraction(
+    a: RegionImage,
+    b: RegionImage,
+    *,
+    tolerance: int = DEFAULT_TOLERANCE,
+    max_samples: int = MAX_SAMPLES,
+) -> float:
     """Fraction of (sampled) pixels whose B/G/R delta exceeds ``tolerance``.
 
     Mismatched dimensions are a full mismatch (1.0).
 
-    At most ``MAX_SAMPLES`` pixels are compared, picked with a uniform stride
-    over the row-major pixel order so the sample spreads across the whole image
-    (and is the same set of pixels on every probe).
+    At most ``max_samples`` pixels are compared (default ``MAX_SAMPLES``, so
+    every existing caller keeps its exact sampling), picked with a uniform
+    stride over the row-major pixel order so the sample spreads across the
+    whole image (and is the same set of pixels on every probe). The stale
+    detector passes a denser budget: it must notice a single appended text
+    line inside a full response region, which the default stride can step
+    right over.
     """
     if a.width != b.width or a.height != b.height:
         return 1.0
@@ -53,7 +63,7 @@ def diff_fraction(a: RegionImage, b: RegionImage, *, tolerance: int = DEFAULT_TO
     if total <= 0 or len(a.pixels) < total * 4 or len(b.pixels) < total * 4:
         return 1.0
 
-    step = 1 if total <= MAX_SAMPLES else -(-total // MAX_SAMPLES)
+    step = 1 if total <= max_samples else -(-total // max_samples)
     left, right = memoryview(a.pixels), memoryview(b.pixels)
     sampled = differing = 0
     for index in range(0, total, step):

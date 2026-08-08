@@ -3,10 +3,12 @@
 AgentClip clicks around *someone else's* chat window, and everything it needs to
 do that - where the window is, which input box is on screen, what "still
 generating" looks like, where the copy button is, where the new-chat button is -
-is drawn by the user and lives for the session. Sub-agent delegation adds a
-second such window, so those calibrations stop being screen-wide singletons and
-become a set *per slot*: :data:`AgentSlot.MASTER` is the chat the main agent
-talks in, :data:`AgentSlot.SUBAGENT` the one a delegated sub-agent gets.
+is drawn by the user and lives for the app run: it describes where the service's
+windows are, not what one conversation said, so it survives ``/new``. Sub-agent
+delegation adds a second such window, so those calibrations stop being
+screen-wide singletons and become a set *per slot*: :data:`AgentSlot.MASTER` is
+the chat the main agent talks in, :data:`AgentSlot.SUBAGENT` the one a delegated
+sub-agent gets.
 
 Two slot pointers ride on top of this data (owned by the TUI, not here):
 *calibrating* - which slot the sidebar's pickers write into - and *live* - which
@@ -61,15 +63,18 @@ class SlotCalibration:
     """Everything the user drew for one chat window.
 
     Mutable and long-lived: the sidebar's pickers write single fields into it as
-    the user calibrates, and ``clear`` empties it on session teardown (windows
-    move around between sessions, so no calibration outlives a ``/new``).
+    the user calibrates, and the set outlives ``/new`` - a new conversation in
+    the same windows needs no re-drawing. ``clear`` empties the whole set at
+    once for when the windows themselves are gone.
 
-    The finish detectors are region + baseline pairs rather than
+    The busy/idle finish detectors are region + baseline pairs rather than
     ``CalibratedElement``s because their comparison is the *inverse* of that
     type's: the busy baseline is captured while the model generates, so a match
-    means "still going". The chat boxes and the new-chat button are genuine
-    "is this still the thing I was pointed at?" questions, hence
-    ``CalibratedElement``.
+    means "still going". The stale detector is a bare region with no stored
+    baseline at all - its tracker's first polled frame IS the baseline, and
+    every later frame is compared to the one before it. The chat boxes and the
+    new-chat button are genuine "is this still the thing I was pointed at?"
+    questions, hence ``CalibratedElement``.
     """
 
     slot: AgentSlot = AgentSlot.MASTER
@@ -86,6 +91,10 @@ class SlotCalibration:
     # Calibrated while IDLE: a later match means "finished".
     idle_region: ScreenRegion | None = None
     idle_baseline: RegionImage | None = None
+    # The response area itself, for the stability ("stale") detector: once it
+    # stops changing frame to frame the model is done. No baseline stored -
+    # the poller's tracker keeps its own previous frame.
+    stale_region: ScreenRegion | None = None
     # One copy-button icon: the click target and the template searched for in a
     # vertical band when the newest response's button has moved.
     copy_region: ScreenRegion | None = None
@@ -94,7 +103,7 @@ class SlotCalibration:
     new_chat: CalibratedElement | None = None
 
     def clear(self) -> None:
-        """Forget every calibration (session teardown). The slot identity stays."""
+        """Forget every calibration. The slot identity stays."""
         self.chat_region = None
         self.chatbox_initial = None
         self.chatbox_ongoing = None
@@ -102,6 +111,7 @@ class SlotCalibration:
         self.busy_baseline = None
         self.idle_region = None
         self.idle_baseline = None
+        self.stale_region = None
         self.copy_region = None
         self.copy_template = None
         self.new_chat = None
@@ -118,9 +128,14 @@ class SlotCalibration:
 
     @property
     def can_finish(self) -> bool:
-        """Can we tell when the model stopped? Either detector is enough - the
-        baseline is what the poller actually needs, so that is what is checked."""
-        return self.busy_baseline is not None or self.idle_baseline is not None
+        """Can we tell when the model stopped? Any one detector is enough. For
+        busy/idle the baseline is what the poller actually needs, so that is
+        what is checked; the stale detector needs only its region."""
+        return (
+            self.busy_baseline is not None
+            or self.idle_baseline is not None
+            or self.stale_region is not None
+        )
 
     @property
     def can_copy(self) -> bool:

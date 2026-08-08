@@ -25,3 +25,15 @@ Delegate work to subagents rather than doing it inline. Use Sonnet for explorati
 - Tests: `uv run pytest`
 - Lint / types: `uv run ruff check .` and `uv run mypy src`
 - All third-party assets must stay embedded in Python source (e.g. CSS lives in the `AgentClipApp.CSS` string, no `.tcss` files) so the PyInstaller build needs no `--add-data`.
+
+### Running OS-touching tests
+
+`uv run pytest` is safe to run while you use the machine. An autouse gate in `tests/conftest.py` neuters the three `user32` calls that inject input (`SendInput`, `SetCursorPos`, `SetForegroundWindow`), so nothing in the suite can click, scroll, move the cursor or type a Ctrl+V into whatever window you have in front of you, and `pick_region` raises instead of throwing a fullscreen overlay up. Read-only calls (desktop metrics, GDI screen capture) stay real.
+
+Tests that genuinely need the real desktop or the real clipboard carry `@pytest.mark.real_os` and are skipped by default. To run them:
+
+```powershell
+$env:AGENTCLIP_OS_TESTS = '1'; uv run pytest
+```
+
+That disarms the gate for the whole run — do it only when nothing else is on screen. `tests/test_os_gate.py` tests the gate itself in both directions.

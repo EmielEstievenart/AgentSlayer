@@ -81,6 +81,12 @@ def test_either_detector_is_enough_to_know_the_model_stopped() -> None:
     assert not SlotCalibration(AgentSlot.MASTER, busy_region=REGION).can_finish
 
 
+def test_a_stale_region_alone_is_also_a_finish_detector() -> None:
+    """The stability detector stores NO baseline - its tracker's first polled
+    frame is the baseline - so unlike busy/idle a bare region is enough."""
+    assert SlotCalibration(AgentSlot.MASTER, stale_region=REGION).can_finish
+
+
 def test_can_delegate_needs_all_four_pieces() -> None:
     assert _ready().can_delegate
     assert _ready().missing() == ()
@@ -107,6 +113,7 @@ def test_clear_empties_everything_but_keeps_the_slot_identity() -> None:
     cal.chatbox_initial = _element()
     cal.idle_region = REGION
     cal.idle_baseline = _image()
+    cal.stale_region = REGION
     cal.clear()
     assert cal.slot is AgentSlot.SUBAGENT
     assert not cal.can_delegate

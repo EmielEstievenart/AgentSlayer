@@ -39,6 +39,9 @@ packages = ["src/agentclip"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "real_os: exercises real OS input/clipboard/screen APIs; opt in with AGENTCLIP_OS_TESTS=1",
+]
 
 [tool.ruff]
 line-length = 100

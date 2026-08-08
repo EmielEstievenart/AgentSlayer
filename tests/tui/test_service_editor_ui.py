@@ -190,6 +190,51 @@ async def test_max_exceeding_total_blocks_the_save(tmp_path: Path) -> None:
         assert not global_path.exists()
 
 
+async def test_stale_seconds_field_accepts_a_float_and_refuses_out_of_bounds(
+    tmp_path: Path,
+) -> None:
+    """The stale detector's stillness window is edited here, bounded by exactly
+    what config.py enforces on load - so a value the editor accepts is never
+    silently replaced on the next start."""
+    app, global_path = _make_app(tmp_path)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        stable_input = editor.query_one("#svc-stable", Input)
+        assert stable_input.value == "2.0"  # the built-in default, pre-filled
+
+        stable_input.value = "6.5"
+        await pilot.pause()
+        assert editor._current_error is None
+        assert editor._services["claude"].stable_seconds == 6.5
+
+        # Below the 0.5 floor: rejected, and never applied to the working copy.
+        stable_input.value = "0.2"
+        await pilot.pause()
+        assert editor._current_error is not None
+        assert "between 0.5 and 60" in editor._current_error
+        assert editor._services["claude"].stable_seconds == 6.5
+
+        stable_input.value = "6.5"
+        await pilot.pause()
+        assert editor._current_error is None
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["claude"].stable_seconds == 6.5
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["claude"]["stable_seconds"] == 6.5
+
+
 async def test_builtin_cannot_be_deleted_but_custom_can(tmp_path: Path) -> None:
     app, _global_path = _make_app(tmp_path)
     async with app.run_test(size=(120, 45)) as pilot:

@@ -1,8 +1,10 @@
 """Optional smoke test against the real OS clipboard.
 
-Skipped in CI and whenever no real backend is available. It must never fail
-the suite: any unexpected condition downgrades to a skip. It briefly replaces
-the user's clipboard content and restores it afterwards (best effort).
+Off by default *everywhere*, CI or not: it briefly replaces whatever the user
+has on their clipboard, which is not something a plain ``uv run pytest`` may
+do behind their back. Opt in with ``AGENTCLIP_OS_TESTS=1``. When it does run it
+must never fail the suite: any unexpected condition downgrades to a skip, and
+the original clipboard content is restored afterwards (best effort).
 """
 
 from __future__ import annotations
@@ -14,10 +16,13 @@ import pytest
 
 from agentclip.clip.base import ClipboardUnavailable, select_provider
 
-pytestmark = pytest.mark.skipif(
-    bool(os.environ.get("CI")),
-    reason="real clipboard smoke test does not run in CI",
-)
+pytestmark = [
+    pytest.mark.real_os,
+    pytest.mark.skipif(
+        os.environ.get("AGENTCLIP_OS_TESTS") != "1",
+        reason="writes the real clipboard; set AGENTCLIP_OS_TESTS=1 to run it",
+    ),
+]
 
 
 def test_real_clipboard_roundtrip_smoke() -> None:

@@ -32,8 +32,11 @@ input box is calibrated TWICE (a fresh chat centres it, an ongoing one docks it
 at the bottom, and one fixed click point would be wrong half the time), and the
 finish detector is calibrated from either end (an element that changes while
 generating, an element that changes while idle, or both for a reinforced
-verdict). Every calibration status label carries the ``side-status`` class so
-the column reads as one list rather than a pile of one-off ids.
+verdict) - plus a third, service-agnostic angle: the response region itself,
+which reads as finished once it stops changing frame to frame (for services
+whose busy/idle pixel cues are unreliable). Every calibration status label
+carries the ``side-status`` class so the column reads as one list rather than
+a pile of one-off ids.
 """
 
 from __future__ import annotations
@@ -58,15 +61,17 @@ ENTER_FLASH_TEXT = ">>> PRESS ENTER <<<\nreply pasted - just send it"
 _FLASH_BLINK_S = 0.4
 _REGION_UNSET = "not set - alt-tab to the chat yourself"
 _CHATBOX_UNSET = "not set - clicks fall back to the chat region"
-# The teardown defaults MainScreen restores on /new.
+# What an uncalibrated detector reads before the user draws it.
 BUSY_UNSET = "not calibrated - set while the model is generating"
 IDLE_UNSET = "not calibrated - set while the chat is idle"
+STALE_UNSET = "not set - staleness check disabled"
 COPY_UNSET = "not set - auto-copy-click disabled"
 NEWCHAT_UNSET = "not set - calibrate the browser's new-chat button"
 # What a detector reads before (or instead of) a live probe verdict: fresh from
 # the picker, and after a slot switch repaints from stored state.
 BUSY_CALIBRATED = "calibrated - watching"
 IDLE_CALIBRATED = "calibrated - watching"
+STALE_CALIBRATED = "calibrated - watching"
 
 # Which chat input box a calibration describes: a fresh chat centres the box,
 # an ongoing one docks it at the bottom. Keys of the ``#side-chatbox-*`` labels.
@@ -183,6 +188,8 @@ class Sidebar(Vertical):
         yield Static(Text(BUSY_UNSET), id="side-busy", classes="side-status")
         yield Button("Set idle button...", id="set-idle-btn")
         yield Static(Text(IDLE_UNSET), id="side-idle", classes="side-status")
+        yield Button("Set response region...", id="set-stale-btn")
+        yield Static(Text(STALE_UNSET), id="side-stale", classes="side-status")
         yield Static(Text("COPY BUTTON"), classes="side-title")
         yield Button("Set copy button...", id="set-copy-btn")
         yield Static(Text(COPY_UNSET), id="side-copy", classes="side-status")
@@ -281,6 +288,7 @@ class Sidebar(Vertical):
         )
         self.update_busy(BUSY_CALIBRATED if cal.busy_baseline is not None else BUSY_UNSET)
         self.update_idle(IDLE_CALIBRATED if cal.idle_baseline is not None else IDLE_UNSET)
+        self.update_stale(STALE_CALIBRATED if cal.stale_region is not None else STALE_UNSET)
         self.update_copy(
             f"{cal.copy_region.describe()} · set" if cal.copy_region is not None else COPY_UNSET
         )
@@ -325,6 +333,13 @@ class Sidebar(Vertical):
         this element was calibrated while the chat was idle, so MATCH means the
         response has finished (display only; MainScreen formats the text)."""
         self.query_one("#side-idle", Static).update(Text(text))
+
+    def update_stale(self, text: str) -> None:
+        """Repaint the live stale-detector readout - the response region's
+        frame-to-frame stability, where "unchanged long enough" means the
+        response has finished (display only; MainScreen owns the tracker and
+        formats the text - CHANGING/STALE/ERROR, or the not-set default)."""
+        self.query_one("#side-stale", Static).update(Text(text))
 
     # -- the paste flash --------------------------------------------------------
 

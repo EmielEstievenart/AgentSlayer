@@ -43,7 +43,13 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Select, Static
 
-from agentclip.config import BUILTIN_SERVICE_KEYS, Config, ServicePreset, default_services
+from agentclip.config import (
+    BUILTIN_SERVICE_KEYS,
+    DEFAULT_STABLE_SECONDS,
+    Config,
+    ServicePreset,
+    default_services,
+)
 from agentclip.tui.screens.confirm import ConfirmScreen
 
 _NEW_SENTINEL = "+add-new+"  # not a legal slug (contains '+'), so it can't collide with a key
@@ -98,6 +104,8 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
                     yield Input(id="svc-max", placeholder="e.g. 12000")
                     yield Static(Text("Total context size (chars)"), classes="side-title")
                     yield Input(id="svc-total", placeholder="e.g. 500000")
+                    yield Static(Text("Stale after (seconds unchanged)"), classes="side-title")
+                    yield Input(id="svc-stable", placeholder="e.g. 2.0")
                     yield Static("", id="svc-error")
                     with Horizontal(id="svc-actions"):
                         yield Button("Add service", id="svc-add-btn", variant="primary")
@@ -125,12 +133,17 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         label_input = self.query_one("#svc-label", Input)
         max_input = self.query_one("#svc-max", Input)
         total_input = self.query_one("#svc-total", Input)
+        stable_input = self.query_one("#svc-stable", Input)
         if key is None:
             key_input.disabled = False
             key_input.value = ""
             label_input.value = ""
             max_input.value = ""
             total_input.value = ""
+            # Pre-filled, unlike the sizes: the stale window has a sensible
+            # universal default, and "add a service" should stay a four-field
+            # job for users who never touch the stale detector.
+            stable_input.value = str(DEFAULT_STABLE_SECONDS)
         else:
             preset = self._services[key]
             key_input.disabled = True
@@ -138,6 +151,7 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
             label_input.value = preset.label
             max_input.value = str(preset.max_paste_chars)
             total_input.value = str(preset.total_context_chars)
+            stable_input.value = str(preset.stable_seconds)
         self._pending_new = None
         self._update_buttons()
         self._revalidate()
@@ -166,6 +180,7 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         label_text = self.query_one("#svc-label", Input).value.strip()
         max_text = self.query_one("#svc-max", Input).value.strip()
         total_text = self.query_one("#svc-total", Input).value.strip()
+        stable_text = self.query_one("#svc-stable", Input).value.strip()
 
         error: str | None = None
         key = self._selected_key
@@ -203,6 +218,18 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
         if error is None and max_val is not None and total_val is not None and max_val > total_val:
             error = "max input size can't exceed total context size"
 
+        stable_val: float | None = None
+        if error is None:
+            try:
+                stable_val = float(stable_text)
+            except ValueError:
+                error = "stale seconds must be a number"
+            else:
+                # Same bounds config.py enforces on load, so a value the editor
+                # accepts is never silently replaced on the next start.
+                if not (0.5 <= stable_val <= 60.0):
+                    error = "stale seconds must be between 0.5 and 60"
+
         self.query_one("#svc-error", Static).update(error or "")
         self._current_error = error
 
@@ -212,10 +239,17 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
                 self.query_one("#svc-add-btn", Button).disabled = True
             return
 
-        assert key is not None and max_val is not None and total_val is not None
+        assert (
+            key is not None and max_val is not None and total_val is not None
+            and stable_val is not None
+        )
         if is_new:
             self._pending_new = ServicePreset(
-                key=key, label=label_text, max_paste_chars=max_val, total_context_chars=total_val
+                key=key,
+                label=label_text,
+                max_paste_chars=max_val,
+                total_context_chars=total_val,
+                stable_seconds=stable_val,
             )
             self.query_one("#svc-add-btn", Button).disabled = False
         else:
@@ -225,6 +259,7 @@ class ServiceEditorScreen(ModalScreen["dict[str, ServicePreset] | None"]):
                 label=label_text,
                 max_paste_chars=max_val,
                 total_context_chars=total_val,
+                stable_seconds=stable_val,
             )
 
     # -- add / reset / delete ----------------------------------------------------

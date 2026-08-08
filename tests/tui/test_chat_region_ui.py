@@ -8,7 +8,7 @@ The real picker spawns a tkinter overlay in a child process and the real click
 moves the OS cursor - neither belongs in a test run, so both are monkeypatched
 at their use site (agentclip.tui.screens.main). What we verify is the wiring:
 button -> picker -> sidebar label + session state, click fired after every
-outbound copy, and the session-scoped reset on /new.
+outbound copy, and the calibration surviving /new.
 """
 
 from __future__ import annotations
@@ -132,13 +132,13 @@ async def test_picker_failure_is_reported_not_fatal(
         assert main._chat_region is None  # error notified; app carries on
 
 
-async def test_outbound_copy_clicks_the_region_and_new_resets_it(
+async def test_outbound_copy_clicks_the_region_and_it_survives_new(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The whole point: with only the chat region drawn, every outbound copy
     (here: the bootstrap, then a follow-up) fires a focus click at it - it is the
-    fallback click target. /new starts a fresh session, and the session-scoped
-    region resets with it."""
+    fallback click target. /new starts a fresh session, but the region describes
+    where the window is, not what the session said, so it survives."""
     clicks: list[ScreenRegion] = []
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: REGION)
     monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
@@ -163,14 +163,14 @@ async def test_outbound_copy_clicks_the_region_and_new_resets_it(
         await _wait_for(pilot, lambda: len(clicks) == 2, "follow-up copy clicked")
         await _wait_for(pilot, lambda: not main.busy, "follow-up flow settled")
 
-        # /new tears the session down: the region is session-scoped and resets.
+        # /new tears the session down, but the calibration outlives it.
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
-        assert main._chat_region is None
-        assert "not set" in _region_label(app)
+        assert main._chat_region == REGION
+        assert REGION.describe() in _region_label(app)
 
-        # With no region drawn, the next bootstrap copies without clicking.
+        # The surviving region means the next bootstrap clicks it again.
         await _send(app, pilot, "Fresh session task.")
         await _wait_for(pilot, lambda: main.session_active, "second session armed")
         await _wait_for(pilot, lambda: not main.busy, "second session flow settled")
-        assert len(clicks) == 2
+        assert clicks == [REGION, REGION, REGION]

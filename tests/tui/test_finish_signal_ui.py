@@ -1,19 +1,24 @@
 """Pilot tests for the combined finish signal that fires the auto-copy flow.
 
-Two detectors, opposite polarities: the busy element was calibrated WHILE the
-model generated (MATCH = generating), the idle element while the chat was idle
-(MATCH = finished). MainScreen folds whichever are live into one verdict -
-anything saying "generating" arms the trigger, and it fires only once EVERY
-live detector says "finished" on two consecutive polls.
+Three detectors: the busy element was calibrated WHILE the model generated
+(MATCH = generating), the idle element while the chat was idle (MATCH =
+finished), and the stale detector needs no calibration pixels at all - the
+response region unchanged long enough (STALE) means finished, still moving
+(CHANGING) means generating. MainScreen folds whichever are live into one
+verdict - anything saying "generating" arms the trigger, and it fires only
+once EVERY live detector says "finished" on two consecutive polls.
 
-``BusyProbed`` / ``IdleProbed`` are the documented injectable path for the
-poller (tui/messages.py); posting them is equivalent to a poll completing, so
-these tests drive the state machine without the real poller thread. With both
-detectors calibrated a tick is *closed* by ``IdleProbed``, so a dual-detector
-tick is two posts, busy first.
+``BusyProbed`` / ``IdleProbed`` / ``StaleProbed`` are the documented
+injectable path for the poller (tui/messages.py); posting them is equivalent
+to a poll completing, so these tests drive the state machine without the real
+poller thread. A tick is *closed* by the LAST calibrated detector in the fixed
+busy -> idle -> stale order, so a multi-detector tick is several posts, in
+that order.
 
-Covered: busy only (today's behaviour), idle only (inverted), and both
-(reinforced - one detector alone can never fire it).
+Covered: busy only, idle only (inverted), both (reinforced - one detector
+alone can never fire it), stale only and stale vetoing the others, plus the
+flow suspension that stops the auto-copy flow's own scrolling from re-firing
+the trigger.
 """
 
 from __future__ import annotations
@@ -33,14 +38,16 @@ from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.region import ScreenRegion
+from agentclip.screen.stale import StaleProbe, StaleState
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed, IdleProbed
+from agentclip.tui.messages import BusyProbed, IdleProbed, StaleProbed
 from agentclip.tui.screens.main import MainScreen
 
 COPY_REGION = ScreenRegion(1830, 612, 24, 24)
 TEMPLATE = RegionImage(width=24, height=24, pixels=b"\x00" * (24 * 24 * 4))
 IDLE_REGION = ScreenRegion(900, 980, 40, 40)
 IDLE_BASELINE = RegionImage(width=40, height=40, pixels=b"\x00" * (40 * 40 * 4))
+STALE_REGION = ScreenRegion(1000, 200, 600, 500)
 
 SIZE = (110, 100)
 
@@ -115,6 +122,13 @@ def _calibrate_idle_detector(main: MainScreen) -> None:
     main._idle_baseline = IDLE_BASELINE
 
 
+def _calibrate_stale_detector(main: MainScreen) -> None:
+    """Mark the stale detector calibrated without going through the picker,
+    for the same reason as ``_calibrate_idle_detector``: the tick-closing rule
+    only depends on the calibrated region."""
+    main._stale_region = STALE_REGION
+
+
 async def _busy(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
     main.post_message(BusyProbed(BusyProbe(state, 0.2)))
     await pilot.pause()
@@ -122,6 +136,11 @@ async def _busy(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
 
 async def _idle(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
     main.post_message(IdleProbed(BusyProbe(state, 0.2)))
+    await pilot.pause()
+
+
+async def _stale(main: MainScreen, pilot: Pilot, state: StaleState, ticks: int = 0) -> None:
+    main.post_message(StaleProbed(StaleProbe(state, 0.01, ticks)))
     await pilot.pause()
 
 
@@ -338,6 +357,154 @@ async def test_a_busy_probe_alone_never_closes_a_dual_tick(
             await _busy(main, pilot, BusyState.MATCH)
         assert main._copy_armed is False  # never evaluated
         assert calls == []
+
+
+# -- the stale detector -----------------------------------------------------------
+
+
+async def test_stale_only_arms_on_changing_and_fires_on_two_stale_ticks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third detector works alone: CHANGING (the response region moving)
+    is "generating", STALE is "finished" - the same arm/streak rules."""
+    _patch_copy_picker(monkeypatch)
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _calibrate_stale_detector(main)
+
+        await _stale(main, pilot, StaleState.CHANGING)  # generating -> armed
+        assert main._copy_armed is True
+        await _stale(main, pilot, StaleState.STALE, ticks=4)
+        await pilot.pause(0.1)
+        assert calls == []  # one finished tick is not enough
+
+        await _stale(main, pilot, StaleState.STALE, ticks=5)
+        await _wait_for(pilot, lambda: len(calls) == 1, "flow fired once")
+
+        await _stale(main, pilot, StaleState.STALE, ticks=6)
+        await _stale(main, pilot, StaleState.STALE, ticks=7)
+        await pilot.pause(0.1)
+        assert len(calls) == 1  # disarmed until the region moves again
+
+
+async def test_stale_never_fires_without_a_change_observed_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A screen that is stale from the start (nothing ever generated) must not
+    read as a response finishing - same rule as the idle element."""
+    _patch_copy_picker(monkeypatch)
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _calibrate_stale_detector(main)
+
+        for ticks in range(5):
+            await _stale(main, pilot, StaleState.STALE, ticks=ticks + 2)
+        await pilot.pause(0.1)
+        assert calls == []
+
+
+async def test_stale_saying_changing_vetoes_the_other_detectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With busy + stale calibrated, the busy element going quiet while the
+    response region is still moving is not a finish - and with stale
+    calibrated, ``StaleProbed`` (not ``BusyProbed``) closes the tick."""
+    _patch_copy_picker(monkeypatch)
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _calibrate_stale_detector(main)
+
+        await _busy(main, pilot, BusyState.MATCH)
+        await _stale(main, pilot, StaleState.CHANGING)
+        assert main._copy_armed is True
+
+        # The busy element reads finished, but text is still streaming in.
+        for _ in range(4):
+            await _busy(main, pilot, BusyState.CHANGED)
+            await _stale(main, pilot, StaleState.CHANGING)
+        await pilot.pause(0.1)
+        assert calls == []
+        assert main._copy_armed is True  # still waiting for stillness
+
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _stale(main, pilot, StaleState.STALE, ticks=4)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _stale(main, pilot, StaleState.STALE, ticks=5)
+        await _wait_for(pilot, lambda: len(calls) == 1, "flow fires once they agree")
+
+
+async def test_a_busy_probe_alone_never_closes_a_tick_with_stale_calibrated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Stale is last in the fixed busy -> idle -> stale order, so once it is
+    calibrated nothing earlier in the order may fold the verdict."""
+    _patch_copy_picker(monkeypatch)
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _calibrate_stale_detector(main)
+
+        for _ in range(4):
+            await _busy(main, pilot, BusyState.MATCH)
+        assert main._copy_armed is False  # never evaluated
+        assert calls == []
+
+
+async def test_evaluation_is_suspended_while_the_flow_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The auto-copy flow scrolls the very region the stale detector watches,
+    so while it runs no probe may arm or fire anything - and once its finally
+    lifts the suspension, a genuine new generation re-arms as usual."""
+    _patch_copy_picker(monkeypatch)
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _calibrate_stale_detector(main)
+
+        main._flow_running = True  # as if _evaluate_finish just fired the flow
+        await _stale(main, pilot, StaleState.CHANGING)
+        await _stale(main, pilot, StaleState.STALE, ticks=4)
+        await _stale(main, pilot, StaleState.STALE, ticks=5)
+        await pilot.pause(0.1)
+        assert calls == []
+        assert main._copy_armed is False  # nothing was even armed
+
+        main._flow_running = False  # the flow's finally
+        await _stale(main, pilot, StaleState.CHANGING)
+        assert main._copy_armed is True
+
+
+async def test_the_flow_wrapper_lifts_the_suspension_so_it_can_refire(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A second response must be able to fire the flow again: the wrapper's
+    finally clears ``_flow_running`` even with the flow body stubbed out."""
+    _patch_copy_picker(monkeypatch)
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot)
+        _calibrate_stale_detector(main)
+
+        await _stale(main, pilot, StaleState.CHANGING)
+        await _stale(main, pilot, StaleState.STALE, ticks=4)
+        await _stale(main, pilot, StaleState.STALE, ticks=5)
+        await _wait_for(pilot, lambda: len(calls) == 1, "flow fired once")
+        await _wait_for(pilot, lambda: not main._flow_running, "suspension lifted")
+
+        await _stale(main, pilot, StaleState.CHANGING)  # next generation
+        await _stale(main, pilot, StaleState.STALE, ticks=4)
+        await _stale(main, pilot, StaleState.STALE, ticks=5)
+        await _wait_for(pilot, lambda: len(calls) == 2, "flow fired again")
 
 
 # -- no template ------------------------------------------------------------------

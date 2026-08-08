@@ -238,9 +238,12 @@ async def test_the_action_without_a_calibration_clicks_nothing(
         assert "not set" in _newchat_label(app)  # the toast is the only feedback
 
 
-async def test_new_resets_the_calibration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Session-scoped like every other calibration - a new session means the
-    windows may well have moved."""
+async def test_new_preserves_the_calibration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The snapshot describes where the browser's new-chat button is, not what
+    the finished session said - /new must not make the user re-draw it (and the
+    verify-before-click step already guards against a window that moved)."""
     _patch_picker(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
@@ -257,5 +260,6 @@ async def test_new_resets_the_calibration(tmp_path: Path, monkeypatch: pytest.Mo
 
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
-        assert main._newchat is None
-        assert "not set" in _newchat_label(app)
+        assert main._newchat is not None
+        assert main._newchat.region == NEWCHAT_REGION
+        assert "180×36 at (120, 90)" in _newchat_label(app)

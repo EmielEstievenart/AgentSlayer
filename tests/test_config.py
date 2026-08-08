@@ -1,8 +1,8 @@
-"""Headless tests for the new per-service ``total_context_chars`` field and the
-service-editor persistence path (``save_services``): TOML merge/validation,
-round-tripping through load_config, minimal-diff writes, and the atomic-write
-mechanics. No Textual here - the pilot tests for the editor UI itself live in
-tests/tui/test_service_editor_ui.py."""
+"""Headless tests for the per-service ``total_context_chars`` and
+``stable_seconds`` fields and the service-editor persistence path
+(``save_services``): TOML merge/validation, round-tripping through load_config,
+minimal-diff writes, and the atomic-write mechanics. No Textual here - the pilot
+tests for the editor UI itself live in tests/tui/test_service_editor_ui.py."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ import pytest
 
 from agentclip.config import (
     BUILTIN_SERVICE_KEYS,
+    DEFAULT_STABLE_SECONDS,
     DEFAULT_THEME,
     ServicePreset,
     default_services,
@@ -98,6 +99,94 @@ def test_load_config_rejects_out_of_range_total_context_chars(
     assert any("total_context_chars" in w for w in cfg.warnings)
 
 
+# -- stable_seconds (the stale finish detector's stillness window) -------------
+
+
+def test_every_builtin_ships_the_shared_stable_seconds_default() -> None:
+    assert DEFAULT_STABLE_SECONDS == 2.0
+    for key, preset in default_services().items():
+        assert preset.stable_seconds == DEFAULT_STABLE_SECONDS, key
+
+
+def test_a_bare_preset_defaults_its_stable_seconds() -> None:
+    assert ServicePreset("k", "K", 1_000, 5_000).stable_seconds == DEFAULT_STABLE_SECONDS
+
+
+def test_load_config_reads_stable_seconds_override(project: Path, global_path: Path) -> None:
+    global_path.write_text("[services.claude]\nstable_seconds = 4.5\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].stable_seconds == 4.5
+    # untouched fields keep the built-in default
+    assert cfg.services["claude"].max_paste_chars == default_services()["claude"].max_paste_chars
+    assert not cfg.warnings
+
+
+def test_load_config_accepts_a_whole_number_stable_seconds(
+    project: Path, global_path: Path
+) -> None:
+    """TOML users write `3` as readily as `3.0`; both are numbers, and the
+    preset always ends up holding a float."""
+    global_path.write_text("[services.claude]\nstable_seconds = 3\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].stable_seconds == 3.0
+    assert isinstance(cfg.services["claude"].stable_seconds, float)
+    assert not cfg.warnings
+
+
+def test_load_config_accepts_both_stable_seconds_bounds(project: Path, global_path: Path) -> None:
+    for value in ("0.5", "60.0"):
+        global_path.write_text(
+            f"[services.claude]\nstable_seconds = {value}\n", encoding="utf-8"
+        )
+        cfg = load_config(project, global_config_path=global_path)
+        assert cfg.services["claude"].stable_seconds == float(value)
+        assert not cfg.warnings
+
+
+@pytest.mark.parametrize("value", ["0.1", "60.5", "0"])
+def test_load_config_rejects_out_of_range_stable_seconds(
+    project: Path, global_path: Path, value: str
+) -> None:
+    global_path.write_text(f"[services.claude]\nstable_seconds = {value}\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].stable_seconds == DEFAULT_STABLE_SECONDS
+    assert any("stable_seconds" in w and "outside" in w for w in cfg.warnings)
+
+
+@pytest.mark.parametrize("value", ['"soon"', "true"])
+def test_load_config_rejects_a_non_numeric_stable_seconds(
+    project: Path, global_path: Path, value: str
+) -> None:
+    """Booleans are ints in Python and must be refused explicitly, exactly as
+    the integer knobs refuse them."""
+    global_path.write_text(f"[services.claude]\nstable_seconds = {value}\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].stable_seconds == DEFAULT_STABLE_SECONDS
+    assert any("stable_seconds" in w and "must be a number" in w for w in cfg.warnings)
+
+
+def test_load_config_new_service_gets_the_default_stable_seconds(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        '[services.mycustom]\nlabel = "My Custom"\nmax_paste_chars = 5000\n', encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["mycustom"].stable_seconds == DEFAULT_STABLE_SECONDS
+    assert not cfg.warnings
+
+
+def test_a_bad_stable_seconds_does_not_poison_the_rest_of_the_preset(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        "[services.claude]\nmax_paste_chars = 30000\nstable_seconds = 999\n", encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].max_paste_chars == 30_000
+    assert cfg.services["claude"].stable_seconds == DEFAULT_STABLE_SECONDS
+
+
 # -- save_services: round trip + minimal diff ----------------------------------
 
 
@@ -156,6 +245,76 @@ def test_save_services_reset_to_default_removes_the_override(
     save_services(services, global_path)
     raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
     assert "claude" not in raw.get("services", {})
+
+
+def test_save_then_load_round_trips_an_edited_stable_seconds(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], stable_seconds=7.5)
+
+    save_services(services, global_path)
+    cfg2 = load_config(project, global_config_path=global_path)
+
+    assert cfg2.services["claude"].stable_seconds == 7.5
+    assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings
+
+
+def test_save_services_writes_stable_seconds_only_when_it_differs(
+    project: Path, global_path: Path
+) -> None:
+    """The knob arrived after the other five fields: a preset whose user never
+    touched the stale window must still be written byte-for-byte as earlier
+    versions wrote it."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], max_paste_chars=30_000)
+
+    save_services(services, global_path)
+    claude = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
+    assert "stable_seconds" not in claude
+
+    services["claude"] = replace(services["claude"], stable_seconds=5.0)
+    save_services(services, global_path)
+    claude = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
+    assert claude["stable_seconds"] == 5.0
+
+
+def test_save_services_omits_a_custom_services_default_stable_seconds(
+    project: Path, global_path: Path
+) -> None:
+    """A brand new key has no built-in to compare against, so the dataclass
+    default is what "unchanged" means for it."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["my-llm"] = ServicePreset("my-llm", "My LLM", 8_000, 300_000)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert "stable_seconds" not in raw["services"]["my-llm"]
+
+    services["my-llm"] = replace(services["my-llm"], stable_seconds=12.0)
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["my-llm"]["stable_seconds"] == 12.0
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["my-llm"] == services["my-llm"]
+
+
+def test_save_services_stable_seconds_alone_is_enough_to_write_a_builtin(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["gemini"] = replace(services["gemini"], stable_seconds=0.5)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+
+    assert set(raw["services"]) == {"gemini"}
+    assert raw["services"]["gemini"]["stable_seconds"] == 0.5
 
 
 def test_save_services_deleting_a_custom_key_removes_it_from_the_file(

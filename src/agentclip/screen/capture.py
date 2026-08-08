@@ -8,6 +8,7 @@ and the focus click, so ``make_dpi_aware`` runs first.
 from __future__ import annotations
 
 import sys
+import threading
 from dataclasses import dataclass
 
 from agentclip.screen.focus import make_dpi_aware
@@ -35,6 +36,96 @@ class CaptureError(Exception):
     """The region could not be captured (unsupported platform or GDI failure)."""
 
 
+# GDI bindings built exactly once (struct classes, DLL handles, argtypes) and
+# shared by every capture thread. Rebuilding them per call raced: capture runs
+# concurrently (busy-probe worker + hover scan), each call minted a fresh
+# BitmapInfo class and rewrote argtypes on the process-global windll cache, so
+# one thread's byref(info) hit another thread's POINTER(BitmapInfo) and ctypes
+# rejected it as a different class ("expected LP_BitmapInfo instance").
+_gdi_state = None
+_gdi_lock = threading.Lock()
+
+
+def _gdi():
+    """Return (user32, gdi32, BitmapInfoHeader, BitmapInfo), initialised once.
+
+    Private WinDLL instances, not ctypes.windll: the global cache shares one
+    function object (and its argtypes) with every other module in the process.
+    """
+    global _gdi_state
+    state = _gdi_state
+    if state is not None:
+        return state
+    with _gdi_lock:
+        if _gdi_state is not None:
+            return _gdi_state
+
+        import ctypes  # lazy, like screen.focus: nothing Windows-only at import time
+        from ctypes import wintypes
+
+        class BitmapInfoHeader(ctypes.Structure):
+            _fields_ = [
+                ("biSize", wintypes.DWORD),
+                ("biWidth", wintypes.LONG),
+                ("biHeight", wintypes.LONG),
+                ("biPlanes", wintypes.WORD),
+                ("biBitCount", wintypes.WORD),
+                ("biCompression", wintypes.DWORD),
+                ("biSizeImage", wintypes.DWORD),
+                ("biXPelsPerMeter", wintypes.LONG),
+                ("biYPelsPerMeter", wintypes.LONG),
+                ("biClrUsed", wintypes.DWORD),
+                ("biClrImportant", wintypes.DWORD),
+            ]
+
+        class BitmapInfo(ctypes.Structure):
+            # BI_RGB at 32bpp uses no palette, but GetDIBits still writes through
+            # bmiColors, so the trailing entries must exist.
+            _fields_ = [("bmiHeader", BitmapInfoHeader), ("bmiColors", wintypes.DWORD * 3)]
+
+        try:
+            user32 = ctypes.WinDLL("user32", use_last_error=True)
+            gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+            # Handles are pointer-sized; without explicit restypes ctypes truncates
+            # them to a C int on 64-bit and every later call fails.
+            user32.GetDC.restype = wintypes.HDC
+            user32.GetDC.argtypes = [wintypes.HWND]
+            user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+            gdi32.CreateCompatibleDC.restype = wintypes.HDC
+            gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+            gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+            gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+            gdi32.SelectObject.restype = wintypes.HGDIOBJ
+            gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+            gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+            gdi32.DeleteDC.argtypes = [wintypes.HDC]
+            gdi32.BitBlt.argtypes = [
+                wintypes.HDC,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.HDC,
+                ctypes.c_int,
+                ctypes.c_int,
+                wintypes.DWORD,
+            ]
+            gdi32.GetDIBits.argtypes = [
+                wintypes.HDC,
+                wintypes.HBITMAP,
+                wintypes.UINT,
+                wintypes.UINT,
+                ctypes.c_void_p,
+                ctypes.POINTER(BitmapInfo),
+                wintypes.UINT,
+            ]
+        except (AttributeError, OSError) as exc:
+            raise CaptureError(f"GDI is unavailable: {exc}") from exc
+
+        _gdi_state = (user32, gdi32, BitmapInfoHeader, BitmapInfo)
+        return _gdi_state
+
+
 def capture_region(region: ScreenRegion) -> RegionImage:
     """Grab the region's current pixels from the virtual screen.
 
@@ -47,68 +138,10 @@ def capture_region(region: ScreenRegion) -> RegionImage:
     if width <= 0 or height <= 0:
         raise CaptureError("region has no area")
 
-    import ctypes  # lazy, like screen.focus: nothing Windows-only at import time
-    from ctypes import wintypes
+    import ctypes
 
     make_dpi_aware()  # capture in the same physical pixels the overlay measured
-
-    class BitmapInfoHeader(ctypes.Structure):
-        _fields_ = [
-            ("biSize", wintypes.DWORD),
-            ("biWidth", wintypes.LONG),
-            ("biHeight", wintypes.LONG),
-            ("biPlanes", wintypes.WORD),
-            ("biBitCount", wintypes.WORD),
-            ("biCompression", wintypes.DWORD),
-            ("biSizeImage", wintypes.DWORD),
-            ("biXPelsPerMeter", wintypes.LONG),
-            ("biYPelsPerMeter", wintypes.LONG),
-            ("biClrUsed", wintypes.DWORD),
-            ("biClrImportant", wintypes.DWORD),
-        ]
-
-    class BitmapInfo(ctypes.Structure):
-        # BI_RGB at 32bpp uses no palette, but GetDIBits still writes through
-        # bmiColors, so the trailing entries must exist.
-        _fields_ = [("bmiHeader", BitmapInfoHeader), ("bmiColors", wintypes.DWORD * 3)]
-
-    try:
-        user32, gdi32 = ctypes.windll.user32, ctypes.windll.gdi32
-        # Handles are pointer-sized; without explicit restypes ctypes truncates
-        # them to a C int on 64-bit and every later call fails.
-        user32.GetDC.restype = wintypes.HDC
-        user32.GetDC.argtypes = [wintypes.HWND]
-        user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
-        gdi32.CreateCompatibleDC.restype = wintypes.HDC
-        gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
-        gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
-        gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
-        gdi32.SelectObject.restype = wintypes.HGDIOBJ
-        gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
-        gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
-        gdi32.DeleteDC.argtypes = [wintypes.HDC]
-        gdi32.BitBlt.argtypes = [
-            wintypes.HDC,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.HDC,
-            ctypes.c_int,
-            ctypes.c_int,
-            wintypes.DWORD,
-        ]
-        gdi32.GetDIBits.argtypes = [
-            wintypes.HDC,
-            wintypes.HBITMAP,
-            wintypes.UINT,
-            wintypes.UINT,
-            ctypes.c_void_p,
-            ctypes.POINTER(BitmapInfo),
-            wintypes.UINT,
-        ]
-    except (AttributeError, OSError) as exc:
-        raise CaptureError(f"GDI is unavailable: {exc}") from exc
+    user32, gdi32, BitmapInfoHeader, BitmapInfo = _gdi()
 
     screen_dc = user32.GetDC(None)
     if not screen_dc:
@@ -168,7 +201,7 @@ def capture_region(region: ScreenRegion) -> RegionImage:
                 gdi32.DeleteObject(bitmap)
         finally:
             gdi32.DeleteDC(mem_dc)
-    except OSError as exc:  # a ctypes-level failure anywhere in the GDI chain
+    except (OSError, ctypes.ArgumentError) as exc:  # a ctypes-level failure anywhere in the GDI chain
         raise CaptureError(f"screen capture failed: {exc}") from exc
     finally:
         user32.ReleaseDC(None, screen_dc)

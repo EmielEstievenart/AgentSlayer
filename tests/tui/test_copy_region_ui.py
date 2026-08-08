@@ -13,7 +13,8 @@ What we verify: the picker captures a template alongside the region, the
 MATCH-then-two-CHANGED trigger fires the auto-copy flow exactly once and
 re-arms only after another MATCH, the flow clicks the matched coordinates
 (band-local offset translated back to screen space), the not-found path
-notifies without clicking, and /new resets all of it.
+notifies without clicking, and /new keeping the calibration while disarming
+the trigger.
 
 The terminal has to be tall enough for "Set copy button..." to be on screen -
 Pilot refuses to click a widget outside the visible region, and the sidebar is
@@ -125,7 +126,7 @@ async def test_pick_copy_region_captures_template_and_updates_sidebar(
 ) -> None:
     _patch_picker(monkeypatch)
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
@@ -143,7 +144,7 @@ async def test_cancelled_pick_changes_nothing(
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: None)
     monkeypatch.setattr(main_mod, "capture_region", lambda region: TEMPLATE)
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
@@ -164,7 +165,7 @@ async def test_picker_failure_is_reported_not_fatal(
     monkeypatch.setattr(main_mod, "pick_region", boom)
     monkeypatch.setattr(main_mod, "capture_region", lambda region: TEMPLATE)
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
@@ -185,7 +186,7 @@ async def test_capture_failure_at_calibration_keeps_neither_region_nor_template(
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: COPY_REGION)
     monkeypatch.setattr(main_mod, "capture_region", boom)
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
@@ -211,7 +212,7 @@ async def test_match_then_two_changed_fires_once_and_rearms(
 
     monkeypatch.setattr(MainScreen, "_auto_copy_flow", fake_flow)
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = await _arm_with_template(app, pilot)
 
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
@@ -246,7 +247,7 @@ async def test_error_probe_resets_streak_but_not_armed(
 
     monkeypatch.setattr(MainScreen, "_auto_copy_flow", fake_flow)
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = await _arm_with_template(app, pilot)
 
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
@@ -269,7 +270,7 @@ async def test_no_fire_without_a_template(tmp_path: Path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(MainScreen, "_auto_copy_flow", fake_flow)
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
@@ -291,7 +292,7 @@ async def test_no_fire_without_prior_match(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(MainScreen, "_auto_copy_flow", fake_flow)
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = await _arm_with_template(app, pilot)
 
         # CHANGED from the very start - never armed by a MATCH.
@@ -327,7 +328,7 @@ async def test_flow_clicks_the_lowest_match(
     monkeypatch.setattr(main_mod, "find_lowest_match", lambda template, band: match)
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = await _arm_with_template(app, pilot)
 
         def fake_band_capture(region: ScreenRegion) -> RegionImage:
@@ -368,7 +369,7 @@ async def test_not_found_notifies_and_does_not_click(
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = await _arm_with_template(app, pilot)
 
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
@@ -409,7 +410,7 @@ async def test_flow_snaps_focus_back_to_the_tool(
 
     monkeypatch.setattr(main_mod, "focus_window", fake_focus)
 
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = await _arm_with_template(app, pilot)
         assert main._own_window == 4242  # recorded at mount
 
@@ -447,7 +448,7 @@ async def test_verified_click_retries_at_an_offset_on_no_change(
     monkeypatch.setattr(main_mod, "find_lowest_match", lambda template, band: match)
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = await _arm_with_template(app, pilot)
 
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
@@ -492,7 +493,7 @@ async def test_verified_click_exhausts_retries_and_leaves_focus(
         main_mod, "focus_window", lambda handle: focus_calls.append(handle) or True
     )
 
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = await _arm_with_template(app, pilot)
 
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
@@ -520,10 +521,15 @@ async def test_verified_click_exhausts_retries_and_leaves_focus(
 # -- session teardown -----------------------------------------------------------
 
 
-async def test_new_resets_copy_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_new_keeps_the_calibration_but_disarms_the_trigger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copy button's region + template describe the service's window, so
+    they survive /new - but the arm/streak belong to the dead session's
+    verdicts, so they reset with it."""
     _patch_picker(monkeypatch)
     app, _ = _make_app(tmp_path)
-    async with app.run_test(size=(110, 64)) as pilot:
+    async with app.run_test(size=(110, 100)) as pilot:
         main = await _arm_with_template(app, pilot)
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
         assert main._copy_armed is True
@@ -534,8 +540,8 @@ async def test_new_resets_copy_state(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
-        assert main._copy_region is None
-        assert main._copy_template is None
+        assert main._copy_region == COPY_REGION
+        assert main._copy_template == TEMPLATE
         assert main._copy_armed is False
         assert main._copy_changed_streak == 0
-        assert "not set" in _copy_label(app)
+        assert "24×24 at (1830, 612)" in _copy_label(app)

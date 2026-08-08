@@ -9,8 +9,8 @@ tests do not sit around for half a second per probe.
 
 What we verify: button -> picker -> baseline capture -> sidebar label, the one
 poller bridging both detectors into unmistakable (and oppositely polarised)
-readouts, and the session-scoped reset on /new. The arm/fire state machine the
-verdicts drive lives in test_finish_signal_ui.py.
+readouts, and /new keeping the calibrations while restarting the poller. The
+arm/fire state machine the verdicts drive lives in test_finish_signal_ui.py.
 """
 
 from __future__ import annotations
@@ -278,9 +278,13 @@ async def test_capture_failure_at_calibration_is_reported_not_adopted(
         assert "not calibrated" in _idle_label(app)
 
 
-async def test_new_stops_polling_and_resets_state(
+async def test_new_keeps_the_calibrations_and_restarts_the_poller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """/new must not make the user recalibrate: both detectors survive the
+    session teardown, and the poller is restarted (a fresh worker replacing the
+    old one) so the surviving baselines keep being watched. Only the verdict
+    state is forgotten - that lives in test_finish_signal_ui.py."""
     _patch_common(monkeypatch)
     monkeypatch.setattr(
         main_mod, "probe_busy", lambda baseline, region: BusyProbe(BusyState.MATCH, 0.01)
@@ -304,14 +308,33 @@ async def test_new_stops_polling_and_resets_state(
 
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
-        assert main._busy_region is None
-        assert main._busy_baseline is None
-        assert main._idle_region is None
-        assert main._idle_baseline is None
-        assert main._busy_seen is False
-        assert main._idle_seen is False
-        assert main._busy_finished is None
-        assert main._idle_finished is None
-        assert "not calibrated" in _busy_label(app)
-        assert "not calibrated" in _idle_label(app)
-        await _wait_for(pilot, lambda: worker.is_cancelled, "poller cancelled")
+        assert main._busy_region == REGION
+        assert main._busy_baseline == BASELINE
+        assert main._idle_region == REGION
+        assert main._idle_baseline == BASELINE
+        assert "not calibrated" not in _busy_label(app)
+        assert "not calibrated" not in _idle_label(app)
+        await _wait_for(pilot, lambda: worker.is_cancelled, "old poller cancelled")
+        assert main._detector_worker is not None
+        assert main._detector_worker is not worker
+        # The fresh poller really is watching: a new verdict lands post-/new.
+        await _wait_for(pilot, lambda: "GENERATING" in _busy_label(app), "polling resumed")
+
+
+async def test_new_leaves_the_poller_off_when_nothing_is_calibrated(tmp_path: Path) -> None:
+    """The restart no-ops without baselines - /new on an uncalibrated app must
+    not spin up a poller with nothing to probe."""
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        assert main._detector_worker is None
+
+        await _send(app, pilot, "Say hello.")
+        await _wait_for(pilot, lambda: main.session_active, "session armed")
+        await _wait_for(pilot, lambda: not main.busy, "session flow settled")
+
+        await _send(app, pilot, "/new")
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
+        assert main._detector_worker is None

@@ -1,11 +1,18 @@
 """Shared fixtures: a tmp project workspace, default config, registry, and an
-Engine factory. The engine round-trip tests never touch a real clipboard."""
+Engine factory. The engine round-trip tests never touch a real clipboard.
+
+Also home to the suite-wide OS-input gate (``_no_real_os_input``) - see its
+docstring: nothing here is allowed to move the user's cursor, type into the
+window they are looking at, or throw a fullscreen overlay in their face.
+"""
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 
@@ -35,6 +42,70 @@ TEST_UTILS_PY = """def test_parse_date():
 # Every engine built by these fixtures agrees this chat name with its "model",
 # so canned replies can hard-code `chat=amber-falcon` on their EOM line.
 CHAT_NAME = "amber-falcon"
+
+# == the OS-input gate ========================================================
+
+# Opt back in with AGENTCLIP_OS_TESTS=1 (read once: nothing may flip the gate
+# mid-run), or per test with @pytest.mark.real_os.
+OS_TESTS_ENABLED = os.environ.get("AGENTCLIP_OS_TESTS") == "1"
+
+PICK_REGION_BLOCKED = (
+    "pick_region reached the real overlay - mock it at the use site (main_mod.pick_region)"
+)
+
+
+def _blocked_pick_region(*args: Any, **kwargs: Any) -> None:
+    raise AssertionError(PICK_REGION_BLOCKED)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail closed on synthetic input: no test moves the cursor, clicks, scrolls
+    or types into whatever window the user is actually looking at.
+
+    This generalizes the per-file ``_no_real_paste`` fixtures - a real Ctrl+V
+    escaping into the test runner's window is unforgivable, and so is a real
+    click landing wherever the pointer happened to be. Individual tests patch
+    ``main_mod.click_region`` / ``main_mod.send_paste`` at the use site, but
+    ``main.py`` from-imports those names, so any test that forgets one drives
+    the real OS. The gate sits under all of them instead.
+
+    The choke point is ``ctypes.windll.user32``: every injecting call in
+    ``screen.focus`` (SendInput for paste/scroll/move, SetCursorPos for the
+    aimed click, SetForegroundWindow for the snap-back) resolves off that one
+    process-wide WinDLL instance *at call time*, whatever name the caller
+    imported. Neutered here, ``click_region``/``scroll_region``/``move_cursor``/
+    ``send_paste``/``focus_window`` all report a plain False - the same answer
+    they give on an unsupported platform, which every caller already handles.
+
+    Read-only calls stay real (GetForegroundWindow, GetSystemMetrics, and the
+    GDI capture in ``screen.capture``, which uses a private WinDLL anyway): they
+    tell tests about the desktop without touching it.
+
+    ``pick_region`` gets a loud stub rather than a no-op, because its failure
+    mode is a fullscreen tkinter overlay in a child process - better an
+    AssertionError naming the mock the test forgot.
+    """
+    if OS_TESTS_ENABLED or request.node.get_closest_marker("real_os"):
+        return
+
+    # The overlay guard is platform-independent (the picker shells out).
+    monkeypatch.setattr("agentclip.screen.picker.pick_region", _blocked_pick_region)
+    # ...and again at main.py's bound name, which is the seam every caller uses.
+    monkeypatch.setattr(
+        "agentclip.tui.screens.main.pick_region", _blocked_pick_region, raising=False
+    )
+
+    if sys.platform != "win32":
+        return  # nothing else here can inject; ctypes.windll does not exist
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    # Signatures are irrelevant: focus.py only reads the return value, and the
+    # argtypes/restype it assigns land harmlessly on these function objects.
+    monkeypatch.setattr(user32, "SendInput", lambda *args: 0, raising=False)
+    monkeypatch.setattr(user32, "SetCursorPos", lambda *args: False, raising=False)
+    monkeypatch.setattr(user32, "SetForegroundWindow", lambda *args: False, raising=False)
 
 
 @pytest.fixture

@@ -75,6 +75,12 @@ VALID_THEMES = frozenset({"textual-light", "textual-dark", "claude-warm", "claud
 DEFAULT_THEME = "textual-dark"
 
 
+# How long the response region must sit unchanged before the stale finish
+# detector calls the response done. Per service because streaming cadence
+# differs: a service that pauses mid-answer needs a longer stillness window.
+DEFAULT_STABLE_SECONDS = 2.0
+
+
 @dataclass(frozen=True, slots=True)
 class ServicePreset:
     key: str
@@ -83,6 +89,7 @@ class ServicePreset:
     total_context_chars: int  # the service's whole conversation window, ~chars (tokens * ~4)
     wrap_blocks_in_fence: bool = True
     attachment_note: bool = True
+    stable_seconds: float = DEFAULT_STABLE_SECONDS  # stale detector: stillness = finished
 
 
 def default_services() -> dict[str, ServicePreset]:
@@ -243,6 +250,18 @@ def _take_int(table: dict, key: str, default: int, lo: int, hi: int, ctx: str, w
     return value
 
 
+def _take_float(table: dict, key: str, default: float, lo: float, hi: float, ctx: str, warnings: list[str]) -> float:
+    value = table.get(key, default)
+    # TOML users will write `2` as readily as `2.0`; both are numbers here.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        warnings.append(f"config: [{ctx}] {key} must be a number; using {default}")
+        return default
+    if not (lo <= value <= hi):
+        warnings.append(f"config: [{ctx}] {key}={value} outside {lo}..{hi}; using {default}")
+        return default
+    return float(value)
+
+
 def _take_bool(table: dict, key: str, default: bool, ctx: str, warnings: list[str]) -> bool:
     value = table.get(key, default)
     if not isinstance(value, bool):
@@ -319,6 +338,15 @@ def load_config(
             ),
             attachment_note=_take_bool(
                 table, "attachment_note", base.attachment_note if base else True, ctx, warnings
+            ),
+            stable_seconds=_take_float(
+                table,
+                "stable_seconds",
+                base.stable_seconds if base else DEFAULT_STABLE_SECONDS,
+                0.5,
+                60.0,
+                ctx,
+                warnings,
             ),
         )
         if preset.max_paste_chars > preset.total_context_chars:
@@ -424,6 +452,13 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
             "wrap_blocks_in_fence": preset.wrap_blocks_in_fence,
             "attachment_note": preset.attachment_note,
         }
+        # Written only when it actually differs from the built-in (or, for a
+        # custom key, from the dataclass default): the field arrived after the
+        # five above, and a file whose user never touched the stale knob should
+        # stay byte-for-byte what earlier versions wrote.
+        base_stable = defaults[key].stable_seconds if key in defaults else DEFAULT_STABLE_SECONDS
+        if preset.stable_seconds != base_stable:
+            services_table[key]["stable_seconds"] = preset.stable_seconds
 
     data = dict(data)
     if services_table:

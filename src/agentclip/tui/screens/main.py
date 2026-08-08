@@ -26,20 +26,27 @@ Threading: the clipboard watcher is a ``run_worker(thread=True)`` that bridges
 captures via the thread-safe ``post_message(ClipboardCaptured)`` -> the controller.
 The controller's flow coroutines run via ``spawn`` (also ``run_worker``), so Textual
 cancels everything on unmount. The finish detectors (sidebar's "Set busy
-region..." / "Set idle button...") are the same shape: one thread worker polling
-whichever elements are calibrated and bridging ``BusyProbed`` / ``IdleProbed``
-to the sidebar.
+region..." / "Set idle button..." / "Set response region...") are the same
+shape: one thread worker polling whichever detectors are calibrated and
+bridging ``BusyProbed`` / ``IdleProbed`` / ``StaleProbed`` to the sidebar.
 
 Their combined verdict drives the copy-button auto-click (``_evaluate_finish``):
 the busy element was calibrated mid-generation so MATCH there means "still
 generating", the idle element was calibrated while idle so MATCH there means
-"finished". Either element saying "generating" arms the trigger; the trigger
-fires only once EVERY calibrated element says "finished" on two consecutive
-polls - with both calibrated that agreement is the whole point of the second
-detector. Firing runs ``_auto_copy_flow``: click the live chat input box, scroll
-to the bottom, find the newest (lowest) copy-button icon in a vertical band -
-falling back to a hover scan for chats that only render the icon under the
-pointer - click it, and let the clipboard watcher ingest the copy.
+"finished", and the stale detector needs no calibration pixels at all - the
+response region reading unchanged for the preset's ``stable_seconds`` means
+"finished" (the service-agnostic fallback for chats whose busy/idle cues are
+unreliable). Any detector saying "generating" arms the trigger; the trigger
+fires only once EVERY calibrated detector says "finished" on two consecutive
+polls - with several calibrated that agreement is the whole point of having
+more than one. Firing runs ``_auto_copy_flow``: click the live chat input box,
+scroll to the bottom, find the newest (lowest) copy-button icon in a vertical
+band - falling back to a hover scan for chats that only render the icon under
+the pointer - click it, and let the clipboard watcher ingest the copy. The
+flow itself scrolls and hover-scans the very screen the stale detector
+watches, so evaluation is suspended while it runs (``_flow_running``) and the
+stale tracker forgets its history when the flow ends - without that the flow
+would read as a fresh generation and re-fire itself forever.
 
 Three calibrations are ``CalibratedElement``s (region + snapshot) rather than
 bare regions, because their whole job is "is this still the thing I was pointed
@@ -86,7 +93,7 @@ from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import Severity
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.clip.watcher import SelfWriteSet, watch, write_via
-from agentclip.config import Config
+from agentclip.config import Config, ServicePreset
 from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnapshot
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
@@ -106,8 +113,9 @@ from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.picker import ScreenPickError, pick_region
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, SlotCalibration, new_slots
+from agentclip.screen.stale import StaleProbe, StaleState, StaleTracker
 from agentclip.screen.template import TemplateMatch, find_lowest_match
-from agentclip.tui.messages import BusyProbed, ClipboardCaptured, IdleProbed
+from agentclip.tui.messages import BusyProbed, ClipboardCaptured, IdleProbed, StaleProbed
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.summary import SummaryScreen
 from agentclip.tui.screens.text_entry import TextEntryScreen
@@ -121,6 +129,7 @@ from agentclip.tui.widgets.sidebar import (
     ENTER_FLASH_TEXT,
     IDLE_CALIBRATED,
     PASTE_FLASH_TEXT,
+    STALE_CALIBRATED,
     Sidebar,
 )
 from agentclip.tui.widgets.statusbar import StatusBar
@@ -199,6 +208,18 @@ def _format_idle_probe(probe: BusyProbe) -> str:
     return f"● GENERATING · changed (diff {pct})"
 
 
+def _format_stale_probe(probe: StaleProbe) -> str:
+    """Same unmistakable readout for the stale detector: the response region
+    still moving means the model is still typing; long enough unchanged means
+    the answer is done. ``still ×N`` shows the streak building toward STALE."""
+    if probe.state is StaleState.ERROR:
+        return "✗ capture failed"
+    if probe.state is StaleState.STALE:
+        return f"○ response ready · stale (still ×{probe.stable_ticks})"
+    pct = f"{(probe.diff or 0.0) * 100:.2f}%"
+    return f"● GENERATING · changing (diff {pct} · still ×{probe.stable_ticks})"
+
+
 def _busy_verdict(probe: BusyProbe) -> bool | None:
     """The busy element's probe as a finish verdict: True = finished,
     False = generating, None = no verdict (capture error).
@@ -220,6 +241,17 @@ def _idle_verdict(probe: BusyProbe) -> bool | None:
     if probe.state is BusyState.ERROR:
         return None
     return probe.state is BusyState.MATCH
+
+
+def _stale_verdict(probe: StaleProbe) -> bool | None:
+    """The stale tracker's probe as a finish verdict, same three values.
+
+    STALE (unchanged long enough) means finished; CHANGING - including the
+    settling polls before the streak completes - means generating.
+    """
+    if probe.state is StaleState.ERROR:
+        return None
+    return probe.state is StaleState.STALE
 
 
 class MainScreen(Screen[None]):
@@ -302,8 +334,9 @@ class MainScreen(Screen[None]):
         # copy-button search band), the input box calibrated TWICE ("Set initial
         # chatbox..." / "Set ongoing chatbox...", because a fresh chat centres
         # the box and an ongoing one docks it at the bottom), the two finish
-        # detectors, the copy button and the new-chat button. All session-scoped:
-        # windows move around, so nothing outlives a /new.
+        # detectors, the copy button and the new-chat button. Calibrations
+        # describe where the service's windows are, not what one conversation
+        # said, so they survive /new; only the pointers below reset.
         #
         # ``_calibrating`` is the slot the sidebar's pickers write into;
         # ``_live`` is the slot the automation (paste click, detector poller,
@@ -321,8 +354,19 @@ class MainScreen(Screen[None]):
         # veto (or fake) a finish.
         self._busy_seen = False
         self._idle_seen = False
+        self._stale_seen = False
         self._busy_finished: bool | None = None
         self._idle_finished: bool | None = None
+        self._stale_finished: bool | None = None
+        # The live stale tracker, kept on self so the auto-copy flow's finally
+        # can reset it: the flow scrolls the very region the tracker watches,
+        # so the frame (and streak) it leaves behind must not count as history.
+        self._stale_tracker: StaleTracker | None = None
+        # True from the moment _evaluate_finish fires the auto-copy flow until
+        # the flow's finally: evaluation is suspended meanwhile, because the
+        # flow's own scrolling/hover-scanning reads as "generating" to the
+        # stale detector and would re-arm and re-fire the trigger forever.
+        self._flow_running = False
         # ``_copy_armed``/``_copy_changed_streak`` track the busy-probe sequence
         # that fires the auto-copy flow - see ``_evaluate_finish``. Trigger
         # state, not calibration, so it lives on the screen and is reset
@@ -413,6 +457,14 @@ class MainScreen(Screen[None]):
     @_idle_baseline.setter
     def _idle_baseline(self, value: RegionImage | None) -> None:
         self._slots[AgentSlot.MASTER].idle_baseline = value
+
+    @property
+    def _stale_region(self) -> ScreenRegion | None:
+        return self._slots[AgentSlot.MASTER].stale_region
+
+    @_stale_region.setter
+    def _stale_region(self, value: ScreenRegion | None) -> None:
+        self._slots[AgentSlot.MASTER].stale_region = value
 
     @property
     def _copy_region(self) -> ScreenRegion | None:
@@ -602,20 +654,22 @@ class MainScreen(Screen[None]):
 
     async def clear_transcript(self) -> None:
         # Only the session-reset path (/new, the summary's "new session") clears
-        # the transcript, so this doubles as the session teardown hook: every
-        # calibration is session-scoped (windows move around) and dies with it -
-        # BOTH slots, and the pointers go home to MASTER, because the next
-        # session's sub-agent chat is a different window in a different place.
-        # The sub-agent tabs go the same way: they belong to the finished
-        # session, and the next one numbers its runs from sub-1 again.
+        # the transcript, so this doubles as the session teardown hook. The
+        # calibrations SURVIVE for both slots: they describe where the service's
+        # windows are, not what the finished session said, so /new must not make
+        # the user re-draw every region. Only the pointers go home to MASTER -
+        # the next session starts by driving the master window - and the
+        # detector worker restarts against it so the surviving baselines keep
+        # being polled. The sub-agent tabs do die with the session: the next one
+        # numbers its runs from sub-1 again.
         await self._remove_session_views()
-        self._stop_detector_worker()
-        for calibration in self._slots.values():
-            calibration.clear()
         self._calibrating = AgentSlot.MASTER
         self._live = AgentSlot.MASTER
-        self._delegation_ready = False
+        # Re-derive rather than clear: the sub-agent slot is still calibrated,
+        # and _after_calibration's one-shot toast must not re-fire after /new.
+        self._delegation_ready = self._slots[AgentSlot.SUBAGENT].can_delegate
         self._reset_finish_trigger()
+        self._start_detector_worker()
         with suppress(NoMatches):
             self.sidebar.show_slot(self.calibrating)
             self.sidebar.hide_paste_flash()
@@ -1049,6 +1103,14 @@ class MainScreen(Screen[None]):
         except NoMatches:  # sidebar never mounted (shouldn't happen): configured default
             return self._config.general.service
 
+    def _active_preset(self) -> ServicePreset:
+        """The preset behind the sidebar's service picker - locked to the
+        running session's service while one is active, so mid-session this is
+        the session's preset. The stale detector reads its ``stable_seconds``
+        from here at poller start: streaming cadence is a property of the
+        service being driven, not of AgentClip."""
+        return self._config.services.get(self._selected_service()) or self._config.preset()
+
     # -- sidebar --------------------------------------------------------------
 
     @on(Sidebar.SlotChanged)
@@ -1281,6 +1343,45 @@ class MainScreen(Screen[None]):
         self._after_calibration()
         self._start_detector_worker()
 
+    @on(Button.Pressed, "#set-stale-btn")
+    def _on_set_stale_region(self, event: Button.Pressed) -> None:
+        event.stop()
+        if self._refuse_second_picker():
+            return
+        self.run_worker(self._pick_stale_region(), group="busyregionpick", exclusive=True)
+
+    async def _pick_stale_region(self) -> None:
+        """Draw-a-box overlay around the response area itself, for the third
+        finish detector: "unchanged for stable_seconds" means the model is
+        done. Unlike the busy/idle pickers there is NO baseline capture here -
+        the tracker's first polled frame is the baseline, and every later frame
+        is compared to the one before it - which is what makes this detector
+        service-agnostic: it trusts no particular pixel cue, only stillness."""
+        try:
+            region = await asyncio.to_thread(
+                pick_region,
+                prompt=self._slot_prompt(
+                    "Drag a box around the RESPONSE area (where the answer "
+                    "text appears) · Esc cancels"
+                ),
+            )
+        except ScreenPickError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        finally:
+            self._picker_open = False
+        if region is None:
+            self.notify("response region unchanged (cancelled)")
+            return
+        self.calibrating.stale_region = region
+        self._stale_seen = False
+        self._stale_finished = None
+        with suppress(NoMatches):
+            self.sidebar.update_stale(STALE_CALIBRATED)
+        self.notify(f"response region calibrated ({region.describe()})")
+        self._after_calibration()
+        self._start_detector_worker()
+
     # -- finish-detector polling -----------------------------------------------
 
     def _start_detector_worker(self) -> None:
@@ -1289,18 +1390,33 @@ class MainScreen(Screen[None]):
         ``post_message``. It replaces any previous run, so a recalibration
         mid-session cannot leave two loops polling different regions.
 
-        Busy is probed first and idle second within a tick, which is what makes
-        ``IdleProbed`` the tick's closing message (see ``_evaluate_finish``).
+        The probe order within a tick is fixed - busy, then idle, then stale -
+        which is what makes the LAST calibrated one the tick's closing message
+        (see ``_finish_tick_closed_by``).
 
         It always polls the LIVE slot, and the regions are read once here rather
         than per tick: restarting the worker is how the poller follows the live
         slot across a delegation, so an in-flight loop must keep watching the
-        window it was started for."""
+        window it was started for. The stale tracker is likewise built once per
+        run - it carries the previous frame and the stillness streak, and both
+        describe one window - with its "stable for N seconds" wish converted to
+        ticks of the poll cadence here, from the active service preset (kept on
+        ``self._stale_tracker`` so the auto-copy flow can reset it)."""
         self._stop_detector_worker()
         live = self.live
         busy_region, busy_baseline = live.busy_region, live.busy_baseline
         idle_region, idle_baseline = live.idle_region, live.idle_baseline
-        if busy_baseline is None and idle_baseline is None:
+        stale_region = live.stale_region
+        tracker: StaleTracker | None = None
+        if stale_region is not None:
+            stable_seconds = self._active_preset().stable_seconds
+            tracker = StaleTracker(
+                stale_region,
+                required_ticks=max(1, round(stable_seconds / _BUSY_POLL_S)),
+                capture=capture_region,
+            )
+        self._stale_tracker = tracker
+        if busy_baseline is None and idle_baseline is None and stale_region is None:
             return
 
         def loop() -> None:
@@ -1310,6 +1426,8 @@ class MainScreen(Screen[None]):
                     self.post_message(BusyProbed(probe_busy(busy_baseline, busy_region)))
                 if idle_region is not None and idle_baseline is not None:
                     self.post_message(IdleProbed(probe_busy(idle_baseline, idle_region)))
+                if tracker is not None:
+                    self.post_message(StaleProbed(tracker.poll()))
                 # Sleep in short increments so cancellation lands promptly.
                 remaining = _BUSY_POLL_S
                 while remaining > 0 and not worker.is_cancelled:
@@ -1326,15 +1444,30 @@ class MainScreen(Screen[None]):
             self._detector_worker.cancel()
             self._detector_worker = None
 
+    def _finish_tick_closed_by(self, detector: str) -> bool:
+        """Is ``detector``'s message the tick's LAST, given what is calibrated?
+
+        The poller posts busy -> idle -> stale each tick, skipping whatever is
+        uncalibrated, and the combined verdict must fold exactly once per tick
+        - on the closing message - or a half-reported tick could arm or fire
+        on one detector's word while another's is still in flight. So each
+        handler closes the tick only when no later-in-order detector is
+        calibrated to close it instead.
+        """
+        live = self.live
+        if detector == "busy":
+            return live.idle_baseline is None and live.stale_region is None
+        if detector == "idle":
+            return live.stale_region is None
+        return True  # stale is last in the order; nothing can follow it
+
     def on_busy_probed(self, message: BusyProbed) -> None:
         message.stop()
         with suppress(NoMatches):
             self.sidebar.update_busy(_format_busy_probe(message.probe))
         self._busy_seen = True
         self._busy_finished = _busy_verdict(message.probe)
-        # With an idle element calibrated the tick is closed by IdleProbed, so
-        # the combined verdict is evaluated exactly once per poll.
-        if self.live.idle_baseline is None:
+        if self._finish_tick_closed_by("busy"):
             self._evaluate_finish()
 
     def on_idle_probed(self, message: IdleProbed) -> None:
@@ -1343,7 +1476,17 @@ class MainScreen(Screen[None]):
             self.sidebar.update_idle(_format_idle_probe(message.probe))
         self._idle_seen = True
         self._idle_finished = _idle_verdict(message.probe)
-        self._evaluate_finish()
+        if self._finish_tick_closed_by("idle"):
+            self._evaluate_finish()
+
+    def on_stale_probed(self, message: StaleProbed) -> None:
+        message.stop()
+        with suppress(NoMatches):
+            self.sidebar.update_stale(_format_stale_probe(message.probe))
+        self._stale_seen = True
+        self._stale_finished = _stale_verdict(message.probe)
+        if self._finish_tick_closed_by("stale"):
+            self._evaluate_finish()
 
     def _evaluate_finish(self) -> None:
         """Fold every live detector's latest verdict into one "the model
@@ -1361,12 +1504,23 @@ class MainScreen(Screen[None]):
         Firing disarms, so the flow cannot repeat until the model generates
         again. A detector that has never reported is ignored entirely - it can
         neither veto nor fake a finish.
+
+        Suspended while the auto-copy flow runs (``_flow_running``): the flow
+        scrolls and hover-scans the browser, which the stale detector reads as
+        the response region changing - a fresh generation - so evaluating
+        mid-flow would re-arm the trigger against the flow's own mouse work
+        and re-fire it forever. The flow's finally lifts the suspension and
+        resets the tracker (``_run_auto_copy_flow``).
         """
+        if self._flow_running:
+            return
         verdicts: list[bool | None] = []
         if self._busy_seen:
             verdicts.append(self._busy_finished)
         if self._idle_seen:
             verdicts.append(self._idle_finished)
+        if self._stale_seen:
+            verdicts.append(self._stale_finished)
         if not verdicts:
             return
         if any(verdict is False for verdict in verdicts):
@@ -1384,18 +1538,41 @@ class MainScreen(Screen[None]):
             return
         self._copy_armed = False
         self._copy_changed_streak = 0
-        self.run_worker(self._auto_copy_flow(), group="copyflow", exclusive=True)
+        self._flow_running = True
+        self.run_worker(self._run_auto_copy_flow(), group="copyflow", exclusive=True)
+
+    async def _run_auto_copy_flow(self) -> None:
+        """``_auto_copy_flow`` inside the flow-suspension bracket.
+
+        A wrapper rather than a try/finally inside the flow itself so the
+        guard's mechanics hold even when tests stub the flow out: whatever the
+        flow body does (return, raise, or get cancelled), the suspension lifts
+        and the stale tracker forgets the frames the flow's own scrolling and
+        hover-scanning produced - polling resumes from a clean post-flow
+        baseline instead of reading the flow's mouse work as a new generation.
+        """
+        try:
+            await self._auto_copy_flow()
+        finally:
+            self._flow_running = False
+            if self._stale_tracker is not None:
+                self._stale_tracker.reset()
 
     def _reset_finish_trigger(self) -> None:
         """Forget every detector verdict and the auto-copy arm.
 
         Called whenever the live slot moves (a delegation starting or ending)
         and on session teardown: verdicts describe a window, so carrying them
-        across a retarget could fire the auto-copy against the wrong chat."""
+        across a retarget could fire the auto-copy against the wrong chat.
+        ``_flow_running`` is deliberately NOT cleared here - only the flow's
+        own finally lifts the suspension, so a slot move while the flow still
+        runs cannot let the trigger fire against its in-flight mouse work."""
         self._busy_seen = False
         self._idle_seen = False
+        self._stale_seen = False
         self._busy_finished = None
         self._idle_finished = None
+        self._stale_finished = None
         self._copy_armed = False
         self._copy_changed_streak = 0
 

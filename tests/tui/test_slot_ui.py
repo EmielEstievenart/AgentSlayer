@@ -10,8 +10,9 @@ What we verify: the two slots are genuinely independent, switching the picker
 repaints the whole column from the selected slot's stored state, the sub-agent's
 picker prompts say which window to draw on, the picker is never locked by a
 session (calibrating mid-session is the normal way to reach delegation), /new
-clears BOTH slots, and the legacy single-window attributes still read and write
-the MASTER slot so the older Pilot suites keep passing unchanged.
+keeps BOTH slots' calibrations and only sends the slot pointers home, and the
+legacy single-window attributes still read and write the MASTER slot so the
+older Pilot suites keep passing unchanged.
 """
 
 from __future__ import annotations
@@ -268,9 +269,12 @@ async def test_the_slot_picker_is_never_locked_by_a_session(
         assert main._slots[AgentSlot.SUBAGENT].new_chat is not None
 
 
-async def test_new_clears_both_slots_and_sends_the_pointers_home(
+async def test_new_keeps_both_slots_and_sends_the_pointers_home(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """/new is a session teardown, not a recalibration: the service's windows
+    have not moved, so both slots' calibrations survive and only the slot
+    pointers (calibrating + live) go home to MASTER."""
     picker = _patch_screen(monkeypatch)
     app = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
@@ -291,15 +295,42 @@ async def test_new_clears_both_slots_and_sends_the_pointers_home(
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
 
-        assert main._slots[AgentSlot.MASTER].chat_region is None
-        assert main._slots[AgentSlot.SUBAGENT].chat_region is None
-        assert main._slots[AgentSlot.SUBAGENT].new_chat is None
+        assert main._slots[AgentSlot.MASTER].chat_region == MASTER_REGION
+        assert main._slots[AgentSlot.SUBAGENT].chat_region == SUB_REGION
+        assert main._slots[AgentSlot.SUBAGENT].new_chat is not None
         assert main._calibrating is AgentSlot.MASTER
         assert main._live is AgentSlot.MASTER
-        assert not main.delegation_available()
         assert main.sidebar.slot_select.value == str(AgentSlot.MASTER)
-        assert "not set" in _label(app, "#side-region")
+        assert MASTER_REGION.describe() in _label(app, "#side-region")
         assert _label(app, "#side-slot-note") == SLOT_NOTE_MASTER
+
+
+async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A sub-agent slot calibrated to readiness stays ready across /new:
+    ``_delegation_ready`` is re-derived from the surviving slot instead of being
+    zeroed, so the next session gets the delegate tool and the one-shot "slot
+    ready" toast has no False->True edge to re-fire on."""
+    picker = _patch_screen(monkeypatch)
+    app = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _select_slot(app, pilot, AgentSlot.SUBAGENT)
+        await _calibrate(app, pilot, picker, "#set-newchat-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#set-chatbox-ongoing-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#set-busy-btn", SUB_REGION)
+        await _calibrate(app, pilot, picker, "#set-copy-btn", SUB_REGION)
+        await _wait_for(pilot, lambda: main.delegation_available(), "sub-agent slot ready")
+
+        await main.clear_transcript()  # the /new teardown hook
+        await pilot.pause()
+        assert main.delegation_available()
+        assert main._delegation_ready is True
+        assert main._calibrating is AgentSlot.MASTER
 
 
 async def test_the_new_browser_chat_button_targets_the_calibrating_slot(

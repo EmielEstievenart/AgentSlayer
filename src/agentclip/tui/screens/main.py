@@ -130,12 +130,7 @@ from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.picker import ScreenPickError, pick_region
 from agentclip.screen.presence import PresenceTracker
 from agentclip.screen.profile import ServiceProfile, TemplateKind
-from agentclip.screen.profile_store import (
-    ProfileStoreError,
-    delete_profile,
-    load_profile,
-    save_template,
-)
+from agentclip.screen.profile_store import load_profile
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import (
     AgentSlot,
@@ -160,13 +155,11 @@ from agentclip.tui.widgets.action_panel import ActionPanel
 from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
-    CAPTURE_CLASS,
     ENTER_FLASH_TEXT,
     PASTE_FLASH_TEXT,
     STALE_CALIBRATED,
     STALE_OFF,
     Sidebar,
-    kind_from_button_id,
     slot_note,
 )
 from agentclip.tui.widgets.statusbar import StatusBar
@@ -1369,89 +1362,17 @@ class MainScreen(Screen[None]):
             "everything is recognised inside it"
         )
 
-    # -- capturing what a service LOOKS like -----------------------------------
-
-    @on(Button.Pressed, f".{CAPTURE_CLASS}")
-    def _on_capture_pressed(self, event: Button.Pressed) -> None:
-        """The one route into a capture, for all six appearances.
-
-        The sidebar generates the APPEARANCE block per ``TemplateKind`` and
-        encodes the kind in each button's id, so the kind is parsed back out
-        here rather than duplicated in six near-identical handlers - adding a
-        seventh appearance means adding an enum member and nothing else.
-        """
-        event.stop()
-        kind = kind_from_button_id(event.button.id)
-        if kind is None:  # a .capture-btn with an id we do not recognise
-            return
-        if self._refuse_second_picker():
-            return
-        self.run_worker(self._capture_template(kind), group="regionpick", exclusive=True)
-
-    async def _capture_template(self, kind: TemplateKind) -> None:
-        """Draw a box around ``kind`` and file the pixels under the SERVICE.
-
-        The one capture path for every appearance. The prompt comes from the
-        kind (screen.profile) rather than from here, because what makes a good
-        capture is a fact about the appearance and must read identically
-        wherever it is asked for; and there is no slot prefix, because the
-        answer is the same whichever window the user drew it in.
-
-        A save failure is reported but the template is kept in memory: the
-        appearance works for this run, it just will not survive a restart -
-        losing the capture as well would be strictly worse.
-
-        The overlay guard is held for the WHOLE method, not just the pick: the
-        bookkeeping after it (store, save, repaint, restart) runs in an
-        exclusive worker, so a second capture press mid-save would cancel this
-        one halfway - a template in memory that never reached disk, or a repaint
-        that never happened. Held, that press is refused instead.
-        """
-        try:
-            try:
-                region = await asyncio.to_thread(pick_region, prompt=kind.prompt)
-            except ScreenPickError as exc:
-                self.notify(str(exc), severity="error")
-                return
-            if region is None:
-                self.notify(f"{kind.label} unchanged (selection cancelled)")
-                return
-            try:
-                image = await asyncio.to_thread(capture_region, region)
-            except CaptureError as exc:
-                self.notify(f"could not capture the {kind.label}: {exc}", severity="error")
-                return
-            profile = self._active_profile()
-            try:
-                profile.put(kind, image)
-            except ValueError as exc:
-                self.notify(f"that {kind.label} cannot be searched for: {exc}", severity="error")
-                return
-            try:
-                await asyncio.to_thread(
-                    save_template, self._profile_root, profile.key, kind, image
-                )
-            except ProfileStoreError as exc:
-                self.notify(
-                    f"{kind.label} captured, but not saved for next time: {exc}", severity="error"
-                )
-            self._region_click_warned = False
-            self._paint_profile()
-            self.notify(f"{kind.label} captured for {profile.key} ({region.describe()})")
-            self._after_calibration()
-            # Only the busy/idle appearances are things the poller hunts, and
-            # they are the service's - so they change what it hunts whichever
-            # slot the sidebar is pointed at. The other four (copy, new-chat,
-            # both chat boxes) are looked for on demand, so capturing one while
-            # calibrating the sub-agent window must not disturb the master's
-            # live poller mid-generation.
-            if kind in (TemplateKind.BUSY, TemplateKind.IDLE):
-                self._start_detector_worker()
-        finally:
-            self._picker_open = False
+    # -- what the active service LOOKS like ------------------------------------
 
     def _paint_profile(self) -> None:
-        """Repaint the whole APPEARANCE block from the active service's profile."""
+        """Repaint the sidebar's read-only appearance summary + probe lines.
+
+        Capturing appearances is the service editor's job now (they are a
+        per-service setting, and belong next to the service's other settings),
+        so this screen only *reads* the profile: it caches it per run, paints
+        this one-line summary of it, hunts for its templates, and drops the
+        cache when ``update_config`` says the editor touched the store.
+        """
         with suppress(NoMatches):
             self.sidebar.show_profile(self._active_profile())
 
@@ -1460,7 +1381,7 @@ class MainScreen(Screen[None]):
         """A different service is a different set of appearances.
 
         Everything downstream of "what does this service look like?" has to
-        follow: the APPEARANCE block, the slot's readiness note (half of which
+        follow: the appearance summary, the slot's readiness note (half of which
         is the profile), and the detector worker - which was built around the
         old service's busy/idle templates and would otherwise keep hunting
         them in the new one's window.
@@ -1469,37 +1390,6 @@ class MainScreen(Screen[None]):
         self._paint_profile()
         self._after_calibration()
         self._start_detector_worker()
-
-    @on(Button.Pressed, "#forget-profile-btn")
-    def _on_forget_profile(self, event: Button.Pressed) -> None:
-        event.stop()
-        self.run_worker(self._forget_profile(), group="forgetprofile", exclusive=True)
-
-    async def _forget_profile(self) -> None:
-        """Drop every appearance captured for the active service, on disk and in
-        memory. Behind a confirm: it is a handful of drag-a-box ceremonies to
-        redo, and nothing else in the app can undo it."""
-        profile = self._active_profile()
-        if not profile.captured:
-            return
-        confirmed = await self.confirm(
-            f"Forget the {profile.key} appearance?",
-            f"{profile.describe()} for {profile.key} will be deleted from disk. "
-            "Every slot pointed at this service loses them, and they have to be "
-            "captured again.",
-        )
-        if not confirmed:
-            return
-        try:
-            await asyncio.to_thread(delete_profile, self._profile_root, profile.key)
-        except ProfileStoreError as exc:
-            self.notify(f"could not delete the {profile.key} profile: {exc}", severity="error")
-            return
-        profile.clear()
-        self._paint_profile()
-        self._after_calibration()
-        self._start_detector_worker()  # its busy/idle trackers are gone with them
-        self.notify(f"{profile.key} appearance forgotten")
 
     # -- finish-detector polling -----------------------------------------------
 
@@ -1988,14 +1878,10 @@ class MainScreen(Screen[None]):
         return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
 
     # -- the browser's new-chat button ------------------------------------------
-
-    def _newchat_status(self, text: str) -> None:
-        """Repaint the new-chat button's status line, keeping its captured size
-        in front of whatever the last click attempt has to report."""
-        with suppress(NoMatches):
-            template = self._active_profile().get(TemplateKind.NEW_CHAT)
-            size = f"{template.width}×{template.height} · " if template is not None else ""
-            self.sidebar.update_template(TemplateKind.NEW_CHAT, f"{size}{text}")
+    #
+    # No sidebar status line: the new-chat button is found on demand rather than
+    # polled, so there is no verdict to keep on screen between presses, and
+    # every outcome below already says what happened as a toast.
 
     @on(Button.Pressed, "#newchat-btn")
     def _on_newchat(self, event: Button.Pressed) -> None:
@@ -2014,8 +1900,8 @@ class MainScreen(Screen[None]):
         outcome = await self._click_profile_element(self._calibrating, TemplateKind.NEW_CHAT)
         if outcome is ElementClick.NOT_CALIBRATED:
             self.notify(
-                'capture the browser\'s new-chat button first ("Capture new-chat button...") '
-                "and draw the chat window it lives in",
+                'capture the browser\'s new-chat button first (F2 > "Capture new-chat '
+                'button...") and draw the chat window it lives in',
                 severity="warning",
             )
             return
@@ -2025,7 +1911,6 @@ class MainScreen(Screen[None]):
                 "was clicked; recapture it or redraw the window",
                 severity="warning",
             )
-            self._newchat_status("not on screen - not clicked")
             return
         if outcome is ElementClick.AMBIGUOUS:
             self.notify(
@@ -2034,16 +1919,13 @@ class MainScreen(Screen[None]):
                 "this chat",
                 severity="warning",
             )
-            self._newchat_status("several on screen - not clicked")
             return
         if outcome is ElementClick.NOT_CLICKED:
             self.notify(
                 "the new-chat click did not land (it is Windows-only) - start the chat yourself",
                 severity="warning",
             )
-            self._newchat_status("click did not land")
             return
-        self._newchat_status("clicked")
         self.notify("new browser chat opened")
         # Same beat as the auto-copy flow: let the click register before focus
         # moves away, then bring the user back to AgentClip.

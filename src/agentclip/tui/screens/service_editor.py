@@ -1,26 +1,36 @@
-"""ServiceEditorScreen: add/edit/delete service presets (F2 / sidebar button).
+"""ServiceEditorScreen: the whole per-service PROFILE editor (F2 / sidebar button).
 
-Replaces the never-built ConfigScreen sketch in tui.md section 1.4 - scope is
-narrowed to just the services table (name, max paste size, total context size),
-which is the thing users actually need to tune per chat service.
+Replaces the never-built ConfigScreen sketch in tui.md section 1.4 - the scope
+is everything that is a property of *one chat service*: its name, its two size
+budgets, the stale detector's stillness window, what it LOOKS like (the six
+captured appearances), and which finish signals its poller may run.
 
 Model: the screen works on an in-memory *working copy* of ``config.services``
 (``self._services``). Editing an existing preset's label/sizes applies live -
 every keystroke revalidates the whole candidate (key + label + both sizes
 together, since "max <= total" is a cross-field rule) and, only while valid,
-writes it straight into the working copy. Adding a new preset is the one
-discrete action: fill in a unique lowercase-hyphen key plus the other fields,
-then press "Add service" (enabled only once the candidate validates) - keys
-are one-time (immutable after creation), so committing them by an explicit
-action rather than continuously avoids collisions/half-typed keys.
+writes it straight into the working copy; the detection checkboxes write the
+same way. Adding a new preset is the one discrete action: fill in a unique
+lowercase-hyphen key plus the other fields, then press "Add service" (enabled
+only once the candidate validates) - keys are one-time (immutable after
+creation), so committing them by an explicit action rather than continuously
+avoids collisions/half-typed keys. Until that press there is no key to file
+anything under, so the capture buttons and the checkboxes are disabled.
+
+Captures are the exception to "applies on close": pressing "Capture <thing>..."
+runs the same full-screen draw-a-box overlay the chat region uses and writes the
+PNG to the profile store *immediately*, exactly as "Forget appearance" deletes
+immediately. Only one overlay may be up at a time (cancelling a worker cannot
+kill the blocking child process it spawned), so a second capture press - and
+escape - are refused while one is in flight.
 
 Escape closes with a :class:`ServiceEdits` answer - or ``None`` when nothing
 changed at all, so the caller has nothing to do. Two independent things can
 change behind one escape and the caller has to act on either: the presets table
 (which it persists) and a service's captured appearances on disk (which
-"Forget appearance" and "Delete" have already removed, and which the main
-screen caches, paints and hunts for). A bare services dict could not say the
-second happened. If the currently displayed field values
+capture/"Forget appearance"/"Delete" have already written or removed, and which
+the main screen caches, paints and hunts for). A bare services dict could not
+say the second happened. If the currently displayed field values
 are invalid, nothing was ever applied to the working copy (invalid values are
 never committed), so there is no real "pending edit" to lose - but the visible
 text would vanish, which is surprising - so escape instead asks via the shared
@@ -38,6 +48,7 @@ touches no captures at all.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -48,23 +59,123 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Input, Select, Static
+from textual.widgets import Button, Checkbox, Input, Select, Static
 
 from agentclip.config import (
     BUILTIN_SERVICE_KEYS,
     DEFAULT_STABLE_SECONDS,
+    FINISH_SIGNALS,
     Config,
     ServicePreset,
     default_services,
+    normalize_finish_signals,
 )
-from agentclip.screen.profile import ServiceProfile
-from agentclip.screen.profile_store import ProfileStoreError, delete_profile, load_profile
+from agentclip.screen.capture import CaptureError, capture_region
+from agentclip.screen.picker import ScreenPickError, pick_region
+from agentclip.screen.profile import ServiceProfile, TemplateKind
+from agentclip.screen.profile_store import (
+    ProfileStoreError,
+    delete_profile,
+    load_profile,
+    save_template,
+)
 from agentclip.tui.screens.confirm import ConfirmScreen
 
 _NEW_SENTINEL = "+add-new+"  # not a legal slug (contains '+'), so it can't collide with a key
 _SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 # The appearance line for a service with nothing captured yet.
 TEMPLATES_NONE = "appearance: nothing captured yet"
+# What an appearance the service profile does not hold yet reads as. One line
+# for all of them: they are captured the same way and lost the same way, and
+# the per-kind advice belongs on the picker prompt (TemplateKind.prompt), where
+# the user is actually being asked to draw the box.
+TEMPLATE_UNSET = "not captured"
+
+# The APPEARANCE block is generated per TemplateKind, so its widget ids are a
+# naming convention rather than a table: the kind is parsed back out of a
+# pressed button's id, which is what lets one handler serve all six.
+CAPTURE_CLASS = "svc-capture-btn"
+_CAPTURE_PREFIX = "svc-capture-"
+_CAPTURE_SUFFIX = "-btn"
+
+# The finish-signal checklist, in user words rather than detector names. The
+# TOML keys ("busy"/"idle"/"stale") describe how the detector works; these
+# describe what the user will SEE when it fires, which is the only thing they
+# can check against their own chat window.
+SIGNAL_LABELS = {
+    "busy": "reasoning icon disappears",
+    "idle": "send icon appears",
+    "stale": "screen stops changing",
+}
+# Which appearance a ticked signal additionally needs. "stale" needs none - a
+# drawn chat region is a finish detector all by itself.
+SIGNAL_TEMPLATE = {
+    "busy": TemplateKind.BUSY,
+    "idle": TemplateKind.IDLE,
+}
+HOVER_SCAN_LABEL = "hover-scan for copy icon"
+# A ticked busy/idle entry whose appearance was never captured runs nothing at
+# all (config.py's checklist and the profile are ANDed). Silent dead weight is
+# exactly the failure that shows up as an auto-copy that never fires, so it is
+# said here, next to the tick that caused it.
+SIGNAL_UNCAPTURED = "ticked but not captured — it will be skipped"
+
+
+def capture_button_id(kind: TemplateKind) -> str:
+    return f"{_CAPTURE_PREFIX}{kind}{_CAPTURE_SUFFIX}"
+
+
+def template_status_id(kind: TemplateKind) -> str:
+    return f"svc-tpl-{kind}"
+
+
+def signal_checkbox_id(signal: str) -> str:
+    return f"svc-signal-{signal}"
+
+
+def kind_from_button_id(button_id: str | None) -> TemplateKind | None:
+    """The appearance a capture-button press is about, or None if it is not one."""
+    if (
+        button_id is None
+        or not button_id.startswith(_CAPTURE_PREFIX)
+        or not button_id.endswith(_CAPTURE_SUFFIX)
+    ):
+        return None
+    try:
+        return TemplateKind(button_id[len(_CAPTURE_PREFIX) : -len(_CAPTURE_SUFFIX)])
+    except ValueError:
+        return None
+
+
+def template_status(profile: ServiceProfile | None, kind: TemplateKind) -> str:
+    """One appearance's status line: its captured size, or the not-set default."""
+    template = None if profile is None else profile.get(kind)
+    if template is None:
+        return TEMPLATE_UNSET
+    return f"{template.width}×{template.height} · captured"
+
+
+def _templates_line(profile: ServiceProfile | None) -> str:
+    """The one-line summary of what this service LOOKS like."""
+    if profile is None or not profile.captured:
+        return TEMPLATES_NONE
+    names = ", ".join(kind.label for kind in profile.captured)
+    return f"appearance: {profile.describe()} ({names})"
+
+
+def _signal_warning(preset: ServicePreset | None, profile: ServiceProfile | None) -> str:
+    """The inline "you ticked a detector that cannot run" line, or ""."""
+    if preset is None:
+        return ""
+    gaps = [
+        SIGNAL_TEMPLATE[signal].label
+        for signal in preset.finish_signals
+        if signal in SIGNAL_TEMPLATE
+        and (profile is None or not profile.has(SIGNAL_TEMPLATE[signal]))
+    ]
+    if not gaps:
+        return ""
+    return f"{', '.join(gaps)}: {SIGNAL_UNCAPTURED}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,27 +184,13 @@ class ServiceEdits:
 
     ``services`` is the edited presets table, or None when the table came out
     exactly as it went in - the caller then has nothing to persist.
-    ``profiles_changed`` is separate because captured appearances are deleted
-    from disk the moment the user confirms, not on close: the caller cannot
+    ``profiles_changed`` is separate because captured appearances are written or
+    deleted on disk the moment the user acts, not on close: the caller cannot
     diff for it, and must reload/repaint/re-arm around it either way.
     """
 
     services: dict[str, ServicePreset] | None
     profiles_changed: bool
-
-
-def _templates_line(profile: ServiceProfile | None) -> str:
-    """One read-only line describing what this service LOOKS like.
-
-    The editor never captures anything - drawing a box needs the browser on
-    screen, which is a main-screen job - but it is where a user goes to reason
-    about a service, so "does this one know what its copy button looks like?"
-    has to be answerable here.
-    """
-    if profile is None or not profile.captured:
-        return TEMPLATES_NONE
-    names = ", ".join(kind.label for kind in profile.captured)
-    return f"appearance: {profile.describe()} ({names})"
 
 
 def _select_options(services: dict[str, ServicePreset]) -> list[tuple[str, str]]:
@@ -115,11 +212,15 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         self._profile_root = profile_root
         self._services: dict[str, ServicePreset] = dict(config.services)
         self._initial_services: dict[str, ServicePreset] = dict(config.services)
-        # Set the moment a profile folder is actually removed from disk. Not
-        # derivable on close (the deletion already happened), and the caller
-        # has to hear about it: it caches profiles, paints them, and hunts for
-        # the templates it thinks are there.
+        # Set the moment a profile folder is actually written or removed on
+        # disk. Not derivable on close (it already happened), and the caller has
+        # to hear about it: it caches profiles, paints them, and hunts for the
+        # templates it thinks are there.
         self._profiles_changed = False
+        # One overlay at a time: cancelling the exclusive worker cannot kill the
+        # blocking child overlay process it spawned, so a second capture press -
+        # and a close - are refused while one is up.
+        self._capturing = False
         default_key = (
             config.general.service
             if config.general.service in self._services
@@ -141,6 +242,14 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                         allow_blank=False,
                         id="svc-select",
                     )
+                    yield Static(Text("DETECTION · response is finished when"),
+                                 classes="side-title")
+                    for signal in FINISH_SIGNALS:
+                        yield Checkbox(
+                            SIGNAL_LABELS[signal], id=signal_checkbox_id(signal), compact=True
+                        )
+                    yield Checkbox(HOVER_SCAN_LABEL, id="svc-hover-scan", compact=True)
+                    yield Static("", id="svc-signal-warning")
                 with Vertical(id="svc-form-col"):
                     yield Static(Text("Key"), classes="side-title")
                     yield Input(id="svc-key", placeholder="lowercase-with-hyphens")
@@ -152,16 +261,27 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                     yield Input(id="svc-total", placeholder="e.g. 500000")
                     yield Static(Text("Stale after (seconds unchanged)"), classes="side-title")
                     yield Input(id="svc-stable", placeholder="e.g. 2.0")
-                    yield Static(
-                        Text(_templates_line(self._profile(self._selected_key))),
-                        id="svc-templates",
-                    )
                     yield Static("", id="svc-error")
                     with Horizontal(id="svc-actions"):
                         yield Button("Add service", id="svc-add-btn", variant="primary")
                         yield Button("Reset to default", id="svc-reset-btn")
-                        yield Button("Forget appearance", id="svc-forget-templates-btn")
                         yield Button("Delete", id="svc-delete-btn", variant="error")
+                with Vertical(id="svc-appearance-col"):
+                    yield Static(Text("APPEARANCE"), classes="side-title")
+                    for kind in TemplateKind:
+                        yield Button(
+                            f"Capture {kind.label}...",
+                            id=capture_button_id(kind),
+                            classes=CAPTURE_CLASS,
+                            compact=True,
+                        )
+                        yield Static(
+                            Text(TEMPLATE_UNSET),
+                            id=template_status_id(kind),
+                            classes="side-status",
+                        )
+                    yield Static(Text(TEMPLATES_NONE), id="svc-templates")
+                    yield Button("Forget appearance", id="svc-forget-templates-btn", compact=True)
             yield Static(
                 "escape closes (applies valid edits) · built-ins: edit or reset, never delete",
                 classes="hint",
@@ -181,9 +301,9 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
     def _profile(self, key: str | None) -> ServiceProfile | None:
         """``key``'s captured appearances, read from disk. None for "+ Add new".
 
-        Read once per selection and passed along: two readouts here are views of
-        the same folder, and reading it twice per click is two decodes of every
-        PNG a service has.
+        Read once per selection and passed along: several readouts here are
+        views of the same folder, and reading it twice per click is two decodes
+        of every PNG a service has.
         """
         return None if key is None else load_profile(self._profile_root, key)
 
@@ -194,6 +314,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         max_input = self.query_one("#svc-max", Input)
         total_input = self.query_one("#svc-total", Input)
         stable_input = self.query_one("#svc-stable", Input)
+        preset: ServicePreset | None = None
         if key is None:
             key_input.disabled = False
             key_input.value = ""
@@ -213,10 +334,36 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             total_input.value = str(preset.total_context_chars)
             stable_input.value = str(preset.stable_seconds)
         self._pending_new = None
-        profile = self._profile(key)
+        for signal in FINISH_SIGNALS:
+            box = self.query_one(f"#{signal_checkbox_id(signal)}", Checkbox)
+            box.value = preset is not None and signal in preset.finish_signals
+        self.query_one("#svc-hover-scan", Checkbox).value = (
+            preset is not None and preset.hover_scan
+        )
+        self._show_appearance(self._profile(key))
+        self._revalidate()
+
+    def _show_appearance(self, profile: ServiceProfile | None) -> None:
+        """Repaint everything derived from what this service looks like.
+
+        One place, because four readouts are views of the same folder: the
+        per-kind status lines, the summary, whether there is anything to forget,
+        and whether a ticked finish signal has an appearance to run against.
+        """
+        for kind in TemplateKind:
+            self.query_one(f"#{template_status_id(kind)}", Static).update(
+                Text(template_status(profile, kind))
+            )
         self.query_one("#svc-templates", Static).update(Text(_templates_line(profile)))
         self._update_buttons(profile)
-        self._revalidate()
+        self._paint_signal_warning(profile)
+
+    def _paint_signal_warning(self, profile: ServiceProfile | None) -> None:
+        key = self._selected_key
+        preset = self._services.get(key) if key is not None else None
+        self.query_one("#svc-signal-warning", Static).update(
+            Text(_signal_warning(preset, profile))
+        )
 
     def _update_buttons(self, profile: ServiceProfile | None) -> None:
         is_new = self._selected_key is None
@@ -233,6 +380,13 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         self.query_one("#svc-forget-templates-btn", Button).display = (
             profile is not None and bool(profile.captured)
         )
+        # Nothing to file a capture or a checklist under until "Add service" has
+        # actually created the key. Disabled rather than hidden so the column
+        # does not reflow as the user fills the form in.
+        for button in self.query(f".{CAPTURE_CLASS}").results(Button):
+            button.disabled = is_new
+        for box in self.query(Checkbox):
+            box.disabled = is_new
 
     # -- live validation --------------------------------------------------------
 
@@ -329,6 +483,110 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                 stable_seconds=stable_val,
             )
 
+    # -- the detection checklist -------------------------------------------------
+
+    @on(Checkbox.Changed)
+    def _on_detection_changed(self, event: Checkbox.Changed) -> None:
+        """Fold the four toggles back into the selected preset, live.
+
+        Read as a set rather than per-box: ``finish_signals`` is a checklist in
+        one canonical order (config.FINISH_SIGNALS), so building it from all
+        three boxes is both simpler and immune to the echo Textual fires when
+        ``_load_service`` writes the values in - that echo writes the freshly
+        loaded service's own values straight back, which is a no-op.
+        """
+        event.stop()
+        key = self._selected_key
+        if key is None or key not in self._services:
+            return
+        signals = normalize_finish_signals(
+            signal
+            for signal in FINISH_SIGNALS
+            if self.query_one(f"#{signal_checkbox_id(signal)}", Checkbox).value
+        )
+        hover = self.query_one("#svc-hover-scan", Checkbox).value
+        self._services[key] = replace(
+            self._services[key], finish_signals=signals, hover_scan=hover
+        )
+        self._paint_signal_warning(self._profile(key))
+
+    # -- capturing what a service LOOKS like -------------------------------------
+
+    @on(Button.Pressed, f".{CAPTURE_CLASS}")
+    def _on_capture_pressed(self, event: Button.Pressed) -> None:
+        """The one route into a capture, for all six appearances.
+
+        The block is generated per ``TemplateKind`` with the kind encoded in
+        each button's id, so the kind is parsed back out here rather than
+        duplicated in six near-identical handlers - adding a seventh appearance
+        means adding an enum member and nothing else.
+        """
+        event.stop()
+        kind = kind_from_button_id(event.button.id)
+        if kind is None or self._selected_key is None:
+            return
+        if self._capturing:
+            self.notify("a region picker is already open - finish it or press Esc first")
+            return
+        self._capturing = True
+        self.run_worker(self._capture_template(kind), group="capture", exclusive=True)
+
+    async def _capture_template(self, kind: TemplateKind) -> None:
+        """Draw a box around ``kind`` and file the pixels under the SERVICE.
+
+        The same overlay the chat region uses, run as a child process; the
+        prompt comes from the kind (screen.profile) rather than from here,
+        because what makes a good capture is a fact about the appearance and
+        must read identically wherever it is asked for.
+
+        The write is immediate, like "Forget appearance"'s delete: the editor
+        holds no profile of its own to hand back on close, so the store IS the
+        working copy and ``_profiles_changed`` is what tells the caller to drop
+        its cache. A save failure therefore files nothing at all - unlike the
+        old main-screen path there is no in-memory template left to be useful.
+
+        The overlay guard is held for the WHOLE method, not just the pick: the
+        bookkeeping after it runs in an exclusive worker, so a second capture
+        press mid-save would cancel this one halfway. Held, that press is
+        refused instead - and so is escape.
+        """
+        try:
+            key = self._selected_key
+            if key is None:
+                return
+            try:
+                region = await asyncio.to_thread(pick_region, prompt=kind.prompt)
+            except ScreenPickError as exc:
+                self.notify(str(exc), severity="error")
+                return
+            if region is None:
+                self.notify(f"{kind.label} unchanged (selection cancelled)")
+                return
+            try:
+                image = await asyncio.to_thread(capture_region, region)
+            except CaptureError as exc:
+                self.notify(f"could not capture the {kind.label}: {exc}", severity="error")
+                return
+            # Anchoring it here is the searchability check: a box narrower than
+            # one anchor can never be matched back, so filing it would only
+            # produce a template that finds nothing.
+            probe = ServiceProfile(key)
+            try:
+                probe.put(kind, image)
+            except ValueError as exc:
+                self.notify(f"that {kind.label} cannot be searched for: {exc}", severity="error")
+                return
+            try:
+                await asyncio.to_thread(save_template, self._profile_root, key, kind, image)
+            except ProfileStoreError as exc:
+                self.notify(f"could not save the {kind.label}: {exc}", severity="error")
+                return
+            self._profiles_changed = True
+            self._show_appearance(self._profile(key))
+            self.notify(f"{kind.label} captured for {key} ({region.describe()})")
+        finally:
+            self._capturing = False
+
     # -- add / reset / delete ----------------------------------------------------
 
     @on(Button.Pressed, "#svc-add-btn")
@@ -364,14 +622,14 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         settings.
         """
         key = self._selected_key
-        if key is None:
+        if key is None or self._capturing:
             return
         confirmed = await self.app.push_screen_wait(
             ConfirmScreen(
                 f"Forget the {key} appearance?",
                 "The captured images of this service's buttons and chat box will be "
                 "deleted from disk. Its size settings are untouched, but every one "
-                "of those images has to be captured again from the main screen.",
+                "of those images has to be captured again.",
             )
         )
         if not confirmed:
@@ -385,7 +643,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             pass
         else:
             self._profiles_changed = True
-        self._load_service(key)
+        self._show_appearance(self._profile(key))
 
     @on(Button.Pressed, "#svc-delete-btn")
     def _on_delete(self, event: Button.Pressed) -> None:
@@ -419,6 +677,12 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         # Bound directly to the escape key, so Textual dispatches it OUTSIDE a
         # worker - push_screen_wait (for the discard confirm) needs one, hence
         # the hand-off (same pattern as AgentClipApp._confirm_quit).
+        if self._capturing:
+            # Escape belongs to the overlay right now, and closing the editor
+            # out from under an in-flight capture would strand the worker that
+            # still has to write the PNG.
+            self.notify("a region picker is open - finish it or cancel it first")
+            return
         self.run_worker(self._close_async(), group="close", exclusive=True)
 
     async def _close_async(self) -> None:

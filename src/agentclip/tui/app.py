@@ -342,12 +342,15 @@ class AgentClipApp(App[None]):
 
     #service-editor-box {
         width: 112;
+        /* Three columns of form; the tallest is ~34 rows, so the shared 85% cap
+           clipped the hint line off the bottom on a 45-row terminal. */
+        max-height: 95%;
     }
     #svc-body {
         height: auto;
     }
     #svc-list-col {
-        width: 36;
+        width: 32;
         margin-right: 2;
     }
     #svc-list-col Select {
@@ -357,11 +360,34 @@ class AgentClipApp(App[None]):
     #svc-form-col {
         width: 1fr;
     }
-    #svc-form-col .side-title {
+    /* The three columns are one form, so every section heading in them sits
+       off its predecessor by a row - except the one that starts a column. */
+    #svc-body .side-title {
         margin-top: 1;
     }
-    #svc-form-col .side-title:first-of-type {
+    #svc-body .side-title:first-of-type {
         margin-top: 0;
+    }
+    #svc-appearance-col {
+        width: 34;
+        margin-left: 2;
+    }
+    /* The capture buttons and their status lines alternate, so both are one
+       row: six three-row buttons would push the column past the modal. */
+    #svc-appearance-col .side-status {
+        color: $text-muted;
+    }
+    #svc-templates {
+        height: auto;
+        margin-top: 1;
+    }
+    #svc-forget-templates-btn {
+        margin-top: 1;
+    }
+    #svc-signal-warning {
+        color: $warning;
+        height: auto;
+        margin-top: 1;
     }
     #svc-error {
         color: $error;
@@ -478,12 +504,12 @@ class AgentClipApp(App[None]):
             self.app_config = replace(self.app_config, services=result.services)
         main = self.main_screen
         if main is not None:
-            # Drops the profile cache, repaints the APPEARANCE block and
+            # Drops the profile cache, repaints the appearance summary and
             # rebuilds the detector poller around what is left.
             main.update_config(self.app_config)
             main.sidebar.refresh_services(self.app_config)
         self.notify(
-            "service presets saved" if result.services is not None else "appearance forgotten",
+            "service presets saved" if result.services is not None else "appearance updated",
             timeout=4,
         )
 

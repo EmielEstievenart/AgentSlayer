@@ -1,19 +1,26 @@
 """Pilot tests for the copy button: an appearance captured per SERVICE, found
 lowest-first inside the drawn chat region.
 
-Nothing remembers where the copy icon is. The user captures what it looks like
-once ("Capture copy button..."), and when the finish detectors agree a response
-is done the flow captures the live chat region and takes the BOTTOM-most match
-in it - the icon appears once per response down the transcript, so lowest is
-newest. There is no vertical search band any more, and therefore no way for the
-search to fail because a band stopped fitting a template.
+Nothing remembers where the copy icon is. The service is told what it looks
+like once (in the service editor, F2), and when the finish detectors agree a
+response is done the flow captures the live chat region and takes the
+BOTTOM-most match in it - the icon appears once per response down the
+transcript, so lowest is newest. There is no vertical search band any more, and
+therefore no way for the search to fail because a band stopped fitting a
+template.
 
-Picker, capture, matcher and focus calls are monkeypatched at their use site
+The appearance itself is seeded straight into the profile store
+(``seed_templates``) rather than captured through the UI: these tests are about
+everything DOWNSTREAM of the capture, and the capture flow is the service
+editor's subject, covered once in test_profile_capture_ui.py. Seeding writes
+the same PNGs a real capture leaves behind, so the app simply loads them.
+
+Capture, matcher and focus calls are monkeypatched at their use site
 (agentclip.tui.screens.main). ``BusyProbed`` is the documented injectable path
 for the poller (tui/messages.py); posting it is equivalent to a poll
 completing, so these tests drive the arm/fire trigger without the real thread.
 
-The terminal has to be tall enough for every sidebar button to be on screen -
+The terminal has to be tall enough for the sidebar's buttons to be on screen -
 Pilot refuses to click a widget outside the visible region.
 """
 
@@ -33,9 +40,7 @@ from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import CaptureError, RegionImage
-from agentclip.screen.picker import ScreenPickError
 from agentclip.screen.profile import TemplateKind
-from agentclip.screen.profile_store import load_profile
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.template import RegionMatch
 from agentclip.tui.app import AgentClipApp
@@ -82,9 +87,38 @@ def _make_app(tmp_path: Path, profile_root: Path) -> tuple[AgentClipApp, FakeCli
     return app, fake
 
 
+def _service_key(app: AgentClipApp) -> str:
+    """The service the sidebar starts on - the one every appearance is filed
+    under (mirrors ``Sidebar._default_service``)."""
+    config = app.app_config
+    if config.general.service in config.services:
+        return config.general.service
+    return sorted(config.services)[0]
+
+
+def _app_with_copy(
+    tmp_path: Path, profile_root: Path, seed: Callable[..., None]
+) -> tuple[AgentClipApp, FakeClipboard]:
+    """An app whose service already knows what its copy button looks like.
+
+    The state a capture leaves behind - a real PNG in the real store, under the
+    selected service - so the app picks it up off disk at startup exactly as it
+    would on the run after the user calibrated it.
+    """
+    app, fake = _make_app(tmp_path, profile_root)
+    seed(_service_key(app), TemplateKind.COPY, size=(COPY_ICON.width, COPY_ICON.height))
+    return app, fake
+
+
 def _copy_label(app: AgentClipApp) -> str:
     assert app.main_screen is not None
     return str(app.main_screen.query_one("#side-tpl-copy", Static).render())
+
+
+def _profile_note(app: AgentClipApp) -> str:
+    """The sidebar's read-only "appearance: n/6 captured" summary."""
+    assert app.main_screen is not None
+    return str(app.main_screen.query_one("#side-profile-note", Static).render())
 
 
 async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
@@ -111,8 +145,7 @@ async def _post_probe(main: MainScreen, pilot: Pilot, state: BusyState, diff: fl
     await pilot.pause()
 
 
-def _patch_picker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: COPY_ICON)
+def _patch_capture(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_mod, "capture_region", _frame)
 
 
@@ -127,15 +160,12 @@ def _freeze_detector(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
 
 
-async def _capture_copy(app: AgentClipApp, pilot: Pilot) -> MainScreen:
-    """Wait for the composer, then capture the copy button's appearance."""
+async def _ready(app: AgentClipApp, pilot: Pilot) -> MainScreen:
+    """Wait for the composer, with the copy button's appearance already loaded."""
     main = app.main_screen
     assert main is not None
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-    await _press(app, pilot, "#capture-copy-btn")
-    await _wait_for(
-        pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
-    )
+    assert main._active_profile().has(TemplateKind.COPY)
     main._active_detectors = ("busy",)
     return main
 
@@ -149,111 +179,30 @@ async def _armed(app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: CHAT_REGION)
     await _press(app, pilot, "#set-region-btn")
     await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
-    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: COPY_ICON)
-    await _press(app, pilot, "#capture-copy-btn")
-    await _wait_for(
-        pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button captured"
-    )
+    assert main._active_profile().has(TemplateKind.COPY)
     main._active_detectors = ("busy",)
     return main
-
-
-# -- capture --------------------------------------------------------------------
-
-
-async def test_capturing_the_copy_button_files_it_under_the_service(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _patch_picker(monkeypatch)
-    app, _ = _make_app(tmp_path, profile_root)
-    async with app.run_test(size=SIZE) as pilot:
-        main = app.main_screen
-        assert main is not None
-        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        assert "not captured" in _copy_label(app)
-        key = main._selected_service()
-
-        main = await _capture_copy(app, pilot)
-        template = main._active_profile().get(TemplateKind.COPY)
-        assert template is not None
-        assert (template.width, template.height) == (24, 24)
-        assert "24×24 · captured" in _copy_label(app)
-        assert load_profile(profile_root, key).has(TemplateKind.COPY)
-
-
-async def test_cancelled_pick_changes_nothing(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: None)
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    app, _ = _make_app(tmp_path, profile_root)
-    async with app.run_test(size=SIZE) as pilot:
-        main = app.main_screen
-        assert main is not None
-        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-
-        await _press(app, pilot, "#capture-copy-btn")
-        await pilot.pause(0.2)
-        assert not main._active_profile().has(TemplateKind.COPY)
-        assert "not captured" in _copy_label(app)
-
-
-async def test_picker_failure_is_reported_not_fatal(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def boom(prompt: str | None = None) -> ScreenRegion:
-        raise ScreenPickError("region picker unavailable: no tkinter")
-
-    monkeypatch.setattr(main_mod, "pick_region", boom)
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    app, _ = _make_app(tmp_path, profile_root)
-    async with app.run_test(size=SIZE) as pilot:
-        main = app.main_screen
-        assert main is not None
-        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-
-        await _press(app, pilot, "#capture-copy-btn")
-        await pilot.pause(0.2)
-        assert not main._active_profile().has(TemplateKind.COPY)
-        assert "not captured" in _copy_label(app)
-
-
-async def test_capture_failure_keeps_the_appearance_unknown(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def boom(region: ScreenRegion) -> RegionImage:
-        raise CaptureError("screen capture is not implemented yet")
-
-    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: COPY_ICON)
-    monkeypatch.setattr(main_mod, "capture_region", boom)
-    app, _ = _make_app(tmp_path, profile_root)
-    async with app.run_test(size=SIZE) as pilot:
-        main = app.main_screen
-        assert main is not None
-        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-
-        await _press(app, pilot, "#capture-copy-btn")
-        await pilot.pause(0.2)
-        assert not main._active_profile().has(TemplateKind.COPY)
-        assert "not captured" in _copy_label(app)
 
 
 # -- the MATCH-then-two-CHANGED trigger ----------------------------------------
 
 
 async def test_match_then_two_changed_fires_once_and_rearms(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_picker(monkeypatch)
+    _patch_capture(monkeypatch)
     calls: list[None] = []
 
     async def fake_flow(self: MainScreen) -> None:
         calls.append(None)
 
     monkeypatch.setattr(MainScreen, "_auto_copy_flow", fake_flow)
-    app, _ = _make_app(tmp_path, profile_root)
+    app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _capture_copy(app, pilot)
+        main = await _ready(app, pilot)
 
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
         await _post_probe(main, pilot, BusyState.CHANGED, 0.3)
@@ -277,18 +226,21 @@ async def test_match_then_two_changed_fires_once_and_rearms(
 
 
 async def test_error_probe_resets_streak_but_not_armed(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_picker(monkeypatch)
+    _patch_capture(monkeypatch)
     calls: list[None] = []
 
     async def fake_flow(self: MainScreen) -> None:
         calls.append(None)
 
     monkeypatch.setattr(MainScreen, "_auto_copy_flow", fake_flow)
-    app, _ = _make_app(tmp_path, profile_root)
+    app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _capture_copy(app, pilot)
+        main = await _ready(app, pilot)
 
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
         await _post_probe(main, pilot, BusyState.CHANGED, 0.3)
@@ -326,18 +278,21 @@ async def test_no_fire_without_a_captured_copy_button(
 
 
 async def test_no_fire_without_prior_match(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _patch_picker(monkeypatch)
+    _patch_capture(monkeypatch)
     calls: list[None] = []
 
     async def fake_flow(self: MainScreen) -> None:
         calls.append(None)
 
     monkeypatch.setattr(MainScreen, "_auto_copy_flow", fake_flow)
-    app, _ = _make_app(tmp_path, profile_root)
+    app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _capture_copy(app, pilot)
+        main = await _ready(app, pilot)
 
         # CHANGED from the very start - never armed by a MATCH.
         await _post_probe(main, pilot, BusyState.CHANGED, 0.3)
@@ -355,13 +310,16 @@ async def _fire(main: MainScreen, pilot: Pilot) -> None:
 
 
 async def test_flow_searches_the_chat_region_and_clicks_the_lowest_match(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clicks: list[ScreenRegion] = []
     scrolls: list[tuple[ScreenRegion, int]] = []
     searched: list[ScreenRegion] = []
 
-    app, fake = _make_app(tmp_path, profile_root)
+    app, fake = _app_with_copy(tmp_path, profile_root, seed_templates)
 
     def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
         clicks.append(region)
@@ -401,20 +359,23 @@ async def test_flow_searches_the_chat_region_and_clicks_the_lowest_match(
 
 
 async def test_no_chat_region_means_the_flow_does_nothing(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The chat region is where the icon is looked for, so without one there is
     nowhere to look - and nothing is clicked or scrolled."""
-    _patch_picker(monkeypatch)
+    _patch_capture(monkeypatch)
     clicks: list[ScreenRegion] = []
     scrolls: list[ScreenRegion] = []
     monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: scrolls.append(region) or True)
     monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda t, s, **kw: MATCH)
 
-    app, _ = _make_app(tmp_path, profile_root)
+    app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _capture_copy(app, pilot)
+        main = await _ready(app, pilot)
         assert main._chat_region is None
 
         await _fire(main, pilot)
@@ -424,7 +385,10 @@ async def test_no_chat_region_means_the_flow_does_nothing(
 
 
 async def test_not_found_notifies_and_does_not_click(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clicks: list[ScreenRegion] = []
     monkeypatch.setattr(main_mod, "capture_region", _frame)
@@ -434,7 +398,7 @@ async def test_not_found_notifies_and_does_not_click(
     monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: False)  # no hover scan either
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
-    app, _ = _make_app(tmp_path, profile_root)
+    app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)
 
@@ -444,13 +408,16 @@ async def test_not_found_notifies_and_does_not_click(
 
 
 async def test_a_failed_capture_of_the_chat_region_is_reported(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: True)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
 
-    app, _ = _make_app(tmp_path, profile_root)
+    app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)
 
@@ -464,14 +431,17 @@ async def test_a_failed_capture_of_the_chat_region_is_reported(
 
 
 async def test_flow_snaps_focus_back_to_the_tool(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """After clicking the browser's copy button the flow hands focus back to
     the window recorded at mount - click first, snap-back strictly after."""
     events: list[str] = []
     monkeypatch.setattr(main_mod, "foreground_window", lambda: 4242)
 
-    app, fake = _make_app(tmp_path, profile_root)
+    app, fake = _app_with_copy(tmp_path, profile_root, seed_templates)
 
     def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
         events.append("click")
@@ -505,14 +475,17 @@ async def test_flow_snaps_focus_back_to_the_tool(
 
 
 async def test_verified_click_retries_at_an_offset_on_no_change(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Sometimes the click lands on the right spot but nothing gets copied -
     the flow must retry at a slightly offset point still inside the icon
     before giving up."""
     clicks: list[tuple[ScreenRegion, float]] = []
 
-    app, fake = _make_app(tmp_path, profile_root)
+    app, fake = _app_with_copy(tmp_path, profile_root, seed_templates)
 
     def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
         clicks.append((region, settle_s))
@@ -543,7 +516,10 @@ async def test_verified_click_retries_at_an_offset_on_no_change(
 
 
 async def test_verified_click_exhausts_retries_and_leaves_focus(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When the clipboard never changes across all three attempts, the flow
     reports the failure and deliberately does NOT snap focus back - the
@@ -551,7 +527,7 @@ async def test_verified_click_exhausts_retries_and_leaves_focus(
     clicks: list[tuple[ScreenRegion, float]] = []
     focus_calls: list[int] = []
 
-    app, _fake = _make_app(tmp_path, profile_root)
+    app, _fake = _app_with_copy(tmp_path, profile_root, seed_templates)
 
     def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
         clicks.append((region, settle_s))
@@ -589,15 +565,18 @@ async def test_verified_click_exhausts_retries_and_leaves_focus(
 
 
 async def test_new_keeps_the_capture_but_disarms_the_trigger(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The copy button's appearance describes the service, so it survives /new
     (and the app itself) - but the arm/streak belong to the dead session's
     verdicts, so they reset with it."""
-    _patch_picker(monkeypatch)
-    app, _ = _make_app(tmp_path, profile_root)
+    _patch_capture(monkeypatch)
+    app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
-        main = await _capture_copy(app, pilot)
+        main = await _ready(app, pilot)
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
         assert main._copy_armed is True
 
@@ -610,4 +589,6 @@ async def test_new_keeps_the_capture_but_disarms_the_trigger(
         assert main._active_profile().has(TemplateKind.COPY)
         assert main._copy_armed is False
         assert main._copy_changed_streak == 0
-        assert "24×24 · captured" in _copy_label(app)
+        # The sidebar's summary is where a surviving capture shows now: the
+        # copy line is a live click verdict, not a capture readout.
+        assert "1/6 captured" in _profile_note(app)

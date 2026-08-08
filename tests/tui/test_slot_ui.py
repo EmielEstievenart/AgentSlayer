@@ -6,13 +6,18 @@ SUBAGENT the second window a delegated sub-agent gets, and choosing between
 them does NOT change which window the automation drives (that is
 ``start_browser_chat``'s job, tested in test_subagent_slot_ui.py).
 
-Everything else in the column is the SERVICE's - captured appearances shared by
-both slots - which is what makes the second window cost one drag. These tests
-pin down exactly that split: the two windows are independent, the appearances
-are not, the readiness note names the gaps from ``slot.missing()``, only the
-region prompt is slot-prefixed, the picker is never locked by a session
-(drawing the sub-agent window mid-session is the normal way to reach
-delegation), and /new keeps both windows while sending the pointers home.
+Everything else the column reports is the SERVICE's - captured appearances
+shared by both slots, filed by the service editor (F2) - which is what makes
+the second window cost one drag. These tests pin down exactly that split: the
+two windows are independent, the appearances are not, the readiness note names
+the gaps from ``slot.missing()``, only the region prompt is slot-prefixed, the
+picker is never locked by a session (drawing the sub-agent window mid-session is
+the normal way to reach delegation), and /new keeps both windows while sending
+the pointers home.
+
+Appearances are seeded straight into the profile store here, exactly as a
+capture would leave them: how they get there is the editor's story
+(test_profile_capture_ui.py), and none of these tests are about it.
 """
 
 from __future__ import annotations
@@ -76,6 +81,14 @@ async def _wait_for(
             return
         await pilot.pause(0.05)
     raise AssertionError(f"timed out waiting for {what}")
+
+
+def _service_key(app: AgentClipApp) -> str:
+    """The service the sidebar starts on - the one a seeded appearance has to be
+    filed under for this app to load it."""
+    config = app.app_config
+    configured = config.general.service
+    return configured if configured in config.services else next(iter(sorted(config.services)))
 
 
 def _make_app(tmp_path: Path, profile_root: Path) -> AgentClipApp:
@@ -153,6 +166,20 @@ async def _calibrate(
     await pilot.pause(0.1)
 
 
+async def _editor_visit(app: AgentClipApp, pilot: Pilot) -> None:
+    """What coming back from the service editor does to this screen.
+
+    Capturing an appearance is the editor's job now, so a mid-run capture
+    reaches the sidebar exactly this way: the per-run profile cache is dropped
+    and everything downstream of "what does this service look like?" repaints -
+    the appearance summary, the slot readiness note, the detectors.
+    """
+    main = app.main_screen
+    assert main is not None
+    main.update_config(app.app_config)
+    await pilot.pause()
+
+
 async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
     main = app.main_screen
     assert main is not None
@@ -187,45 +214,56 @@ async def test_the_two_slots_are_independent(
 
 
 async def test_switching_the_slot_repaints_the_window_but_not_the_appearances(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
 ) -> None:
+    """A slot switch repaints the CHAT WINDOW block and nothing else.
+
+    What the service looks like is not a property of a window, so the
+    appearance summary reads the same from either slot - that sharing is what
+    makes the second window cost one drag.
+    """
     picker = _patch_screen(monkeypatch)
     app = _make_app(tmp_path, profile_root)
+    seed_templates(_service_key(app), TemplateKind.NEW_CHAT, TemplateKind.COPY)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_REGION)
-        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", MASTER_REGION)
         assert MASTER_REGION.describe() in _label(app, "#side-region")
+        assert "2/6 captured" in _label(app, "#side-profile-note")
 
-        # The sub-agent slot has no window drawn, so the per-slot rows read as
+        # The sub-agent slot has no window drawn, so the per-slot row reads as
         # unset - but the captured appearances are the service's and stay put.
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await pilot.pause()
         assert "not set" in _label(app, "#side-region")
-        assert "captured" in _label(app, "#side-tpl-new-chat")
+        assert "2/6 captured" in _label(app, "#side-profile-note")
+        assert main._active_profile().has(TemplateKind.COPY)
 
-        # The copy button is the SERVICE's appearance, not this slot's, so it
-        # reads the same from either slot - that sharing is the point.
-        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_REGION)
-        assert "captured" in _label(app, "#side-tpl-copy")
-
-        # ...and switching back restores the master's, from stored state.
+        # ...and switching back restores the master's window, from stored state,
+        # while the service's appearances never moved at all.
         await _select_slot(app, pilot, AgentSlot.MASTER)
         await pilot.pause()
         assert MASTER_REGION.describe() in _label(app, "#side-region")
-        assert "captured" in _label(app, "#side-tpl-new-chat")
-        assert "captured" in _label(app, "#side-tpl-copy")
+        assert "2/6 captured" in _label(app, "#side-profile-note")
+        assert main._active_profile().has(TemplateKind.NEW_CHAT)
         assert _label(app, "#side-slot-note") == SLOT_NOTE_MASTER
 
 
 async def test_the_note_reports_what_delegation_is_still_missing(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
 ) -> None:
     picker = _patch_screen(monkeypatch)
     app = _make_app(tmp_path, profile_root)
+    key = _service_key(app)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -241,12 +279,14 @@ async def test_the_note_reports_what_delegation_is_still_missing(
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
         assert MISSING_CHAT_REGION not in _label(app, "#side-slot-note")
 
-        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_REGION)
+        seed_templates(key, TemplateKind.NEW_CHAT)
+        await _editor_visit(app, pilot)
         assert MISSING_NEWCHAT not in _label(app, "#side-slot-note")
 
         # A capture is a profile change, not a slot one - the ready-toast seam
         # has to notice it too, or delegation would silently stay "off".
-        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_REGION)
+        seed_templates(key, TemplateKind.COPY)
+        await _editor_visit(app, pilot)
         await _wait_for(
             pilot,
             lambda: _label(app, "#side-slot-note") == SLOT_NOTE_READY,
@@ -261,7 +301,7 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
     """Both slots share the picker code, so the prompt is the only thing that
     tells the user which browser window to point at.
 
-    Only the per-slot pickers say it: capturing an appearance is a question
+    Only the per-slot picker says it: capturing an appearance is a question
     about the SERVICE, and the answer is the same whichever window it is drawn
     in - a slot prefix there would be a lie."""
     picker = _patch_screen(monkeypatch)
@@ -280,8 +320,10 @@ async def test_subagent_prompts_name_the_window_being_drawn_on(
         # service, whose answer is the same in either one.
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
         assert "SUB-AGENT window" in picker.prompts[-1]
-        await _calibrate(app, pilot, picker, "#capture-busy-btn", SUB_REGION)
-        assert "SUB-AGENT window" not in picker.prompts[-1]
+        # The appearance captures ask in words that come from TemplateKind, in
+        # the service editor, which knows nothing about slots - so none of them
+        # can name a window even by accident.
+        assert all("SUB-AGENT" not in kind.prompt for kind in TemplateKind)
 
 
 async def test_the_slot_picker_is_never_locked_by_a_session(
@@ -304,18 +346,22 @@ async def test_the_slot_picker_is_never_locked_by_a_session(
         assert not main.sidebar.slot_select.disabled
 
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
-        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_REGION)
-        assert main._active_profile().has(TemplateKind.NEW_CHAT)
+        await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
+        assert main._slots[AgentSlot.SUBAGENT].chat_region == SUB_REGION
 
 
 async def test_new_keeps_both_slots_and_sends_the_pointers_home(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
 ) -> None:
     """/new is a session teardown, not a recalibration: the service's windows
     have not moved, so both slots' calibrations survive and only the slot
     pointers (calibrating + live) go home to MASTER."""
     picker = _patch_screen(monkeypatch)
     app = _make_app(tmp_path, profile_root)
+    seed_templates(_service_key(app), TemplateKind.NEW_CHAT)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -324,7 +370,6 @@ async def test_new_keeps_both_slots_and_sends_the_pointers_home(
         await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_REGION)
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_REGION)
         main._live = AgentSlot.SUBAGENT  # as a delegation would leave it
 
         await _send(app, pilot, "Say hello.")
@@ -345,7 +390,10 @@ async def test_new_keeps_both_slots_and_sends_the_pointers_home(
 
 
 async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
 ) -> None:
     """A sub-agent slot calibrated to readiness stays ready across /new:
     ``_delegation_ready`` is re-derived from the surviving slot instead of being
@@ -353,6 +401,9 @@ async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
     ready" toast has no False->True edge to re-fire on."""
     picker = _patch_screen(monkeypatch)
     app = _make_app(tmp_path, profile_root)
+    # Everything readiness asks of the SERVICE; the drag below is the only
+    # thing left that belongs to the slot.
+    seed_templates(_service_key(app), TemplateKind.NEW_CHAT, TemplateKind.COPY)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
@@ -360,9 +411,6 @@ async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
 
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#capture-busy-btn", SUB_REGION)
-        await _calibrate(app, pilot, picker, "#capture-copy-btn", SUB_REGION)
         await _wait_for(pilot, lambda: main.delegation_available(), "sub-agent slot ready")
 
         await main.clear_transcript()  # the /new teardown hook
@@ -373,7 +421,10 @@ async def test_new_rederives_delegation_readiness_from_the_surviving_slot(
 
 
 async def test_the_new_browser_chat_button_targets_the_calibrating_slot(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
 ) -> None:
     """The button is how the user *tests* a calibration, so it follows the
     sidebar - and it never moves the live slot. The appearance is the service's
@@ -385,13 +436,13 @@ async def test_the_new_browser_chat_button_targets_the_calibrating_slot(
         main_mod, "click_region", lambda region, **kw: bool(clicks.append(region)) or True
     )
     app = _make_app(tmp_path, profile_root)
+    seed_templates(_service_key(app), TemplateKind.NEW_CHAT)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_REGION)
-        await _calibrate(app, pilot, picker, "#capture-new-chat-btn", MASTER_REGION)
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
 

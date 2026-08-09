@@ -28,6 +28,7 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
 
+import agentclip.screen.detector as detector_mod
 import agentclip.tui.screens.main as main_mod
 from agentclip.app.types import SessionRef
 from agentclip.cli import make_engine_factory
@@ -201,15 +202,19 @@ def _record_stale_ticks(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     cadence ONCE, when the poller starts - so this list is both "how many times
     was the poller rebuilt" and "what did each rebuild believe", which is
     exactly what an edited ``stable_seconds`` has to change.
+
+    Spied where the tracker is now BUILT: composing a detector out of one
+    window's calibration is ``screen.detector.build_detector``'s job, and
+    MainScreen only asks it for one.
     """
     ticks: list[int] = []
-    real = main_mod.StaleTracker
+    real = detector_mod.StaleTracker
 
     def spy(region: ScreenRegion, **kwargs: Any) -> Any:
         ticks.append(int(kwargs["required_ticks"]))
         return real(region, **kwargs)
 
-    monkeypatch.setattr(main_mod, "StaleTracker", spy)
+    monkeypatch.setattr(detector_mod, "StaleTracker", spy)
     return ticks
 
 

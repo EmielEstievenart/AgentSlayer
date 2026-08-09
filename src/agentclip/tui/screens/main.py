@@ -36,13 +36,22 @@ heading per sub-task, not one over five.
 Threading: the clipboard watcher is a ``run_worker(thread=True)`` that bridges
 captures via the thread-safe ``post_message(ClipboardCaptured)`` -> the controller.
 The controller's flow coroutines run via ``spawn`` (also ``run_worker``), so Textual
-cancels everything on unmount. The finish detectors are the same shape: ONE
-thread worker takes a single capture of the live chat region per tick and
-hands it to whichever detectors the active service ASKS FOR and can run - its
-``finish_signals`` checklist picks from busy/idle/stale, and the two icon
-detectors additionally need their appearance captured - bridging ``BusyProbed``
-/ ``IdleProbed`` / ``StaleProbed`` back to the UI. An empty set means no worker
-at all and a sidebar line saying finish detection is off.
+cancels everything on unmount. The detectors are the same shape: ONE thread
+worker takes a single capture of the live chat region per tick and hands it to
+one ``screen.detector.ScreenDetector`` - a plain, Textual-free object that
+searches for every appearance the live window's service is CALIBRATED for and
+answers with a snapshot - bridging ``BusyProbed`` / ``IdleProbed`` /
+``StaleProbed`` / ``SendReadyProbed`` / ``ElementsMatched`` back to the UI.
+
+That split is deliberate and load-bearing: **the detector detects, the state
+machine consumes**. Nothing about the send gate, the auto-copy flow or the
+session can reach into what a tick searches for, which is what lets the ELEMENTS
+column show what the tool can see at any moment rather than only during the two
+windows the searches used to be gated to. Which FINISH detectors the service
+asks for (``finish_signals``, with busy/idle additionally needing their
+appearance captured) still decides what can ever fold into a verdict - an empty
+set means finish detection is off and the sidebar says so - but a captured send
+or copy button is still watched and still shown.
 
 Their combined verdict drives the copy-button auto-click (``_evaluate_finish``):
 the busy appearance is on screen only WHILE the model generates, so finding it
@@ -158,6 +167,7 @@ from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import CaptureError, RegionImage, capture_region
+from agentclip.screen.detector import ScreenDetector, Sighting, build_detector
 from agentclip.screen.focus import (
     click_region,
     focus_window,
@@ -186,7 +196,6 @@ from agentclip.screen.template import (
     RegionMatch,
     Template,
     find_all_in_region,
-    find_in_region,
     find_lowest_with_best_miss,
     match_rect,
     same_element,
@@ -481,30 +490,7 @@ def _lowest_match_scored(
     return best, best_miss
 
 
-def _first_match(
-    templates: Sequence[Template], scene: RegionImage, *, max_diff: float
-) -> tuple[Template, RegionMatch] | None:
-    """The first match of ANY of a kind's images, and the image that made it.
-
-    The presence question (screen.template.find_in_region) asked across a
-    stack, and the send gate's whole search: any of the pictures being on
-    screen means the button is there, so the sweep stops at the first hit.
-
-    It keeps the match rather than collapsing to a bool - which is all the gate
-    itself needs - because the ELEMENTS column cuts its crop out of exactly
-    that rectangle (§1.7), and a discarded match is a picture the user cannot
-    be shown.
-    """
-    for template in templates:
-        match = find_in_region(template, scene, max_diff=max_diff)
-        if match is not None:
-            return (template, match)
-    return None
-
-
-def _element_crop(
-    scene: RegionImage, sighting: tuple[Template, RegionMatch] | None
-) -> ElementCrop | None:
+def _element_crop(scene: RegionImage, sighting: Sighting | None) -> ElementCrop | None:
     """Cut a verified match out of the frame it was found in, panel-sized.
 
     The cut runs in the WORKER that captured the scene, never on the UI thread,
@@ -519,7 +505,7 @@ def _element_crop(
     """
     if sighting is None:
         return None
-    template, match = sighting
+    template, match = sighting.template, sighting.match
     image = element_crop_image(crop(scene, match.x, match.y, template.width, template.height))
     return None if image is None else ElementCrop(image, match.diff)
 
@@ -765,12 +751,18 @@ class MainScreen(Screen[None]):
         # ``_evaluate_finish``.
         self._stale_diff: float | None = None
         self._stale_arm_streak = 0
-        # The live detectors, kept on self so the auto-copy flow's finally can
-        # reset them: the flow drives the very window they watch, so the frames
-        # (and streaks) it leaves behind must not count as history.
-        # ``_active_detectors`` is which of them the current worker posts, in
-        # the fixed busy -> idle -> stale order - the seam that says which
-        # message closes a tick (``_finish_tick_closed_by``).
+        # What is looking at the live window: one ``ScreenDetector``, rebuilt
+        # per poller run, searching for every appearance that window's service
+        # is calibrated for and for nothing else. It is a SOURCE, never a
+        # participant - everything below consumes it, and nothing below may
+        # decide what it looks for.
+        self._detector: ScreenDetector | None = None
+        # Its three finish trackers, kept under their own names so the auto-copy
+        # flow's finally can reset them: the flow drives the very window they
+        # watch, so the frames (and streaks) it leaves behind must not count as
+        # history. ``_active_detectors`` is which of them the current worker
+        # posts, in the fixed busy -> idle -> stale order - the seam that says
+        # which message closes a tick (``_finish_tick_closed_by``).
         self._busy_tracker: PresenceTracker | None = None
         self._idle_tracker: PresenceTracker | None = None
         self._stale_tracker: StaleTracker | None = None
@@ -2467,30 +2459,29 @@ class MainScreen(Screen[None]):
         if self._calibrating is self._live:
             self._start_detector_worker()
 
-    # -- finish-detector polling -----------------------------------------------
+    # -- detector polling ------------------------------------------------------
 
     def _start_detector_worker(self) -> None:
         """Mirrors ``_start_watcher``: one thread worker watching the live
-        slot's chat region and bridging each verdict back to the UI via
+        slot's chat region and bridging each tick back to the UI via
         ``post_message``. It replaces any previous run, so a recapture or a
         slot move mid-session cannot leave two loops watching two windows.
 
-        ONE capture per tick, shared by every detector. That is not only
-        cheaper: the three verdicts then describe the same instant of a moving
-        screen rather than three moments of it, and a failed capture reaches
-        all of them as the same ERROR instead of some seeing a frame and
-        others not.
+        ONE capture per tick, handed to ONE ``ScreenDetector``. That is not only
+        cheaper: every verdict then describes the same instant of a moving
+        screen rather than four moments of it, and a failed capture reaches all
+        of them as the same ERROR instead of some seeing a frame and others not.
 
-        What runs is composed from the drawn window, the checklist of the
-        service THAT WINDOW is pointed at (never the selected tab's - the user
-        reading the master's transcript mid-delegation must not re-aim the
-        poller), and that service's captured appearances: a busy
-        tracker if the checklist asks for one AND a busy indicator is captured,
-        an idle tracker on the same terms, and the stale tracker if the
-        checklist asks for it (it needs no capture - a drawn region is a finish
-        detector all by itself). With no region drawn there is nothing to watch
-        and no worker at all; with nothing runnable the worker is likewise not
-        started.
+        What that detector searches for is entirely
+        ``screen.detector.build_detector``'s business, and it decides from
+        calibration alone: the drawn window, the checklist of the service THAT
+        WINDOW is pointed at (never the selected tab's - the user reading the
+        master's transcript mid-delegation must not re-aim the poller), and that
+        service's captured appearances. This method knows nothing about which
+        kinds those are, and deliberately: the loop below is a bridge, not a
+        policy. With no region drawn there is nothing to watch and no worker at
+        all; with nothing calibrated at all (``ScreenDetector.watching``) the
+        worker is likewise not started.
 
         This is also the ONLY writer of the sidebar's DETECTION block
         (``_paint_detection``): those lines report what is being watched in the
@@ -2499,17 +2490,23 @@ class MainScreen(Screen[None]):
         tab may touch them, because the tab and the live window part company for
         the whole of a delegation.
 
-        ``_active_detectors`` records which of them will post, in the fixed
-        busy -> idle -> stale order, which is what makes the last one the
-        tick's closing message (see ``_finish_tick_closed_by``). Everything is
-        read once here rather than per tick: restarting the worker is how the
-        poller follows the live slot across a delegation, so an in-flight loop
-        must keep watching the window it was started for. The trackers are
-        likewise built once per run - they carry streaks and a previous frame,
-        and all of that describes one window - with the "stable for N seconds"
-        wish converted to ticks of the poll cadence here, from the live window's
-        service preset. The run gets a fresh ``_detector_generation`` too, which
-        every probe it posts carries back (see ``_ghost``).
+        ``_active_detectors`` records which of the FINISH detectors will post,
+        in the fixed busy -> idle -> stale order, which is what makes the last
+        one the tick's closing message (see ``_finish_tick_closed_by``). It is
+        not the same question as whether a worker runs: a service with a
+        captured send button and an empty checklist has nothing that can decide
+        a response finished, and still has something to show the user in the
+        ELEMENTS column every half second.
+
+        Everything is read once here rather than per tick: restarting the worker
+        is how the poller follows the live slot across a delegation, so an
+        in-flight loop must keep watching the window it was started for. The
+        detector is likewise built once per run - its trackers carry streaks and
+        a previous frame, and all of that describes one window - with the
+        "stable for N seconds" wish converted to ticks of the poll cadence here,
+        from the live window's service preset. The run gets a fresh
+        ``_detector_generation`` too, which every message it posts carries back
+        (see ``_ghost``).
         """
         self._stop_detector_worker()
         self._detector_generation += 1
@@ -2527,55 +2524,27 @@ class MainScreen(Screen[None]):
         self._idle_tracker = None
         self._stale_tracker = None
         self._active_detectors = ()
+        self._detector = None
         region = self.live.chat_region
         if region is None:
             self._paint_detection(STALE_UNSET)
             return
-        profile = self._live_profile()
         preset = self._live_preset()
-        signals = preset.finish_signals
         ticks = max(1, round(preset.stable_seconds / _BUSY_POLL_S))
-        # Every image the service has of each indicator, not one: the tracker
-        # ORs them (screen.presence), so a second capture of the same control
-        # drawn differently is one more way to see it, never a replacement.
-        busy_templates = profile.variants(TemplateKind.BUSY) if "busy" in signals else ()
-        idle_templates = profile.variants(TemplateKind.IDLE) if "idle" in signals else ()
-        busy = (
-            PresenceTracker(
-                busy_templates,
-                found_is_busy=True,
-                required_ticks=ticks,
-                max_diff=TemplateKind.BUSY.max_diff,
-            )
-            if busy_templates
-            else None
+        detector = build_detector(
+            region,
+            self._live_profile(),
+            signals=preset.finish_signals,
+            required_ticks=ticks,
         )
-        idle = (
-            PresenceTracker(
-                idle_templates,
-                found_is_busy=False,
-                required_ticks=ticks,
-                max_diff=TemplateKind.IDLE.max_diff,
-            )
-            if idle_templates
-            else None
-        )
-        # No ``capture=``: the loop below takes the tick's single capture and
-        # hands it to ``observe``, so this tracker never captures for itself.
-        stale = StaleTracker(region, required_ticks=ticks) if "stale" in signals else None
-        # The send gate's appearance is read here for the same reason as the
-        # others - one poller run watches one window - but it has no checklist
-        # entry and no tracker: a capture is a capability, so having it IS the
-        # gate being on, and the debounce it would need is exactly the debounce
-        # that must NOT happen (a button not seen yet and a button that has gone
-        # are opposite answers, and a presence tracker cannot tell them apart).
-        send_templates = profile.variants(TemplateKind.SEND_READY)
-        self._busy_tracker, self._idle_tracker, self._stale_tracker = busy, idle, stale
-        self._active_detectors = tuple(
-            name
-            for name, tracker in (("busy", busy), ("idle", idle), ("stale", stale))
-            if tracker is not None
-        )
+        self._detector = detector
+        # The trackers stay reachable under their own names: the flow, the paste
+        # and the slot move all reset the DEBOUNCE without touching what the
+        # detector has seen, and that is a per-tracker act.
+        self._busy_tracker = detector.busy
+        self._idle_tracker = detector.idle
+        self._stale_tracker = detector.stale
+        self._active_detectors = detector.active_detectors
         if not self._active_detectors:
             # The service's checklist is empty, or asks only for appearances it
             # has none of. Say so where the stale verdict would go: an unexplained
@@ -2583,13 +2552,20 @@ class MainScreen(Screen[None]):
             # never finding anything, and the consequence (auto-copy will never
             # fire) is invisible until the user waits for a copy that never comes.
             self._paint_detection(STALE_OFF)
+        else:
+            # Whether the stale line is a live verdict or an explanation of its
+            # silence: it is the one detector with no appearance behind it, so
+            # "unticked" is otherwise indistinguishable from "not reporting yet".
+            self._paint_detection(
+                STALE_CALIBRATED if "stale" in self._active_detectors else STALE_UNTICKED
+            )
+        if not detector.watching:
+            # Nothing calibrated at all: no tracker to feed and no picture to
+            # look for, so a loop would be pure cost. Note this is NOT the same
+            # test as the one above - a captured send or copy button with an
+            # empty checklist still has something to show, even though nothing
+            # can decide a response finished.
             return
-        # Whether the stale line is a live verdict or an explanation of its
-        # silence: it is the one detector with no appearance behind it, so
-        # "unticked" is otherwise indistinguishable from "not reporting yet".
-        self._paint_detection(
-            STALE_CALIBRATED if "stale" in self._active_detectors else STALE_UNTICKED
-        )
 
         def loop() -> None:
             worker = get_current_worker()
@@ -2598,50 +2574,42 @@ class MainScreen(Screen[None]):
                     scene: RegionImage | None = capture_region(region)
                 except CaptureError:
                     scene = None  # every detector hears about it the same way
-                # What this tick RECOGNISED, for the ELEMENTS column (§1.7).
-                # Filled in beside each search below rather than by a second
-                # pass, because the crop has to come out of the very frame the
-                # match was verified against. A kind stays absent when it was
-                # not searched at all - the panel then leaves its row alone.
-                crops: dict[TemplateKind, ElementCrop | None] = {}
-                if busy is not None:
-                    self.post_message(BusyProbed(busy.observe(scene), generation))
-                    if scene is not None:
-                        crops[TemplateKind.BUSY] = _element_crop(scene, busy.last_sighting)
-                if idle is not None:
-                    self.post_message(IdleProbed(idle.observe(scene), generation))
-                    if scene is not None:
-                        crops[TemplateKind.IDLE] = _element_crop(scene, idle.last_sighting)
-                if stale is not None:
-                    self.post_message(StaleProbed(stale.observe(scene), generation))
-                # Last, and only while the gate is actually holding: it is not a
-                # finish detector (it closes no tick and folds into no verdict),
-                # and searching for a button nobody is waiting on would cost a
-                # template scan per tick for the whole of every response.
-                if send_templates and self._send_gate is not None:
-                    # ANY of the captured images counts as the button being
-                    # there - the case this exists for is a service that greys
-                    # the send control out while a file uploads, where the
-                    # greyed picture missing would release the gate on a
-                    # message the user has not sent yet.
-                    hit = (
-                        None
-                        if scene is None
-                        else _first_match(
-                            send_templates, scene, max_diff=TemplateKind.SEND_READY.max_diff
+                # ONE search pass over the frame, for everything the live
+                # window's service is calibrated for. What that is was decided
+                # when the detector was built; this loop only carries the answers
+                # across the thread boundary, in the fixed busy -> idle -> stale
+                # order the tick-closing rule reads.
+                tick = detector.observe(scene)
+                if tick.busy is not None:
+                    self.post_message(BusyProbed(tick.busy, generation))
+                if tick.idle is not None:
+                    self.post_message(IdleProbed(tick.idle, generation))
+                if tick.stale is not None:
+                    self.post_message(StaleProbed(tick.stale, generation))
+                # The send button, every tick it is captured - it closes no tick
+                # and folds into no verdict, and the gate that CONSUMES this
+                # (``on_send_ready_probed``) ignores it whenever it is not
+                # holding. ``present`` is three-valued: on screen, not on screen,
+                # or no answer at all because the capture failed.
+                if detector.searches(TemplateKind.SEND_READY):
+                    self.post_message(
+                        SendReadyProbed(tick.present(TemplateKind.SEND_READY), generation)
+                    )
+                # One message for the whole tick's pictures, after the verdicts
+                # they illustrate, cut from the very frame the matches were
+                # verified against (§1.7). A failed capture recognised nothing
+                # and says nothing: an empty map would blank rows a dropped
+                # frame is no evidence about, so the tick simply posts nothing.
+                if scene is not None and tick.sightings:
+                    self.post_message(
+                        ElementsMatched(
+                            {
+                                kind: _element_crop(scene, sighting)
+                                for kind, sighting in tick.sightings.items()
+                            },
+                            generation,
                         )
                     )
-                    self.post_message(
-                        SendReadyProbed(None if scene is None else hit is not None, generation)
-                    )
-                    if scene is not None:
-                        crops[TemplateKind.SEND_READY] = _element_crop(scene, hit)
-                # One message for the whole tick's pictures, after the verdicts
-                # they illustrate. A failed capture recognised nothing and says
-                # nothing: an empty map would blank rows a dropped frame is no
-                # evidence about, so the tick simply posts nothing.
-                if crops:
-                    self.post_message(ElementsMatched(crops, generation))
                 # Sleep in short increments so cancellation lands promptly.
                 remaining = _BUSY_POLL_S
                 while remaining > 0 and not worker.is_cancelled:
@@ -3420,17 +3388,44 @@ class MainScreen(Screen[None]):
     def _show_copy_crop(
         self, scene: RegionImage, found: tuple[Template, RegionMatch] | None
     ) -> None:
-        """Put the copy button's search result in the ELEMENTS column, once.
+        """Put the flow's OWN copy-button search result in the ELEMENTS column.
+
+        The poller draws that row every tick from its own presence search, so
+        this is not what keeps the row alive - it is the picture of the frame
+        the click was actually aimed at, posted at the instant it was aimed,
+        which is the one the user wants to see when a click misses. The next
+        poll tick will replace it with a picture of *now*, as it should.
 
         Runs on the UI event loop rather than in a worker, which the rule in
         ``tui.pixels`` allows here and nowhere else: the cut and the shrink are
         over one icon-sized rectangle, not a chat region, so this is
         microseconds. Everything the poller does stays in its thread.
         """
+        sighting = (
+            None
+            if found is None
+            else Sighting(TemplateKind.COPY, found[0], found[1], time.monotonic())
+        )
         with suppress(NoMatches):
-            self.elements_panel.show_matches(
-                {TemplateKind.COPY: _element_crop(scene, found)}
-            )
+            self.elements_panel.show_matches({TemplateKind.COPY: _element_crop(scene, sighting)})
+
+    def _copy_last_seen_note(self) -> str:
+        """What the always-running detector remembers about the copy button.
+
+        The other half of a failed harvest's report. ``best_miss`` says how
+        close THIS frame came; this says whether the poller has ever seen the
+        icon in this window at all - which separates "the capture no longer
+        matches anything, ever" from "it was there thirty seconds ago and this
+        response has not drawn one yet". Read-only, and never a coordinate: the
+        flow re-searches for what it clicks.
+        """
+        detector = self._detector
+        if detector is None or not detector.searches(TemplateKind.COPY):
+            return ""
+        ago = detector.seen_ago(TemplateKind.COPY)
+        if ago is None:
+            return "; the poller has never seen it in this window either"
+        return f"; the poller last saw one {ago:.0f}s ago"
 
     async def _auto_copy_flow(self) -> None:
         """Fired once by ``_evaluate_finish`` when the detectors agree reasoning
@@ -3442,6 +3437,16 @@ class MainScreen(Screen[None]):
         remembered icon: the icon appears once per response down the transcript,
         and *lowest inside the window the user drew* is the same answer without
         anyone having to remember a column.
+
+        It is its OWN search, deliberately, even though the poller has been
+        looking for the same icon twice a second all along. Three reasons, and
+        the first is enough: this flow has just clicked, scrolled and waited for
+        the page to render, so the newest response's icon is somewhere the last
+        poll frame does not show it - **a location up to half a second old is not
+        a click target**. The poller also answers a different question (is one on
+        screen, anywhere) from the one a harvest asks (which is the LOWEST, i.e.
+        newest), and it stops at the first hit to stay cheap. What the poller's
+        record IS good for is explaining a miss, which is where it is read below.
         """
         region = self.live.chat_region
         templates = self._live_profile().variants(TemplateKind.COPY)
@@ -3505,7 +3510,9 @@ class MainScreen(Screen[None]):
             # The number goes on the ``copy`` entry, the consequence on the
             # ``state`` one: the two print on adjacent lines, and repeating the
             # parenthetical on both made the log read as a stutter.
-            self._log_harness(KIND_COPY, f"copy button not found ({how_close})")
+            self._log_harness(
+                KIND_COPY, f"copy button not found ({how_close}{self._copy_last_seen_note()})"
+            )
             self._set_loop_state(
                 LoopState.MANUAL_COPY, "the copy button was not found on screen"
             )

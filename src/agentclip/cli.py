@@ -22,6 +22,7 @@ from agentclip.tools.registry import default_registry
 from agentclip.tools.sandbox import Workspace
 from agentclip.tools.skills import discover_skills
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.graphics import probe_terminal
 
 
 def make_engine_factory(
@@ -163,6 +164,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     prune_sessions(project_root, config.backup.keep_sessions)
+    # BEFORE app.run(), and this is the only place it may happen: probing asks
+    # the terminal questions over stdin/stdout, and once Textual starts its own
+    # reader thread the answers go to Textual instead - which is exactly how the
+    # ELEMENTS column ends up silently drawing blocks on a terminal that can do
+    # sixel (tui.graphics, tui.md 1.7).
+    probe_terminal()
     provider = select_provider(config.clipboard.provider)
     app = AgentClipApp(
         config=config,

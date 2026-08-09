@@ -135,6 +135,23 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
     monkeypatch.setattr(user32, "SetForegroundWindow", lambda *args: False, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _half_block_terminal() -> Any:
+    """Every test starts on the renderer that needs nothing from a terminal.
+
+    The sixel verdict is a process-global set once at startup (``tui.graphics``),
+    so a test that declares one to reach the sixel path would otherwise leave it
+    declared for every test after it in the same worker - and a pytest run has
+    no terminal to draw sixels on. Reset rather than forbidden: declaring the
+    verdict IS the documented way into that path.
+    """
+    from agentclip.tui.graphics import NO_SIXEL, set_terminal_graphics
+
+    set_terminal_graphics(NO_SIXEL)
+    yield
+    set_terminal_graphics(NO_SIXEL)
+
+
 @pytest.fixture
 def project(tmp_path: Path) -> Path:
     """A tmp project with a few files for the tools to act on."""

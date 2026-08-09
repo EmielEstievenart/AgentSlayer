@@ -213,7 +213,7 @@ from agentclip.tui.messages import (
     SendReadyProbed,
     StaleProbed,
 )
-from agentclip.tui.pixels import crop, thumbnail
+from agentclip.tui.pixels import crop
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.log import LogScreen
 from agentclip.tui.screens.summary import SummaryScreen
@@ -222,9 +222,8 @@ from agentclip.tui.widgets.action_panel import ActionPanel
 from agentclip.tui.widgets.command_popup import CommandPopup
 from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.elements import (
-    ELEMENT_CROP_COLS,
-    ELEMENT_CROP_ROWS,
     ElementsPanel,
+    element_crop_image,
 )
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
@@ -508,10 +507,11 @@ def _element_crop(
 ) -> ElementCrop | None:
     """Cut a verified match out of the frame it was found in, panel-sized.
 
-    Both halves run in the WORKER that captured the scene, never on the UI
-    thread, for the same reason the old whole-region thumbnail did
-    (tui.pixels): sizing belongs to the caller's thread, and the message queue
-    should carry the few dozen cells that survive rather than the frame.
+    The cut runs in the WORKER that captured the scene, never on the UI thread,
+    for the same reason the old whole-region thumbnail did (tui.pixels): the
+    message queue should carry an icon, not a chat window. What the cut is
+    sized to is the panel's business, because it depends on which renderer the
+    terminal can drive - ``elements.element_crop_image`` decides.
 
     ``None`` in, ``None`` out - "nothing matched" and "the match is too
     degenerate to draw" are the same row in the panel, and there is nothing
@@ -520,11 +520,7 @@ def _element_crop(
     if sighting is None:
         return None
     template, match = sighting
-    image = thumbnail(
-        crop(scene, match.x, match.y, template.width, template.height),
-        ELEMENT_CROP_COLS,
-        ELEMENT_CROP_ROWS,
-    )
+    image = element_crop_image(crop(scene, match.x, match.y, template.width, template.height))
     return None if image is None else ElementCrop(image, match.diff)
 
 

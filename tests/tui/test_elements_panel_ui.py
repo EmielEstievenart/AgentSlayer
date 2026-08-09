@@ -45,6 +45,7 @@ from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.screen.template import RegionMatch
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.graphics import NO_SIXEL, TerminalGraphics, set_terminal_graphics
 from agentclip.tui.messages import ElementCrop, ElementsMatched
 from agentclip.tui.pixels import HALF_BLOCK, thumbnail
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
@@ -52,9 +53,11 @@ from agentclip.tui.widgets.elements import (
     ELEMENT_CROP_COLS,
     ELEMENT_CROP_ROWS,
     ELEMENT_MISSING,
+    ELEMENT_ORDER,
     ELEMENT_RESTING,
     ELEMENTS_TITLE,
     element_crop_id,
+    element_crop_image,
     element_label_id,
 )
 
@@ -555,3 +558,148 @@ async def test_a_copy_button_that_is_not_there_clears_its_row(
 
         assert ELEMENT_MISSING in _label(app, TemplateKind.COPY)
         assert _picture(app, TemplateKind.COPY) == ""
+
+
+# -- which renderer draws it --------------------------------------------------
+#
+# A pytest run has no terminal to draw sixels on, so the verdict is DECLARED
+# (tui.graphics.set_terminal_graphics - the documented way in, and reset for
+# every test by the autouse fixture in tests/conftest.py). What that buys is
+# real: the widget really is textual-image's sixel widget, really is asked to
+# render inside a running Textual, and the escape sequence it produces can be
+# read straight off its strips. That is the exact thing that silently failed
+# before - auto-detection picked half cells and nothing said so.
+#
+# The declared cell size is the one textual_image's own get_cell_size() falls
+# back to off a terminal (10x20). It has to be, because the widget scales the
+# image with that function rather than with our verdict - in production the two
+# are the same number because the probe caches what it returned.
+
+SIXEL_TERMINAL = TerminalGraphics(sixel=True, cell_width=10, cell_height=20)
+
+
+def _sixel_strips(app: AgentClipApp, kind: TemplateKind) -> str:
+    """Everything the crop widget would write to the terminal this frame."""
+    assert app.main_screen is not None
+    widget = app.main_screen.query_one(f"#{element_crop_id(kind)}")
+    text = ""
+    for child in widget.children:
+        for strip in child.render_lines(child.region.reset_offset):
+            text += "".join(segment.text for segment in strip)
+    return text
+
+
+async def test_a_sixel_terminal_gets_the_sixel_widget(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Composed from the startup probe, and by NAME: textual-image's auto alias
+    resolves to half cells whenever its import-time detection lost the race with
+    Textual, which is precisely the failure this column is not allowed to have."""
+    from textual_image.widget.sixel import Image as SixelImage
+
+    set_terminal_graphics(SIXEL_TERMINAL)
+    _patch_picker(monkeypatch)
+    _freeze_detector(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        assert app.main_screen is not None
+        for kind in ELEMENT_ORDER:
+            widget = app.main_screen.query_one(f"#{element_crop_id(kind)}")
+            assert isinstance(widget, SixelImage)
+            # crop_rows(20) rows, ELEMENT_CROP_COLS wide - pinned inline so the
+            # crop that was padded to exactly this box is not resized again.
+            assert widget.styles.width is not None
+            assert widget.styles.height is not None
+
+
+async def test_a_posted_crop_reaches_the_terminal_as_sixel_data(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The end of the road: a match posted by the poller comes back out of the
+    widget as a sixel escape sequence, sized to the cell box the panel reserved
+    (the raster attributes say 160x60 = 16 cols x 10px by 3 rows x 20px)."""
+    set_terminal_graphics(SIXEL_TERMINAL)
+    _patch_picker(monkeypatch)
+    _freeze_detector(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        await _polling(app, pilot)
+        assert "\x1bP" not in _sixel_strips(app, TemplateKind.BUSY)
+
+        _post(app, {TemplateKind.BUSY: ElementCrop(ICON, 0.012)})
+        await pilot.pause()
+        await pilot.pause()
+
+        drawn = _sixel_strips(app, TemplateKind.BUSY)
+        assert "\x1bP" in drawn  # DCS: the sixel introducer
+        assert '"1;1;160;60' in drawn  # raster attributes: the padded box
+        assert HALF_BLOCK not in drawn
+        assert "1.2%" in _label(app, TemplateKind.BUSY)
+
+
+async def test_a_missing_element_stops_drawing_sixels(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """"Searched and not on screen" has to clear the picture in both renderers,
+    or the row keeps showing a button that has gone."""
+    set_terminal_graphics(SIXEL_TERMINAL)
+    _patch_picker(monkeypatch)
+    _freeze_detector(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        await _polling(app, pilot)
+        _post(app, {TemplateKind.IDLE: ElementCrop(ICON, 0.012)})
+        await pilot.pause()
+        await pilot.pause()
+        assert "\x1bP" in _sixel_strips(app, TemplateKind.IDLE)
+
+        _post(app, {TemplateKind.IDLE: None})
+        await pilot.pause()
+        await pilot.pause()
+        assert "\x1bP" not in _sixel_strips(app, TemplateKind.IDLE)
+        assert ELEMENT_MISSING in _label(app, TemplateKind.IDLE)
+
+
+async def test_the_column_says_which_renderer_it_is_using(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Nobody can see a sixel that was never sent. "The detector is finding the
+    wrong thing" and "your terminal cannot draw pictures" look identical from
+    the outside, and only the second one has a fix the user can act on."""
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        assert app.main_screen is not None
+        assert "half-block" in str(app.main_screen.query_one("#elements-mode", Static).render())
+
+    set_terminal_graphics(SIXEL_TERMINAL)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        await pilot.pause()
+        assert app.main_screen is not None
+        assert "sixel" in str(app.main_screen.query_one("#elements-mode", Static).render())
+
+
+# -- what the worker hands over -----------------------------------------------
+
+
+def test_half_blocks_get_the_cell_grid_and_sixel_gets_the_pixels() -> None:
+    """The one thing the two renderers disagree about upstream of the panel:
+    half blocks want the crop already averaged down to the cells they will draw,
+    sixel wants every pixel that matched, because drawing them at their real
+    size is the entire point."""
+    set_terminal_graphics(NO_SIXEL)
+    small = element_crop_image(ICON)
+    assert small is not None
+    assert (small.width, small.height) != (ICON.width, ICON.height)
+    assert small.width <= ELEMENT_CROP_COLS
+
+    set_terminal_graphics(SIXEL_TERMINAL)
+    assert element_crop_image(ICON) is ICON
+
+
+def test_a_degenerate_cut_is_nothing_to_draw_in_either_renderer() -> None:
+    for graphics in (NO_SIXEL, SIXEL_TERMINAL):
+        set_terminal_graphics(graphics)
+        assert element_crop_image(RegionImage(0, 0, b"")) is None

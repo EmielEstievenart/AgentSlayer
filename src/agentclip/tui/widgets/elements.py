@@ -34,15 +34,28 @@ make the column dance.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING, cast
 
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
+from textual.widget import Widget
 from textual.widgets import Static
 
+from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
+from agentclip.tui.graphics import (
+    TerminalGraphics,
+    crop_picture,
+    crop_rows,
+    sixel_image_class,
+    terminal_graphics,
+)
 from agentclip.tui.messages import ElementCrop
-from agentclip.tui.pixels import half_block_text
+from agentclip.tui.pixels import half_block_text, thumbnail
+
+if TYPE_CHECKING:  # the sixel widget is imported lazily - see tui.graphics
+    from textual_image.widget.sixel import Image as SixelImage
 
 ELEMENTS_TITLE = "ELEMENTS"
 ELEMENTS_HINT = "F7 hides this column"
@@ -65,13 +78,14 @@ ELEMENT_LABEL: dict[TemplateKind, str] = {
     TemplateKind.COPY: "copy button",
 }
 
-# The cell budget one crop is drawn in. The column is 20 wide (17 usable), and
-# six rows is twelve pixels of height - which for a ~24px icon is a halving
-# rather than the near-total loss the old whole-region thumbnail inflicted on
-# it, and is enough to tell an arrow from a clipboard from a slab of
-# background. That is the whole question this column answers; reading a glyph
-# is not. Rows bind before columns for anything squarish, so the column budget
-# only really decides how a WIDE appearance (a send bar, a composer) is drawn.
+# The cell budget one crop is drawn in. The column is 20 wide, 17 of content,
+# and 16 once a scrollbar shows - so 16 columns is what a crop can count on.
+#
+# The ROW budget is the half-block one, and it is the fallback's: six rows is
+# twelve pixels of height, which for a ~24px icon is a halving, enough to tell
+# an arrow from a clipboard from a slab of background and no more. Sixel does
+# not use it - a sixel row is sized from the terminal's real cell height
+# (``graphics.crop_rows``), because the budget that matters there is in pixels.
 ELEMENT_CROP_COLS = 16
 ELEMENT_CROP_ROWS = 6
 
@@ -81,6 +95,34 @@ ELEMENT_CROP_ROWS = 6
 # that will not release or an auto-copy that never fires.
 ELEMENT_RESTING = "no match yet"
 ELEMENT_MISSING = "not on screen"
+
+# The column says which of the two renderers it is using. Not decoration: the
+# difference between "the detector is finding the wrong thing" and "your
+# terminal cannot draw pictures" is invisible otherwise, and the second one has
+# a fix (a terminal with sixel) that the user can only reach if they are told.
+ELEMENT_MODE_PREFIX = "crops · "
+
+
+def element_mode_line(graphics: TerminalGraphics) -> str:
+    return f"{ELEMENT_MODE_PREFIX}{graphics.mode}"
+
+
+def element_crop_image(cut: RegionImage) -> RegionImage | None:
+    """Size a freshly cut match for whichever renderer is live. Worker-side.
+
+    Half blocks need the exact cell grid they will draw and nothing more, so the
+    averaging happens here, in the thread that captured the frame (tui.pixels).
+    Sixel needs the OPPOSITE - every pixel that was matched, because the whole
+    point is drawing them at their real size - so the cut is passed through
+    untouched and the fitting happens in the panel. That costs the message queue
+    nothing: a Textual message carries the object, not a copy of it, and an
+    appearance is icon-sized by construction.
+    """
+    if cut.width <= 0 or cut.height <= 0:
+        return None
+    if terminal_graphics().sixel:
+        return cut
+    return thumbnail(cut, ELEMENT_CROP_COLS, ELEMENT_CROP_ROWS)
 
 
 def elements_title(window_name: str) -> str:
@@ -125,13 +167,24 @@ class ElementsPanel(Vertical):
     ElementsPanel .el-crop {
         /* ELEMENT_CROP_ROWS, reserved whether or not anything matched: a row
            that grows when its element appears would make every row below it
-           jump on a 0.5 s timer. */
+           jump on a 0.5 s timer. A sixel row overrides both dimensions inline
+           (_crop_widget), because its height is a pixel budget divided by this
+           terminal's cell height rather than a constant. */
         height: 6;
+        width: 16;
     }
     ElementsPanel .el-hint {
         color: $text-muted;
     }
     """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        # Read ONCE, per panel, rather than per repaint: the verdict cannot
+        # change while the process runs (tui.graphics), and a panel that
+        # composed half-block widgets must keep painting half blocks into them.
+        self._graphics = terminal_graphics()
+        self._rows = crop_rows(self._graphics.cell_height)
 
     def compose(self) -> ComposeResult:
         yield Static(Text(elements_title("")), id="elements-title", classes="side-title")
@@ -141,8 +194,43 @@ class ElementsPanel(Vertical):
                 id=element_label_id(kind),
                 classes="el-label",
             )
-            yield Static(Text(""), id=element_crop_id(kind), classes="el-crop")
+            yield self._crop_widget(kind)
         yield Static(Text(ELEMENTS_HINT), classes="el-hint")
+        yield Static(Text(element_mode_line(self._graphics)), id="elements-mode", classes="el-hint")
+
+    def _crop_widget(self, kind: TemplateKind) -> Widget:
+        """The widget one crop is drawn in: a sixel image, or a block of text.
+
+        Chosen at COMPOSE time from the startup probe, and never revisited. The
+        half-block ``Static`` is not a stub - it is the renderer for every
+        terminal that cannot do sixel, which includes every headless test run,
+        so both branches are live code.
+        """
+        if self._graphics.sixel:
+            sixel_image = sixel_image_class()
+            if sixel_image is not None:
+                widget = cast(Widget, sixel_image(id=element_crop_id(kind), classes="el-crop"))
+                # Inline, because the height is this terminal's and the class
+                # rule above is the fallback's. Both are pinned rather than left
+                # to auto: textual-image scales the image to whatever cell box
+                # it is given, and crop_picture has already padded the crop to
+                # exactly this one.
+                widget.styles.width = ELEMENT_CROP_COLS
+                widget.styles.height = self._rows
+                return widget
+        return Static(Text(""), id=element_crop_id(kind), classes="el-crop")
+
+    def _paint_crop(self, kind: TemplateKind, image: RegionImage | None) -> None:
+        """Draw (or blank) one row's picture, in whichever mode this panel composed."""
+        widget = self.query_one(f"#{element_crop_id(kind)}", Widget)
+        if isinstance(widget, Static):
+            widget.update(Text("") if image is None else half_block_text(image))
+            return
+        cast("SixelImage", widget).image = (
+            None
+            if image is None
+            else crop_picture(image, ELEMENT_CROP_COLS, self._rows, self._graphics)
+        )
 
     def show_window(self, window_name: str) -> None:
         """Name the window every crop below is from.
@@ -162,21 +250,22 @@ class ElementsPanel(Vertical):
         never looked. Present-and-``None`` is the opposite claim, that the
         search ran and found nothing, and it clears the row.
 
-        ``ElementCrop.image`` is already sized (``tui.pixels``, run in the
-        worker that captured the frame); all that happens here is the channel
-        swap and the half-block glyphs.
+        ``ElementCrop.image`` arrives sized for whichever renderer is live
+        (:func:`element_crop_image`, run in the worker that captured the frame):
+        the exact cell grid for half blocks, the untouched pixels for sixel.
+        What happens here is the last hop into the widget - the glyph pass, or
+        the BGRX->Pillow->sixel fit.
         """
         for kind, crop in crops.items():
             if kind not in ELEMENT_LABEL:
                 continue
             label = self.query_one(f"#{element_label_id(kind)}", Static)
-            picture = self.query_one(f"#{element_crop_id(kind)}", Static)
             if crop is None or crop.image.width <= 0 or crop.image.height <= 0:
                 label.update(Text(element_line(kind, ELEMENT_MISSING)))
-                picture.update(Text(""))
+                self._paint_crop(kind, None)
                 continue
             label.update(Text(element_line(kind, found_line(crop.diff))))
-            picture.update(half_block_text(crop.image))
+            self._paint_crop(kind, crop.image)
 
     def clear(self) -> None:
         """Back to "nothing has matched yet", every row.
@@ -190,4 +279,4 @@ class ElementsPanel(Vertical):
             self.query_one(f"#{element_label_id(kind)}", Static).update(
                 Text(element_line(kind, ELEMENT_RESTING))
             )
-            self.query_one(f"#{element_crop_id(kind)}", Static).update(Text(""))
+            self._paint_crop(kind, None)

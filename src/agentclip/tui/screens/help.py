@@ -1,4 +1,11 @@
-"""HelpScreen: static key/flow cheatsheet (F1 or ?)."""
+"""HelpScreen: static key/flow cheatsheet (F1 or ?).
+
+The command section is the one part that is NOT static: it is rendered from
+``agentclip.app.commands.COMMANDS``, the same tuple the popup, the `/help` note
+and the unknown-command hint come from. It used to be a fifth hand-written copy
+of that list, which is exactly how a help screen ends up documenting a key that
+moved two releases ago - and a test pins the two together.
+"""
 
 from __future__ import annotations
 
@@ -9,24 +16,50 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Static
 
-HELP_TEXT = """\
+from agentclip.app.commands import COMMANDS
+
+# Width of the command column, so the summaries line up under each other.
+_COMMAND_COLUMN = 16
+
+
+def commands_block() -> str:
+    """The chat-command section's body, one indented row per registry entry."""
+    return "\n".join(
+        f"  {command.label:<{_COMMAND_COLUMN}}{command.summary}" for command in COMMANDS
+    )
+
+
+def help_text() -> str:
+    """The whole cheatsheet. A function, not a constant, because the command
+    rows are read off the registry every time it is shown."""
+    return f"""\
 Chat box (bottom of the screen)
   Type a message and press Enter to send it to the model.
   Ctrl+J inserts a newline; pasting keeps its newlines.
   Esc frees the single-key shortcuts below; press t (or click) to type again.
 
 Chat commands (type in the chat box, leading slash)
-  /yolo [on|off]  auto-approve EVERY edit and command (bypasses allowlist).
-                  Bare /yolo toggles. The status bar shows a red YOLO badge.
-  /new            clear the chat and start a fresh session
-  /abort          end the delegated sub-agent run in flight. The model is told
-                  the run was aborted and carries on with the rest of its turn.
-  /help           list these commands
+{commands_block()}
+  Typing "/" pops the list up above the box; each further character narrows it.
+  Nothing is highlighted until you press a letter or an arrow - then Enter (or
+  Tab) COMPLETES the highlighted row and the next Enter sends it. Esc closes the
+  list without touching your text. "//text" sends a literal leading slash.
 
-Sub-agents (only when the second chat window is calibrated, see the sidebar)
+Window tabs (top of the chat column) - a tab is a BROWSER WINDOW, not a session
+  Row 1 is the master window - the chat you steer. Row 2 is the sub-agent
+  window a delegated sub-task runs in. Each carries its own service (shown on
+  the tab), its own drawn rectangle, and its own transcript that simply
+  accumulates: a delegated run appends a divider and its output rather than
+  minting a tab, so one window is one scroll of everything that happened in it.
+  F6 (or a click) selects the next tab. Selecting only changes what YOU see and
+  what the sidebar configures - never where output lands, and never which
+  window the automation is driving.
+
+Sub-agents (only when the sub-agent window is calibrated, see the sidebar)
   The model can hand one bounded sub-task to a fresh sub-agent in its own chat.
-  It runs in its own tab (magenta status bar, "SUB-AGENT" on the approval box)
-  while your conversation waits; you still approve every edit and command.
+  The sub-agent tab shows ▶ while it runs, ✓ when it handed a result back and ✗
+  when it ended without one; the status bar goes magenta and the approval box
+  says "SUB-AGENT" - you still approve every edit and command.
   ctrl+x cancels the calls running right now; /abort ends the whole run.
 
 Approval (the bordered box above the chat)
@@ -39,15 +72,16 @@ Session  (press Esc first if the chat box has focus)
   w  pause/resume the clipboard watcher   t  jump to the chat box
   e  end session / show the summary       x  expand the last collapsed output
   l  export the full chat log to a file (raw blocks + payloads, for debugging)
-  F6 show the next transcript tab. A delegated sub-agent gets its own tab
-     (▶ while it runs, ✓ when it is done); browsing tabs never changes where
-     new output lands - that always follows the running session.
+  F6 select the next window tab (see above)
   ctrl+x  cancel the tool calls running now (the "Working..." bar). The running
           command is killed, later calls are skipped, and the model is told -
           the results are copied out as usual, so the turn ends cleanly.
 
 App
-  F1 or ?  this help        F2  settings (lands in M3 - edit .agentclip.toml)
+  F1 or ?  this help
+  F2  service profiles: sizes, what each service LOOKS like (the captures the
+      automation clicks by), and which finish signals it may watch for
+  F3  hide/show the sidebar     F4  appearance (themes)
   ctrl+p   command palette  ctrl+q  quit (confirms when a turn is mid-flight)
 
 The loop: AgentClip copies a payload - paste it into your chat and send.
@@ -62,7 +96,7 @@ class HelpScreen(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical(classes="modal-box"):
             yield Static("AGENTCLIP HELP", classes="title")
-            yield Static(Text(HELP_TEXT))
+            yield Static(Text(help_text()))
             yield Static("escape close", classes="hint")
 
     def action_close(self) -> None:

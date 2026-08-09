@@ -29,6 +29,14 @@ transcript for the whole of a delegation - so the heading names that window and
 only the detector machinery writes here (tui.md 3.4e). Every row is a fixed
 height whether it holds a picture or a resting line, so a match landing cannot
 make the column dance.
+
+**Two renderers, chosen once.** "Readable size" means SIXEL where the terminal
+can do it: the crop drawn as the bitmap it is, at the size the screenshot has
+it. Half blocks - the same crop averaged down to a 16x6 cell grid - are what
+every other terminal gets, and they are the reason the column survived being
+built at all, so both paths are live. Which one is in use is decided at startup
+(``tui.graphics``) and written at the bottom of the column, because a sixel
+nobody can see is indistinguishable from a detector that never matches.
 """
 
 from __future__ import annotations

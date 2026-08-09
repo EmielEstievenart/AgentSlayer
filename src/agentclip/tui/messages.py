@@ -101,10 +101,13 @@ class StaleProbed(Message):
 class ElementCrop:
     """One recognised appearance: the matched pixels, and how well they matched.
 
-    ``image`` is already thumbnail-sized (``tui.pixels.crop`` then
-    ``tui.pixels.thumbnail``, both run wherever the frame was captured), so the
-    message queue carries a few dozen cells rather than a chat window, and the
-    UI thread only ever runs the half-block glyph pass over it.
+    ``image`` was cut from the frame and sized for the live renderer wherever
+    that frame was captured (``tui.pixels.crop`` then
+    ``elements.element_crop_image``), so what crosses here is an icon rather
+    than a chat window: the exact cell grid the half-block pass will draw, or -
+    on a sixel terminal - the matched pixels untouched, because drawing them at
+    their real size is the whole point. Either way the UI thread's share is one
+    small image.
     """
 
     image: RegionImage

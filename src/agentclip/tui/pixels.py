@@ -8,9 +8,13 @@ pixel as the background. A cell is roughly twice as tall as it is wide, so
 half-blocks come out with roughly SQUARE pixels - a chat window keeps its
 proportions instead of being squashed to a third of its height.
 
-No new dependency, on purpose, and for the same reason as ``screen/png.py``:
-Textual 8 has no image widget, Pillow would cost a compiled dependency plus a
-PyInstaller hook, and the whole job is a channel swap and some averaging.
+**The renderer for terminals that cannot do better.** The ELEMENTS column now
+draws its close-ups as sixel where the terminal supports it (``tui.graphics``,
+tui.md 1.7) - averaging a 24px icon into six cell rows answers *is that
+squarish* and nothing sharper. This module is what everything else gets: the
+service editor's template thumbnails (where a shape really is the question),
+and every terminal, pipe and test run without sixel. It needs nothing from the
+terminal and nothing from Pillow, which is exactly why it stays.
 
 Everything here is a pure function over :class:`RegionImage`, with no Textual
 in sight, so the sizing, the averaging and the colours are unit-testable

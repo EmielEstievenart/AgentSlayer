@@ -196,6 +196,19 @@ class AgentClipApp(App[None]):
         padding: 0 1;
         margin: 0 1;
     }
+    /* The slash-command list: sits directly on top of the composer and shares
+       its margin, so the two read as one control. Height is the match count
+       (one row per command, ellipsized rather than wrapped), capped so a very
+       short terminal keeps the transcript. */
+    #cmd-popup {
+        height: auto;
+        max-height: 6;
+        background: $surface;
+        color: $text;
+        border: round $accent;
+        margin: 0 1;
+        padding: 0 1;
+    }
     #composer {
         height: 5;
         border: round $primary;

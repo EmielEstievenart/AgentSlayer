@@ -68,6 +68,7 @@ src/agentclip/
 │
 ├── app/                   # UI-agnostic orchestration: drives the engine, never imports tui/clip/screen
 │   ├── controller.py      # SessionController: flows, gate/ask futures, delegation (nested sessions)
+│   ├── commands.py        # the chat slash-command registry: dispatch, /help and the popup read one tuple
 │   ├── view.py            # ChatView Protocol (the one UI seam) + SessionView state snapshot
 │   └── types.py           # SessionSpec, SessionRef, EngineRequest, SessionStats
 │

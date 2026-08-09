@@ -134,6 +134,21 @@ async def _start_session(
     await _wait_for(pilot, lambda: not main.busy, "session flow settled")
 
 
+async def _send_command(app: AgentClipApp, pilot: Pilot, command: str) -> None:
+    """Type a slash command and send it - which takes two Enters.
+
+    A half-typed command has the autocomplete popup up (§3.3a), and the first
+    Enter completes the highlighted row to `<command> ` instead of sending. The
+    trailing space closes the popup, so the second Enter is an ordinary send.
+    The autocomplete rules themselves live in test_slash_autocomplete_ui.py.
+    """
+    main = app.main_screen
+    assert main is not None
+    main.composer.load_text(command)
+    await pilot.press("enter")  # completes
+    await pilot.press("enter")  # sends
+
+
 async def test_startup_is_modal_free_with_sidebar(tmp_path: Path) -> None:
     """The launch experience (tui.md section 1.3): no modal - an empty chat, a
     focused composer, and a settings sidebar whose service picker seeds the
@@ -231,8 +246,7 @@ async def test_quit_while_awaiting_a_new_session_does_not_warn(tmp_path: Path) -
         await _start_session(app, pilot)
         main = app.main_screen
         assert main is not None
-        main.composer.load_text("/new")
-        await pilot.press("enter")
+        await _send_command(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "inline start flow re-armed")
         assert main.busy  # the session flow is parked on the inline prompt
 
@@ -420,9 +434,7 @@ async def test_yolo_command_auto_approves_every_call(tmp_path: Path) -> None:
         main = app.main_screen
         assert main is not None
 
-        composer = main.composer
-        composer.load_text("/yolo")
-        await pilot.press("enter")
+        await _send_command(app, pilot, "/yolo")
         await _wait_for(pilot, lambda: main._snap is not None and main._snap.yolo, "yolo armed")
         assert main.composer.text == ""  # the command cleared the box
         # The status bar shows the YOLO badge (st-yolo class) in the edits segment.
@@ -454,8 +466,7 @@ async def test_new_command_clears_and_restarts(tmp_path: Path) -> None:
         assert main.transcript.entries  # the bootstrap left content in the window
         assert main.sidebar.service_select.disabled  # locked while a session runs
 
-        main.composer.load_text("/new")
-        await pilot.press("enter")
+        await _send_command(app, pilot, "/new")
 
         await _wait_for(pilot, lambda: main.awaiting_new_session, "inline start flow re-armed")
         assert app.screen is main  # no modal was pushed

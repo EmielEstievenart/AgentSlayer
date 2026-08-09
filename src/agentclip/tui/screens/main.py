@@ -176,6 +176,7 @@ from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.summary import SummaryScreen
 from agentclip.tui.screens.text_entry import TextEntryScreen
 from agentclip.tui.widgets.action_panel import ActionPanel
+from agentclip.tui.widgets.command_popup import CommandPopup
 from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
@@ -674,6 +675,9 @@ class MainScreen(Screen[None]):
                         yield TranscriptPanel(id=_panel_id(window))
                 yield ActionPanel(id="action")
                 yield RunningBar(id="running")
+                # Directly above the box, so the list a keystroke is filtering
+                # sits where the eye already is (§3.3a). Hidden until it isn't.
+                yield CommandPopup(id="cmd-popup")
                 yield ChatComposer(id="composer")
             yield Sidebar(self._config, self._project_root, id="sidebar")
         yield StatusBar(id="statusbar")
@@ -710,6 +714,11 @@ class MainScreen(Screen[None]):
     @property
     def composer(self) -> ChatComposer:
         return self.query_one(ChatComposer)
+
+    @property
+    def command_popup(self) -> CommandPopup:
+        """The slash-command list above the composer (the composer drives it)."""
+        return self.query_one(CommandPopup)
 
     @property
     def running_bar(self) -> RunningBar:
@@ -2363,7 +2372,16 @@ class MainScreen(Screen[None]):
     # -- composer enable/disable + focus (presentation) -----------------------
 
     def _update_composer(self) -> None:
-        """Enable/disable the chat box and set its prompt to match the phase."""
+        """Enable/disable the chat box, set its prompt, and say whether the next
+        send is verbatim - the three things that all follow from the same phase.
+
+        ``verbatim`` is the slash-command popup's suppression switch (§3.3a).
+        The two modes that consume the box's text literally are exactly the two
+        the controller already tells us about: waiting for the task that starts a
+        session, and an open ``ask_user`` gate (``SessionView.awaiting_answer``).
+        A leading slash means nothing there, so offering to complete it would be
+        a lie about what Enter is going to do.
+        """
         if not self.is_mounted:
             return
         try:
@@ -2399,6 +2417,9 @@ class MainScreen(Screen[None]):
         else:  # no session, executing, at a gate, etc.
             composer.disabled = True
             composer.border_title = self._composer_idle_title()
+        # Last, so the popup is re-decided against the mode we just settled on
+        # (the setter re-syncs it, and a disabled box never shows one).
+        composer.verbatim = self.awaiting_new_session or self.awaiting_answer
 
     def _composer_idle_title(self) -> str:
         if not self.session_active:

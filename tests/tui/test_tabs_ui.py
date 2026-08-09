@@ -353,6 +353,9 @@ async def test_new_clears_both_transcripts_and_keeps_both_tabs(tmp_path: Path) -
         assert _label(main, SUBAGENT_WINDOW).startswith("✓ ")
 
         main.composer.load_text("/new")
+        # Two Enters: the first completes the autocomplete row (§3.3a), the
+        # second sends the completed "/new ".
+        await pilot.press("enter")
         await pilot.press("enter")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "inline start flow re-armed")
         await pilot.pause()

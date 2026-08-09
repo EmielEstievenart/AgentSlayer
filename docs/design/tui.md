@@ -49,6 +49,7 @@ MainScreen
 │   │   │       ├── Static           id=action-hints      # "[y] approve  [n] reject  [a] auto-accept edits"
 │   │   │       └── Input            id=reject-reason     # hidden until 'n'
 │   │   ├── RunningBar(Static)       id=running           # spinner + "(ctrl+x to cancel)" while a turn executes
+│   │   ├── CommandPopup(Static)     id=cmd-popup         # display:none unless a /command is being typed (§3.3a)
 │   │   └── ChatComposer(TextArea)   id=composer          # the one text box: task, answers, follow-ups
 │   └── Sidebar(Vertical)            id=sidebar           # width 32; F3 hides it (§1.3)
 ├── StatusBar(Horizontal)            id=statusbar         # full width, height 1 (sits above Footer)
@@ -355,9 +356,21 @@ The chat box also accepts slash commands (parsed in `SessionController.submit_me
 - `/yolo [on|off]` — toggle YOLO mode (§2.6).
 - `/new` — clear the transcript and start a fresh session (re-arms the inline start flow of §1.3; the service picker unlocks so the next session can use a different preset). Refused mid-turn (answer/finish the current step first); reachable while armed/idle or after `task_done`.
 - `/abort` — end the delegated sub-agent run in flight (§3.4c). A no-op with a warning when nothing is delegated.
-- `/help` — list the commands in the transcript.
+- `/help` — list the commands in the transcript. Aliases `/commands` and `/?` dispatch here but are never offered by the popup below — one obvious spelling per command.
+
+**One registry.** The list above is data, not prose repeated per consumer: `app/commands.py` holds a frozen `ChatCommand` (name, arg hint, one-line summary, aliases) per entry, and the controller's dispatch table, the `/help` note, the "unknown command — try `/yolo`, `/new`, `/abort`, or `/help`" hint and the autocomplete popup all render from that one tuple. `SessionController._command_handlers()` is the join between a registry name and what it does, and a test pins the two sets equal, so a command cannot ship as an undiscoverable row (or a hidden feature). It sits in `app`, not `tui`, because the dispatch does — plain string work, no Textual import, which is exactly what lets a `tui` widget read the same table.
 
 Precedence: while answering an `ask_user` question, the typed text is **always** the answer (commands are not parsed) — so a slash-leading answer like `/etc/hosts` is delivered verbatim, never eaten. A follow-up message that must begin with a literal slash is escaped as `//…` (one slash is stripped and the rest sent as a message).
+
+**Autocomplete (`CommandPopup`, §1.2).** Commands are otherwise findable only by already knowing `/help` exists, so a compact list pops up **directly above the composer** the moment one is being typed, and narrows with every character.
+
+- *Trigger* (`commands.match_prefix`, shared with the dispatcher so the two cannot drift): the box's text is a single bare token starting with exactly one slash. `/` offers everything; `/y` narrows to `/yolo`; `/yolo` still matches itself. Each of the three ways a line stops being a command in progress closes the popup on its own — `//escaped` is the literal-slash hatch, `/yolo ` has committed and is typing its argument, and `/xyz` matches nothing. Deleting the slash closes it too.
+- *Keys*, intercepted by `ChatComposer` and **only** while the popup is up; every other key keeps editing (and re-filters the list underneath):
+  - `↑`/`↓` move the highlight, wrapping at both ends.
+  - `Enter` or `Tab` **complete**: the highlighted command replaces the line as `/name ` — with the trailing space where its argument goes. Enter does *not* send here; because the trailing space closes the popup, the **next** Enter is an ordinary send. `Tab` does not move focus.
+  - `Esc` dismisses the list and touches neither the text nor the focus. With no popup up, `Esc` keeps its old job (blur to command mode, §1.2).
+- *Focus* never moves: the popup is a `Static` painting one Rich `Text` (one row per command, ellipsized rather than wrapped, so its height is the match count) and is driven entirely by method calls from the composer. It therefore cannot steal focus from the box, or from the Approve button at a gate.
+- *Suppression.* No popup while the box's next send is consumed **verbatim**, because a leading slash there is text and offering to complete it would misrepresent what Enter does. That is exactly two modes, and both are already-known state rather than a new signal: `MainScreen.awaiting_new_session` (the task that starts a session, §1.3) and `awaiting_answer` from the `SessionView` push (the `ask_user` gate above). `_update_composer` hands both to the composer as one `verbatim` flag alongside the enable/disable decision, and a disabled box never shows a popup either.
 
 ### 3.4a Screen regions and the focus click (the "hand me back to the browser" nudge)
 

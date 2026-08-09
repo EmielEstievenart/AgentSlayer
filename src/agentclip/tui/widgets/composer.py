@@ -7,14 +7,36 @@ newlines (paste is a Paste event, not a stream of Enter keypresses) and ``ctrl+j
 inserts a literal newline. ``escape`` blurs the box so the main screen's
 single-key shortcuts (u/c/i/w/e/x) become reachable again ("command mode").
 
+It also drives the slash-command popup (``CommandPopup``, §3.3a): the box is the
+only thing that knows what has been typed, so it decides when the popup is up
+and it owns the four keys that mean something different while it is. Enter is
+the interesting one - it *completes* instead of sending, which is safe precisely
+because completing appends a trailing space and a space closes the popup, so the
+very next Enter sends as it always did.
+
+The popup is a sibling widget rather than a child: this is a TextArea, and the
+list has to render *above* the box. The composer finds it on the screen instead
+of holding a reference, which keeps ``MainScreen`` free to lay both out where it
+likes and keeps this widget usable (popup-less) without one.
+
+``verbatim`` is the suppression switch MainScreen sets: while the next send is
+consumed literally - the task that starts a session, or an answer to the model's
+``ask_user`` - a leading slash is TEXT, not a command, so no popup may appear.
+
 The MainScreen owns every bit of routing; this widget only emits ``Submitted``.
 """
 
 from __future__ import annotations
 
-from textual import events
+from contextlib import suppress
+
+from textual import events, on
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import TextArea
+
+from agentclip.app.commands import ChatCommand, match_prefix
+from agentclip.tui.widgets.command_popup import CommandPopup
 
 
 class ChatComposer(TextArea):
@@ -27,7 +49,87 @@ class ChatComposer(TextArea):
             self.text = text
             super().__init__()
 
+    _verbatim: bool = False  # class-level default; MainScreen sets it per mode
+
+    # -- slash-command popup ---------------------------------------------------
+
+    @property
+    def verbatim(self) -> bool:
+        """True while the next send is taken literally (task entry / an answer)."""
+        return self._verbatim
+
+    @verbatim.setter
+    def verbatim(self, value: bool) -> None:
+        self._verbatim = value
+        self.sync_popup()
+
+    @property
+    def popup(self) -> CommandPopup | None:
+        """The command list mounted alongside us, if the screen has one."""
+        if not self.is_mounted:
+            return None
+        with suppress(NoMatches):
+            return self.screen.query_one(CommandPopup)
+        return None
+
+    def sync_popup(self) -> None:
+        """Match the popup to what is in the box right now.
+
+        The single place the popup's visibility is decided, so every route into
+        the text - typing, pasting, a completion, ``reset``, the screen loading a
+        draft - lands on the same rule. Called on every ``Changed`` and whenever
+        MainScreen re-evaluates the box's mode.
+        """
+        popup = self.popup
+        if popup is None:
+            return
+        if self._verbatim or self.disabled:
+            popup.hide()
+            return
+        popup.show(match_prefix(self.text))
+
+    @on(TextArea.Changed)
+    def _text_changed(self, event: TextArea.Changed) -> None:
+        self.sync_popup()
+
+    def _complete(self, command: ChatCommand) -> None:
+        """Replace the half-typed command with the real one, ready for its argument.
+
+        The trailing space is load-bearing twice over: it is where `/yolo on` is
+        typed next, and it is what closes the popup (a line with whitespace is no
+        longer a command in progress), which is what makes the following Enter a
+        plain send again.
+        """
+        self.load_text(f"{command.slash} ")
+        self.move_cursor(self.document.end)
+        popup = self.popup
+        if popup is not None:
+            popup.hide()
+
     async def _on_key(self, event: events.Key) -> None:
+        # While the popup is up it owns four keys, and only those four: the
+        # arrows pick a row, Enter/Tab complete it, Escape dismisses the list
+        # without touching the text. Everything else keeps editing (and each
+        # edit re-filters the list underneath).
+        popup = self.popup
+        if popup is not None and popup.is_open:
+            if event.key in ("up", "down"):
+                event.stop()
+                event.prevent_default()
+                popup.move(-1 if event.key == "up" else 1)
+                return
+            if event.key in ("enter", "tab"):
+                command = popup.highlighted
+                event.stop()
+                event.prevent_default()
+                if command is not None:
+                    self._complete(command)
+                return
+            if event.key == "escape":
+                event.stop()
+                event.prevent_default()
+                popup.hide()  # the box keeps its text AND its focus
+                return
         # Enter sends (TextArea's default would insert "\n"); ctrl+j keeps the
         # literal-newline escape hatch. Everything else falls through to the
         # normal TextArea editing keys.

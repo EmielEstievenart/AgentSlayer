@@ -84,7 +84,7 @@ src/agentclip/
 │   ├── png.py             # stdlib zlib/struct PNG encode/decode, for persisting templates
 │   ├── profile.py         # TemplateKind + ServiceProfile: what a SERVICE looks like (not where)
 │   ├── profile_store.py   # one folder of PNGs + a manifest per service; load never raises
-│   ├── slot.py            # AgentSlot (MASTER/SUBAGENT) + SlotCalibration: the drawn window per slot
+│   ├── slot.py            # AgentSlot (MASTER/SUBAGENT) + SlotCalibration: the drawn window per slot (= per tab)
 │   └── template.py        # anchor-based 2D search for an appearance inside a captured region
 │
 └── tui/
@@ -96,6 +96,7 @@ src/agentclip/
     │   └── settings.py    # M3: config editor screen
     └── widgets/
         ├── transcript.py  # VerticalScroll of per-message widgets, .anchor() pinning
+        ├── window_tabs.py # the two-row tab bar whose tabs ARE browser windows (tui.md §1.6)
         ├── diffview.py    # Static wrapping rich.syntax.Syntax(diff_text, "diff")
         └── statusbar.py   # docked Horizontal: watcher state, budget, service, phase
 ```
@@ -195,6 +196,13 @@ class Engine:
 
 # app/types.py -----------------------------------------------------------
 @dataclass(frozen=True, slots=True)
+class SessionSpec:
+    """What the New-Session prompt returns: the task plus a service PER ROLE."""
+    task: str
+    service: str                        # the master window tab's service
+    subagent_service: str = ""          # the sub-agent window tab's; "" → same as the master's
+
+@dataclass(frozen=True, slots=True)
 class EngineRequest:
     """What the controller asks cli.make_engine_factory to build."""
     service: str
@@ -207,13 +215,22 @@ class EngineRequest:
 class SessionRef:
     id: str                             # "master", "sub-1", "sub-2", ...
     role: Literal["master", "subagent"]
-    title: str                          # the transcript tab's label
+    title: str                          # short task label: the run's transcript divider
     chat_name: str                      # routes pastes to the right session
 
 # A request object rather than a bare service key because role, catalog gating
 # and chat naming have to travel as plain data: the factory lives in `cli` (it
 # needs the tool/store/composer wiring) while the decision to spawn a sub-agent
 # is made in `app`, which must not import `screen` or `tui` to make it.
+#
+# SessionSpec is the same seam for the OTHER half of "which service?". AgentClip
+# drives two browser windows and the user picks a service per window tab
+# (tui.md 1.6), so a delegation's Engine must be built from the SUB tab's
+# preset, not the master's. Rather than a port call the controller would have to
+# make mid-run, both keys travel in the spec at bootstrap and the controller
+# keeps `_subagent_service` for the session's life - which is exactly as long as
+# they are true for, since both pickers lock while a session runs. The app layer
+# therefore still learns nothing about tabs, windows or slots.
 
 # tools/registry.py ------------------------------------------------------
 @dataclass(frozen=True, slots=True)
@@ -290,7 +307,8 @@ The TUI wraps the engine: clipboard watcher thread → `post_message(ClipboardCa
 # AgentClip configuration. Project file .agentclip.toml overrides these per key.
 
 [general]
-service = "chatgpt"            # key into [services.*]
+service = "chatgpt"            # key into [services.*]: the MASTER window tab starts here
+subagent_service = ""          # the SUB-AGENT window tab's (tui.md §1.6); "" = same as the master's
 chars_per_token = 3            # code-like payloads tokenize ~3 chars/token (budget math)
 
 [clipboard]

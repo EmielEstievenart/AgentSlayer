@@ -39,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TypeVar
 
+from agentclip.app.commands import command_list, help_text, lookup
 from agentclip.app.types import EngineRequest, SessionRef, SessionStats
 from agentclip.app.view import ChatView, SessionView
 from agentclip.config import Config, ServicePreset
@@ -359,6 +360,26 @@ class SessionController:
     # engine. Parsing is plain string work: no Textual/clip import (layering OK).
     # Only reached when NOT answering a question (submit_message gates that first),
     # so a slash-leading answer is never mistaken for a command.
+    #
+    # WHICH commands exist is not decided here: agentclip.app.commands holds the
+    # one table, and the help note, the "unknown command" hint and the composer's
+    # autocomplete popup all render from it. This module only says what each one
+    # DOES, and _command_handlers is the join - one entry per registry name.
+
+    def _command_handlers(self) -> dict[str, Callable[[str], None]]:
+        """What each registered command runs, keyed by its canonical name.
+
+        Every :data:`~agentclip.app.commands.COMMANDS` entry must appear here and
+        nothing else may (a test pins the two sets together), so a command added
+        to the registry cannot ship as a dead menu row. The uniform ``(arg)``
+        signature is what lets dispatch stay a dict lookup; only `/yolo` reads it.
+        """
+        return {
+            "yolo": self._cmd_yolo,
+            "new": lambda _arg: self._cmd_new(),
+            "abort": lambda _arg: self._cmd_abort(),
+            "help": lambda _arg: self._cmd_help(),
+        }
 
     def _handle_command(self, raw: str) -> None:
         """Dispatch a leading-slash composer line. `//text` is an escape hatch that
@@ -372,20 +393,16 @@ class SessionController:
         name, _, arg = raw[1:].partition(" ")
         name = name.strip().lower()
         arg = arg.strip()
-        if name == "yolo":
-            self._cmd_yolo(arg)
-        elif name == "new":
-            self._cmd_new()
-        elif name == "abort":
-            self._cmd_abort()
-        elif name in ("help", "commands", "?"):
-            self._cmd_help()
-        else:
+        command = lookup(name)  # aliases resolve here: /commands and /? are /help
+        handler = self._command_handlers().get(command.name) if command is not None else None
+        if handler is None:
             shown = f"/{name}" if name else "/"
             self._view.notify(
-                f"unknown command: {shown} - try /yolo, /new, /abort, or /help",
+                f"unknown command: {shown} - try {command_list()}",
                 severity="warning",
             )
+            return
+        handler(arg)
 
     def _cmd_yolo(self, arg: str) -> None:
         """Toggle (or set on/off) YOLO auto-approve-everything. Only reachable while
@@ -488,14 +505,7 @@ class SessionController:
             engine.request_cancel()
 
     def _cmd_help(self) -> None:
-        self._view.spawn(
-            self._view.add_note(
-                "commands:  /yolo [on|off] - toggle auto-approve-everything  ·  "
-                "/new - clear the chat and start a new session  ·  "
-                "/abort - end the sub-agent run in flight (ctrl+x only cancels "
-                "the calls running now)  ·  /help - this list"
-            )
-        )
+        self._view.spawn(self._view.add_note(help_text()))
 
     def submit_decision(self, decision: Decision, note: str | None) -> None:
         """Resolve the approval gate (from a key action or panel button)."""

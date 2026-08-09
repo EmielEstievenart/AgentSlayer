@@ -29,6 +29,7 @@ and cannot be seen by the agent that wrote it.
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 
 from PIL import Image as PILImage
@@ -103,11 +104,33 @@ def set_terminal_graphics(graphics: TerminalGraphics) -> None:
     _graphics = graphics
 
 
+def interactive_terminal() -> bool:
+    """Is there a real console on both ends to hold a conversation with?
+
+    Asked FIRST, and it is not a nicety. Probing writes an escape sequence and
+    reads the reply back off the file descriptor; ``textual_image``'s own
+    support query checks only that stdout *exists*, so pointed at a pipe or at
+    NUL it writes the query, reads end-of-file, appends the empty string to the
+    response it is accumulating, and does that forever - a spin, not a block,
+    and not something a timeout saves you from. AgentClip is piped often enough
+    (a smoke test, a ``| tee``, an agent running it) that this has to be a
+    guard rather than a warning, and a piped run wants half blocks anyway.
+
+    ``sys.__stdout__``/``sys.__stdin__`` rather than the current ones, because
+    those are what the query actually writes to and reads from.
+    """
+    streams = (sys.__stdout__, sys.__stdin__)
+    return all(stream is not None and stream.isatty() for stream in streams)
+
+
 def probe_terminal() -> TerminalGraphics:
     """Ask the terminal what it can do, once, before Textual owns the terminal.
 
     Call this from the entry point and nowhere else. It:
 
+    * refuses outright when there is no console on both ends
+      (:func:`interactive_terminal`) - a query written into a pipe never comes
+      back, and the reader spins on end-of-file rather than timing out;
     * imports ``textual_image.renderable``, whose module body performs the
       sixel/TGP detection - doing that here rather than lazily is the whole
       point of this function (see the module docstring);
@@ -124,6 +147,9 @@ def probe_terminal() -> TerminalGraphics:
     nonsense - is answered with :data:`NO_SIXEL`. There is a working renderer
     behind this, so an unusable probe is never a reason to fail a launch.
     """
+    if not interactive_terminal():
+        set_terminal_graphics(NO_SIXEL)
+        return NO_SIXEL
     try:
         import textual_image.widget.sixel  # noqa: F401  (imported for its side effects)
         from textual_image._terminal import get_cell_size

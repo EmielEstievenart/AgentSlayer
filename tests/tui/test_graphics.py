@@ -30,6 +30,7 @@ from agentclip.tui.graphics import (
     crop_picture,
     crop_rows,
     fit_pixels,
+    interactive_terminal,
     pad_to_box,
     probe_terminal,
     region_to_pil,
@@ -65,6 +66,7 @@ def test_the_probe_caches_what_the_terminal_said(monkeypatch: pytest.MonkeyPatch
     import textual_image._terminal as terminal_mod
     import textual_image.renderable.sixel as sixel_mod
 
+    monkeypatch.setattr(graphics_mod, "interactive_terminal", lambda: True)
     monkeypatch.setattr(sixel_mod, "query_terminal_support", lambda: True)
     monkeypatch.setattr(terminal_mod, "get_cell_size", lambda: terminal_mod.CellSize(8, 17))
 
@@ -76,6 +78,7 @@ def test_a_terminal_that_says_no_gets_the_fallback(monkeypatch: pytest.MonkeyPat
     import textual_image._terminal as terminal_mod
     import textual_image.renderable.sixel as sixel_mod
 
+    monkeypatch.setattr(graphics_mod, "interactive_terminal", lambda: True)
     monkeypatch.setattr(sixel_mod, "query_terminal_support", lambda: False)
     monkeypatch.setattr(terminal_mod, "get_cell_size", lambda: terminal_mod.CellSize(9, 18))
 
@@ -90,9 +93,45 @@ def test_a_probe_that_blows_up_is_not_a_failed_launch(monkeypatch: pytest.Monkey
     def boom() -> bool:
         raise OSError("no terminal here")
 
+    monkeypatch.setattr(graphics_mod, "interactive_terminal", lambda: True)
     monkeypatch.setattr(sixel_mod, "query_terminal_support", boom)
     assert probe_terminal() == NO_SIXEL
     assert terminal_graphics() == NO_SIXEL
+
+
+def test_a_piped_run_is_never_asked_anything(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard that has to come first: textual-image's support query only
+    checks that stdout EXISTS, so pointed at a pipe it writes the query, reads
+    end-of-file, appends "" to the response it is accumulating - and spins
+    there. A timeout does not save you from it, so it is never asked.
+    """
+    import textual_image.renderable.sixel as sixel_mod
+
+    def never(*_: object) -> bool:
+        raise AssertionError("a piped run must not query the terminal")
+
+    monkeypatch.setattr(graphics_mod, "interactive_terminal", lambda: False)
+    monkeypatch.setattr(sixel_mod, "query_terminal_support", never)
+    assert probe_terminal() == NO_SIXEL
+
+
+def test_a_console_is_needed_on_both_ends(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Both, because the query writes to one and reads the answer off the other."""
+
+    class Stream:
+        def __init__(self, tty: bool) -> None:
+            self._tty = tty
+
+        def isatty(self) -> bool:
+            return self._tty
+
+    for out, err in ((True, True), (True, False), (False, True), (False, False)):
+        monkeypatch.setattr(graphics_mod.sys, "__stdout__", Stream(out))
+        monkeypatch.setattr(graphics_mod.sys, "__stdin__", Stream(err))
+        assert interactive_terminal() is (out and err)
+
+    monkeypatch.setattr(graphics_mod.sys, "__stdout__", None)
+    assert interactive_terminal() is False
 
 
 def test_a_terminal_that_will_not_say_its_cell_size_gets_the_vt340_one(
@@ -101,6 +140,7 @@ def test_a_terminal_that_will_not_say_its_cell_size_gets_the_vt340_one(
     import textual_image._terminal as terminal_mod
     import textual_image.renderable.sixel as sixel_mod
 
+    monkeypatch.setattr(graphics_mod, "interactive_terminal", lambda: True)
     monkeypatch.setattr(sixel_mod, "query_terminal_support", lambda: True)
     monkeypatch.setattr(terminal_mod, "get_cell_size", lambda: terminal_mod.CellSize(0, 0))
 

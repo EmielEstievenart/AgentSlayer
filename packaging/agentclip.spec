@@ -36,9 +36,30 @@ pygments_hidden = (
     + collect_submodules("pygments.formatters")
 )
 
+# The ELEMENTS column reaches textual-image only through lazy, guarded imports
+# (tui/graphics.py: probe_terminal and sixel_image_class both import inside a
+# try, so the whole app can run without the package). PyInstaller's static
+# analysis therefore sees nothing, and a missed collection would not error -
+# the probe would just answer "no sixel" and the frozen exe would silently draw
+# half blocks on a terminal that can do better, which is the exact failure the
+# probe exists to end. Named explicitly so it cannot happen.
+#
+# Pillow needs no help here: PyInstaller ships a hook for it, and the platform
+# plugins it drags in are the hook's business, not ours.
+#
+# Its bundled demo app is dropped: it is a `python -m textual_image` playground
+# that pulls click (which `excludes` below deliberately keeps out) and nothing
+# in AgentClip imports it.
+textual_image_hidden = [
+    name
+    for name in collect_submodules("textual_image")
+    if not name.startswith("textual_image.demo") and name != "textual_image.__main__"
+]
+
 hiddenimports = (
     textual_hidden
     + pygments_hidden
+    + textual_image_hidden
     # copykitten is imported lazily inside a function and guarded by
     # try/except, so a missed collection would not error - it would silently
     # fall back to pyperclip and lose the Windows sequence-number polling.

@@ -29,6 +29,8 @@ from agentclip.screen.picker import ScreenPickError
 from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
 
+from .conftest import send_composer
+
 REGION = ScreenRegion(1050, 340, 812, 540)
 
 
@@ -71,14 +73,8 @@ async def _click_set_region(app: AgentClipApp, pilot: Pilot) -> None:
 
 
 async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
-    """Type into the composer and send - refocusing it first, since clicking the
-    sidebar button leaves focus on the button."""
-    main = app.main_screen
-    assert main is not None
-    main.composer.load_text(text)
-    main.composer.focus()
-    await pilot.pause()
-    await pilot.press("enter")
+    """Send a composer line - see ``send_composer`` for why /new takes two Enters."""
+    await send_composer(app, pilot, text)
 
 
 async def test_pick_region_updates_sidebar_and_state(

@@ -47,6 +47,8 @@ from agentclip.screen.template import RegionMatch, Template
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen
 
+from .conftest import send_composer
+
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 INITIAL_BOX = ScreenRegion(1300, 520, 400, 90)
 ONGOING_BOX = ScreenRegion(1300, 860, 400, 90)
@@ -147,14 +149,8 @@ async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
 
 
 async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
-    """Type into the composer and send - refocusing it first, since clicking the
-    sidebar button leaves focus on the button."""
-    main = app.main_screen
-    assert main is not None
-    main.composer.load_text(text)
-    main.composer.focus()
-    await pilot.pause()
-    await pilot.press("enter")
+    """Send a composer line - see ``send_composer`` for why /new takes two Enters."""
+    await send_composer(app, pilot, text)
 
 
 def _patch_capture(monkeypatch: pytest.MonkeyPatch) -> None:

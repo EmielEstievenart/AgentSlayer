@@ -39,6 +39,8 @@ from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.tui.widgets.sidebar import STALE_CALIBRATED, STALE_OFF, STALE_UNSET
 
+from .conftest import send_composer
+
 REGION = ScreenRegion(1000, 200, 600, 500)
 SUB_REGION = ScreenRegion(120, 60, 400, 300)
 # A frame the fake capture always hands back: unchanging pixels are exactly
@@ -96,14 +98,8 @@ _CLICK_CHAIN_S = 0.6
 
 
 async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
-    """Type into the composer and send - refocusing it first, since clicking the
-    sidebar button leaves focus on the button."""
-    main = app.main_screen
-    assert main is not None
-    main.composer.load_text(text)
-    main.composer.focus()
-    await pilot.pause()
-    await pilot.press("enter")
+    """Send a composer line - see ``send_composer`` for why /new takes two Enters."""
+    await send_composer(app, pilot, text)
 
 
 # Which window tab each slot lives on. Selecting the tab is what points the

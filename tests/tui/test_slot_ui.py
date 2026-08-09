@@ -48,6 +48,8 @@ from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.tui.widgets.sidebar import SLOT_NOTE_MASTER, SLOT_NOTE_READY
 
+from .conftest import send_composer
+
 MASTER_REGION = ScreenRegion(10, 20, 300, 400)
 SUB_REGION = ScreenRegion(900, 20, 300, 400)
 # Tall enough that every sidebar button is on screen: Pilot refuses to click a
@@ -215,12 +217,8 @@ async def _editor_visit(app: AgentClipApp, pilot: Pilot) -> None:
 
 
 async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
-    main = app.main_screen
-    assert main is not None
-    main.composer.load_text(text)
-    main.composer.focus()
-    await pilot.pause()
-    await pilot.press("enter")
+    """Send a composer line - see ``send_composer`` for why /new takes two Enters."""
+    await send_composer(app, pilot, text)
 
 
 async def test_the_two_windows_are_independent(

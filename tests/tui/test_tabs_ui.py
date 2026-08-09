@@ -37,6 +37,8 @@ from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.tui.widgets.window_tabs import WindowTab
 
+from .conftest import send_composer
+
 SIZE = (110, 40)
 
 SUB_ONE = SessionRef(id="sub-1", role="subagent", title="read the docs", chat_name="jade-otter")
@@ -352,11 +354,7 @@ async def test_new_clears_both_transcripts_and_keeps_both_tabs(tmp_path: Path) -
         await pilot.pause()
         assert _label(main, SUBAGENT_WINDOW).startswith("✓ ")
 
-        main.composer.load_text("/new")
-        # Two Enters: the first completes the autocomplete row (§3.3a), the
-        # second sends the completed "/new ".
-        await pilot.press("enter")
-        await pilot.press("enter")
+        await send_composer(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "inline start flow re-armed")
         await pilot.pause()
 

@@ -26,6 +26,8 @@ from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.summary import SummaryScreen
 from agentclip.tui.widgets.sidebar import Sidebar
 
+from .conftest import send_composer
+
 UTILS_PY = '''"""Utility helpers."""
 
 
@@ -135,18 +137,10 @@ async def _start_session(
 
 
 async def _send_command(app: AgentClipApp, pilot: Pilot, command: str) -> None:
-    """Type a slash command and send it - which takes two Enters.
-
-    A half-typed command has the autocomplete popup up (§3.3a), and the first
-    Enter completes the highlighted row to `<command> ` instead of sending. The
-    trailing space closes the popup, so the second Enter is an ordinary send.
-    The autocomplete rules themselves live in test_slash_autocomplete_ui.py.
-    """
-    main = app.main_screen
-    assert main is not None
-    main.composer.load_text(command)
-    await pilot.press("enter")  # completes
-    await pilot.press("enter")  # sends
+    """Type a slash command and send it - which takes two Enters, because the
+    first completes the autocomplete row (§3.3a; see ``send_composer``). The
+    autocomplete rules themselves live in test_slash_autocomplete_ui.py."""
+    await send_composer(app, pilot, command)
 
 
 async def test_startup_is_modal_free_with_sidebar(tmp_path: Path) -> None:

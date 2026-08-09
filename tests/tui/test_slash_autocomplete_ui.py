@@ -131,6 +131,32 @@ async def test_slash_opens_the_list_and_typing_filters_it(tmp_path: Path) -> Non
         assert not popup.is_open
 
 
+async def test_every_command_gets_exactly_one_row(tmp_path: Path) -> None:
+    """Regression: the popup's height must be its match count.
+
+    `/abort`'s summary is wider than the chat column at every size we run at. If
+    it *wrapped* it would take two rows, the highlight would stop lining up with
+    the commands, and the popup's max-height would silently clip the last entry
+    off the bottom - `/help` would simply not be there. It is cut, not wrapped,
+    so a narrow terminal loses characters rather than a whole command.
+    """
+    app, _, _ = _make_app(tmp_path)
+    async with app.run_test(size=(80, 24)) as pilot:  # deliberately cramped
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        await pilot.press("slash")
+        await pilot.pause()
+
+        popup = main.command_popup
+        assert popup.matches == COMMANDS
+        assert popup.region.height == len(COMMANDS) + 2  # one row each, + the border
+        # It sits directly above the box, and the box is still fully on screen.
+        assert popup.region.y + popup.region.height == main.composer.region.y
+        assert main.composer.region.y + main.composer.region.height <= 24
+
+
 async def test_down_then_enter_completes_and_sends_nothing(tmp_path: Path) -> None:
     """Enter with the popup up completes the highlighted row - it must not send,
     or the user could never see the list they just opened."""

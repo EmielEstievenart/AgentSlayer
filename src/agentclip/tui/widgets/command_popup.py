@@ -14,10 +14,14 @@ time. Navigation therefore arrives as method calls (:meth:`move`,
 :meth:`highlighted`) from ``ChatComposer``'s key interception rather than as key
 events of its own; this widget knows nothing about keys.
 
-Long summaries ellipsize rather than wrap (``no_wrap`` + ``overflow="ellipsis"``)
-so one command is always exactly one row: the popup's height is then the number
-of matches, which is what keeps it compact at the narrow widths the Pilot suites
-run at, and what makes "the third row is highlighted" mean what it looks like.
+One command is always exactly one row, which is what makes the popup's height
+its match count and "the third row is highlighted" mean what it looks like. A
+summary wider than the chat column (`/abort`'s is, at every size we run at) is
+therefore cut rather than wrapped - by ``text-wrap: nowrap; text-overflow:
+ellipsis`` on ``#cmd-popup``, since Textual re-wraps a widget's renderable to
+its own width and the Rich ``Text``'s own settings do not survive that. Wrapping
+would not merely look untidy: the second row would push the last command out
+from under the popup's ``max-height`` and `/help` would silently not be there.
 """
 
 from __future__ import annotations
@@ -101,7 +105,7 @@ class CommandPopup(Static):
     # -- painting -------------------------------------------------------------
 
     def _paint(self) -> None:
-        text = Text(no_wrap=True, overflow="ellipsis")
+        text = Text()  # one line per command; #cmd-popup's CSS keeps it that way
         for row, command in enumerate(self._matches):
             if row:
                 text.append("\n")

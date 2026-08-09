@@ -208,6 +208,11 @@ class AgentClipApp(App[None]):
         border: round $accent;
         margin: 0 1;
         padding: 0 1;
+        /* One command = one row, always: a long summary is cut, never wrapped,
+           or the rows stop lining up with the highlight and the tallest entry
+           pushes the last command out from under max-height. */
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
     #composer {
         height: 5;

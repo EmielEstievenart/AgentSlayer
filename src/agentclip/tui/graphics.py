@@ -180,10 +180,12 @@ def sixel_image_class() -> type | None:
     time and moves the cursor itself; the auto alias resolves to that widget
     only when the detection happened to succeed.
 
-    The import is lazy so that merely importing the TUI does not pull Pillow and
-    query a terminal - ``--list-services`` and the ``--pick-region`` child do
-    neither. By the time the panel asks, :func:`probe_terminal` has already
-    imported the module, so nothing here touches the terminal.
+    The import is lazy because importing this package QUERIES A TERMINAL - its
+    ``__init__`` chain runs the auto-detection and ``get_cell_size()`` - and
+    merely importing the TUI must not do that. ``--list-services`` and the
+    ``--pick-region`` child import the TUI and never draw a crop. By the time
+    the panel asks, :func:`probe_terminal` has already imported the module at
+    the one moment those queries were safe, so nothing here touches anything.
     """
     try:
         from textual_image.widget.sixel import Image as SixelImage

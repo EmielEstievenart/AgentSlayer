@@ -56,6 +56,58 @@ def test_builtin_service_keys_matches_default_services() -> None:
     assert len(BUILTIN_SERVICE_KEYS) == 12
 
 
+# -- [general] subagent_service ------------------------------------------------
+#
+# The sub-agent window tab's service (tui.md 1.6). Blank is the default AND a
+# meaningful value - "whatever the master tab is on" - which is what keeps the
+# key invisible to everybody running one service in both windows, so the three
+# cases below are load, name, and name-that-does-not-exist.
+
+
+def test_subagent_service_defaults_to_blank(project: Path, global_path: Path) -> None:
+    config = load_config(project, global_config_path=global_path)
+    assert config.general.subagent_service == ""
+    assert not config.warnings
+
+
+def test_load_config_reads_a_subagent_service(project: Path, global_path: Path) -> None:
+    global_path.write_text(
+        '[general]\nservice = "claude"\nsubagent_service = "gemini"\n', encoding="utf-8"
+    )
+    config = load_config(project, global_config_path=global_path)
+    assert config.general.service == "claude"
+    assert config.general.subagent_service == "gemini"
+    assert not config.warnings
+
+
+def test_load_config_warns_and_blanks_an_unknown_subagent_service(
+    project: Path, global_path: Path
+) -> None:
+    """Blanked rather than kept: a window pointed at a preset that is in no
+    picker would silently drive the automation off ``Config.preset()``'s
+    fallback, on a paste budget nobody chose."""
+    global_path.write_text(
+        '[general]\nservice = "claude"\nsubagent_service = "nope"\n', encoding="utf-8"
+    )
+    config = load_config(project, global_config_path=global_path)
+    assert config.general.subagent_service == ""
+    assert any(
+        "unknown subagent_service preset 'nope'" in warning for warning in config.warnings
+    )
+    assert config.general.service == "claude"  # ...and the master's is untouched
+
+
+def test_an_unknown_subagent_service_is_not_confused_with_an_unknown_service(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text('[general]\nservice = "nope"\n', encoding="utf-8")
+    config = load_config(project, global_config_path=global_path)
+    assert config.general.service == "unknown"
+    assert config.general.subagent_service == ""
+    assert any("unknown service preset 'nope'" in warning for warning in config.warnings)
+    assert not any("subagent_service" in warning for warning in config.warnings)
+
+
 # -- TOML merge / validation ---------------------------------------------------
 
 

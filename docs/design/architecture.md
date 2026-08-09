@@ -91,6 +91,8 @@ src/agentclip/
 └── tui/
     ├── app.py             # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
     ├── messages.py        # ClipboardCaptured + the generation-stamped BusyProbed/IdleProbed/StaleProbed
+    ├── graphics.py        # can this terminal draw sixels? probed ONCE from cli.main, before Textual (tui.md §1.7)
+    ├── pixels.py          # the half-block renderer: pure functions over RegionImage, the no-sixel fallback
     ├── screens/
     │   ├── main.py        # the ChatView adapter: tabs, transcripts, sidebar routing, detectors
     │   ├── service_editor.py # F2: the whole per-service PROFILE editor (tui.md §1.4)
@@ -556,6 +558,8 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
 | `pyperclip` | `>=1.11,<2` | fallback provider (pure Python, Wayland-without-XWayland path) |
 | `platformdirs` | `>=4` | config dir resolution — declared explicitly even though textual carries it (don't depend on transitive deps) |
 | `tomli-w` | `>=1.0` | TOML *writing* for the service editor's `config.save_services` (M3, landed with it — see below); tiny, pure-Python, no longer deferred |
+| `pillow` | `>=11,<12` | scaling and encoding the ELEMENTS column's crops for sixel (tui.md §1.7); a compiled dep, accepted after half-block close-ups were rejected on quality — PyInstaller has a built-in hook for it |
+| `textual-image` | `>=0.13,<1` | the sixel renderer and the Textual widget that can inject sixel data into a composited screen. Used **explicitly** (`textual_image.widget.sixel.Image`), never through its auto-detecting alias — see tui.md §1.7 for why that distinction is load-bearing |
 
 **Dev (PEP 735 `[dependency-groups]`, uv-native):** `pytest`, `pytest-asyncio`, `pytest-textual-snapshot`, `textual-dev`, `ruff`, `mypy`.
 
@@ -587,6 +591,9 @@ dependencies = [
   "copykitten>=2.0,<3",
   "pyperclip>=1.11,<2",
   "platformdirs>=4",
+  "tomli-w>=1.2.0",
+  "pillow>=11,<12",
+  "textual-image>=0.13,<1",
 ]
 
 [project.scripts]
@@ -611,7 +618,8 @@ testpaths = ["tests"]
 - Textual CSS lives in the `CSS` class variable of `AgentClipApp`, **not** a `.tcss` file → zero `--add-data` and no `CSS_PATH` resolution against an extraction dir.
 - Ship `packaging/hook-agentclip.py` (M4) with `hiddenimports = collect_submodules("textual.widgets")` — Textual lazy-loads widgets via module `__getattr__` and PyInstaller misses them.
 - The protocol-spec templates in `protocol/spec.py` are Python string constants, not data files, for the same reason.
-- copykitten's abi3 `.pyd`/`.so` is auto-collected; pyperclip is pure Python. No other binary deps exist by construction.
+- copykitten's abi3 `.pyd`/`.so` is auto-collected; pyperclip is pure Python. Pillow is the one further binary dep, and PyInstaller ships a hook for it.
+- `textual_image` is named in `hiddenimports` (minus its bundled demo, which pulls the excluded `click`): `tui/graphics.py` reaches it only through lazy, guarded imports, so static analysis sees nothing and a missed collection fails **soft** — the probe would answer "no sixel" and the frozen exe would quietly draw half-blocks.
 
 ---
 

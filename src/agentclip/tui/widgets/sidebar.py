@@ -23,11 +23,15 @@ are per-service settings that belong next to the service's other settings, and
 six capture buttons with six status lines had grown into two thirds of a 32-cell
 column. What is left is:
 
-* **CHAT WINDOW** - the one per-slot block. The AGENT SLOT picker above it
-  chooses which window "Set chat region..." writes into, and ``show_slot``
-  repaints the block from that slot in one go. Unlike the service picker it is
-  never locked: drawing the sub-agent window mid-session is the normal way to
-  reach delegation.
+* **SERVICE** - the picker, its caption and the read-only appearance summary.
+  All three describe the **selected window tab's** service (tui.md 1.6): the
+  two browser windows are pointed at a service each, and the tab bar is what
+  chooses between them, so there is no AGENT SLOT picker here any more.
+  ``show_service`` writes the selected tab's key in without announcing a switch.
+* **CHAT WINDOW** - what the selected tab's window is, and the readiness line
+  under it. ``show_slot`` repaints the block from one slot in one go. Unlike the
+  service picker it is never locked: drawing the sub-agent window mid-session is
+  the normal way to reach delegation.
 * **DETECTION** - four read-only lines the running automation writes into: the
   busy and idle probes (``update_template``), the staleness verdict
   (``update_stale``), and what the auto-copy flow's last click attempt did.
@@ -36,7 +40,9 @@ column. What is left is:
   toasts, so they have no line here.
 * One read-only **appearance summary** under the service picker
   (``show_profile``) - "appearance: 4/6 captured" - so "is this service usable
-  at all?" is answerable at a glance without opening the editor.
+  at all?" is answerable at a glance without opening the editor. It follows the
+  picker, so switching tabs can change what it says: two windows on two
+  services have two sets of captures.
 
 Every status label carries the ``side-status`` class so the column reads as one
 list rather than a pile of one-off ids.
@@ -105,23 +111,20 @@ def template_status_id(kind: TemplateKind) -> str:
     return f"side-tpl-{kind}"
 
 
-# The AGENT SLOT note, one line per state. The master slot has nothing to be
+# The CHAT WINDOW note, one line per state. The master window has nothing to be
 # "ready" for - it is simply the chat the session runs in - so only the
-# sub-agent slot reports readiness, and it reports the gaps by name.
+# sub-agent window reports readiness, and it reports the gaps by name.
 SLOT_NOTE_MASTER = "the main agent's chat window"
 SLOT_NOTE_READY = "delegation ON"
 SLOT_NOTE_MISSING = "delegation off · need: "
 
 
-def _slot_options() -> list[tuple[str, str]]:
-    return [(slot.label, str(slot)) for slot in AgentSlot]
-
-
 def slot_note(cal: SlotCalibration, profile: ServiceProfile) -> str:
-    """The one-line readiness readout under the slot picker.
+    """The one-line readiness readout under the selected tab's window.
 
-    Two inputs because readiness has two halves now: the box this slot's window
-    was drawn as, and what the service it is pointed at looks like.
+    Two inputs because readiness has two halves now: the box this window was
+    drawn as, and what the service THAT TAB is pointed at looks like - which is
+    the sub-agent tab's own service whenever the sub-agent tab is selected.
     """
     if cal.slot is AgentSlot.MASTER:
         return SLOT_NOTE_MASTER
@@ -161,7 +164,7 @@ class Sidebar(Vertical):
     }
     Sidebar #side-slot-note {
         /* Fixed height: the note grows and shrinks as pieces are calibrated,
-           and every button below it must keep its screen position. */
+           and every line below it must keep its screen position. */
         height: 3;
     }
     Sidebar #side-profile-note {
@@ -184,16 +187,6 @@ class Sidebar(Vertical):
 
         def __init__(self, key: str) -> None:
             self.key = key
-            super().__init__()
-
-    class SlotChanged(Message):
-        """The user picked a different agent slot for the calibration buttons.
-
-        MainScreen owns the slot pointers; the sidebar only reports the choice.
-        """
-
-        def __init__(self, slot: AgentSlot) -> None:
-            self.slot = slot
             super().__init__()
 
     def __init__(self, config: Config, project_root: Path, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
@@ -222,17 +215,10 @@ class Sidebar(Vertical):
         yield Static(Text(self._preset_caption()), id="side-service-label")
         yield Static(Text(""), id="side-profile-note", classes="side-status")
         yield Button("Edit services...", id="edit-services-btn", variant="primary")
-        yield Static(Text("AGENT SLOT"), classes="side-title")
-        yield Select(
-            _slot_options(),
-            value=str(AgentSlot.MASTER),
-            allow_blank=False,
-            id="slot-select",
-        )
-        yield Static(Text(SLOT_NOTE_MASTER), id="side-slot-note", classes="side-status")
         yield Static(Text("CHAT WINDOW"), classes="side-title")
         yield Button("Set chat region...", id="set-region-btn")
         yield Static(Text(_REGION_UNSET), id="side-region", classes="side-status")
+        yield Static(Text(SLOT_NOTE_MASTER), id="side-slot-note", classes="side-status")
         yield Static(Text("DETECTION"), classes="side-title")
         yield Static(
             Text(self._probe_line(TemplateKind.BUSY, PROBE_RESTING)),
@@ -309,56 +295,56 @@ class Sidebar(Vertical):
         value = self.service_select.value
         return self._default_service() if value is Select.NULL else str(value)
 
-    def set_locked(self, locked: bool) -> None:
-        """Lock the picker while a session owns the service; unlock between sessions.
+    def show_service(self, key: str) -> None:
+        """Put ``key`` in the picker WITHOUT announcing a service switch.
 
-        Only the *service* picker: the slot picker stays live for the whole
-        session, because calibrating the sub-agent window mid-session is the
-        normal way to reach delegation.
+        The entry point for a window-tab change: each tab carries its own
+        service, so selecting one has to move the picker - but that is the
+        picker catching up with a choice the user already made, not a new one.
+        Announcing it would send MainScreen round the whole "a different service
+        is a different set of appearances" loop (reload the profile, restart the
+        detectors) on behalf of a window it may not even be driving. Same
+        ``_reported_service`` discipline as ``refresh_services``, and the caller
+        repaints the summary and the readiness note itself.
+        """
+        if key not in self._config.services:
+            return
+        select = self.service_select
+        self._reported_service = key
+        if select.value != key:
+            select.value = key
+        self.query_one("#side-service-label", Static).update(Text(self._preset_caption(key)))
+
+    def set_locked(self, locked: bool) -> None:
+        """Lock the picker while a session owns the services; unlock between them.
+
+        Only the *service* picker, and it locks whichever tab is selected: the
+        master's budget is baked into its Engine at bootstrap and the sub-agent
+        tab's service decides the delegate catalog at that same moment, so
+        neither may move mid-session. The chat-region button beside it stays
+        live for the whole session, because drawing the sub-agent window
+        mid-session is the normal way to reach delegation.
         """
         self.service_select.disabled = locked
 
-    # -- the agent slot picker -------------------------------------------------
-
-    @property
-    def slot_select(self) -> Select[str]:
-        return self.query_one("#slot-select", Select)
-
-    @property
-    def slot(self) -> AgentSlot:
-        """The slot the calibration buttons currently write into."""
-        value = self.slot_select.value
-        return AgentSlot.MASTER if value is Select.NULL else AgentSlot(str(value))
-
-    @on(Select.Changed, "#slot-select")
-    def _on_slot_changed(self, event: Select.Changed) -> None:
-        # Stop the raw Select event and re-post the domain one: MainScreen owns
-        # the slot pointers and repaints the column via show_slot().
-        event.stop()
-        if event.value is Select.NULL:
-            return
-        self.post_message(self.SlotChanged(AgentSlot(str(event.value))))
+    # -- the selected tab's chat window ---------------------------------------
 
     def show_slot(self, cal: SlotCalibration, note: str) -> None:
-        """Repaint every calibration readout from one slot's stored state.
+        """Repaint the CHAT WINDOW block from one window's stored state.
 
-        Called when the slot picker moves and on session teardown - every
+        Called when the window tab bar moves and on session teardown - every
         readout below is a view of ``cal`` and nothing else, which after the
         slot reduction means the drawn window and the staleness detector that
         rides on it. The appearance summary is deliberately NOT repainted here:
-        it belongs to the service, not to a window, so switching slots must not
-        change what it says (``show_profile`` is its only entry point, and it is
-        driven by service switches). The stale line falls back to a static
-        "watching" here rather than a live verdict: a probe belongs to
-        whichever slot the automation
-        is actually driving, and re-deriving one from a stored region would be
-        a lie.
+        it belongs to the service, and a tab switch may or may not be a service
+        switch (``show_profile`` is its only entry point, and MainScreen drives
+        the two together when it needs to). The stale line falls back to a
+        static "watching" here rather than a live verdict: a probe belongs to
+        whichever window the automation is actually driving, and re-deriving one
+        from a stored region would be a lie.
         """
-        select = self.slot_select
-        if select.value != str(cal.slot):
-            select.value = str(cal.slot)
-        self.update_slot_note(note)
         self.update_region(cal.chat_region)
+        self.update_slot_note(note)
         self.update_stale(STALE_CALIBRATED if cal.chat_region is not None else STALE_UNSET)
 
     def update_slot_note(self, note: str) -> None:

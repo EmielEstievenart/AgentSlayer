@@ -36,7 +36,7 @@ from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, can_finish
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.screens.main import MainScreen
+from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.tui.widgets.sidebar import STALE_CALIBRATED, STALE_OFF, STALE_UNSET
 
 REGION = ScreenRegion(1000, 200, 600, 500)
@@ -106,11 +106,19 @@ async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
     await pilot.press("enter")
 
 
+# Which window tab each slot lives on. Selecting the tab is what points the
+# sidebar at a slot now; the mapping is MainScreen's seam for an N-window bar.
+WINDOW_OF = {AgentSlot.MASTER: MASTER_WINDOW, AgentSlot.SUBAGENT: SUBAGENT_WINDOW}
+
+
 async def _select_slot(app: AgentClipApp, pilot: Pilot, slot: AgentSlot) -> None:
+    """Select that window's tab - which is what points the sidebar at a slot now
+    (the tab bar itself is test_tabs_ui's)."""
     main = app.main_screen
     assert main is not None
-    main.sidebar.slot_select.value = str(slot)
+    main._select_window(WINDOW_OF[slot])
     await _wait_for(pilot, lambda: main._calibrating is slot, f"{slot} selected")
+    await pilot.pause()
 
 
 class _Picker:

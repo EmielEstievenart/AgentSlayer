@@ -7,8 +7,9 @@ clicks, the synthetic paste), exactly as the other screen tests do it.
 
 What this pins down that the controller tests cannot:
 
-* the sub-agent gets a second **tab**, live (``▶``) while it runs and ticked
-  (``✓``) once it is done, with its own transcript;
+* the run lands in the **sub-agent window's tab**, which badges itself live
+  (``▶``) while it runs and ticked (``✓``) once it is done, under a divider
+  naming the task;
 * the sub-agent's chat window is **opened before anything is pasted** - asserted
   on one interleaved trace of clicks and clipboard writes, because a sub-agent
   bootstrap landing in the master's chat is the unrecoverable failure of this
@@ -41,7 +42,7 @@ from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.messages import ClipboardCaptured
-from agentclip.tui.screens.main import MainScreen
+from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 
 MASTER_CHAT = "amber-falcon"
 SUB_CHAT = "jade-otter"
@@ -139,8 +140,9 @@ def patched(monkeypatch: pytest.MonkeyPatch, trace: list[tuple[str, object]]) ->
     newchat_at = {AgentSlot.MASTER: MASTER_NEWCHAT, AgentSlot.SUBAGENT: SUB_NEWCHAT}
 
     async def fake_find_all(self, kind, slot=None, *, scene=None):
-        cal = self._slots[slot] if slot is not None else self.live
-        if cal.chat_region is None or not self._active_profile().has(kind):
+        target = slot if slot is not None else self._live
+        cal = self._slots[target]
+        if cal.chat_region is None or not self._profile_for(target).has(kind):
             return []
         return [newchat_at[cal.slot] if kind is TemplateKind.NEW_CHAT else cal.chat_region]
 
@@ -191,6 +193,12 @@ async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
     assert app.main_screen is not None
     button = app.main_screen.query_one(button_id, Button)
     await _wait_for(pilot, lambda: button.region.width > 0, "sidebar button laid out")
+    # ...and for its press animation to be over. Textual's Button ignores a
+    # click outright while the "-active" class is still on it, so two presses of
+    # the SAME button close together silently become one - which is exactly the
+    # shape of this suite (draw the master's window, switch tab, draw the
+    # sub-agent's) and reads as a click that vanished.
+    await _wait_for(pilot, lambda: not button.has_class("-active"), f"{button_id} idle again")
     await pilot.click(button_id)
 
 
@@ -201,14 +209,29 @@ async def _calibrate(
     before = len(picker.prompts)
     await _press(app, pilot, button_id)
     await _wait_for(pilot, lambda: len(picker.prompts) > before, f"{button_id} picker ran")
-    await pilot.pause(0.05)
+    # ...and then for the one-overlay-at-a-time guard to be released. The
+    # picker returns from inside the worker, so ``_picker_open`` is still held
+    # for a beat afterwards - and a second press landing in that beat is
+    # REFUSED, not queued, which under load reads as a click that vanished.
+    main = app.main_screen
+    assert main is not None
+    await _wait_for(pilot, lambda: not main._picker_open, "the picker guard released")
+    await pilot.pause()
+
+
+# Which window tab each slot lives on. Selecting the tab is what points the
+# sidebar at a slot now; the mapping is MainScreen's seam for an N-window bar.
+WINDOW_OF = {AgentSlot.MASTER: MASTER_WINDOW, AgentSlot.SUBAGENT: SUBAGENT_WINDOW}
 
 
 async def _select_slot(app: AgentClipApp, pilot: Pilot, slot: AgentSlot) -> None:
+    """Select that window's tab - which is what points the sidebar at a slot now
+    (the tab bar itself is test_tabs_ui's)."""
     main = app.main_screen
     assert main is not None
-    main.sidebar.slot_select.value = str(slot)
+    main._select_window(WINDOW_OF[slot])
     await _wait_for(pilot, lambda: main._calibrating is slot, f"{slot} selected")
+    await pilot.pause()
 
 
 async def _calibrate_both_slots(app: AgentClipApp, pilot: Pilot, picker: _Picker) -> None:
@@ -266,15 +289,14 @@ async def test_a_delegation_runs_end_to_end(
         # -- the master delegates -------------------------------------------
         trace.clear()
         main.post_message(ClipboardCaptured(DELEGATE_REPLY))
-        await _wait_for(pilot, lambda: main.chat_tabs.tab_count == 2, "the sub-agent's tab")
         await _wait_for(
             pilot,
             lambda: main._controller._reply_future is not None,
             "the sub-run waiting for its chat",
         )
 
-        assert main.chat_tabs.get_tab("tab-sub-1").label_text.startswith("▶ ")
-        assert main._focused_panel == "sub-1"
+        assert main.chat_tabs.tab(SUBAGENT_WINDOW).label_text.startswith("▶ ")
+        assert main._focused_panel == SUBAGENT_WINDOW
         assert main._live is AgentSlot.SUBAGENT  # the automation moved windows
 
         # The new-chat click came BEFORE the first byte was ever written out.
@@ -294,14 +316,16 @@ async def test_a_delegation_runs_end_to_end(
         await _wait_for(pilot, lambda: main._live is AgentSlot.MASTER, "the master chat back")
         await _wait_for(pilot, lambda: not main.busy, "the master turn to finish")
 
-        assert main.chat_tabs.get_tab("tab-sub-1").label_text == "✓ Read every file under src/ and…"
-        assert main._focused_panel == "master"
+        sub_tab = main.chat_tabs.tab(SUBAGENT_WINDOW).label_text
+        assert sub_tab == f"✓ SUB-AGENT · {SERVICE}"  # idle again, on its own service
+        assert main._focused_panel == MASTER_WINDOW
         # The sub-agent's deliverable rode home inside the master's payload.
         assert "src/ holds exactly one file" in provider.written[-1]
         assert "===CLIP:RESULT id=1 status=ok===" in provider.written[-1]
         # Both transcripts survive, each with its own half of the story.
-        sub_entries = " ".join(main._panels["sub-1"].entries)
-        master_entries = " ".join(main._panels["master"].entries)
+        sub_entries = " ".join(main._panels[SUBAGENT_WINDOW].entries)
+        master_entries = " ".join(main._panels[MASTER_WINDOW].entries)
+        assert "── task: Read every file under src/ and…" in sub_entries  # the divider
         assert "task done" in sub_entries
         assert "delegating to a sub-agent" in master_entries
         assert "sub-agent result" in master_entries

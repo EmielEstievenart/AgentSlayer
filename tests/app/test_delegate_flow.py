@@ -23,7 +23,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from agentclip.app.controller import SessionController
-from agentclip.app.types import SessionRef
+from agentclip.app.types import EngineRequest, SessionRef
+from agentclip.engine.engine import Engine
 from agentclip.protocol.composer import BudgetExceeded
 
 from .conftest import (
@@ -57,9 +58,26 @@ async def _feed_sub(controller: SessionController, *replies: str) -> None:
         )
 
 
-async def _delegating_session(controller: SessionController, view: FakeChatView) -> None:
+async def _delegating_session(
+    controller: SessionController, view: FakeChatView, *, subagent_service: str = ""
+) -> None:
     view.delegation = True
-    await start_session(controller, view)
+    await start_session(controller, view, subagent_service=subagent_service)
+
+
+def _record_engine_requests(controller: SessionController) -> list[EngineRequest]:
+    """Tap the engine factory, keeping the real one behind it - what the
+    controller ASKS for is the assertion, and a real Engine still has to come
+    back or the session it arms is a stub."""
+    seen: list[EngineRequest] = []
+    inner = controller._engine_factory
+
+    def record(request: EngineRequest) -> Engine:
+        seen.append(request)
+        return inner(request)
+
+    controller._engine_factory = record
+    return seen
 
 
 # -- the happy path -----------------------------------------------------------
@@ -80,6 +98,44 @@ async def test_a_delegated_result_reaches_the_master_payload(
     # Verbatim, and delivered as the delegate call's own ok result.
     assert "===CLIP:RESULT id=1 status=ok===" in master_payload
     assert "src/utils.py is the only file." in master_payload
+
+
+async def test_the_sub_agent_engine_is_built_from_the_sub_windows_service(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """Two windows, two services (tui.md 1.6). The delegation's Engine has to
+    come from the SUB-AGENT tab's preset: its paste budget is the budget of the
+    chat the sub-run will actually be pasted into, and composing a bootstrap
+    against the master's would overrun a smaller one silently.
+
+    Frozen at bootstrap, like the master's - the spec carries both, because both
+    pickers are locked for the session's life.
+    """
+    requests = _record_engine_requests(controller)
+    await _delegating_session(controller, view, subagent_service="gemini")
+    controller.submit_clipboard(delegate_reply("Read every file under src/."))
+    await _feed_sub(controller, task_done_reply("read them", result="one file.", chat=SUB))
+    await settle(view)
+
+    assert [(req.role, req.service) for req in requests] == [
+        ("master", "claude"),
+        ("subagent", "gemini"),
+    ]
+
+
+async def test_a_blank_sub_agent_service_follows_the_master(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """One picker's worth of information is a legal spec: a front-end that never
+    offers a second service leaves the field blank and both windows run the
+    same one."""
+    requests = _record_engine_requests(controller)
+    await _delegating_session(controller, view)
+    controller.submit_clipboard(delegate_reply("Read every file under src/."))
+    await _feed_sub(controller, task_done_reply("read them", result="one file.", chat=SUB))
+    await settle(view)
+
+    assert [req.service for req in requests] == ["claude", "claude"]
 
 
 async def test_the_sub_agent_gets_its_own_chat_and_tab(

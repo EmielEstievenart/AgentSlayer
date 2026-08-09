@@ -14,13 +14,24 @@ the sidebar's service picker and parks on an ``asyncio.Future`` that the first
 composer send resolves into a ``SessionSpec``. The same path serves ``/new`` and
 the summary screen's "new session" choice, so there is exactly one way to start.
 
-The transcript is a ``TabbedContent``: one pane per *session view*. The master's
-is always there; a delegated sub-agent run gets its own (``open_session_view``)
-and keeps it, ticked, once it finishes. Which pane the controller writes into is
-``_focused_panel``, moved only by ``focus_session_view`` - never by the user
-clicking a tab. That split is the point: the user can read a finished
-sub-agent's transcript while the master keeps working, and live output still
-lands where it belongs instead of in whatever tab happens to be visible.
+**A tab is a browser window** (``WindowTabs``, two rows: master windows over the
+selected master's sub-agent windows). Not a session view - a window outlives
+every session that runs in it, so the tabs are fixed furniture: one per window
+AgentClip drives, each with its own service, its own drawn rectangle and its own
+transcript panel that simply accumulates. Selecting a tab is what the AGENT SLOT
+picker used to be: it points ``_calibrating`` (and the sidebar's service picker)
+at that window and shows its transcript. It never touches ``_live`` - the
+automation keeps driving the window it was retargeted at, whatever the user is
+looking at.
+
+Which panel the controller writes into is ``_focused_panel``, moved only by
+``focus_session_view`` - never by the user clicking a tab. That split is the
+point: the user can read the master's conversation while a sub-agent runs, and
+live output still lands where it belongs instead of in whatever tab happens to
+be visible. A delegation appends a divider and its run to the sub-agent window's
+panel rather than minting a pane, so the window's whole history is one scroll -
+and ``render_log`` slices it back apart per run, because an export wants one
+heading per sub-task, not one over five.
 
 Threading: the clipboard watcher is a ``run_worker(thread=True)`` that bridges
 captures via the thread-safe ``post_message(ClipboardCaptured)`` -> the controller.
@@ -73,16 +84,28 @@ are therefore a refusal, never a coin toss.
 
 Every one of those calibrations belongs to an *agent slot*
 (:mod:`agentclip.screen.slot`), not to the screen: MASTER is the chat the
-session runs in, SUBAGENT the second window a delegated sub-agent gets. Two
-independent pointers say what happens to which slot - ``_calibrating`` is what
-the sidebar's pickers write into, ``_live`` is what the automation drives right
-now - because the user must be able to calibrate the sub-agent window while the
-master chat is mid-turn. ``start_browser_chat``/``end_browser_chat`` are the
-only things that move ``_live``, and ``start_browser_chat`` is all-or-nothing on
-purpose: it retargets the automation *only* after a verified click landed, so a
-False return guarantees nothing was clicked and nothing was retargeted - a
-sub-agent bootstrap pasted into the master chat would corrupt that conversation
+session runs in, SUBAGENT the second window a delegated sub-agent gets. The slot
+is the storage key behind a window tab (``_WINDOW_SLOTS``) - that mapping is the
+seam an N-window bar plugs into, and it is why the readiness rules and the
+calibration dataclass never had to learn what a tab is. Two independent pointers
+say what happens to which slot - ``_calibrating`` is the selected tab, ``_live``
+is what the automation drives right now - because the user must be able to
+calibrate (and watch) the sub-agent window while the master chat is mid-turn.
+``start_browser_chat``/``end_browser_chat`` are the only things that move
+``_live``, and ``start_browser_chat`` is all-or-nothing on purpose: it retargets
+the automation *only* after a verified click landed, so a False return
+guarantees nothing was clicked and nothing was retargeted - a sub-agent
+bootstrap pasted into the master chat would corrupt that conversation
 irrecoverably.
+
+**A service per window, too.** Each tab carries its own service key
+(``_services``), so the conversation the user steers can run on a big-context
+chat while delegated sub-tasks go to a cheap fast one. Every "what does this
+look like / how long is stillness / may I hover-scan" question therefore has to
+name a slot: ``_slot_preset``/``_slot_profile`` answer it, ``_live_preset``/
+``_live_profile`` are the automation's shorthand for the window it is driving,
+and ``_active_preset``/``_active_profile`` are the sidebar's for the tab the
+user has selected. The two coincide constantly and are never the same question.
 """
 
 from __future__ import annotations
@@ -91,6 +114,7 @@ import asyncio
 import time
 from collections.abc import Callable, Coroutine
 from contextlib import suppress
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -103,7 +127,7 @@ from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Button, Collapsible, Footer, Input, TabbedContent, TabPane
+from textual.widgets import Button, Collapsible, Footer, Input
 from textual.worker import Worker, get_current_worker
 
 from agentclip.app import SessionController, SessionSpec, SessionView
@@ -164,6 +188,7 @@ from agentclip.tui.widgets.sidebar import (
 )
 from agentclip.tui.widgets.statusbar import StatusBar
 from agentclip.tui.widgets.transcript import TranscriptPanel
+from agentclip.tui.widgets.window_tabs import WindowSpec, WindowTabs
 
 if TYPE_CHECKING:  # only for the action_settings hand-off; importing it for real would cycle
     from agentclip.tui.app import AgentClipApp
@@ -204,18 +229,60 @@ _CHAT_REGION_PROMPT = (
     "sidebar, so the New Chat button is inside it · Esc cancels"
 )
 
-# The session view that always exists: the conversation the user started. Its
-# widget ids are the pre-tabs ones (``#transcript``) so every existing selector
-# - and every test that reaches for the transcript - keeps resolving.
+# The session id the controller uses for the conversation the user started.
 MASTER_VIEW = "master"
 
+# The browser windows AgentClip drives, as the tab bar names them. One master
+# and one sub-agent for now; the ids are shaped for the N x N bar (``m2``,
+# ``m1-s2``) so nothing downstream has to be re-taught what a window id looks
+# like when the second pair arrives.
+MASTER_WINDOW = "m1"
+SUBAGENT_WINDOW = "m1-s1"
 
-def _pane_id(view_id: str) -> str:
-    return f"tab-{view_id}"
+# The seam between "a tab" and "the calibration store". Everything below the
+# tab bar - SlotCalibration, can_delegate, start_browser_chat - speaks slots and
+# knows nothing about tabs; this dict is the entire translation, and the place
+# an N-window bar plugs in (a window id would become a slot *identity* rather
+# than one of two enum members).
+_WINDOW_SLOTS: dict[str, AgentSlot] = {
+    MASTER_WINDOW: AgentSlot.MASTER,
+    SUBAGENT_WINDOW: AgentSlot.SUBAGENT,
+}
+_SLOT_WINDOWS: dict[AgentSlot, str] = {slot: win for win, slot in _WINDOW_SLOTS.items()}
+
+# What a window tab is called, before the state glyph and the service key.
+_WINDOW_NAMES = {MASTER_WINDOW: "MASTER", SUBAGENT_WINDOW: "SUB-AGENT"}
 
 
-def _panel_id(view_id: str) -> str:
-    return "transcript" if view_id == MASTER_VIEW else f"tr-{view_id}"
+def _panel_id(window: str) -> str:
+    """The transcript panel's widget id. The master window keeps the pre-tabs
+    ``#transcript`` so every existing selector - and every test that reaches for
+    the transcript - resolves unchanged."""
+    return "transcript" if window == MASTER_WINDOW else f"tr-{window}"
+
+
+def _run_divider(title: str) -> str:
+    """The line that separates one delegated run from the next in the sub-agent
+    window's transcript. The window's panel is never cleared between runs, so
+    this is the only thing saying where one sub-task ended and the next began."""
+    return f"── task: {title} ──"
+
+
+@dataclass(slots=True)
+class _SubRun:
+    """Where one delegated run lives inside the sub-agent window's transcript.
+
+    The window's panel is persistent now, so a run is a *slice* of it rather
+    than a panel of its own: ``start`` is the index of its first event in
+    ``TranscriptPanel.event_log`` (just past the divider) and ``end`` is set
+    when it finishes. The log is never pruned, so both stay valid for the life
+    of the session - which is what lets ``render_log`` put one ``## sub-agent:``
+    heading over each run instead of one over all of them.
+    """
+
+    ref: SessionRef
+    start: int
+    end: int | None = None
 
 
 class ElementClick(Enum):
@@ -425,15 +492,29 @@ class MainScreen(Screen[None]):
         self._session_title = ""
         # Resolved by the first composer send while waiting for a new session.
         self._new_session_future: asyncio.Future[SessionSpec | None] | None = None
-        # One transcript panel per session view, keyed by SessionRef.id: the
-        # master's is always present (mounted by compose, registered on mount),
-        # each sub-agent run adds and keeps one. ``_focused_panel`` is where the
-        # CONTROLLER's output goes - deliberately NOT the tab the user is
-        # looking at, so reading an old sub-agent tab can never misroute live
-        # output into it (see ``transcript``).
+        # One transcript panel per browser WINDOW, keyed by window id, both
+        # mounted by compose and registered on mount. They are permanent: a
+        # window's transcript accumulates every session and every delegated run
+        # that happened in it, and only ``/new`` empties them.
+        # ``_focused_panel`` is the window the CONTROLLER's output goes into -
+        # deliberately NOT the tab the user is looking at, so reading the
+        # master's conversation mid-delegation can never misroute the
+        # sub-agent's output into it (see ``transcript``).
         self._panels: dict[str, TranscriptPanel] = {}
-        self._focused_panel = MASTER_VIEW
-        self._sessions: dict[str, SessionRef] = {}  # view id -> its identity, for labels/export
+        self._focused_panel = MASTER_WINDOW
+        # Which window tab is selected: what the sidebar configures and what the
+        # user sees. Moves ``_calibrating`` with it; never ``_live``.
+        self._selected_window = MASTER_WINDOW
+        self._sessions: dict[str, SessionRef] = {}  # session id -> its identity
+        # Every delegated run so far, in order, as slices of the sub-agent
+        # window's transcript (see ``_SubRun``). Cleared with the session.
+        self._sub_runs: list[_SubRun] = []
+        # The service each window tab is pointed at. Two windows, two services:
+        # a big-context chat for the conversation the user steers, something
+        # cheap and fast for delegated sub-tasks. The sidebar's picker edits
+        # whichever tab is selected; the automation reads whichever window it is
+        # driving (``_live_preset`` / ``_live_profile``).
+        self._services: dict[str, str] = self._initial_services(config)
         # Every user-drawn calibration, one set per agent slot - which since the
         # appearance model is exactly one thing: the chat window. That single
         # box is where every appearance is searched for, the click target of
@@ -443,10 +524,11 @@ class MainScreen(Screen[None]):
         # service LOOKS like lives in ``_profiles`` instead - captured once,
         # shared by both slots, persisted across runs.
         #
-        # ``_calibrating`` is the slot the sidebar's pickers write into;
-        # ``_live`` is the slot the automation (paste click, detector poller,
-        # auto-copy) drives. They move independently: the sub-agent window is
-        # calibrated while the master chat is mid-session.
+        # ``_calibrating`` is the slot behind the SELECTED window tab - what the
+        # sidebar configures; ``_live`` is the slot the automation (paste click,
+        # detector poller, auto-copy) drives. They move independently: the
+        # sub-agent window is calibrated, and read, while the master chat is
+        # mid-session.
         self._slots: dict[AgentSlot, SlotCalibration] = new_slots()
         self._calibrating: AgentSlot = AgentSlot.MASTER
         self._live: AgentSlot = AgentSlot.MASTER
@@ -501,11 +583,52 @@ class MainScreen(Screen[None]):
         self._picker_open = False
         self._controller = SessionController(config, engine_factory, project_root, view=self)
 
+    # -- window tabs -> slots --------------------------------------------------
+
+    @staticmethod
+    def _initial_services(config: Config) -> dict[str, str]:
+        """Which service each window tab starts on.
+
+        The master's is the configured default; the sub-agent window's is
+        ``[general] subagent_service`` when it names a real preset and the
+        master's otherwise, which is what makes the second key optional for
+        everybody running one service in both windows.
+        """
+        master = config.general.service
+        if master not in config.services:
+            master = next(iter(sorted(config.services)))
+        sub = config.general.subagent_service
+        return {
+            MASTER_WINDOW: master,
+            SUBAGENT_WINDOW: sub if sub in config.services else master,
+        }
+
+    @staticmethod
+    def _window_of(slot: AgentSlot) -> str:
+        return _SLOT_WINDOWS[slot]
+
+    @staticmethod
+    def _slot_of(window: str) -> AgentSlot:
+        return _WINDOW_SLOTS[window]
+
+    def _window_of_session(self, session_id: str) -> str | None:
+        """Which browser window a session's output belongs in.
+
+        The mapping the ChatView port is expressed in: a sub-agent session runs
+        in the sub-agent window, anything else in the master's. Unknown ids
+        answer None rather than guessing - losing a transcript line beats
+        writing it into the wrong conversation's panel.
+        """
+        ref = self._sessions.get(session_id)
+        if ref is not None:
+            return SUBAGENT_WINDOW if ref.role == "subagent" else MASTER_WINDOW
+        return MASTER_WINDOW if session_id == MASTER_VIEW else None
+
     # -- slots ----------------------------------------------------------------
 
     @property
     def calibrating(self) -> SlotCalibration:
-        """The slot the sidebar's calibration buttons write into."""
+        """The slot behind the selected window tab - what the sidebar edits."""
         return self._slots[self._calibrating]
 
     @property
@@ -533,14 +656,22 @@ class MainScreen(Screen[None]):
         # and the footer stay full width underneath both.
         with Horizontal(id="body"):
             with Vertical(id="main-col"):
-                # One tab per session view. A single tab (the master's) is the
-                # normal case and reads as a plain title bar; a delegation adds
-                # a second one and the user can flip between them.
-                with (
-                    TabbedContent(id="chats"),
-                    TabPane("master", id=_pane_id(MASTER_VIEW)),
-                ):
-                    yield TranscriptPanel(id=_panel_id(MASTER_VIEW))
+                # One tab per browser window, in two rows: masters on top, the
+                # selected master's sub-agent windows under it. Both windows'
+                # panels are mounted here for good; only one is displayed.
+                yield WindowTabs(
+                    [
+                        WindowSpec(
+                            MASTER_WINDOW,
+                            self._window_label(MASTER_WINDOW),
+                            (WindowSpec(SUBAGENT_WINDOW, self._window_label(SUBAGENT_WINDOW)),),
+                        )
+                    ],
+                    id="chats",
+                )
+                with Vertical(id="chat-panels"):
+                    for window in _WINDOW_SLOTS:
+                        yield TranscriptPanel(id=_panel_id(window))
                 yield ActionPanel(id="action")
                 yield RunningBar(id="running")
                 yield ChatComposer(id="composer")
@@ -552,20 +683,21 @@ class MainScreen(Screen[None]):
     def transcript(self) -> TranscriptPanel:
         """The panel the controller's output goes into right now.
 
-        The *focused* view, not the visible tab: the user may be reading a
-        finished sub-agent's transcript while the master keeps working, and
-        output landing in the tab they happen to have open would look exactly
-        like data loss. Falls back to the master panel (and raises ``NoMatches``
-        before the screen is mounted, which every ``add_*`` already suppresses).
+        The *focused* window, not the selected tab: the user may be reading the
+        master's conversation while a sub-agent runs, and output landing in the
+        tab they happen to have open would look exactly like data loss. Falls
+        back to the master panel (and raises ``NoMatches`` before the screen is
+        mounted, which every ``add_*`` already suppresses).
         """
         panel = self._panels.get(self._focused_panel)
         if panel is not None and panel.is_mounted:
             return panel
-        return self.query_one(f"#{_panel_id(MASTER_VIEW)}", TranscriptPanel)
+        return self.query_one(f"#{_panel_id(MASTER_WINDOW)}", TranscriptPanel)
 
     @property
-    def chat_tabs(self) -> TabbedContent:
-        return self.query_one("#chats", TabbedContent)
+    def chat_tabs(self) -> WindowTabs:
+        """The two-row window tab bar."""
+        return self.query_one("#chats", WindowTabs)
 
     @property
     def action_panel(self) -> ActionPanel:
@@ -598,6 +730,15 @@ class MainScreen(Screen[None]):
         # itself), so the per-run cache is no longer trustworthy - drop it and
         # let the next read come off disk.
         self._profiles.clear()
+        # A deleted service can also be the one a window tab is pointed at. The
+        # sidebar re-picks for the SELECTED tab on its own (refresh_services),
+        # but the other tab has no widget to catch it, and a window pointed at a
+        # preset that no longer exists would silently drive the automation off
+        # ``Config.preset()``'s fallback.
+        for window, key in list(self._services.items()):
+            if key not in config.services:
+                self._services[window] = self._initial_services(config)[window]
+                self._relabel_window(window)
         self._paint_profile()
         self._after_calibration()
         # Everything the running poller was built from can have just changed:
@@ -608,7 +749,9 @@ class MainScreen(Screen[None]):
         self._start_detector_worker()
 
     def on_mount(self) -> None:
-        self._panels[MASTER_VIEW] = self.query_one(f"#{_panel_id(MASTER_VIEW)}", TranscriptPanel)
+        for window in _WINDOW_SLOTS:
+            self._panels[window] = self.query_one(f"#{_panel_id(window)}", TranscriptPanel)
+        self._show_panel(MASTER_WINDOW)
         self._paint_status()
         self._update_composer()
         self._sync_sidebar()
@@ -705,26 +848,26 @@ class MainScreen(Screen[None]):
     async def clear_transcript(self) -> None:
         # Only the session-reset path (/new, the summary's "new session") clears
         # the transcript, so this doubles as the session teardown hook. The
-        # calibrations SURVIVE for both slots: they describe where the service's
-        # windows are, not what the finished session said, so /new must not make
-        # the user re-draw every region. Only the pointers go home to MASTER -
-        # the next session starts by driving the master window - and the
-        # detector worker restarts against it so the surviving baselines keep
-        # being polled. The sub-agent tabs do die with the session: the next one
-        # numbers its runs from sub-1 again.
+        # calibrations SURVIVE for both windows: they describe where the
+        # service's windows are, not what the finished session said, so /new
+        # must not make the user re-draw every region. Nor do the TABS go
+        # anywhere - a window outlives the sessions run in it; only their
+        # transcripts are emptied. The pointers go home to MASTER (the next
+        # session starts by driving the master window) and the detector worker
+        # restarts against it so the surviving baselines keep being polled.
         await self._remove_session_views()
-        self._calibrating = AgentSlot.MASTER
         self._live = AgentSlot.MASTER
+        self._select_window(MASTER_WINDOW)
         # Re-derive rather than clear: the sub-agent slot is still calibrated,
         # and _after_calibration's one-shot toast must not re-fire after /new.
         self._delegation_ready = self.delegation_available()
         self._reset_finish_trigger()
         self._start_detector_worker()
         with suppress(NoMatches):
-            self.sidebar.show_slot(self.calibrating, self._slot_note())
             self.sidebar.hide_paste_flash()
-        with suppress(NoMatches):
-            await self.transcript.clear_events()
+        for panel in self._panels.values():
+            with suppress(NoMatches):
+                await panel.clear_events()
 
     def has_transcript_events(self) -> bool:
         if not self._panels:
@@ -732,98 +875,183 @@ class MainScreen(Screen[None]):
         return any(panel.event_log for panel in self._panels.values())
 
     def render_log(self, meta_lines: list[str]) -> str:
-        """The master's log, then every sub-agent's under its own heading.
+        """The master's log, then every sub-agent RUN under its own heading.
 
         One exported document for the whole delegation tree: the master's
         transcript reads end to end (the sub-runs appear in it as the delegate
-        call and its result) and each sub-agent's full transcript follows, so
+        call and its result) and each delegated run's transcript follows, so
         nothing a sub-agent did is only visible in a tab.
+
+        Per run, not per window, even though the runs now share one panel. Five
+        sub-tasks under a single ``## sub-agent:`` heading is a wall; each one
+        under its own title and chat name is the readable thing an export is
+        for. ``_sub_runs`` remembers where each run's events start and end in
+        the panel's (unpruned) log, which is all it takes to slice them back
+        apart.
         """
-        master = self._panels.get(MASTER_VIEW)
+        master = self._panels.get(MASTER_WINDOW)
         if master is None:
-            master = self.query_one(f"#{_panel_id(MASTER_VIEW)}", TranscriptPanel)
+            master = self.query_one(f"#{_panel_id(MASTER_WINDOW)}", TranscriptPanel)
         parts = [master.render_log(meta_lines)]
-        for view_id, panel in self._panels.items():
-            if view_id == MASTER_VIEW:
-                continue
-            ref = self._sessions.get(view_id)
-            title = ref.title if ref is not None else view_id
-            chat = f" ({ref.chat_name})" if ref is not None and ref.chat_name else ""
-            parts.append(f"## sub-agent: {title}{chat}\n\n{panel.render_events()}".rstrip() + "\n")
+        sub = self._panels.get(SUBAGENT_WINDOW)
+        if sub is not None:
+            for run in self._sub_runs:
+                chat = f" ({run.ref.chat_name})" if run.ref.chat_name else ""
+                body = sub.render_events(run.start, run.end)
+                parts.append(f"## sub-agent: {run.ref.title}{chat}\n\n{body}".rstrip() + "\n")
         return "\n".join(parts)
 
-    # == ChatView: session views (transcript tabs) ============================
+    # == ChatView: session views (window transcripts) =========================
+    # The port speaks session ids; this screen speaks windows. ``_window_of_session``
+    # is the whole adapter - a sub-agent session's output belongs in the
+    # sub-agent window's panel, whichever run it is.
 
     async def open_session_view(self, session: SessionRef) -> None:
-        """Mount a transcript tab for ``session`` and make it the focused one.
+        """Start ``session``'s transcript in its window and focus that window.
+
+        No pane is minted: the sub-agent window's panel is permanent, so a run
+        opens by appending a divider to whatever is already in it and recording
+        where it began (``_SubRun``). That is what makes the window's history
+        one scroll instead of a graveyard of tabs, and the divider is the only
+        thing marking where the previous sub-task ended.
 
         Focus moves here, not on the user's next click: the controller writes
         the sub-agent's whole run through the ordinary ``add_*`` calls right
         after this returns.
         """
-        panel = TranscriptPanel(id=_panel_id(session.id))
-        await self.chat_tabs.add_pane(
-            TabPane(f"▶ {session.title}", panel, id=_pane_id(session.id))
-        )
-        self._panels[session.id] = panel
         self._sessions[session.id] = session
+        window = self._window_of_session(session.id)
+        panel = self._panels.get(window) if window is not None else None
+        if panel is not None:
+            await panel.add_note(_run_divider(session.title))
+            if window == SUBAGENT_WINDOW:
+                self._sub_runs.append(_SubRun(session, len(panel.event_log)))
+                self._relabel_window(window)
         self.focus_session_view(session.id)
 
     def focus_session_view(self, session_id: str) -> None:
-        """Route every later ``add_*`` into ``session_id``'s panel (and show it).
+        """Route every later ``add_*`` into that session's window (and show it).
 
         Unknown ids are ignored rather than fatal: losing a transcript line is
         never worth taking a running session down with an exception.
         """
-        if session_id not in self._panels and session_id != MASTER_VIEW:
+        window = self._window_of_session(session_id)
+        if window is None:
             return
-        self._focused_panel = session_id
-        with suppress(NoMatches):
-            self.chat_tabs.active = _pane_id(session_id)
+        self._focused_panel = window
+        self._select_window(window)
 
     async def finish_session_view(self, session_id: str, note: str) -> None:
-        """A sub-agent run ended: annotate its panel and tick its tab.
+        """A sub-agent run ended: annotate its transcript and re-badge its tab.
 
         Nothing is disabled or removed - the panels are output-only and the
         composer always targets the controller's active session, so leaving the
-        tab readable costs nothing and is the whole point of keeping it.
+        run readable costs nothing and is the whole point of keeping it. The
+        tab drops its ``▶`` for a ``✓``: the label belongs to the WINDOW, so it
+        reports whether that window is busy, and the run's own title lives in
+        the divider above its transcript.
         """
-        panel = self._panels.get(session_id)
+        window = self._window_of_session(session_id)
+        panel = self._panels.get(window) if window is not None else None
         if panel is None:
             return
         await panel.add_note(note)
-        ref = self._sessions.get(session_id)
-        title = ref.title if ref is not None else session_id
-        with suppress(NoMatches, ValueError):
-            self.chat_tabs.get_tab(_pane_id(session_id)).label = f"✓ {title}"
+        if window == SUBAGENT_WINDOW:
+            for run in reversed(self._sub_runs):
+                if run.ref.id == session_id:
+                    run.end = len(panel.event_log)
+                    break
+            self._relabel_window(window)
 
     async def _remove_session_views(self) -> None:
-        """Drop every sub-agent tab, leaving the master's - the /new teardown."""
-        self._focused_panel = MASTER_VIEW
-        stale = [view_id for view_id in self._panels if view_id != MASTER_VIEW]
+        """The /new teardown: forget the runs, keep both window tabs.
+
+        Windows are not session state - the browser is still open, still drawn,
+        still pointed at its service - so nothing is unmounted here. Only the
+        run bookkeeping goes, and with it the sub-agent tab's ``✓``; the
+        transcripts themselves are emptied by ``clear_transcript``.
+        """
+        self._focused_panel = MASTER_WINDOW
         self._sessions.clear()
-        for view_id in stale:
-            del self._panels[view_id]
-            with suppress(NoMatches):
-                await self.chat_tabs.remove_pane(_pane_id(view_id))
-        with suppress(NoMatches):
-            self.chat_tabs.active = _pane_id(MASTER_VIEW)
+        self._sub_runs.clear()
+        self._relabel_window(SUBAGENT_WINDOW)
 
     def action_next_chat_tab(self) -> None:
-        """f6: show the next transcript tab. Browsing only - it moves what the
-        user SEES, never where the controller writes (see ``transcript``)."""
+        """f6: select the next window tab.
+
+        Browsing plus pointing: like clicking the tab, it moves what the user
+        SEES and what the sidebar configures, and never where the controller
+        writes (see ``transcript``) or which window the automation drives.
+        """
         try:
             tabs = self.chat_tabs
         except NoMatches:
             return
-        order = [_pane_id(view_id) for view_id in self._panels]
+        order = tabs.order()
         if len(order) < 2:
             return
         try:
-            index = order.index(tabs.active)
+            index = order.index(self._selected_window)
         except ValueError:
             index = -1
-        tabs.active = order[(index + 1) % len(order)]
+        self._select_window(order[(index + 1) % len(order)])
+
+    # -- selecting a window tab ------------------------------------------------
+
+    @on(WindowTabs.WindowSelected)
+    def _on_window_selected(self, message: WindowTabs.WindowSelected) -> None:
+        message.stop()
+        self._select_window(message.window)
+
+    def _select_window(self, window: str) -> None:
+        """Make ``window`` the tab the user sees and the sidebar configures.
+
+        This is what the AGENT SLOT picker used to do, plus the transcript: it
+        moves ``_calibrating`` (so "Set chat region..." and the service picker
+        write into this window), repaints the whole column from that window's
+        state, and shows its transcript panel.
+
+        It pointedly does NOT touch ``_live``. Looking at a window is not
+        driving it: a click here while a sub-agent is mid-run must not send the
+        next paste into the master's chat.
+        """
+        if window not in _WINDOW_SLOTS:
+            return
+        self._selected_window = window
+        self._calibrating = self._slot_of(window)
+        self._show_panel(window)
+        with suppress(NoMatches):
+            self.chat_tabs.select(window)
+        with suppress(NoMatches):
+            self.sidebar.show_service(self._selected_service())
+            self.sidebar.show_slot(self.calibrating, self._slot_note())
+        self._paint_profile()
+
+    def _show_panel(self, window: str) -> None:
+        """Display that window's transcript and hide the others."""
+        for other, panel in self._panels.items():
+            panel.display = other == window
+
+    def _window_label(self, window: str) -> str:
+        """A window tab's text: what it is, how it is doing, what it runs on.
+
+        The service key is on the tab because it is per window now and the
+        sidebar only ever shows the selected one's - without it, "which chat is
+        the sub-agent going to open?" would be a question you answer by clicking
+        around. The glyph is the sub-agent window's live state, derived from the
+        runs rather than stored: none before it has ever run, ``▶`` while a run
+        is in flight (its slice has no end yet), ``✓`` once one has finished.
+        """
+        name = _WINDOW_NAMES[window]
+        service = self._services.get(window, "")
+        glyph = ""
+        if window == SUBAGENT_WINDOW and self._sub_runs:
+            glyph = "▶ " if any(run.end is None for run in self._sub_runs) else "✓ "
+        return f"{glyph}{name} · {service}" if service else f"{glyph}{name}"
+
+    def _relabel_window(self, window: str) -> None:
+        with suppress(NoMatches, KeyError):
+            self.chat_tabs.set_label(window, self._window_label(window))
 
     # == ChatView: state + chrome =============================================
 
@@ -948,10 +1176,13 @@ class MainScreen(Screen[None]):
         """Every place ``kind`` is on screen right now, in absolute coordinates.
 
         The one primitive behind every "is it there / click it" question. It
-        looks *inside the drawn chat region* for the ACTIVE SERVICE's captured
-        appearance, which is the whole point of the profile model: the user
-        drew one box per window, and everything inside it is recognised rather
-        than remembered, so moving or resizing the browser costs nothing.
+        looks *inside the drawn chat region* for the appearance THAT WINDOW's
+        own service captured, which is the whole point of the profile model: the
+        user drew one box per window, and everything inside it is recognised
+        rather than remembered, so moving or resizing the browser costs nothing.
+        Per window rather than per app because the two windows can be pointed at
+        two different services - a sub-agent chat whose copy icon looks nothing
+        like the master's is exactly the case this supports.
 
         All of them rather than the first, because that is the question callers
         actually have to answer: an appearance is the SERVICE's, so a second
@@ -973,11 +1204,12 @@ class MainScreen(Screen[None]):
         """
         if scene is not None and slot is not None:
             raise ValueError("_find_all takes a slot or a captured scene, never both")
-        cal = self._slots[slot] if slot is not None else self.live
+        target = slot if slot is not None else self._live
+        cal = self._slots[target]
         region = cal.chat_region
         if region is None:
             return []
-        template = self._active_profile().get(kind)
+        template = self._profile_for(target).get(kind)
         if template is None:
             return []
         if scene is None:
@@ -1203,8 +1435,11 @@ class MainScreen(Screen[None]):
         """One door for every composer send.
 
         While waiting for a new session the text IS the task (verbatim - no slash
-        command parsing, exactly like an ask_user answer), and it starts the session
-        with the sidebar's selected service. Otherwise it goes to the controller.
+        command parsing, exactly like an ask_user answer), and it starts the
+        session with a service PER WINDOW: the master's tab decides the
+        conversation's budgets, the sub-agent tab's decides what any delegation
+        will run on. Both are read here, once, because both are locked for the
+        session's life. Otherwise the text goes to the controller.
         """
         self._remember_own_window()  # typing here = our terminal has OS focus
         future = self._new_session_future
@@ -1214,23 +1449,56 @@ class MainScreen(Screen[None]):
                 self.notify("describe the task first", severity="warning")
                 return
             self.reset_composer()
-            future.set_result(SessionSpec(task=task, service=self._selected_service()))
+            future.set_result(
+                SessionSpec(
+                    task=task,
+                    service=self._service_for(AgentSlot.MASTER),
+                    subagent_service=self._service_for(AgentSlot.SUBAGENT),
+                )
+            )
             return
         self._controller.submit_message(text)
 
+    # -- a service per window --------------------------------------------------
+    #
+    # Three ways to ask "which service?", and mixing them up is the bug this
+    # split exists to prevent. ``_service_for(slot)`` is the general one; the
+    # automation asks about the window it is DRIVING (``_live_*``) and the
+    # sidebar about the tab the user has SELECTED (``_active_*``). They agree
+    # almost always and are never the same question - mid-delegation the live
+    # window is the sub-agent's while the user reads the master's tab.
+
+    def _service_for(self, slot: AgentSlot) -> str:
+        """The service key one window tab is pointed at."""
+        key = self._services.get(self._window_of(slot), "")
+        return key if key in self._config.services else self._config.general.service
+
+    def _preset_for(self, slot: AgentSlot) -> ServicePreset:
+        return self._config.services.get(self._service_for(slot)) or self._config.preset()
+
+    def _profile_for(self, slot: AgentSlot) -> ServiceProfile:
+        return self._profile(self._service_for(slot))
+
+    def _live_preset(self) -> ServicePreset:
+        """The preset of the window the automation is driving. The stale
+        detector reads its ``stable_seconds`` at poller start and the auto-copy
+        flow its ``hover_scan``: streaming cadence and icon rendering are
+        properties of the service in THAT window, not of AgentClip and not of
+        whatever tab is on screen."""
+        return self._preset_for(self._live)
+
+    def _live_profile(self) -> ServiceProfile:
+        """What the window the automation is driving looks like."""
+        return self._profile_for(self._live)
+
     def _selected_service(self) -> str:
-        try:
-            return self.sidebar.service
-        except NoMatches:  # sidebar never mounted (shouldn't happen): configured default
-            return self._config.general.service
+        """The selected tab's service - what the sidebar's picker shows."""
+        return self._service_for(self._calibrating)
 
     def _active_preset(self) -> ServicePreset:
-        """The preset behind the sidebar's service picker - locked to the
-        running session's service while one is active, so mid-session this is
-        the session's preset. The stale detector reads its ``stable_seconds``
-        from here at poller start: streaming cadence is a property of the
-        service being driven, not of AgentClip."""
-        return self._config.services.get(self._selected_service()) or self._config.preset()
+        """The preset behind the sidebar's service picker: the SELECTED window
+        tab's service, locked to it while a session runs."""
+        return self._preset_for(self._calibrating)
 
     # -- service profiles (what the service LOOKS like) ------------------------
 
@@ -1249,53 +1517,38 @@ class MainScreen(Screen[None]):
         return profile
 
     def _active_profile(self) -> ServiceProfile:
-        """The profile of the service currently being driven.
-
-        Resolved exactly like ``_active_preset``: through the sidebar's picker,
-        which a running session locks to that session's service - so mid-session
-        this is the session's profile and between sessions it is whatever the
-        user has selected to calibrate against.
+        """What the SELECTED window tab's service looks like - the sidebar's
+        appearance summary and readiness note, and nothing the automation does.
         """
-        return self._profile(self._selected_service())
+        return self._profile_for(self._calibrating)
 
     # -- sidebar --------------------------------------------------------------
 
-    @on(Sidebar.SlotChanged)
-    def _on_slot_changed(self, message: Sidebar.SlotChanged) -> None:
-        """Point the calibration buttons at another slot and repaint the column
-        from that slot's stored state. The *live* slot is untouched: switching
-        the picker mid-run must not retarget a click at a different window."""
-        message.stop()
-        self._calibrating = message.slot
-        with suppress(NoMatches):
-            self.sidebar.show_slot(self.calibrating, self._slot_note())
-
     def _slot_note(self) -> str:
-        """The sidebar's readiness line for the slot being calibrated.
+        """The sidebar's readiness line for the selected window.
 
         Composed here, not in the sidebar, because it takes both halves of the
-        answer: the slot's drawn window and the active service's appearances.
+        answer: the window's drawn box and what THAT TAB's service looks like.
         """
         return slot_note(self.calibrating, self._active_profile())
 
     def _slot_prompt(self, prompt: str) -> str:
-        """Both slots share the picker code, so the sub-agent's prompts have to
-        say out loud which window the user is being asked to draw on."""
+        """Both windows share the picker code, so the sub-agent's prompts have
+        to say out loud which window the user is being asked to draw on."""
         if self._calibrating is AgentSlot.SUBAGENT:
             return f"SUB-AGENT window · {prompt}"
         return prompt
 
     def _after_calibration(self) -> None:
-        """Repaint the slot readiness line after anything readiness depends on
-        changed, and tell the user once when the sub-agent slot becomes usable
+        """Repaint the window readiness line after anything readiness depends on
+        changed, and tell the user once when the sub-agent window becomes usable
         - the delegate tool is baked into the bootstrap, so it only reaches the
         model on the next /new.
 
         Both kinds of event have to land here, which is easy to get wrong:
-        readiness is composed from the slot AND the service profile, so
+        readiness is composed from the window AND its service's profile, so
         capturing a copy button can flip delegation ON without any region being
-        drawn - and it does so for BOTH slots at once, since the profile is
-        shared."""
+        drawn."""
         ready = self.delegation_available()
         with suppress(NoMatches):
             self.sidebar.update_slot_note(self._slot_note())
@@ -1362,7 +1615,7 @@ class MainScreen(Screen[None]):
             "everything is recognised inside it"
         )
 
-    # -- what the active service LOOKS like ------------------------------------
+    # -- what the selected tab's service LOOKS like ----------------------------
 
     def _paint_profile(self) -> None:
         """Repaint the sidebar's read-only appearance summary + probe lines.
@@ -1378,18 +1631,26 @@ class MainScreen(Screen[None]):
 
     @on(Sidebar.ServiceChanged)
     def _on_service_changed(self, message: Sidebar.ServiceChanged) -> None:
-        """A different service is a different set of appearances.
+        """The user pointed the SELECTED window tab at a different service.
 
-        Everything downstream of "what does this service look like?" has to
-        follow: the appearance summary, the slot's readiness note (half of which
-        is the profile), and the detector worker - which was built around the
-        old service's busy/idle templates and would otherwise keep hunting
-        them in the new one's window.
+        The picker edits one tab, so the key lands in that window's slot of
+        ``_services`` and the tab's label follows. Everything downstream of
+        "what does this service look like?" repaints: the appearance summary and
+        the readiness note (half of which is the profile).
+
+        The detector worker restarts only when the tab that changed is the one
+        the automation is DRIVING. Re-pointing the sub-agent window mid-session
+        is the normal way to set delegation up, and rebuilding the master's
+        poller there would throw away its in-flight streaks and its trackers'
+        previous frames on behalf of a window nothing is watching.
         """
         message.stop()
+        self._services[self._selected_window] = message.key
+        self._relabel_window(self._selected_window)
         self._paint_profile()
         self._after_calibration()
-        self._start_detector_worker()
+        if self._calibrating is self._live:
+            self._start_detector_worker()
 
     # -- finish-detector polling -----------------------------------------------
 
@@ -1405,8 +1666,10 @@ class MainScreen(Screen[None]):
         all of them as the same ERROR instead of some seeing a frame and
         others not.
 
-        What runs is composed from the drawn window, the ACTIVE SERVICE's
-        ``finish_signals`` checklist, and its captured appearances: a busy
+        What runs is composed from the drawn window, the checklist of the
+        service THAT WINDOW is pointed at (never the selected tab's - the user
+        reading the master's transcript mid-delegation must not re-aim the
+        poller), and that service's captured appearances: a busy
         tracker if the checklist asks for one AND a busy indicator is captured,
         an idle tracker on the same terms, and the stale tracker if the
         checklist asks for it (it needs no capture - a drawn region is a finish
@@ -1423,7 +1686,7 @@ class MainScreen(Screen[None]):
         must keep watching the window it was started for. The trackers are
         likewise built once per run - they carry streaks and a previous frame,
         and all of that describes one window - with the "stable for N seconds"
-        wish converted to ticks of the poll cadence here, from the active
+        wish converted to ticks of the poll cadence here, from the live window's
         service preset.
         """
         self._stop_detector_worker()
@@ -1443,8 +1706,8 @@ class MainScreen(Screen[None]):
         region = self.live.chat_region
         if region is None:
             return
-        profile = self._active_profile()
-        preset = self._active_preset()
+        profile = self._live_profile()
+        preset = self._live_preset()
         signals = preset.finish_signals
         ticks = max(1, round(preset.stable_seconds / _BUSY_POLL_S))
         busy_template = profile.get(TemplateKind.BUSY) if "busy" in signals else None
@@ -1649,7 +1912,7 @@ class MainScreen(Screen[None]):
             self._copy_changed_streak = 0
             return
         self._copy_changed_streak += 1
-        if self._copy_changed_streak < 2 or not self._active_profile().has(TemplateKind.COPY):
+        if self._copy_changed_streak < 2 or not self._live_profile().has(TemplateKind.COPY):
             return
         self._copy_armed = False
         self._copy_changed_streak = 0
@@ -1708,7 +1971,7 @@ class MainScreen(Screen[None]):
         """Repaint the copy button's status line, keeping its captured size in
         front of whatever the flow has to report."""
         with suppress(NoMatches):
-            template = self._active_profile().get(TemplateKind.COPY)
+            template = self._live_profile().get(TemplateKind.COPY)
             size = f"{template.width}×{template.height} · " if template is not None else ""
             self.sidebar.update_template(TemplateKind.COPY, f"{size}{text}")
 
@@ -1755,7 +2018,7 @@ class MainScreen(Screen[None]):
         anyone having to remember a column.
         """
         region = self.live.chat_region
-        template = self._active_profile().get(TemplateKind.COPY)
+        template = self._live_profile().get(TemplateKind.COPY)
         if region is None or template is None:
             return
 
@@ -1774,7 +2037,7 @@ class MainScreen(Screen[None]):
         match = await asyncio.to_thread(
             find_lowest_in_region, template, scene, max_diff=TemplateKind.COPY.max_diff
         )
-        if match is None and self._active_preset().hover_scan:
+        if match is None and self._live_preset().hover_scan:
             # Nothing in the static frame: this service is one of the chats that
             # only paint the icon under the pointer, so try again while hovering
             # up the region. Opt-in per service (``hover_scan``) because the scan
@@ -1867,7 +2130,7 @@ class MainScreen(Screen[None]):
         toss between two conversations, and the loser is a chat that gets
         clicked - reset, even - on behalf of the other.
         """
-        if self._slots[slot].chat_region is None or not self._active_profile().has(kind):
+        if self._slots[slot].chat_region is None or not self._profile_for(slot).has(kind):
             return ElementClick.NOT_CALIBRATED
         found = await self._find_all(kind, slot)
         if not found:
@@ -1936,14 +2199,21 @@ class MainScreen(Screen[None]):
     # -- sub-agent transport: opening a chat and retargeting the automation ----
 
     def delegation_available(self) -> bool:
-        """Is the sub-agent slot calibrated well enough to run a delegation?
+        """Is the sub-agent window calibrated well enough to run a delegation?
 
         The single source of truth the controller asks before it even builds a
         sub-agent engine. Deliberately strict (see ``SlotCalibration``): a
-        half-calibrated slot must read as unavailable rather than strand a
+        half-calibrated window must read as unavailable rather than strand a
         sub-run halfway through.
+
+        Against the SUB-AGENT tab's own service profile, which is the whole
+        point of a service per window: the copy and new-chat buttons the run
+        will click are the ones in the chat it is going to open, and the master
+        tab having captured its own says nothing about them.
         """
-        return can_delegate(self._slots[AgentSlot.SUBAGENT], self._active_profile())
+        return can_delegate(
+            self._slots[AgentSlot.SUBAGENT], self._profile_for(AgentSlot.SUBAGENT)
+        )
 
     def delegation_missing(self) -> tuple[str, ...]:
         """The calibrations still standing between here and ``can_delegate``.
@@ -1953,7 +2223,7 @@ class MainScreen(Screen[None]):
         the controller cannot import ``screen`` to ask, and should not have to
         know what a "new-chat button" is.
         """
-        return missing(self._slots[AgentSlot.SUBAGENT], self._active_profile())
+        return missing(self._slots[AgentSlot.SUBAGENT], self._profile_for(AgentSlot.SUBAGENT))
 
     async def start_browser_chat(self, slot: AgentSlot) -> bool:
         """Open a fresh browser chat in ``slot`` and make it the live one.

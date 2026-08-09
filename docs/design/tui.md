@@ -24,17 +24,22 @@ AgentClipApp(App[None])            # CSS embedded in App.CSS (avoids PyInstaller
 MainScreen
 ├── Horizontal                       id=body              # 1fr height
 │   ├── Vertical                     id=main-col          # width 1fr: the chat column
-│   │   ├── TabbedContent            id=chats             # 1fr height; one pane per session view (§1.6)
-│   │   │ └── TabPane "master"       id=tab-master        # + "▶ <title>" / "✓ <title>" per sub-agent run
-│   │   ├── TranscriptPanel(VerticalScroll)  id=transcript        # inside tab-master; sub panes get id=tr-sub-N
-│   │   │   ├── Markdown                     .ev-user             # user task / follow-ups
-│   │   │   ├── Markdown                     .ev-prose            # LLM prose between blocks
-│   │   │   ├── Vertical                     .ev-call             # one per tool call
-│   │   │   │   ├── Static                                        # "▶ edit_file src/utils.py · 1 hunk · ✓ ok"
-│   │   │   │   └── Collapsible(collapsed=True)                    # long payloads only
-│   │   │   │       └── Static                                     # Rich Syntax / plain text
-│   │   │   ├── Static                       .ev-note / .ev-error / .ev-approval
-│   │   │   └── ...
+│   │   ├── WindowTabs(Vertical)     id=chats             # height 2: one tab per browser WINDOW (§1.6)
+│   │   │   ├── Horizontal           id=win-row-master    # row 1: the master windows
+│   │   │   │   └── WindowTab(Static) id=win-m1           # "MASTER · chatgpt-attach"
+│   │   │   └── Horizontal           id=win-row-sub       # row 2: the SELECTED master's sub-agent windows
+│   │   │       └── WindowTab(Static) id=win-m1-s1        # "SUB-AGENT · claude" / "▶ …" / "✓ …"
+│   │   ├── Vertical                 id=chat-panels       # 1fr; one panel per window, exactly one displayed
+│   │   │   ├── TranscriptPanel(VerticalScroll)  id=transcript    # the master window's (pre-tabs id)
+│   │   │   │   ├── Markdown                     .ev-user         # user task / follow-ups
+│   │   │   │   ├── Markdown                     .ev-prose        # LLM prose between blocks
+│   │   │   │   ├── Vertical                     .ev-call         # one per tool call
+│   │   │   │   │   ├── Static                                    # "▶ edit_file src/utils.py · 1 hunk · ✓ ok"
+│   │   │   │   │   └── Collapsible(collapsed=True)                # long payloads only
+│   │   │   │   │       └── Static                                 # Rich Syntax / plain text
+│   │   │   │   ├── Static                       .ev-note / .ev-error / .ev-approval
+│   │   │   │   └── ...
+│   │   │   └── TranscriptPanel      id=tr-m1-s1          # the sub-agent window's: divider + run, divider + run…
 │   │   ├── ActionPanel(Vertical)    id=action            # display:none when idle; max-height:60%
 │   │   │   ├── Static               id=action-title      # "APPROVE · call 2/5 · edit_file src/utils.py"
 │   │   │   ├── Static               id=queue-strip       # "✓ read_file  ▶ edit_file  • run_command  • task_done"

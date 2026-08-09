@@ -94,19 +94,15 @@ class AgentClipApp(App[None]):
         width: 1fr;
         height: 1fr;
     }
-    /* The transcript tabs (one pane per session view). TabbedContent sizes to
-       its content by default, which inside #main-col's vertical flex would
-       collapse the transcript to nothing - so every layer down to the panel is
-       pinned to the available height. */
+    /* The window tab bar is two fixed rows at the top of the chat column; the
+       transcripts underneath take whatever is left. #chat-panels holds one
+       panel per window and shows exactly one of them (MainScreen._show_panel),
+       so its 1fr goes entirely to whichever is displayed. */
     #chats {
-        height: 1fr;
+        height: 2;
     }
-    #chats ContentSwitcher {
+    #chat-panels {
         height: 1fr;
-    }
-    #chats TabPane {
-        height: 1fr;
-        padding: 0;
     }
     TranscriptPanel {
         height: 1fr;

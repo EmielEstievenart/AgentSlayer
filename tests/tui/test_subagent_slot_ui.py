@@ -34,7 +34,7 @@ from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.screens.main import MainScreen
+from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 
 MASTER_BOX = ScreenRegion(10, 400, 300, 40)
 MASTER_NEWCHAT = ScreenRegion(10, 60, 80, 24)
@@ -112,8 +112,9 @@ def _patch_screen(
         tested there): records the attempt and answers where each slot's copy
         of ``kind`` sits. ``copies`` makes the same appearance resolve more than
         once, as a second window of the same service inside the region would."""
-        cal = self._slots[slot] if slot is not None else self.live
-        if cal.chat_region is None or not self._active_profile().has(kind):
+        target = slot if slot is not None else self._live
+        cal = self._slots[target]
+        if cal.chat_region is None or not self._profile_for(target).has(kind):
             return []
         rect = NEWCHAT_AT[cal.slot] if kind is TemplateKind.NEW_CHAT else cal.chat_region
         probed.append(rect)
@@ -137,6 +138,12 @@ async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
     assert app.main_screen is not None
     button = app.main_screen.query_one(button_id, Button)
     await _wait_for(pilot, lambda: button.region.width > 0, "sidebar button laid out")
+    # ...and for its press animation to be over. Textual's Button ignores a
+    # click outright while the "-active" class is still on it, so two presses of
+    # the SAME button close together silently become one - which is exactly the
+    # shape of this suite (draw the master's window, switch tab, draw the
+    # sub-agent's) and reads as a click that vanished.
+    await _wait_for(pilot, lambda: not button.has_class("-active"), f"{button_id} idle again")
     await pilot.click(button_id)
 
 
@@ -147,14 +154,29 @@ async def _calibrate(
     before = len(picker.prompts)
     await _press(app, pilot, button_id)
     await _wait_for(pilot, lambda: len(picker.prompts) > before, f"{button_id} picker ran")
-    await pilot.pause(0.1)
+    # ...and then for the one-overlay-at-a-time guard to be released. The
+    # picker returns from inside the worker, so ``_picker_open`` is still held
+    # for a beat afterwards - and a second press landing in that beat is
+    # REFUSED, not queued, which under load reads as a click that vanished.
+    main = app.main_screen
+    assert main is not None
+    await _wait_for(pilot, lambda: not main._picker_open, "the picker guard released")
+    await pilot.pause()
+
+
+# Which window tab each slot lives on. Selecting the tab is what points the
+# sidebar at a slot now; the mapping is MainScreen's seam for an N-window bar.
+WINDOW_OF = {AgentSlot.MASTER: MASTER_WINDOW, AgentSlot.SUBAGENT: SUBAGENT_WINDOW}
 
 
 async def _select_slot(app: AgentClipApp, pilot: Pilot, slot: AgentSlot) -> None:
+    """Select that window's tab - which is what points the sidebar at a slot now
+    (the tab bar itself is test_tabs_ui's)."""
     main = app.main_screen
     assert main is not None
-    main.sidebar.slot_select.value = str(slot)
+    main._select_window(WINDOW_OF[slot])
     await _wait_for(pilot, lambda: main._calibrating is slot, f"{slot} selected")
+    await pilot.pause()
 
 
 async def _capture(

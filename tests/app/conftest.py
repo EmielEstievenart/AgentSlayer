@@ -347,8 +347,17 @@ async def start_session(
     task: str = "Tidy up src/utils.py.",
     *,
     service: str = "claude",
+    subagent_service: str = "",
 ) -> None:
-    view.specs.append(SessionSpec(task=task, service=service))
+    """Arm a session from a spec, which carries a service PER ROLE.
+
+    ``subagent_service`` blank means the sub-agent window is on the same service
+    as the master's - the shape of every front-end that has one picker, and of
+    every test here that does not care.
+    """
+    view.specs.append(
+        SessionSpec(task=task, service=service, subagent_service=subagent_service)
+    )
     controller.start()
     await wait_for(lambda: view.input_started > 0, "session armed")
     await settle(view)

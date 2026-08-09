@@ -38,6 +38,7 @@ from agentclip.screen.profile import TemplateKind
 from agentclip.screen.profile_store import ProfileStoreError, load_profile
 from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.screens.main import SUBAGENT_WINDOW
 from agentclip.tui.screens.service_editor import (
     ServiceEditorScreen,
     capture_button_id,
@@ -562,7 +563,7 @@ async def test_a_capture_is_shared_by_both_slots_and_survives_new(
         await pilot.press("escape")
         await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
 
-        main.sidebar.slot_select.value = str(AgentSlot.SUBAGENT)
+        main._select_window(SUBAGENT_WINDOW)  # selecting that tab is the slot switch
         await _wait_for(pilot, lambda: main._calibrating is AgentSlot.SUBAGENT, "slot switched")
         await pilot.pause()
         assert main._active_profile().has(TemplateKind.COPY)

@@ -96,6 +96,16 @@ FINISH_SIGNALS: tuple[str, ...] = ("busy", "idle", "stale")
 DEFAULT_FINISH_SIGNALS: tuple[str, ...] = ("stale",)
 
 
+# How an outbound payload gets from the clipboard into the chat box once the
+# focus click has landed. "paste" is one clipboard write and one synthetic
+# Ctrl+V; "stream" walks the payload in through a run of them, so a very large
+# message shows visible progress instead of stalling the page on one huge paste.
+DELIVERY_PASTE = "paste"
+DELIVERY_STREAM = "stream"
+DELIVERY_MODES: tuple[str, ...] = (DELIVERY_PASTE, DELIVERY_STREAM)
+DEFAULT_DELIVERY = DELIVERY_PASTE
+
+
 def normalize_finish_signals(values: Iterable[str]) -> tuple[str, ...]:
     """Drop unknown entries, dedupe, and return them in :data:`FINISH_SIGNALS`
     order, so a hand-written (or future editor-written) checklist can never make
@@ -121,6 +131,10 @@ class ServicePreset:
     # visible, slow takeover of the user's mouse, and only some chats (Claude's)
     # need it at all.
     hover_scan: bool = False
+    # One of DELIVERY_MODES. "paste" everywhere by default: chunked delivery is
+    # slower and leaves a half-written message in the box if it is interrupted,
+    # so it is worth it only where a single large paste visibly stalls the page.
+    delivery: str = DEFAULT_DELIVERY
 
 
 def default_services() -> dict[str, ServicePreset]:
@@ -361,6 +375,21 @@ def _take_finish_signals(
     return signals
 
 
+def _take_delivery(table: dict, default: str, ctx: str, warnings: list[str]) -> str:
+    """Read an outbound delivery mode, falling back to ``default`` for anything
+    that is not one of :data:`DELIVERY_MODES`. Warned about rather than accepted:
+    an unknown mode would otherwise read as "paste" silently, and the whole
+    reason a user writes this key is that one big paste does not work for them."""
+    value = table.get("delivery", default)
+    if not isinstance(value, str) or value not in DELIVERY_MODES:
+        warnings.append(
+            f"config: [{ctx}] delivery must be one of {', '.join(DELIVERY_MODES)}; "
+            f"using {default!r}"
+        )
+        return default
+    return value
+
+
 def load_config(
     project_root: Path,
     *,
@@ -428,6 +457,9 @@ def load_config(
                 warnings,
             ),
             hover_scan=_take_bool(table, "hover_scan", base.hover_scan if base else False, ctx, warnings),
+            delivery=_take_delivery(
+                table, base.delivery if base else DEFAULT_DELIVERY, ctx, warnings
+            ),
         )
         if preset.max_paste_chars > preset.total_context_chars:
             warnings.append(
@@ -560,6 +592,8 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
             services_table[key]["finish_signals"] = list(preset.finish_signals)
         if preset.hover_scan != (base.hover_scan if base else False):
             services_table[key]["hover_scan"] = preset.hover_scan
+        if preset.delivery != (base.delivery if base else DEFAULT_DELIVERY):
+            services_table[key]["delivery"] = preset.delivery
 
     data = dict(data)
     if services_table:

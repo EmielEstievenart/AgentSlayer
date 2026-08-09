@@ -105,6 +105,45 @@ class ChatView(Protocol):
     # -- clipboard / transport ------------------------------------------------
     async def copy_outbound(self, text: str) -> None: ...
     async def read_clipboard(self) -> str | None: ...
+
+    # /new wants the next conversation in a FRESH browser chat, and only the
+    # view knows what a new-chat button is - so the controller states the intent
+    # and the view does the whole thing, right now: find the control, click it,
+    # hand focus back. Never blocking (it returns as soon as the work is
+    # scheduled), and all-or-nothing on the tool side: the view calls
+    # ``request_new_session`` itself when - and only when - the click landed, so
+    # a refused click leaves the old chat AND the session it belongs to alone.
+    # That is the same path the sidebar's "New browser chat" takes, deliberately:
+    # two ways to ask for one thing, one implementation of it.
+    def open_new_chat_now(self) -> None: ...
+
+    # /identify's whole implementation, for the same reason: the controller can
+    # say "show the user what you can see", and nothing more - where the tool is
+    # looking, what it is looking for and how a rectangle gets drawn on a real
+    # screen are all the view's. Never blocking: the overlay it puts up owns the
+    # screen for a few seconds, and the controller must not be parked on it.
+    def show_identify_overlay(self) -> None: ...
+
+    # /log's whole implementation, for the third time and the same reason: the
+    # controller can say "show the user why you did what you did", and the
+    # decisions themselves are all the view's - the paste attempt, the send
+    # gate, the finish detectors and the auto-copy flow live on the far side of
+    # this port, so the log they write does too. Never blocking: it pushes a
+    # modal the user dismisses.
+    def show_harness_log(self) -> None: ...
+
+    # The global ARMED switch (`/armed`, F5). DISARMED means the tool stops
+    # ACTING on the world - no clicks, no synthetic paste, no cursor moves, no
+    # focus stealing, no clipboard watching - while every read-only half
+    # (capture, the finish detectors, the whole sidebar readout) stays live.
+    #
+    # View-owned, unlike `/yolo`: every acting primitive is called from the view
+    # layer and the controller never touches the OS, so there is nothing here for
+    # the engine or a session to hold. Which is also why this takes a target and
+    # returns nothing - the controller does not mirror the flag and cannot get it
+    # out of step. ``None`` means toggle, and it is the bare `/armed` (and F5).
+    def set_os_armed(self, target: bool | None) -> None: ...
+
     def start_input(self) -> None: ...
     def stop_input(self) -> None: ...
 

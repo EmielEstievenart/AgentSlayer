@@ -30,20 +30,31 @@ from textual.widgets import Button, Checkbox, Input, Select, Static
 import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
-from agentclip.config import DEFAULT_FINISH_SIGNALS, FINISH_SIGNALS, load_config
+from agentclip.config import (
+    DEFAULT_DELIVERY,
+    DEFAULT_FINISH_SIGNALS,
+    FINISH_SIGNALS,
+    Config,
+    load_config,
+)
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.profile_store import load_profile, profile_dir, save_template
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.pixels import HALF_BLOCK
 from agentclip.tui.screens.confirm import ConfirmScreen
+from agentclip.tui.screens.main import SUBAGENT_WINDOW
 from agentclip.tui.screens.service_editor import (
     SIGNAL_UNCAPTURED,
+    TEMPLATE_PREVIEW_COLS,
+    TEMPLATE_PREVIEW_ROWS,
     TEMPLATES_NONE,
     ServiceEditorScreen,
     capture_button_id,
     signal_checkbox_id,
+    template_preview_id,
 )
 from agentclip.tui.widgets.sidebar import Sidebar
 
@@ -438,7 +449,7 @@ async def test_the_editor_reports_what_a_service_looks_like(
         editor.query_one("#svc-select", Select).value = "claude"
         await pilot.pause()
         line = str(editor.query_one("#svc-templates", Static).render())
-        assert "2/6 captured" in line
+        assert "2/7 captured" in line
         assert "busy indicator" in line
         assert "copy button" in line
         assert editor.query_one("#svc-forget-templates-btn", Button).display
@@ -450,6 +461,95 @@ async def test_the_editor_reports_what_a_service_looks_like(
         assert not editor.query_one("#svc-forget-templates-btn", Button).display
         # ...and the per-kind lines it captures from say the same thing.
         assert "not captured" in str(editor.query_one("#svc-tpl-copy", Static).render())
+
+
+def _preview(editor: ServiceEditorScreen, kind: TemplateKind) -> str:
+    return str(editor.query_one(f"#{template_preview_id(kind)}", Static).render())
+
+
+async def test_the_editor_shows_the_picture_it_captured_not_only_its_size(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """"40×40 · captured" cannot tell a stop button from the blank page beside
+    it, and a drag that missed reads exactly the same as one that landed. So
+    each kind's first image is drawn next to its status line, in half-blocks,
+    inside the column's 12x2 budget (tui.md 1.7)."""
+    save_template(profile_root, "claude", TemplateKind.COPY, _image())
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+
+        drawn = _preview(editor, TemplateKind.COPY)
+        lines = drawn.splitlines()
+        assert HALF_BLOCK in drawn
+        assert len(lines) == TEMPLATE_PREVIEW_ROWS
+        assert all(len(line) <= TEMPLATE_PREVIEW_COLS for line in lines)
+        # A kind with nothing captured draws nothing - the status line beside
+        # it already says "not captured", and a placeholder picture would be a
+        # picture of something.
+        assert _preview(editor, TemplateKind.BUSY) == ""
+
+
+async def test_the_pictures_follow_the_selected_service(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Same rule as every other readout in the column: they are views of one
+    folder, and switching services re-reads it."""
+    save_template(profile_root, "claude", TemplateKind.COPY, _image())
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        assert HALF_BLOCK in _preview(editor, TemplateKind.COPY)
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        assert _preview(editor, TemplateKind.COPY) == ""
+
+
+async def test_forgetting_an_appearance_clears_its_picture(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The picture is part of the appearance readout, so it goes when the
+    appearance does - a thumbnail of a PNG that is no longer on disk would be
+    the most convincing wrong answer in the column."""
+    save_template(profile_root, "claude", TemplateKind.COPY, _image())
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        assert HALF_BLOCK in _preview(editor, TemplateKind.COPY)
+
+        await pilot.click("#svc-forget-templates-btn")
+        await _wait_for(pilot, lambda: isinstance(app.screen, ConfirmScreen), "confirm shown")
+        await pilot.press("y")
+        await _wait_for(pilot, lambda: app.screen is editor, "back on the editor")
+
+        assert _preview(editor, TemplateKind.COPY) == ""
 
 
 async def test_forgetting_an_appearance_leaves_the_preset_alone(
@@ -497,7 +597,7 @@ async def test_forgetting_an_appearance_reaches_the_main_screen(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         assert main._active_profile().has(TemplateKind.COPY)
-        assert "1/6 captured" in _label(app, "#side-profile-note")
+        assert "1/7 captured" in _label(app, "#side-profile-note")
 
         await _open_editor_via_f2(app, pilot)
         editor = app.screen
@@ -515,7 +615,7 @@ async def test_forgetting_an_appearance_reaches_the_main_screen(
         await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
 
         assert not main._active_profile().has(TemplateKind.COPY)  # the cache was invalidated
-        assert "0/6 captured" in _label(app, "#side-profile-note")
+        assert "0/7 captured" in _label(app, "#side-profile-note")
         assert not global_path.exists()  # no preset edit to persist
 
 
@@ -634,6 +734,64 @@ async def test_the_checklist_and_hover_scan_round_trip_into_the_saved_services(
         raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
         assert raw["services"]["claude"]["finish_signals"] == ["busy"]
         assert raw["services"]["claude"]["hover_scan"] is True
+
+
+async def test_the_delivery_tick_round_trips_into_the_saved_services(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Streaming is per-service policy like the rest of this column: one tick,
+    the working copy, and the same close-and-persist path - and it is written to
+    disk as the mode name rather than a boolean."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        assert not editor.query_one("#svc-stream-delivery", Checkbox).value  # shipped default
+
+        editor.query_one("#svc-stream-delivery", Checkbox).value = True
+        await pilot.pause()
+        assert editor._services["claude"].delivery == "stream"
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["claude"].delivery == "stream"
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["claude"]["delivery"] == "stream"
+
+
+async def test_the_delivery_tick_follows_the_selected_service(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Switching the picker reloads it, and the echo Textual fires while it is
+    being written must not leak the previous service's answer into the new one."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        before_gemini = editor._services["gemini"]
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        editor.query_one("#svc-stream-delivery", Checkbox).value = True
+        await pilot.pause()
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        assert not editor.query_one("#svc-stream-delivery", Checkbox).value
+        assert editor._services["gemini"] == before_gemini
+        assert editor._services["claude"].delivery == "stream"
 
 
 async def test_the_checkboxes_follow_the_selected_service(
@@ -782,6 +940,7 @@ async def test_the_add_new_form_shows_what_it_is_going_to_create(
         created = editor._services["brand-new"]
         assert created.finish_signals == DEFAULT_FINISH_SIGNALS
         assert created.hover_scan is False
+        assert created.delivery == DEFAULT_DELIVERY
         # ...and the form now shows exactly what it created.
         assert {
             signal
@@ -847,3 +1006,72 @@ async def test_f2_is_refused_while_the_chat_region_picker_is_open(
 
         main._picker_open = False
         await _open_editor_via_f2(app, pilot)  # ...and it opens again once it is gone
+
+
+# -- initial selection follows the selected window tab (tui.md section 1.4) --
+
+
+def test_a_present_initial_key_wins_over_every_fallback() -> None:
+    """Unit-level companion to the Pilot test below: pins the resolution chain
+    the constructor runs, without the cost of driving a whole app."""
+    config = Config()  # general.service defaults to "chatgpt-attach"
+    assert "claude" in config.services and config.general.service != "claude"
+
+    editor = ServiceEditorScreen(config, Path("unused"), initial_key="claude")
+    assert editor._selected_key == "claude"
+
+
+def test_a_missing_or_stale_initial_key_falls_back_exactly_as_before() -> None:
+    config = Config()
+
+    editor = ServiceEditorScreen(config, Path("unused"), initial_key=None)
+    assert editor._selected_key == config.general.service
+
+    # Named a service that isn't (or no longer is) in the table.
+    editor = ServiceEditorScreen(config, Path("unused"), initial_key="no-such-service")
+    assert editor._selected_key == config.general.service
+
+
+async def test_editor_opens_preselected_on_the_selected_window_tab_s_service(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Decided behavior: the editor no longer opens on a fixed default - it
+    opens on whichever service the currently SELECTED window tab points at.
+    Master tab selected (the default) -> the master's service; sub tab
+    selected -> the sub-agent's, distinct here via [general] subagent_service."""
+    project = tmp_path / "project"
+    project.mkdir(exist_ok=True)
+    global_path = tmp_path / "config.toml"
+    config = load_config(project, global_config_path=global_path)
+    config = replace(config, general=replace(config.general, subagent_service="claude"))
+    fake = FakeClipboard()
+    app = AgentClipApp(
+        config=config,
+        provider=fake,
+        engine_factory=make_engine_factory(lambda: app.app_config, project),
+        project_root=project,
+        global_config_path=global_path,
+        profile_root=profile_root,
+    )
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        assert main._service_for(AgentSlot.MASTER) == "chatgpt-attach"
+        assert main._service_for(AgentSlot.SUBAGENT) == "claude"
+
+        # Master tab is selected by default.
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        assert editor.query_one("#svc-select", Select).value == "chatgpt-attach"
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        # Select the sub-agent tab, then reopen: preselects ITS service instead.
+        main._select_window(SUBAGENT_WINDOW)
+        await pilot.pause()
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        assert editor.query_one("#svc-select", Select).value == "claude"

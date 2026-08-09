@@ -205,13 +205,12 @@ async def test_the_captures_survive_a_restart(
 
         profile = main._active_profile()
         assert profile.key == _service_key(app)
-        template = profile.get(TemplateKind.CHATBOX_ONGOING)
-        assert template is not None
+        (template,) = profile.variants(TemplateKind.CHATBOX_ONGOING)
         assert (template.width, template.height) == (ONGOING_BOX.width, ONGOING_BOX.height)
         # The other layout is a separate appearance, and no window was drawn.
         assert not profile.has(TemplateKind.CHATBOX_INITIAL)
         assert main._chat_region is None
-        assert "1/6 captured" in _label(app, "#side-profile-note")
+        assert "1/7 captured" in _label(app, "#side-profile-note")
 
 
 async def test_the_two_layouts_are_kept_apart(
@@ -228,11 +227,10 @@ async def test_the_two_layouts_are_kept_apart(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         profile = main._active_profile()
-        initial = profile.get(TemplateKind.CHATBOX_INITIAL)
-        ongoing = profile.get(TemplateKind.CHATBOX_ONGOING)
-        assert initial is not None and ongoing is not None
+        (initial,) = profile.variants(TemplateKind.CHATBOX_INITIAL)
+        (ongoing,) = profile.variants(TemplateKind.CHATBOX_ONGOING)
         assert initial.image != ongoing.image
-        assert "2/6 captured" in _label(app, "#side-profile-note")
+        assert "2/7 captured" in _label(app, "#side-profile-note")
 
 
 async def test_a_second_picker_is_refused_while_an_overlay_is_open(
@@ -349,6 +347,42 @@ async def test_neither_on_screen_falls_back_to_the_chat_window(
         assert clicks == [CHAT_REGION]
 
 
+async def test_a_second_image_of_one_layout_is_ored_in_not_counted_twice(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A kind holds a stack of images of ONE control (an input box with and
+    without its attachment chip), so the search unions them - and two images
+    matching the same pixels must fold into one element, or the ambiguity
+    fallback would read a second picture as a second window."""
+    clicks: list[ScreenRegion] = []
+    _patch_capture(monkeypatch)
+    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    app, _ = _make_app(tmp_path, profile_root)
+    key = _service_key(app)
+    # Two images of the ongoing box: the one the scene shows, and a second the
+    # search will also place on exactly the same spot.
+    save_template(profile_root, key, TemplateKind.CHATBOX_ONGOING, _frame(ONGOING_BOX))
+    save_template(profile_root, key, TemplateKind.CHATBOX_ONGOING, _frame(INITIAL_BOX))
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _draw_chat_region(app, pilot, monkeypatch)
+        assert len(main._active_profile().variants(TemplateKind.CHATBOX_ONGOING)) == 2
+
+        # Only the SECOND image is on screen - the first would have found
+        # nothing, so a search that stopped at it would fall back to the window.
+        _patch_found(monkeypatch, INITIAL_BOX)
+        assert await main._chatbox_region() == INITIAL_BOX
+
+        # ...and with both landing on the same spot it is still one element.
+        def both_here(template: Template, scene: RegionImage, **kw: object) -> list[RegionMatch]:
+            return [_local(ONGOING_BOX)]
+
+        monkeypatch.setattr(main_mod, "find_all_in_region", both_here)
+        assert await main._chatbox_region() == ONGOING_BOX
+
+
 async def test_two_boxes_of_one_layout_fall_back_to_the_drawn_window(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -457,7 +491,10 @@ async def test_nothing_drawn_means_no_click(
 
 
 async def test_new_preserves_the_region_and_the_appearances(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    new_chat_click_lands: None,
 ) -> None:
     """The window has not moved and the service still looks like itself - /new
     must not make the user redraw or recapture anything."""

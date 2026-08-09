@@ -4,8 +4,9 @@ The feature is three rules and they interact, so they are tested through real
 keypresses rather than by poking the widget: the popup opens on a bare `/` and
 narrows as characters arrive, four keys mean something different while it is up
 (arrows, Enter/Tab, Escape), and it must not appear at all while the box's next
-send is taken verbatim - the task that starts a session, and an answer to the
-model's question, where a leading slash is text.
+send is taken verbatim - an answer to the model's question, where a leading
+slash is text. The task prompt is NOT such a mode: Enter dispatches commands
+there too (§1.3), so the popup is offered.
 
 The Enter rule is the one worth stating twice: with the popup up, Enter
 *completes* rather than sends. That is only safe because completing appends a
@@ -360,9 +361,13 @@ async def test_escape_closes_the_popup_first_and_blurs_second(tmp_path: Path) ->
         assert app.focused is not main.composer
 
 
-async def test_no_popup_while_the_task_is_being_typed(tmp_path: Path) -> None:
-    """The first message IS the task, verbatim - a slash there is a word, not a
-    command, so offering to complete it would misrepresent what Enter does."""
+async def test_the_popup_is_offered_at_the_task_prompt_where_slashes_are_commands(
+    tmp_path: Path,
+) -> None:
+    """Enter runs commands at the "Describe the task" prompt (§1.3), so hiding the
+    popup there would hide the completion for a key that dispatches - the exact
+    misrepresentation the suppression rule exists to prevent. The task that must
+    begin with a slash is typed `//...`, and that escape closes the popup itself."""
     app, fake, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 40)) as pilot:
         main = app.main_screen
@@ -371,10 +376,10 @@ async def test_no_popup_while_the_task_is_being_typed(tmp_path: Path) -> None:
         popup = main.command_popup
 
         await pilot.press("slash")
-        assert not popup.is_open
-        assert main.composer.verbatim
+        assert popup.is_open  # nothing armed is exactly where /identify is needed
+        assert not main.composer.verbatim
 
-        main.composer.load_text("/deploy the thing")
+        main.composer.load_text("//deploy the thing")  # the literal-slash escape
         await pilot.pause()
         assert not popup.is_open
 
@@ -382,10 +387,9 @@ async def test_no_popup_while_the_task_is_being_typed(tmp_path: Path) -> None:
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
 
-        # The slash-leading task went to the model verbatim.
+        # One slash stripped: what follows it is the task, sent to the model.
         assert any("you: /deploy the thing" in e for e in main.transcript.entries)
         assert "/deploy the thing" in fake.written[-1]
-        assert not main.composer.verbatim  # ...and the box is a chat box again
 
 
 async def test_no_popup_while_answering_and_the_answer_still_wins(tmp_path: Path) -> None:

@@ -42,16 +42,19 @@ from agentclip.tui.screens.main import SUBAGENT_WINDOW
 from agentclip.tui.screens.service_editor import (
     ServiceEditorScreen,
     capture_button_id,
+    clear_button_id,
     template_status_id,
 )
 
 BOX = ScreenRegion(200, 150, 64, 64)
+OTHER_BOX = ScreenRegion(400, 300, 48, 32)
 SIZE = (120, 45)
 
 # Every capture button, and the appearance it files. The editor ids are the
 # contract these tests key on.
 BUTTONS = {f"#{capture_button_id(kind)}": kind for kind in TemplateKind}
 STATUS_ID = {kind: f"#{template_status_id(kind)}" for kind in TemplateKind}
+CLEAR_ID = {kind: f"#{clear_button_id(kind)}" for kind in TemplateKind}
 
 
 def _frame(region: ScreenRegion) -> RegionImage:
@@ -110,7 +113,30 @@ async def _ready(app: AgentClipApp, pilot: Pilot) -> ServiceEditorScreen:
 async def _press(editor: ServiceEditorScreen, pilot: Pilot, button_id: str) -> None:
     button = editor.query_one(button_id, Button)
     await _wait_for(pilot, lambda: button.region.width > 0, "capture button laid out")
+    # Textual drops a click on a button still showing its press flash, so
+    # pressing the SAME button twice in a row (two images of one appearance)
+    # has to wait the effect out or the second press silently vanishes.
+    await _wait_for(pilot, lambda: not button.has_class("-active"), "the press flash cleared")
     await pilot.click(button_id)
+
+
+async def _capture(
+    editor: ServiceEditorScreen, pilot: Pilot, profile_root: Path, key: str, kind: TemplateKind
+) -> None:
+    """Press ``kind``'s capture button and wait for the whole flow to land.
+
+    Including the overlay guard, not just the write: a second press arriving
+    while ``_capturing`` is still held is refused by design, so a test that
+    stacks two captures has to wait for the release rather than for the PNG.
+    """
+    before = len(load_profile(profile_root, key).variants(kind))
+    await _press(editor, pilot, f"#{capture_button_id(kind)}")
+    await _wait_for(
+        pilot,
+        lambda: len(load_profile(profile_root, key).variants(kind)) > before,
+        f"{kind.label} image {before + 1} captured",
+    )
+    await _wait_for(pilot, lambda: not editor._capturing, "the overlay guard released")
 
 
 def _patch_picker(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -166,8 +192,7 @@ async def test_every_capture_button_files_its_appearance_and_saves_it(
         )
 
         # On disk, under the selected service, ready for the next run...
-        template = load_profile(profile_root, key).get(kind)
-        assert template is not None
+        (template,) = load_profile(profile_root, key).variants(kind)
         assert (template.width, template.height) == (BOX.width, BOX.height)
         # ...and said so in the editor's own readout.
         await _wait_for(
@@ -199,6 +224,10 @@ async def test_each_button_asks_for_its_own_appearance_in_its_own_words(
                 pilot, lambda n=before: len(picker.prompts) > n, f"{button_id} picked"
             )
             assert picker.prompts[-1] == kind.prompt
+            # The prompt is recorded when the pick STARTS, so leaving it there
+            # ends the test with a capture worker still holding the editor -
+            # which then repaints a screen the shutdown has already unmounted.
+            await _wait_for(pilot, lambda: not editor._capturing, "the capture finished")
 
         assert "avoid animated spinners" in TemplateKind.BUSY.prompt
 
@@ -208,7 +237,7 @@ async def test_one_handler_serves_every_capture_button(
 ) -> None:
     """The block is generated per TemplateKind and the kind is parsed back out
     of the pressed button's id, so a seventh appearance is an enum member and
-    nothing else. Pressing all six in a row is the proof."""
+    nothing else. Pressing all seven in a row is the proof."""
     _patch_picker(monkeypatch)
     app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
@@ -227,7 +256,7 @@ async def test_one_handler_serves_every_capture_button(
         assert load_profile(profile_root, key).captured == tuple(TemplateKind)
         await _wait_for(
             pilot,
-            lambda: "6/6 captured" in _label(editor, "#svc-templates"),
+            lambda: "7/7 captured" in _label(editor, "#svc-templates"),
             "the summary line repainted",
         )
         # ...and the whole set can now be forgotten again.
@@ -267,7 +296,146 @@ async def test_captures_persist_across_a_restart(
         assert profile.has(TemplateKind.COPY)
         assert not profile.has(TemplateKind.IDLE)
         # ...and the sidebar says so without anyone pressing anything.
-        assert "2/6 captured" in _label(main, "#side-profile-note")
+        assert "2/7 captured" in _label(main, "#side-profile-note")
+
+
+# -- a kind is a stack, and Clear is what empties it -----------------------------
+
+
+async def test_capturing_twice_keeps_both_images(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole point of the stack: a service that greys its send button out
+    mid-upload draws a second picture of the same control, and the second
+    capture must ADD it rather than move the blind spot."""
+    boxes = iter((BOX, OTHER_BOX))
+    monkeypatch.setattr(editor_mod, "pick_region", lambda prompt=None: next(boxes))
+    monkeypatch.setattr(editor_mod, "capture_region", _frame)
+    # No toasts: they are docked over the top-right of the screen, which is
+    # where this column's buttons are - a capture's own notification lands on
+    # top of the button the next press aims at.
+    _notes(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        editor = await _ready(app, pilot)
+        key = editor._selected_key
+        assert key is not None
+
+        await _capture(editor, pilot, profile_root, key, TemplateKind.SEND_READY)
+        assert "64×64 · captured" in _label(editor, STATUS_ID[TemplateKind.SEND_READY])
+
+        await _capture(editor, pilot, profile_root, key, TemplateKind.SEND_READY)
+        assert [
+            (t.width, t.height)
+            for t in load_profile(profile_root, key).variants(TemplateKind.SEND_READY)
+        ] == [(64, 64), (48, 32)]
+        # The readout counts them, so a user cannot believe the second replaced
+        # the first - and it is still ONE calibrated kind.
+        await _wait_for(
+            pilot,
+            lambda: "2 images" in _label(editor, STATUS_ID[TemplateKind.SEND_READY]),
+            "the readout counted them",
+        )
+        assert "1/7 captured" in _label(editor, "#svc-templates")
+
+
+async def test_clear_wipes_one_kinds_whole_stack_and_nothing_else(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No confirm, unlike "Forget appearance": one kind is one capture button
+    away from being back, and the other kinds are untouched."""
+    _patch_picker(monkeypatch)
+    _notes(monkeypatch)  # toasts dock over this very column (see above)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        editor = await _ready(app, pilot)
+        key = editor._selected_key
+        assert key is not None
+        for _ in range(2):
+            await _capture(editor, pilot, profile_root, key, TemplateKind.COPY)
+        await _capture(editor, pilot, profile_root, key, TemplateKind.BUSY)
+        assert "2 images" in _label(editor, STATUS_ID[TemplateKind.COPY])
+
+        await pilot.click(CLEAR_ID[TemplateKind.COPY])
+        await _wait_for(
+            pilot,
+            lambda: not load_profile(profile_root, key).has(TemplateKind.COPY),
+            "the copy stack cleared",
+        )
+        assert app.screen is editor  # no confirmation dialog stood in the way
+        profile = load_profile(profile_root, key)
+        assert profile.captured == (TemplateKind.BUSY,)  # only its own kind went
+        assert "not captured" in _label(editor, STATUS_ID[TemplateKind.COPY])
+        assert "64×64 · captured" in _label(editor, STATUS_ID[TemplateKind.BUSY])
+        assert "1/7 captured" in _label(editor, "#svc-templates")
+        assert editor._profiles_changed
+
+
+async def test_clear_is_disabled_until_there_is_something_to_clear(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It is the only readout of whether pressing it would do anything - there
+    is no dialog on the way to find that out from."""
+    _patch_picker(monkeypatch)
+    _notes(monkeypatch)  # toasts dock over this very column (see above)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        editor = await _ready(app, pilot)
+        key = editor._selected_key
+        assert key is not None
+        assert all(
+            editor.query_one(CLEAR_ID[kind], Button).disabled for kind in TemplateKind
+        )
+
+        await _press(editor, pilot, f"#{capture_button_id(TemplateKind.IDLE)}")
+        await _wait_for(
+            pilot,
+            lambda: not editor.query_one(CLEAR_ID[TemplateKind.IDLE], Button).disabled,
+            "the idle Clear came alive",
+        )
+        assert editor.query_one(CLEAR_ID[TemplateKind.BUSY], Button).disabled
+
+        await pilot.click(CLEAR_ID[TemplateKind.IDLE])
+        await _wait_for(
+            pilot,
+            lambda: editor.query_one(CLEAR_ID[TemplateKind.IDLE], Button).disabled,
+            "...and went inert again",
+        )
+        assert not load_profile(profile_root, key).captured
+
+
+async def test_a_cleared_appearance_reaches_the_main_screen(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same contract as a capture: the store is the working copy, so the close
+    has to tell the main screen its cached profile is stale."""
+    _patch_picker(monkeypatch)
+    _notes(monkeypatch)  # toasts dock over this very column (see above)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        editor = await _open_editor(app, pilot)
+        await _press(editor, pilot, f"#{capture_button_id(TemplateKind.COPY)}")
+        await _wait_for(pilot, lambda: editor._profiles_changed, "copy captured")
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+        assert "1/7 captured" in _label(main, "#side-profile-note")
+
+        editor = await _open_editor(app, pilot)
+        await pilot.click(CLEAR_ID[TemplateKind.COPY])
+        await _wait_for(
+            pilot,
+            lambda: "not captured" in _label(editor, STATUS_ID[TemplateKind.COPY]),
+            "the copy stack cleared",
+        )
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert not main._active_profile().has(TemplateKind.COPY)
+        assert "0/7 captured" in _label(main, "#side-profile-note")
 
 
 # -- everything that can go wrong ------------------------------------------------
@@ -489,7 +657,7 @@ async def test_closing_the_editor_propagates_the_capture_to_the_main_screen(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         assert not main._active_profile().captured
-        assert "0/6 captured" in _label(main, "#side-profile-note")
+        assert "0/7 captured" in _label(main, "#side-profile-note")
 
         editor = await _open_editor(app, pilot)
         await _press(editor, pilot, f"#{capture_button_id(TemplateKind.COPY)}")
@@ -499,7 +667,7 @@ async def test_closing_the_editor_propagates_the_capture_to_the_main_screen(
         await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
 
         assert main._active_profile().has(TemplateKind.COPY)  # the cache was dropped
-        assert "1/6 captured" in _label(main, "#side-profile-note")
+        assert "1/7 captured" in _label(main, "#side-profile-note")
 
 
 async def test_a_busy_capture_restarts_the_detector_poller(
@@ -567,12 +735,12 @@ async def test_a_capture_is_shared_by_both_slots_and_survives_new(
         await _wait_for(pilot, lambda: main._calibrating is AgentSlot.SUBAGENT, "slot switched")
         await pilot.pause()
         assert main._active_profile().has(TemplateKind.COPY)
-        assert "1/6 captured" in _label(main, "#side-profile-note")
+        assert "1/7 captured" in _label(main, "#side-profile-note")
 
         await main.clear_transcript()  # the /new teardown hook
         await pilot.pause()
         assert main._active_profile().has(TemplateKind.COPY)
-        assert "1/6 captured" in _label(main, "#side-profile-note")
+        assert "1/7 captured" in _label(main, "#side-profile-note")
 
 
 async def test_the_capture_lands_under_the_service_the_editor_has_selected(
@@ -607,4 +775,4 @@ async def test_the_capture_lands_under_the_service_the_editor_has_selected(
         await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
         # The chat's own service is untouched, and the summary still says so.
         assert not main._active_profile().captured
-        assert "0/6 captured" in _label(main, "#side-profile-note")
+        assert "0/7 captured" in _label(main, "#side-profile-note")

@@ -52,10 +52,18 @@ OS_TESTS_ENABLED = os.environ.get("AGENTCLIP_OS_TESTS") == "1"
 PICK_REGION_BLOCKED = (
     "pick_region reached the real overlay - mock it at the use site (main_mod.pick_region)"
 )
+IDENTIFY_OVERLAY_BLOCKED = (
+    "draw_identify_overlay reached the real overlay - mock it at the use site "
+    "(main_mod.draw_identify_overlay)"
+)
 
 
 def _blocked_pick_region(*args: Any, **kwargs: Any) -> None:
     raise AssertionError(PICK_REGION_BLOCKED)
+
+
+def _blocked_identify_overlay(*args: Any, **kwargs: Any) -> None:
+    raise AssertionError(IDENTIFY_OVERLAY_BLOCKED)
 
 
 @pytest.fixture(autouse=True)
@@ -84,16 +92,35 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
 
     ``pick_region`` gets a loud stub rather than a no-op, because its failure
     mode is a fullscreen tkinter overlay in a child process - better an
-    AssertionError naming the mock the test forgot.
+    AssertionError naming the mock the test forgot. ``draw_identify_overlay``
+    (`/identify`'s read-only twin) is blocked the same way: it too spawns a child
+    process that covers the user's whole desktop, and it has no timer of its own,
+    so a test that forgets it would hang behind a picture of somebody's browser
+    until a human dismissed it.
     """
     if OS_TESTS_ENABLED or request.node.get_closest_marker("real_os"):
         return
 
-    # The overlay guard is platform-independent (the picker shells out).
+    # The overlay guards are platform-independent (the picker shells out).
     monkeypatch.setattr("agentclip.screen.picker.pick_region", _blocked_pick_region)
-    # ...and again at main.py's bound name, which is the seam every caller uses.
+    monkeypatch.setattr(
+        "agentclip.screen.picker.draw_identify_overlay", _blocked_identify_overlay
+    )
+    # ...and the drawing itself, which the identify CHILD calls in-process: a
+    # test that exercises the `--show-identify` entry point (cli.main, or the
+    # child function directly) would otherwise open a real Tk window right here,
+    # with no child process in between to keep it away from the test runner.
+    monkeypatch.setattr(
+        "agentclip.screen.overlay.run_identify_overlay", _blocked_identify_overlay
+    )
+    # ...and again at main.py's bound names, which are the seam every caller uses.
     monkeypatch.setattr(
         "agentclip.tui.screens.main.pick_region", _blocked_pick_region, raising=False
+    )
+    monkeypatch.setattr(
+        "agentclip.tui.screens.main.draw_identify_overlay",
+        _blocked_identify_overlay,
+        raising=False,
     )
 
     if sys.platform != "win32":

@@ -118,7 +118,7 @@ def _copy_label(app: AgentClipApp) -> str:
 
 
 def _profile_note(app: AgentClipApp) -> str:
-    """The sidebar's read-only "appearance: n/6 captured" summary."""
+    """The sidebar's read-only "appearance: n/7 captured" summary."""
     assert app.main_screen is not None
     return str(app.main_screen.query_one("#side-profile-note", Static).render())
 
@@ -136,8 +136,16 @@ async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
 
 
 async def _post_probe(main: MainScreen, pilot: Pilot, state: BusyState, diff: float | None) -> None:
-    """Inject one busy-poller verdict - the documented path (tui/messages.py)."""
-    main.post_message(BusyProbed(BusyProbe(state, diff), main._detector_generation))
+    """Inject one busy-poller verdict - the documented path (tui/messages.py).
+
+    A MATCH here is a frame that genuinely found the busy appearance
+    (``BusyProbe.generating_now``), which is what arms the trigger; the settling
+    default that shares the state carries no evidence and is
+    test_finish_signal_ui.py's subject.
+    """
+    main.post_message(
+        BusyProbed(BusyProbe(state, diff, state is BusyState.MATCH), main._detector_generation)
+    )
     await pilot.pause()
 
 
@@ -163,11 +171,18 @@ async def _ready(app: AgentClipApp, pilot: Pilot) -> MainScreen:
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
     assert main._active_profile().has(TemplateKind.COPY)
     main._active_detectors = ("busy",)
+    main._open_reply_gate()  # see _armed
     return main
 
 
 async def _armed(app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatch) -> MainScreen:
-    """Everything the flow needs: the drawn chat window and the captured icon."""
+    """Everything the flow needs: the drawn chat window and the captured icon.
+
+    Plus the session gate open. Calibration alone never fires the flow - a
+    payload has to be sitting in the chat waiting for a reply first - and
+    ``_open_reply_gate`` is the state ``copy_outbound`` leaves behind
+    (test_finish_signal_ui owns the gate's own rules).
+    """
     _freeze_detector(monkeypatch)
     main = app.main_screen
     assert main is not None
@@ -177,6 +192,7 @@ async def _armed(app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatc
     await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
     assert main._active_profile().has(TemplateKind.COPY)
     main._active_detectors = ("busy",)
+    main._open_reply_gate()
     return main
 
 
@@ -214,7 +230,10 @@ async def test_match_then_two_changed_fires_once_and_rearms(
         await pilot.pause(0.1)
         assert len(calls) == 1
 
-        # A fresh MATCH re-arms it; two more CHANGED fire again.
+        # A fresh MATCH re-arms it; two more CHANGED fire again. The firing
+        # above harvested the reply and shut the session gate with it, so the
+        # next turn's outbound copy has to re-open it first.
+        main._open_reply_gate()
         await _post_probe(main, pilot, BusyState.MATCH, 0.01)
         await _post_probe(main, pilot, BusyState.CHANGED, 0.3)
         await _post_probe(main, pilot, BusyState.CHANGED, 0.31)
@@ -329,7 +348,7 @@ async def test_flow_searches_the_chat_region_and_clicks_the_lowest_match(
     monkeypatch.setattr(
         main_mod, "scroll_region", lambda region, n: scrolls.append((region, n)) or True
     )
-    monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda t, s, **kw: MATCH)
+    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
     async with app.run_test(size=SIZE) as pilot:
@@ -354,6 +373,51 @@ async def test_flow_searches_the_chat_region_and_clicks_the_lowest_match(
         assert clicks[-1] == CLICK_TARGET
 
 
+async def test_the_lowest_match_across_every_captured_image_wins(
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A kind holds a stack, so "lowest is newest" is asked across the whole
+    stack - and the rectangle clicked is the size of the image that matched,
+    not of whichever one happens to be first."""
+    clicks: list[ScreenRegion] = []
+    app, fake = _make_app(tmp_path, profile_root)
+    key = _service_key(app)
+    seed_templates(key, TemplateKind.COPY, size=(24, 24))
+    seed_templates(key, TemplateKind.COPY, size=(30, 18))
+    higher = RegionMatch(x=10, y=100, diff=0.05)
+    lower = RegionMatch(x=40, y=400, diff=0.07)
+
+    def fake_click(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
+        clicks.append(region)
+        fake.write_text(f"copied {len(clicks)}")
+        return True
+
+    monkeypatch.setattr(main_mod, "capture_region", _frame)
+    monkeypatch.setattr(main_mod, "click_region", fake_click)
+    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
+    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(
+        main_mod,
+        "find_lowest_with_best_miss",
+        lambda template, scene, **kw: (higher if template.width == 24 else lower, None),
+    )
+
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _armed(app, pilot, monkeypatch)
+        await _fire(main, pilot)
+        await _wait_for(
+            pilot, lambda: "clicked (diff 0.07)" in _copy_label(app), "copy button clicked"
+        )
+        assert clicks[-1] == ScreenRegion(
+            CHAT_REGION.left + lower.x, CHAT_REGION.top + lower.y, 30, 18
+        )
+        # ...and the readout says how many pictures of it are being searched for.
+        assert "24×24 +1 · " in _copy_label(app)
+
+
 async def test_no_chat_region_means_the_flow_does_nothing(
     tmp_path: Path,
     profile_root: Path,
@@ -367,7 +431,7 @@ async def test_no_chat_region_means_the_flow_does_nothing(
     scrolls: list[ScreenRegion] = []
     monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: scrolls.append(region) or True)
-    monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda t, s, **kw: MATCH)
+    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
 
     app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
@@ -390,7 +454,9 @@ async def test_not_found_notifies_and_does_not_click(
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda t, s, **kw: None)
+    monkeypatch.setattr(
+        main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21)
+    )
     monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: False)  # no hover scan either
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
@@ -448,7 +514,7 @@ async def test_flow_snaps_focus_back_to_the_tool(
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "click_region", fake_click)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda t, s, **kw: MATCH)
+    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
     focus_calls: list[int] = []
 
     def fake_focus(handle: int) -> bool:
@@ -492,7 +558,7 @@ async def test_verified_click_retries_at_an_offset_on_no_change(
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "click_region", fake_click)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda t, s, **kw: MATCH)
+    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
 
     async with app.run_test(size=SIZE) as pilot:
@@ -532,7 +598,7 @@ async def test_verified_click_exhausts_retries_and_leaves_focus(
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "click_region", fake_click)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda t, s, **kw: MATCH)
+    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
     monkeypatch.setattr(main_mod, "focus_window", lambda handle: focus_calls.append(handle) or True)
 
     async with app.run_test(size=SIZE) as pilot:
@@ -565,6 +631,7 @@ async def test_new_keeps_the_capture_but_disarms_the_trigger(
     profile_root: Path,
     seed_templates: Callable[..., None],
     monkeypatch: pytest.MonkeyPatch,
+    new_chat_click_lands: None,
 ) -> None:
     """The copy button's appearance describes the service, so it survives /new
     (and the app itself) - but the arm/streak belong to the dead session's
@@ -585,6 +652,7 @@ async def test_new_keeps_the_capture_but_disarms_the_trigger(
         assert main._active_profile().has(TemplateKind.COPY)
         assert main._copy_armed is False
         assert main._copy_changed_streak == 0
+        assert main._awaiting_pasted_reply is False  # nor is any reply still due
         # The sidebar's summary is where a surviving capture shows now: the
         # copy line is a live click verdict, not a capture readout.
-        assert "1/6 captured" in _profile_note(app)
+        assert "1/7 captured" in _profile_note(app)

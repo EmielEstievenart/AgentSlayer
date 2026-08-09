@@ -18,36 +18,102 @@ poller thread. A tick is *closed* by the LAST entry in ``_active_detectors``
 several posts, in that order - and ``_detectors`` is how each test says which
 subset the poller would have been built with.
 
+All of that sits UNDER a session gate: none of it may arm or fire unless an
+outbound is actually waiting for a reply (``copy_outbound`` opens it, the
+harvest shuts it), so every test that drives the trigger opens the gate first -
+``_arm_with_template`` does it the way production does.
+
 Covered: busy only, idle only (inverted), both (reinforced - one detector
 alone can never fire it), stale only and stale vetoing the others, the
-send-arming rule that keeps a caret blink from arming the trigger, plus the
+send-arming rule that keeps a caret blink from arming the trigger, the
 flow suspension that stops the auto-copy flow's own scrolling from re-firing
-the trigger.
+the trigger, plus the session gate itself - a fully calibrated but idle tab
+arming nothing, the outbound copy opening it, and firing / /new shutting it.
+
+The last section covers the READY-TO-SEND gate that rides on top of that one
+(``SendReadyProbed``, same injectable shape): a service with that appearance
+captured holds finish detection back from the paste until the send button is
+seen and then seen to go, which is the user's Enter. Without the capture there
+is no gate and nothing above it changed - which is what the rest of this file,
+all of it written against such a service, keeps proving. The gate may delay a
+session and may never deadlock one, so the same section pins all three of its
+bounded exits: the button going (the Enter), a busy/idle detector reporting
+that the model is GENERATING - which overrides the gate on the spot, because
+nothing answers a message that was never sent - and, for each phase, a clock.
 """
 
 from __future__ import annotations
 
+import random
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from textual.pilot import Pilot
+from textual.widgets import Button, Static
 
 import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
+from agentclip.screen.capture import RegionImage
+from agentclip.screen.presence import PresenceTracker
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.screen.stale import StaleProbe, StaleState
+from agentclip.screen.template import Template
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed, IdleProbed, StaleProbed
+from agentclip.tui.loop_state import LoopState
+from agentclip.tui.messages import BusyProbed, IdleProbed, SendReadyProbed, StaleProbed
 from agentclip.tui.screens.main import MainScreen
+from agentclip.tui.widgets.sidebar import (
+    SEND_READY_ARMED,
+    SEND_READY_OVERRIDDEN,
+    SEND_READY_RELEASED,
+    SEND_READY_RESTING,
+    SEND_READY_SEEN,
+    SEND_READY_STUCK,
+    SEND_READY_TIMEOUT,
+    template_status_id,
+)
 
 SIZE = (110, 100)
+# Somewhere for the picker to hand back, for the tests that need a tab whose
+# calibration is finished (see ``_calibrated_but_idle``).
+CHAT_REGION = ScreenRegion(0, 0, 400, 300)
+# What the one test that runs the REAL poll thread captures: flat pixels, so no
+# appearance is ever found in it.
+BLANK_FRAME = RegionImage(200, 200, b"\x00" * (200 * 200 * 4))
+
+
+def _noise(width: int, height: int, seed: int) -> RegionImage:
+    rng = random.Random(seed)
+    pixels = bytearray()
+    for _ in range(width * height):
+        pixels += bytes((rng.randrange(256), rng.randrange(256), rng.randrange(256), 0))
+    return RegionImage(width, height, bytes(pixels))
+
+
+def _with_icon(scene: RegionImage, patch: RegionImage, x: int, y: int) -> RegionImage:
+    pixels = bytearray(scene.pixels)
+    row = patch.width * 4
+    for ty in range(patch.height):
+        start = ((y + ty) * scene.width + x) * 4
+        pixels[start : start + row] = patch.pixels[ty * row : (ty + 1) * row]
+    return RegionImage(scene.width, scene.height, bytes(pixels))
+
+
+# Two frames of a chat region for the one test that drives a REAL PresenceTracker
+# rather than posting hand-made verdicts: the same picture with and without a
+# reasoning icon in it.
+ICON = _noise(20, 16, seed=2)
+ICON_TEMPLATE = Template.build(ICON)
+NO_ICON_FRAME = _noise(140, 90, seed=1)
+ICON_FRAME = _with_icon(NO_ICON_FRAME, ICON, 60, 40)
 
 
 async def _wait_for(
@@ -96,6 +162,12 @@ async def _arm_with_template(
     a profile on disk plus a dropped cache - which is what ``seed_templates``
     and ``update_config`` reproduce here, without an editor visit these tests
     are not about.
+
+    It also opens the SESSION gate, because none of the rules below exist until
+    a reply is outstanding: an outbound has to have gone into the chat before a
+    verdict may arm or fire anything (``_open_reply_gate``, the state
+    ``copy_outbound`` leaves behind - and the one test that goes through the
+    real thing is ``test_the_gate_opens_on_the_outbound_copy`` below).
     """
     main = app.main_screen
     assert main is not None
@@ -106,6 +178,7 @@ async def _arm_with_template(
     await _wait_for(
         pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button appearance known"
     )
+    main._open_reply_gate()
     _detectors(main, "busy")  # the default for these tests; each overrides it
     return main
 
@@ -122,13 +195,33 @@ def _detectors(main: MainScreen, *names: str) -> None:
     main._active_detectors = names
 
 
-async def _busy(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
-    main.post_message(BusyProbed(BusyProbe(state, 0.2), main._detector_generation))
+async def _busy(
+    main: MainScreen, pilot: Pilot, state: BusyState, *, evidence: bool | None = None
+) -> None:
+    """One busy-appearance probe, as ``PresenceTracker.observe`` would post it.
+
+    A probe carries two things, and conflating them was a shipped bug (see
+    ``test_the_pastes_tracker_reset_arms_nothing_on_its_own``): ``state`` is the
+    DE-BOUNCED verdict, while ``generating_now`` is whether that frame's own
+    template search actually found the icon. They agree on every frame the
+    tracker is settled, which is why ``evidence`` defaults to the honest reading
+    of ``state`` - MATCH is the busy appearance being on screen - and the tests
+    that care about the disagreement pass it explicitly.
+    """
+    if evidence is None:
+        evidence = state is BusyState.MATCH
+    main.post_message(BusyProbed(BusyProbe(state, 0.2, evidence), main._detector_generation))
     await pilot.pause()
 
 
-async def _idle(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
-    main.post_message(IdleProbed(BusyProbe(state, 0.2), main._detector_generation))
+async def _idle(
+    main: MainScreen, pilot: Pilot, state: BusyState, *, evidence: bool | None = None
+) -> None:
+    """The same, inverted: for an idle appearance CHANGED is "generating", and
+    the evidence behind it is the appearance having been watched to GO."""
+    if evidence is None:
+        evidence = state is BusyState.CHANGED
+    main.post_message(IdleProbed(BusyProbe(state, 0.2, evidence), main._detector_generation))
     await pilot.pause()
 
 
@@ -497,6 +590,9 @@ async def test_the_flow_wrapper_lifts_the_suspension_so_it_can_refire(
         await _wait_for(pilot, lambda: len(calls) == 1, "flow fired once")
         await _wait_for(pilot, lambda: not main._flow_running, "suspension lifted")
 
+        # Firing harvested the reply, so the gate shut with it: the next turn's
+        # outbound copy is what re-opens it (``_open_reply_gate``).
+        main._open_reply_gate()
         await _stale_send(main, pilot)  # next generation
         await _stale(main, pilot, StaleState.STALE, ticks=4)
         await _stale(main, pilot, StaleState.STALE, ticks=5)
@@ -659,6 +755,11 @@ async def test_a_late_probe_from_the_previous_live_window_arms_nothing(
         main.end_browser_chat()  # /abort: the master gets the automation back
         assert main._live is AgentSlot.MASTER
         assert main._detector_generation != sub_generation
+        # The retarget shuts the session gate too; re-open it so the generation
+        # stamp is the only thing standing between the ghost and the trigger -
+        # which is what this test is about. In the real flow the master's next
+        # outbound copy does exactly this a moment later.
+        main._open_reply_gate()
 
         # ...and now the sub window's last tick lands: a sustained large delta,
         # which on the live window would arm the trigger outright.
@@ -696,3 +797,734 @@ async def test_nothing_fires_without_a_captured_copy_button(
         await _busy(main, pilot, BusyState.CHANGED)
         await pilot.pause(0.1)
         assert calls == []
+
+
+# -- the session gate: is a reply outstanding at all? ------------------------------
+
+
+async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
+    assert app.main_screen is not None
+    button = app.main_screen.query_one(button_id, Button)
+    await _wait_for(pilot, lambda: button.region.width > 0, "sidebar button laid out")
+    await pilot.click(button_id)
+
+
+async def _calibrated_but_idle(
+    app: AgentClipApp,
+    pilot: Pilot,
+    seed: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    send_ready: bool = False,
+) -> MainScreen:
+    """Exactly what a finished calibration leaves behind, and nothing more.
+
+    The copy-button appearance, the chat window drawn through the real picker
+    button, a poller composed around it - and no session, no outbound, no reply
+    due. The poll THREAD is stubbed out (only the spawn: the composition is
+    part of what is being set up) so its own verdicts cannot race the ones each
+    test injects.
+
+    ``send_ready`` adds the ready-to-send appearance, which is the ONLY switch
+    the send gate has (§3.4b): a capture is a capability, so a service that has
+    one gets the gate and a service that has not behaves exactly as it always
+    did.
+    """
+    monkeypatch.setattr(MainScreen, "_spawn_detector_worker", lambda self, loop: None)
+    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: CHAT_REGION)
+    main = app.main_screen
+    assert main is not None
+    await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+    kinds = (TemplateKind.COPY, TemplateKind.SEND_READY) if send_ready else (TemplateKind.COPY,)
+    seed(main._selected_service(), *kinds, size=(24, 24))
+    main._profiles.clear()
+    main.update_config(main._config)
+    await _wait_for(
+        pilot, lambda: main._active_profile().has(TemplateKind.COPY), "copy button appearance known"
+    )
+    await _press(app, pilot, "#set-region-btn")
+    await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
+    return main
+
+
+async def test_setting_the_chat_region_arms_nothing_and_fires_nothing(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE bug the gate closes: drawing the box was enough to start clicking.
+
+    With the appearances captured and the window drawn, the poller starts - and
+    it used to be free to act on whatever it saw. A resting chat gives it plenty:
+    an un-debounced busy/idle "generating" needs one frame, and the picker
+    overlay closing is a sustained large delta all by itself. Two quiet ticks
+    later the auto-copy flow scrolled and clicked its way through a conversation
+    nobody had sent anything to. Setting a region is configuration; it is not a
+    turn.
+    """
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch)
+        assert main._awaiting_pasted_reply is False
+
+        # The icon path: one "generating" frame used to be the whole arming.
+        _detectors(main, "busy")
+        await _busy(main, pilot, BusyState.MATCH)
+        assert main._copy_armed is False
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _busy(main, pilot, BusyState.CHANGED)
+
+        # ...and the staleness path: the overlay coming down, then the settled
+        # screen it left behind.
+        _detectors(main, "stale")
+        await _stale_send(main, pilot)
+        assert main._copy_armed is False
+        for ticks in (4, 5, 6):
+            await _stale(main, pilot, StaleState.STALE, ticks=ticks)
+
+        await pilot.pause(0.1)
+        assert calls == []
+        assert main._copy_armed is False
+
+
+async def test_the_outbound_copy_opens_the_gate_and_the_trigger_works_again(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other half: once AgentClip has actually put a payload in the chat,
+    the arm-then-fire machinery is exactly what it always was. ``copy_outbound``
+    is the real opener - the same call the controller makes for a bootstrap, a
+    results payload, an answer or a re-copy."""
+    calls = _patch_flow(monkeypatch)
+    app, fake = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch)
+
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert fake.read_text() == "the payload"
+        assert main._awaiting_pasted_reply is True
+
+        _detectors(main, "busy")
+        await _busy(main, pilot, BusyState.MATCH)
+        assert main._copy_armed is True
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _wait_for(pilot, lambda: len(calls) == 1, "flow fired for a real outbound")
+
+
+async def test_firing_shuts_the_gate_until_the_next_outbound(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Firing IS the harvest, so the reply stops being outstanding with it - and
+    a second response cannot come out of nowhere: it takes a second outbound."""
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+
+        _detectors(main, "busy")
+        await _busy(main, pilot, BusyState.MATCH)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _wait_for(pilot, lambda: len(calls) == 1, "flow fired once")
+        await _wait_for(pilot, lambda: not main._flow_running, "suspension lifted")
+        assert main._awaiting_pasted_reply is False
+
+        # The same sequence again, with nothing pasted in between: nothing.
+        await _busy(main, pilot, BusyState.MATCH)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await pilot.pause(0.1)
+        assert calls == [None]
+        assert main._copy_armed is False
+
+        # The next turn's outbound copy is what makes it possible again.
+        await main.copy_outbound("the next payload")
+        await pilot.pause()
+        await _busy(main, pilot, BusyState.MATCH)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _wait_for(pilot, lambda: len(calls) == 2, "flow fired for the second outbound")
+
+
+async def test_new_shuts_the_gate(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """/new tears the session down while the drawn window and the appearances
+    survive it (they describe where the chat is, not what it said) - so the tab
+    is calibrated and idle again, which is precisely the state that may not
+    click anything."""
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert main._awaiting_pasted_reply is True
+
+        await main.clear_transcript()  # the /new teardown hook
+        await pilot.pause()
+        assert main._awaiting_pasted_reply is False
+        assert main._chat_region == CHAT_REGION  # the calibration outlives it
+
+        _detectors(main, "busy")
+        await _busy(main, pilot, BusyState.MATCH)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await pilot.pause(0.1)
+        assert calls == []
+        assert main._copy_armed is False
+
+
+async def test_the_gate_survives_a_modal_that_only_suspends_the_detectors(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A turn interrupted by an F2 visit is still a turn awaiting its reply.
+
+    ``suspend_detectors`` forgets what the detectors SAW, which is the right
+    answer for an overlay drawn over the browser - but the outbound is still
+    sitting in the chat, so the gate is not trigger state and does not go with
+    it."""
+    _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+
+        main.suspend_detectors()
+        main.resume_detectors()
+        assert main._awaiting_pasted_reply is True
+
+        _detectors(main, "busy")
+        await _busy(main, pilot, BusyState.MATCH)
+        assert main._copy_armed is True
+
+
+# -- the ready-to-send gate: has the user actually pressed Enter yet? --------------
+
+
+def _record_notifications(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    seen: list[str] = []
+
+    def fake_notify(self: MainScreen, message: str, *args: Any, **kwargs: Any) -> None:
+        seen.append(message)
+
+    monkeypatch.setattr(MainScreen, "notify", fake_notify)
+    return seen
+
+
+async def _send_ready(main: MainScreen, pilot: Pilot, found: bool | None) -> None:
+    """One look for the ready-to-send button (None = the tick's capture failed)."""
+    main.post_message(SendReadyProbed(found, main._detector_generation))
+    await pilot.pause()
+
+
+def _send_line(app: AgentClipApp) -> str:
+    assert app.main_screen is not None
+    widget_id = f"#{template_status_id(TemplateKind.SEND_READY)}"
+    return str(app.main_screen.query_one(widget_id, Static).render())
+
+
+def _banner_up(main: MainScreen) -> bool:
+    return bool(main.query_one("#side-paste-flash", Static).display)
+
+
+async def _finishes(main: MainScreen, pilot: Pilot) -> None:
+    """The busy sequence that arms and then fires: generating, then two quiet ticks."""
+    await _busy(main, pilot, BusyState.MATCH)
+    await _busy(main, pilot, BusyState.CHANGED)
+    await _busy(main, pilot, BusyState.CHANGED)
+
+
+async def _stale_finishes(main: MainScreen, pilot: Pilot) -> None:
+    """The same round trip, seen by the STALE detector alone: the send landing
+    in the transcript as a sustained large delta, then two still ticks.
+
+    The gate tests below want the sequence that arms and fires WITHOUT any icon
+    evidence in it, because a busy/idle "generating" verdict now overrides the
+    gate outright - deliberately, since nothing generates a reply to a message
+    that was never sent. Staleness is the evidence the gate exists to distrust,
+    so staleness is what has to stay vetoed while it holds.
+    """
+    await _stale_send(main, pilot)
+    await _stale(main, pilot, StaleState.STALE)
+    await _stale(main, pilot, StaleState.STALE)
+
+
+async def test_without_a_send_capture_the_paste_gates_nothing_and_still_needs_an_icon(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capture is a capability: no ready-to-send appearance, no gate at all.
+
+    That is the whole of the compatibility promise - and it is a promise about
+    the GATE, not a licence to arm on nothing. What the paste hands finish
+    detection is a clean slate (every tracker reset), so the ticks that follow
+    it are settling ticks: "generating" verdicts with no icon behind them. They
+    may not arm. The first frame that genuinely sees the reasoning appearance
+    may, immediately, and from there the sequence is what it always was.
+    """
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch)
+        assert not main._live_profile().has(TemplateKind.SEND_READY)
+
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert main._send_gate is None
+        assert SEND_READY_RESTING in _send_line(app)
+
+        _detectors(main, "busy")
+        await _busy(main, pilot, BusyState.MATCH, evidence=False)
+        assert main._copy_armed is False  # a settling tick is not a sighting
+        assert main._loop_state is not LoopState.WAIT_GENERATE
+
+        await _busy(main, pilot, BusyState.MATCH)  # the icon, actually on screen
+        assert main._copy_armed is True
+        assert main._loop_state is LoopState.WAIT_GENERATE
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _wait_for(pilot, lambda: len(calls) == 1, "flow fired with no gate in the way")
+
+
+async def test_the_pastes_tracker_reset_arms_nothing_on_its_own(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """THE bug: every message reached MANUAL_COPY a couple of seconds after the
+    paste, "like it fails to detect the reasoning and continues too fast".
+
+    ``_open_reply_gate`` resets every tracker at the paste, and a freshly reset
+    ``PresenceTracker`` reports the de-bounced "generating" default for its
+    first ``required_ticks - 1`` frames - the right bias for a finish decision,
+    and evidence of precisely nothing. Reading that as "the reasoning icon is on
+    screen" armed the auto-copy on tick one; the same un-evidenced ticks then
+    completed their streak, read "finished" twice over, and fired the flow at a
+    chat with no response in it - which found no copy button and reported
+    MANUAL_COPY. Nothing on this screen changed the whole time.
+    """
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        _detectors(main, "busy")
+
+        # The settling window: the verdict says "generating", no frame saw it.
+        for _ in range(3):
+            await _busy(main, pilot, BusyState.MATCH, evidence=False)
+        assert main._copy_armed is False
+
+        # ...and now the debounce completes on that same unchanged screen.
+        for _ in range(3):
+            await _busy(main, pilot, BusyState.CHANGED)
+        await pilot.pause(0.1)
+        assert calls == []
+        assert main._loop_state is not LoopState.MANUAL_COPY  # the user's symptom
+        assert _banner_up(main)  # still waiting for the Enter it asked for
+
+
+async def test_a_real_tracker_across_the_paste_holds_the_gate_until_the_icon_shows(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same bug with nothing hand-made in the loop.
+
+    Every other test here posts pre-fabricated verdicts, and that is exactly how
+    the regression shipped: the helpers could not express "the verdict says
+    generating and no frame saw anything", because only ``PresenceTracker``
+    produces that state - and only across the reset ``_open_reply_gate``
+    performs at the paste. So this one feeds real frames of a real chat region
+    to a real tracker and posts what it actually says.
+
+    The screen is IDENTICAL throughout the hold: the same pixels, no icon in
+    them, exactly what a browser shows while a pasted payload waits for its
+    Enter. Nothing may arm, and the send gate must still be holding at the end
+    of it. Then the model starts and the icon appears - one frame, and the gate
+    is overridden and the trigger armed, which is the deadlock fix intact.
+    """
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        tracker = PresenceTracker((ICON_TEMPLATE,), found_is_busy=True)
+        main._busy_tracker = tracker
+
+        async def tick(scene: RegionImage) -> None:
+            """One poller tick: one capture, through the tracker, onto the screen."""
+            main.post_message(BusyProbed(tracker.observe(scene), main._detector_generation))
+            await pilot.pause()
+
+        # The chat before the paste: settled, no icon, tracker long since sure.
+        _detectors(main, "busy")
+        for _ in range(6):
+            await tick(NO_ICON_FRAME)
+        assert main._busy_finished is True
+
+        # The paste. This is the boundary: the gate opens and the tracker is
+        # reset in the same call, so the next few verdicts are the settling
+        # default all over again.
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert main._send_gate is main_mod.SendGate.HOLD
+
+        for _ in range(8):  # well past the tracker's required_ticks
+            await tick(NO_ICON_FRAME)
+        await pilot.pause(0.1)
+        assert main._copy_armed is False
+        assert main._send_gate is main_mod.SendGate.HOLD  # no Enter, no evidence
+        assert calls == []
+        assert _banner_up(main)
+
+        # The user presses Enter and the model starts: the icon is on screen.
+        await tick(ICON_FRAME)
+        assert main._send_gate is None
+        assert SEND_READY_OVERRIDDEN in _send_line(app)
+        assert main._copy_armed is True
+        assert main._loop_state is LoopState.WAIT_GENERATE
+        assert not _banner_up(main)
+
+        # ...and the answer finishing harvests it, icon gone for the whole streak.
+        for _ in range(6):
+            await tick(NO_ICON_FRAME)
+        await _wait_for(pilot, lambda: len(calls) == 1, "the harvest fired on real frames")
+
+
+async def test_the_gate_holds_finish_detection_until_the_button_comes_and_goes(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The feature, end to end.
+
+    While the send button is on screen the payload is sitting in the composer
+    UNSENT - so the stillness of that screen is about a message nobody has
+    asked anything with, and the sequence that would normally arm and fire the
+    auto-copy must do neither. The button vanishing IS the user's Enter, and
+    from that instant everything behaves as it did before the gate existed.
+
+    On the stale detector throughout, because that is the evidence the gate
+    exists to distrust: a busy/idle icon saying the model is *generating* is
+    evidence of a send rather than of a still screen, and now overrides the
+    gate rather than being vetoed by it (see the override test below).
+    """
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert main._send_gate is main_mod.SendGate.HOLD
+        assert _banner_up(main)
+
+        # The full arm-then-fire sequence, twice over, vetoed throughout.
+        _detectors(main, "stale")
+        await _stale_finishes(main, pilot)
+        await _stale_finishes(main, pilot)
+        await pilot.pause(0.1)
+        assert calls == []
+        assert main._copy_armed is False
+        assert main._stale_arm_streak == 0  # the large-delta run does not advance either
+        assert _banner_up(main)  # the user has not sent anything yet
+
+        # Seen: still holding, and the banner still nags.
+        await _send_ready(main, pilot, True)
+        assert main._send_gate is main_mod.SendGate.SEEN
+        assert SEND_READY_SEEN in _send_line(app)
+        await _stale_finishes(main, pilot)
+        await pilot.pause(0.1)
+        assert calls == []
+        assert _banner_up(main)
+
+        # Gone: that was the Enter keystroke.
+        await _send_ready(main, pilot, False)
+        assert main._send_gate is None
+        assert SEND_READY_RELEASED in _send_line(app)
+        assert not _banner_up(main)
+        assert main._copy_armed is False  # detection starts from the send, not the paste
+
+        await _stale_finishes(main, pilot)
+        await _wait_for(pilot, lambda: len(calls) == 1, "flow fired once the send was seen")
+
+
+async def test_a_button_that_never_shows_times_the_gate_out_and_says_so(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Delaying a session is allowed; deadlocking one is not.
+
+    A capture that stopped matching (a theme switch, a redesign) must cost a
+    few seconds and a toast, not the turn."""
+    calls = _patch_flow(monkeypatch)
+    notes = _record_notifications(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+
+        for _ in range(main_mod.SEND_GATE_TIMEOUT_TICKS - 1):
+            await _send_ready(main, pilot, False)
+        assert main._send_gate is main_mod.SendGate.HOLD  # still waiting
+        assert not any("never appeared" in note for note in notes)
+
+        await _send_ready(main, pilot, False)
+        assert main._send_gate is None
+        assert SEND_READY_TIMEOUT in _send_line(app)
+        assert any("never appeared" in note for note in notes)
+        # ...and the fallback is today's behaviour, banner included.
+        assert _banner_up(main)
+
+        _detectors(main, "busy")
+        await _finishes(main, pilot)
+        await _wait_for(pilot, lambda: len(calls) == 1, "finish detection took over")
+
+
+async def test_a_blind_poller_runs_the_gates_clock_down_too(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The other way the gate could hang for ever: captures that keep failing.
+
+    A None probe says nothing about the button, so it may not release the gate -
+    but it must still count, or a browser that cannot be captured at all would
+    hold the reply back until ``/new``."""
+    _patch_flow(monkeypatch)
+    _record_notifications(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+
+        for _ in range(main_mod.SEND_GATE_TIMEOUT_TICKS):
+            await _send_ready(main, pilot, None)
+        assert main._send_gate is None
+
+
+async def test_a_generating_icon_overrides_a_gate_whose_button_will_not_go(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadlock the gate used to be able to reach, and the way out of it.
+
+    Its ordinary release is one non-debounced template match going away, and a
+    fresh chat's FIRST message is exactly where that does not happen: the
+    composer is centred and animating rather than docked where the capture was
+    taken, so the button gets seen once and then never yields a clean
+    not-found frame. The user pressed Enter regardless, the model generated,
+    and nothing was left that could ever let go - ``>>> PRESS ENTER <<<``
+    flashed for ever and the reply was never harvested.
+
+    A reasoning icon on screen answers the gate's own question - has the user
+    pressed Enter? - better than the button ever could, because nothing
+    generates a reply to a message that was never sent. So it releases on the
+    spot, on that same tick, keeping the verdict that did it.
+    """
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        _detectors(main, "busy")
+
+        await _send_ready(main, pilot, True)
+        assert main._send_gate is main_mod.SendGate.SEEN
+        assert _banner_up(main)
+
+        # The button is stuck on screen; the model starts generating anyway.
+        await _send_ready(main, pilot, True)
+        await _busy(main, pilot, BusyState.MATCH)
+        assert main._send_gate is None
+        assert SEND_READY_OVERRIDDEN in _send_line(app)
+        assert main._copy_armed is True  # the very tick that released it also arms
+        assert main._loop_state is LoopState.WAIT_GENERATE
+        assert not _banner_up(main)  # the nag is over: the send is proven
+
+        # ...and the turn then finishes like any other.
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _busy(main, pilot, BusyState.CHANGED)
+        await _wait_for(pilot, lambda: len(calls) == 1, "the harvest fired after the override")
+
+
+async def test_a_stale_verdict_alone_never_overrides_the_gate(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The override is icon evidence only, and that limit is the gate's point.
+
+    A caret blinking in a composer full of unsent text is a CHANGING probe, and
+    a sustained one at that while the paste itself lands; letting that claim
+    "the model is generating" would hand the gate straight back to the noise it
+    was built to ignore."""
+    _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        _detectors(main, "stale")
+
+        await _send_ready(main, pilot, True)
+        await _stale_send(main, pilot)
+        await pilot.pause(0.1)
+        assert main._send_gate is main_mod.SendGate.SEEN
+        assert SEND_READY_SEEN in _send_line(app)
+
+
+async def test_a_button_that_never_goes_away_times_the_gate_out_too(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The gate may delay a session; it may never deadlock one - and that has to
+    hold for the phase AFTER the sighting as well as the one before it.
+
+    The override above rescues every session whose model can be *seen* to
+    generate; this is the backstop for the rest - a service running no icon
+    detector at all, whose only evidence is a button that goes on matching long
+    after the message it belonged to was sent. The budget is deliberately a
+    generous one (minutes, not the five seconds a never-appearing button costs)
+    because what the SEEN phase is waiting for is a human reading what is about
+    to go out, and it may not expire on one who paused to think.
+
+    The clock also RESTARTS at the sighting, so a slow-appearing button does not
+    eat the user's reading time.
+    """
+    calls = _patch_flow(monkeypatch)
+    notes = _record_notifications(monkeypatch)
+    monkeypatch.setattr(main_mod, "SEND_GATE_SEEN_TIMEOUT_TICKS", 6)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        _detectors(main, "stale")
+
+        # A sighting that only just beats the HOLD clock; the SEEN phase still
+        # gets its whole budget afterwards.
+        for _ in range(main_mod.SEND_GATE_TIMEOUT_TICKS - 1):
+            await _send_ready(main, pilot, False)
+        await _send_ready(main, pilot, True)
+        assert main._send_gate is main_mod.SendGate.SEEN
+
+        for _ in range(5):
+            await _send_ready(main, pilot, True)
+        assert main._send_gate is main_mod.SendGate.SEEN  # the user may take their time
+        assert not any("never went away" in note for note in notes)
+
+        await _send_ready(main, pilot, True)
+        assert main._send_gate is None
+        assert SEND_READY_STUCK in _send_line(app)
+        assert any("never went away" in note for note in notes)
+        # ...and the fallback is today's behaviour, banner included: nothing is
+        # reset and nothing is hidden, because no send was ever proven.
+        assert _banner_up(main)
+
+        await _stale_finishes(main, pilot)
+        await _wait_for(pilot, lambda: len(calls) == 1, "finish detection took over")
+
+
+def test_the_seen_phase_waits_far_longer_than_the_sighting_does() -> None:
+    """The two budgets are not interchangeable and must not drift together.
+
+    Five seconds is the right cost for a capture that never matches; it is the
+    wrong one for a human deciding whether to send what AgentClip just wrote, so
+    the phase that waits on a person is an order of magnitude more patient."""
+    assert main_mod.SEND_GATE_SEEN_TIMEOUT_TICKS > main_mod.SEND_GATE_TIMEOUT_TICKS * 10
+
+
+async def test_new_during_the_hold_clears_the_send_gate(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The send gate is a phase OF the reply gate - "out but not sent yet" - so
+    every way an outstanding reply stops being one takes it along."""
+    _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert main._send_gate is main_mod.SendGate.HOLD
+
+        await main.clear_transcript()  # the /new teardown hook
+        await pilot.pause()
+        assert main._send_gate is None
+        assert main._awaiting_pasted_reply is False
+        assert SEND_READY_ARMED in _send_line(app)  # captured, waiting for the next paste
+
+
+async def test_the_send_gate_survives_a_modal_that_only_suspends_the_detectors(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same reasoning as the reply gate it rides on: an F2 visit forgets what
+    the detectors SAW, and un-pastes nothing. The payload is still sitting
+    unsent in the chat box afterwards, so the hold has to still be on."""
+    _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        await _send_ready(main, pilot, True)
+
+        main.suspend_detectors()
+        main.resume_detectors()
+        await pilot.pause()
+        assert main._send_gate is main_mod.SendGate.SEEN
+        assert SEND_READY_SEEN in _send_line(app)
+
+
+async def test_the_poller_thread_really_looks_for_the_button(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every test above injects probes; this one lets the real loop produce them.
+
+    The wiring it proves is that the send probe rides the tick's ONE shared
+    capture and is posted from the same thread as the three finish detectors -
+    with a blank frame the button is never found, so ten real ticks are exactly
+    the timeout path.
+    """
+    _patch_flow(monkeypatch)
+    _record_notifications(monkeypatch)
+    monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: CHAT_REGION)
+    monkeypatch.setattr(main_mod, "capture_region", lambda region: BLANK_FRAME)
+    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.01)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        seed_templates(
+            main._selected_service(),
+            TemplateKind.COPY,
+            TemplateKind.SEND_READY,
+            size=(24, 24),
+        )
+        main._profiles.clear()
+        main.update_config(main._config)
+        await _wait_for(
+            pilot,
+            lambda: main._active_profile().has(TemplateKind.SEND_READY),
+            "send button appearance known",
+        )
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
+
+        main._open_reply_gate()
+        assert main._send_gate is main_mod.SendGate.HOLD
+        await _wait_for(pilot, lambda: main._send_gate is None, "the gate timed out on real probes")
+
+
+async def test_a_probe_from_a_dead_poller_run_cannot_release_the_gate(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A verdict is a reading of one window. Cancelling a poll thread only
+    raises a flag, so an in-flight look at the window AgentClip has stopped
+    driving lands after the retarget - and "the send button is gone" over there
+    says nothing about the payload sitting in the chat over here."""
+    _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        await _send_ready(main, pilot, True)
+
+        main.post_message(SendReadyProbed(False, main._detector_generation - 1))
+        await pilot.pause()
+        assert main._send_gate is main_mod.SendGate.SEEN

@@ -264,20 +264,20 @@ async def test_switching_tabs_repaints_the_window_but_not_a_shared_appearance(
 
         await _calibrate(app, pilot, picker, "#set-region-btn", MASTER_REGION)
         assert MASTER_REGION.describe() in _label(app, "#side-region")
-        assert "2/6 captured" in _label(app, "#side-profile-note")
+        assert "2/7 captured" in _label(app, "#side-profile-note")
 
         # The sub-agent window has no rectangle drawn, so the per-window row
         # reads as unset - but both tabs are on the same service, whose captures
         # stay put.
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         assert "not set" in _label(app, "#side-region")
-        assert "2/6 captured" in _label(app, "#side-profile-note")
+        assert "2/7 captured" in _label(app, "#side-profile-note")
         assert main._active_profile().has(TemplateKind.COPY)
 
         # ...and switching back restores the master's window, from stored state.
         await _select_slot(app, pilot, AgentSlot.MASTER)
         assert MASTER_REGION.describe() in _label(app, "#side-region")
-        assert "2/6 captured" in _label(app, "#side-profile-note")
+        assert "2/7 captured" in _label(app, "#side-profile-note")
         assert main._active_profile().has(TemplateKind.NEW_CHAT)
         assert _label(app, "#side-slot-note") == SLOT_NOTE_MASTER
 
@@ -338,7 +338,7 @@ async def test_a_second_service_has_its_own_appearances_and_readiness(
         # Point the sub-agent window at a service with nothing captured: the
         # buttons the run would click are that service's, and it has none.
         await _pick_service(app, pilot, other)
-        assert "0/6 captured" in _label(app, "#side-profile-note")
+        assert "0/7 captured" in _label(app, "#side-profile-note")
         note = _label(app, "#side-slot-note")
         assert MISSING_COPY in note and MISSING_NEWCHAT in note
         assert not main.delegation_available()
@@ -354,7 +354,7 @@ async def test_a_second_service_has_its_own_appearances_and_readiness(
         assert main.delegation_available()
         # The master tab's own appearance summary is unchanged by any of it.
         await _select_slot(app, pilot, AgentSlot.MASTER)
-        assert "2/6 captured" in _label(app, "#side-profile-note")
+        assert "2/7 captured" in _label(app, "#side-profile-note")
 
 
 async def test_the_note_reports_what_delegation_is_still_missing(
@@ -485,6 +485,7 @@ async def test_new_keeps_both_windows_and_sends_the_pointers_home(
     profile_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     seed_templates: Callable[..., None],
+    new_chat_click_lands: None,
 ) -> None:
     """/new is a session teardown, not a recalibration: the service's windows
     have not moved, so both calibrations (and both services) survive and only

@@ -406,7 +406,9 @@ async def test_has_transcript_events_sees_a_sub_agent_only_run(tmp_path: Path) -
         assert main.has_transcript_events()
 
 
-async def test_new_clears_both_transcripts_and_keeps_both_tabs(tmp_path: Path) -> None:
+async def test_new_clears_both_transcripts_and_keeps_both_tabs(
+    tmp_path: Path, new_chat_click_lands: None
+) -> None:
     """/new is the session teardown. The windows are not session state - the
     browser is still open and still drawn - so only their transcripts go."""
     app, _ = _make_app(tmp_path)

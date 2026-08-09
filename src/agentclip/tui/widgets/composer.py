@@ -22,8 +22,8 @@ of holding a reference, which keeps ``MainScreen`` free to lay both out where it
 likes and keeps this widget usable (popup-less) without one.
 
 ``verbatim`` is the suppression switch MainScreen sets: while the next send is
-consumed literally - the task that starts a session, or an answer to the model's
-``ask_user`` - a leading slash is TEXT, not a command, so no popup may appear.
+consumed literally - an answer to the model's ``ask_user`` - a leading slash is
+TEXT, not a command, so no popup may appear.
 
 The MainScreen owns every bit of routing; this widget only emits ``Submitted``.
 """
@@ -57,7 +57,7 @@ class ChatComposer(TextArea):
 
     @property
     def verbatim(self) -> bool:
-        """True while the next send is taken literally (task entry / an answer)."""
+        """True while the next send is taken literally (an ``ask_user`` answer)."""
         return self._verbatim
 
     @verbatim.setter

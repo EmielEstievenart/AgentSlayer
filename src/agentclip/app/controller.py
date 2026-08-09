@@ -132,8 +132,10 @@ def _fmt_k(chars: int) -> str:
 
 
 def _parse_onoff(arg: str, *, current: bool) -> bool | None:
-    """Parse a /yolo argument: empty toggles, on/off variants set explicitly,
-    anything else is unrecognized (None)."""
+    """Parse an on/off command argument (`/yolo`, `/armed`): empty toggles
+    against ``current``, on/off variants set explicitly, anything else is
+    unrecognized (None). ``current`` is consulted for the empty case ONLY, so a
+    caller that handles the bare form itself may pass anything."""
     if not arg:
         return not current
     low = arg.strip().lower()
@@ -388,13 +390,17 @@ class SessionController:
         Every :data:`~agentclip.app.commands.COMMANDS` entry must appear here and
         nothing else may (a test pins the two sets together), so a command added
         to the registry cannot ship as a dead menu row. The uniform ``(arg)``
-        signature is what lets dispatch stay a dict lookup; only `/yolo` reads it.
+        signature is what lets dispatch stay a dict lookup; only the two on/off
+        commands - `/yolo` and `/armed` - read it.
         """
         return {
             "yolo": self._cmd_yolo,
             "new": lambda _arg: self._cmd_new(),
             "abort": lambda _arg: self._cmd_abort(),
             "help": lambda _arg: self._cmd_help(),
+            "identify": lambda _arg: self._cmd_identify(),
+            "log": lambda _arg: self._cmd_log(),
+            "armed": self._cmd_armed,
         }
 
     def _handle_command(self, raw: str) -> None:
@@ -455,7 +461,7 @@ class SessionController:
         if target:
             await self._view.add_note(
                 "YOLO mode ON - every tool call (edits AND commands) auto-approves, "
-                "bypassing the allowlist and deny tokens. /yolo off to disarm."
+                "bypassing the allowlist and deny tokens. /yolo off restores the gates."
             )
             self._view.alert("YOLO mode ON - approvals are off", severity="warning")
             self._view.notify("YOLO mode ON - every tool call auto-approves", severity="warning")
@@ -467,17 +473,51 @@ class SessionController:
             self._view.notify("YOLO mode OFF - approvals restored", severity="information")
 
     def _cmd_new(self) -> None:
-        """Clear the chat and start a fresh session (re-prompts for a task)."""
+        """Open a fresh BROWSER chat now, and start a fresh session behind it.
+
+        /new is the one command that asks the view to touch the browser (tui.md
+        section 3.3a): the user wants a new conversation, and the one on screen
+        is the old one's. The whole flow is the view's - it clicks the new-chat
+        control immediately and, on a landed click, calls ``request_new_session``
+        back into this controller, which is the *same* path the sidebar's "New
+        browser chat" button takes. So the reset is not started here: a click
+        that never landed must leave the session on the chat it is still having.
+
+        Only here. The launch, the budget-exceeded retry and the summary
+        screen's *new session* reach ``_reset_session`` too, and none of them
+        means "the chat in the browser is stale" (the first has none, the last
+        has just been read by the user).
+        """
+        if not self._new_session_allowed():
+            return  # refused before the browser is touched, exactly like the button
+        self._view.open_new_chat_now()
+
+    def request_new_session(self) -> bool:
+        """Start a fresh session once a fresh browser chat is already open.
+
+        The tool-side half of /new, public because the browser side runs in the
+        view: both the sidebar's "New browser chat" on the master tab and /new
+        itself land here *after* the click (tui.md sections 1.3 and 3.3a), to
+        reset the conversation to match the chat that just replaced it. Returns
+        whether the reset started, and toasts the refusal when it did not.
+        """
+        if not self._new_session_allowed():
+            return False
+        self._spawn_flow(self._reset_session())
+        return True
+
+    def _new_session_allowed(self) -> bool:
+        """The two refusals a session reset can give, toasted where they happen."""
         if not self._session_active:
             self._view.notify("no active session to replace", severity="warning")
-            return
+            return False
         if self._busy:
             self._view.notify(
                 "can't start a new session mid-turn - answer or finish the current step first",
                 severity="warning",
             )
-            return
-        self._spawn_flow(self._reset_session())
+            return False
+        return True
 
     def _cmd_abort(self) -> None:
         """End the sub-agent run in flight (protocol.md's delegate failure path).
@@ -522,6 +562,69 @@ class SessionController:
 
     def _cmd_help(self) -> None:
         self._view.spawn(self._view.add_note(help_text()))
+
+    def _cmd_identify(self) -> None:
+        """Show the user what the tool believes it can see in the chat window.
+
+        The only command with NO session gate, deliberately: it is a calibration
+        aid, and the moments it is most needed - a paste that landed in the wrong
+        box, a copy that never fired - are exactly the moments the session is
+        wedged or over. Nothing here can affect a run either; it captures one
+        frame and draws on top of it.
+
+        Which is also why the controller has no more to say about it than
+        "please do": what a chat region is, which window is live and what a copy
+        button looks like all live in the screen layer, on the far side of the
+        ChatView port.
+        """
+        self._view.show_identify_overlay()
+
+    def _cmd_log(self) -> None:
+        """Show the harness decision log - every loop move, with its reason.
+
+        `/identify` answers "what can you see?"; this answers "why did you do
+        that?", and the two share a rationale for having NO session gate: the
+        moment a user wants either one is the moment the automation has stopped
+        making sense to them, which is routinely after a run has wedged or
+        ended. A log you can only read from a healthy session is a log you
+        cannot read when it matters.
+
+        And, like `/identify`, the controller has nothing to add: every decision
+        in it was taken on the view's side of the port - the paste attempt, the
+        send gate, the finish detectors, the auto-copy flow - so it says "show
+        it" and stops.
+        """
+        self._view.show_harness_log()
+
+    def _cmd_armed(self, arg: str) -> None:
+        """Arm or disarm the whole OS-acting half of the tool (bare = toggle).
+
+        NO session gate, for `/identify`'s reason and more sharply: the moments
+        a user reaches for this are the moments something is going wrong on
+        their screen - a paste landing in the wrong window, a click flow that
+        will not stop - and a switch that could only be reached from a healthy
+        session would be missing exactly when it is wanted. Nothing here can
+        affect a run either; the flag decides what the VIEW may do to the
+        browser, and every read-only half keeps running.
+
+        No engine involvement either, which is what makes it different from
+        `/yolo`: YOLO is a policy of one session (it is audited into that
+        session's log and dies with it), while this is a property of the
+        machine in front of the user and outlives every session on it. So the
+        controller neither stores it nor mirrors it - it forwards the intent to
+        the one layer that owns the mouse and has nothing else to say.
+        """
+        if not arg:
+            self._view.set_os_armed(None)  # bare /armed toggles, exactly like F5
+            return
+        # ``current`` is never read for a non-empty argument (see _parse_onoff),
+        # and the bare-toggle case has already returned: the flag lives in the
+        # view, so there is no current state here to toggle against.
+        target = _parse_onoff(arg, current=False)
+        if target is None:
+            self._view.notify("usage: /armed [on|off] - bare /armed toggles", severity="warning")
+            return
+        self._view.set_os_armed(target)
 
     def submit_decision(self, decision: Decision, note: str | None) -> None:
         """Resolve the approval gate (from a key action or panel button)."""

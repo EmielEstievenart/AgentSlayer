@@ -45,6 +45,16 @@ def rewrite_version(directory: Path, version: object) -> None:
     manifest.write_text(json.dumps(raw), encoding="utf-8")
 
 
+def downgrade_to_v1(directory: Path) -> None:
+    """Rewrite a freshly saved profile the way the pre-variants build wrote it:
+    format 1, one entry per kind rather than a list."""
+    manifest = directory / MANIFEST_NAME
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    raw["version"] = 1
+    raw["templates"] = {name: entries[0] for name, entries in raw["templates"].items()}
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+
+
 def patch(width: int = 20, height: int = 16, shade: int = 0) -> RegionImage:
     pixels = bytearray()
     for y in range(height):
@@ -62,8 +72,7 @@ def bgr(image: RegionImage) -> bytes:
 def test_a_saved_appearance_reloads_pixel_for_pixel(tmp_path: Path) -> None:
     image = patch()
     save_template(tmp_path, "chatgpt", TemplateKind.BUSY, image)
-    template = load_profile(tmp_path, "chatgpt").get(TemplateKind.BUSY)
-    assert template is not None
+    (template,) = load_profile(tmp_path, "chatgpt").variants(TemplateKind.BUSY)
     assert (template.width, template.height) == (20, 16)
     assert bgr(template.image) == bgr(image)
 
@@ -75,6 +84,153 @@ def test_several_appearances_round_trip_together(tmp_path: Path) -> None:
     profile = load_profile(tmp_path, "chatgpt")
     assert profile.key == "chatgpt"
     assert profile.captured == (TemplateKind.BUSY, TemplateKind.COPY, TemplateKind.NEW_CHAT)
+
+
+def test_the_ready_to_send_button_round_trips_like_any_other_appearance(
+    tmp_path: Path,
+) -> None:
+    """The newest kind needed no manifest change: a kind is a file name.
+
+    ``FORMAT_VERSION`` is about the SHAPE of the manifest, not its contents -
+    the templates table is keyed by kind value, so an added appearance is one
+    more entry an older build simply skips (``load_profile`` drops names it does
+    not recognise) rather than a format nobody can read.
+    """
+    save_template(tmp_path, "chatgpt", TemplateKind.SEND_READY, patch(28, 28, shade=4))
+    raw = json.loads((tmp_path / "chatgpt" / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert raw["version"] == FORMAT_VERSION
+    assert raw["templates"]["send-ready"][0]["file"] == "send-ready.png"
+    (template,) = load_profile(tmp_path, "chatgpt").variants(TemplateKind.SEND_READY)
+    assert (template.width, template.height) == (28, 28)
+
+
+# -- a kind is a stack of images ------------------------------------------------
+
+
+def test_a_second_save_adds_a_numbered_file_rather_than_overwriting(tmp_path: Path) -> None:
+    """The motivating case: the greyed-out send button is a second picture of
+    the same control, and losing the first would just move the blind spot."""
+    save_template(tmp_path, "chatgpt", TemplateKind.SEND_READY, patch(shade=1))
+    save_template(tmp_path, "chatgpt", TemplateKind.SEND_READY, patch(24, 24, shade=2))
+    save_template(tmp_path, "chatgpt", TemplateKind.SEND_READY, patch(28, 28, shade=3))
+    directory = tmp_path / "chatgpt"
+    raw = json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert [entry["file"] for entry in raw["templates"]["send-ready"]] == [
+        "send-ready.png",
+        "send-ready-2.png",
+        "send-ready-3.png",
+    ]
+    assert sorted(p.name for p in directory.glob("*.png")) == [
+        "send-ready-2.png",
+        "send-ready-3.png",
+        "send-ready.png",
+    ]
+    # Capture order round-trips, and it is still one calibrated kind.
+    profile = load_profile(tmp_path, "chatgpt")
+    assert [
+        (t.width, t.height) for t in profile.variants(TemplateKind.SEND_READY)
+    ] == [(20, 16), (24, 24), (28, 28)]
+    assert profile.describe() == "1/7 captured"
+
+
+def test_one_corrupt_image_costs_only_itself_not_the_stack(tmp_path: Path) -> None:
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch(shade=1))
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch(24, 24, shade=2))
+    (tmp_path / "chatgpt" / "copy.png").write_bytes(b"not a png at all")
+    profile = load_profile(tmp_path, "chatgpt")
+    assert [(t.width, t.height) for t in profile.variants(TemplateKind.COPY)] == [(24, 24)]
+    assert profile.captured == (TemplateKind.COPY,)
+
+
+def test_drop_template_removes_every_image_of_its_kind(tmp_path: Path) -> None:
+    """What the editor's per-kind "Clear" asks for: half a stack still matches,
+    which is indistinguishable from the clear having done nothing."""
+    for shade in (1, 2, 3):
+        save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch(shade=shade))
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch(shade=4))
+    drop_template(tmp_path, "chatgpt", TemplateKind.BUSY)
+    directory = tmp_path / "chatgpt"
+    raw = json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert set(raw["templates"]) == {"copy"}
+    assert sorted(p.name for p in directory.glob("*.png")) == ["copy.png"]
+    assert load_profile(tmp_path, "chatgpt").captured == (TemplateKind.COPY,)
+
+
+def test_the_numbering_starts_over_after_a_clear(tmp_path: Path) -> None:
+    """It is read off the manifest, so a cleared kind has no names taken."""
+    for shade in (1, 2):
+        save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch(shade=shade))
+    drop_template(tmp_path, "chatgpt", TemplateKind.BUSY)
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch(shade=3))
+    raw = json.loads((tmp_path / "chatgpt" / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert [entry["file"] for entry in raw["templates"]["busy"]] == ["busy.png"]
+
+
+# -- reading what an older build wrote ------------------------------------------
+
+
+def test_a_format_1_manifest_loads_as_one_image_stacks(tmp_path: Path) -> None:
+    """A profile captured before variants keeps working untouched: one entry
+    per kind IS a stack of one."""
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch(shade=1))
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch(24, 24, shade=2))
+    downgrade_to_v1(tmp_path / "chatgpt")
+    profile = load_profile(tmp_path, "chatgpt")
+    assert profile.captured == (TemplateKind.BUSY, TemplateKind.COPY)
+    (busy,) = profile.variants(TemplateKind.BUSY)
+    assert (busy.width, busy.height) == (20, 16)
+    assert known_keys(tmp_path) == ("chatgpt",)
+
+
+def test_saving_into_a_format_1_profile_migrates_it_and_keeps_what_was_there(
+    tmp_path: Path,
+) -> None:
+    """A v1 table normalises into a v2 one without losing anything, so the
+    first capture after an upgrade is an addition rather than a reset."""
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch(shade=1))
+    downgrade_to_v1(tmp_path / "chatgpt")
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch(30, 12, shade=2))
+    raw = json.loads((tmp_path / "chatgpt" / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert raw["version"] == FORMAT_VERSION
+    assert [entry["file"] for entry in raw["templates"]["busy"]] == ["busy.png", "busy-2.png"]
+    assert [
+        (t.width, t.height) for t in load_profile(tmp_path, "chatgpt").variants(TemplateKind.BUSY)
+    ] == [(20, 16), (30, 12)]
+
+
+def test_clearing_a_format_1_kind_removes_its_file(tmp_path: Path) -> None:
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
+    downgrade_to_v1(tmp_path / "chatgpt")
+    drop_template(tmp_path, "chatgpt", TemplateKind.BUSY)
+    assert not (tmp_path / "chatgpt" / "busy.png").exists()
+    assert load_profile(tmp_path, "chatgpt").captured == ()
+
+
+def test_a_kind_whose_entry_is_not_a_list_is_ignored(tmp_path: Path) -> None:
+    """Format 2 says list; a hand-edited manifest saying otherwise loses that
+    kind, not the profile."""
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch())
+    manifest = tmp_path / "chatgpt" / MANIFEST_NAME
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    raw["templates"]["busy"] = {"file": "busy.png", "width": 20, "height": 16}
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+    assert load_profile(tmp_path, "chatgpt").captured == (TemplateKind.COPY,)
+
+
+def test_a_manifest_may_not_delete_outside_the_profile_folder(tmp_path: Path) -> None:
+    """drop_template unlinks what the manifest names, so it validates the name
+    exactly as loading does - a manifest is a file anything can write."""
+    outsider = tmp_path / "secret.png"
+    outsider.write_bytes(b"mine")
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
+    manifest = tmp_path / "chatgpt" / MANIFEST_NAME
+    raw = json.loads(manifest.read_text(encoding="utf-8"))
+    raw["templates"]["busy"][0]["file"] = "../secret.png"
+    manifest.write_text(json.dumps(raw), encoding="utf-8")
+    drop_template(tmp_path, "chatgpt", TemplateKind.BUSY)
+    assert outsider.exists()
+    assert load_profile(tmp_path, "chatgpt").captured == ()
 
 
 def test_profiles_of_different_services_do_not_mix(tmp_path: Path) -> None:
@@ -89,7 +245,7 @@ def test_the_manifest_describes_what_it_stored(tmp_path: Path) -> None:
     raw = json.loads((tmp_path / "chatgpt" / MANIFEST_NAME).read_text(encoding="utf-8"))
     assert raw["version"] == FORMAT_VERSION
     assert raw["service"] == "chatgpt"
-    entry = raw["templates"]["busy"]
+    (entry,) = raw["templates"]["busy"]
     assert entry["file"] == "busy.png"
     assert (entry["width"], entry["height"]) == (20, 16)
     assert entry["captured_at"].endswith("+00:00")
@@ -109,7 +265,7 @@ def test_saving_leaves_no_temp_files_behind(tmp_path: Path) -> None:
 
 def test_loading_a_service_that_was_never_captured_is_empty(tmp_path: Path) -> None:
     assert load_profile(tmp_path / "nothing-here", "chatgpt").captured == ()
-    assert load_profile(tmp_path, "chatgpt").describe() == "0/6 captured"
+    assert load_profile(tmp_path, "chatgpt").describe() == "0/7 captured"
 
 
 def test_one_corrupt_png_costs_only_its_own_appearance(tmp_path: Path) -> None:
@@ -176,7 +332,7 @@ def test_unknown_manifest_entries_and_stray_files_are_ignored(tmp_path: Path) ->
     save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
     manifest = tmp_path / "chatgpt" / MANIFEST_NAME
     raw = json.loads(manifest.read_text(encoding="utf-8"))
-    raw["templates"]["from-the-future"] = {"file": "future.png", "width": 1, "height": 1}
+    raw["templates"]["from-the-future"] = [{"file": "future.png", "width": 1, "height": 1}]
     manifest.write_text(json.dumps(raw), encoding="utf-8")
     (tmp_path / "chatgpt" / "notes.txt").write_text("mine now", encoding="utf-8")
     assert load_profile(tmp_path, "chatgpt").captured == (TemplateKind.BUSY,)
@@ -188,7 +344,7 @@ def test_a_manifest_may_not_point_outside_the_profile_folder(tmp_path: Path) -> 
     save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
     manifest = tmp_path / "chatgpt" / MANIFEST_NAME
     raw = json.loads(manifest.read_text(encoding="utf-8"))
-    raw["templates"]["busy"]["file"] = "../../secret.png"
+    raw["templates"]["busy"][0]["file"] = "../../secret.png"
     manifest.write_text(json.dumps(raw), encoding="utf-8")
     assert load_profile(tmp_path, "chatgpt").captured == ()
 
@@ -200,7 +356,7 @@ def test_a_manifest_may_not_name_a_directory_or_a_path(tmp_path: Path, filename:
     save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
     manifest = tmp_path / "chatgpt" / MANIFEST_NAME
     raw = json.loads(manifest.read_text(encoding="utf-8"))
-    raw["templates"]["busy"]["file"] = filename
+    raw["templates"]["busy"][0]["file"] = filename
     manifest.write_text(json.dumps(raw), encoding="utf-8")
     assert load_profile(tmp_path, "chatgpt").captured == ()
 

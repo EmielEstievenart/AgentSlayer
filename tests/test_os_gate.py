@@ -17,13 +17,14 @@ import sys
 
 import pytest
 
-from agentclip.screen import focus, picker
+from agentclip.screen import focus, overlay, picker
 from agentclip.screen.region import ScreenRegion
 
 REGION = ScreenRegion(40, 40, 20, 20)
 
 # Captured at import time, i.e. during collection - before any fixture runs.
 REAL_PICK_REGION = picker.pick_region
+REAL_IDENTIFY_OVERLAY = picker.draw_identify_overlay
 
 gated_only = pytest.mark.skipif(
     os.environ.get("AGENTCLIP_OS_TESTS") == "1",
@@ -74,6 +75,31 @@ def test_the_region_picker_fails_loudly_instead_of_covering_the_screen() -> None
         picker.pick_region()
 
 
+@gated_only
+def test_the_identify_overlay_fails_loudly_instead_of_covering_the_screen() -> None:
+    """`/identify`'s overlay is the picker's read-only twin - same fullscreen
+    child process, thrown over whatever the user is doing - and it has no timer
+    at all, so a forgotten mock would hang the suite behind a fullscreen window
+    nobody is watching. It must be a red test instead."""
+    with pytest.raises(AssertionError, match="mock it at the use site"):
+        picker.draw_identify_overlay([])
+
+
+@gated_only
+def test_the_identify_drawing_itself_is_blocked_in_process() -> None:
+    """The `--show-identify` child calls this one directly, in whatever process
+    it is running - which, for a test that drives the CLI entry point, is the
+    test runner. There is no child process in between to keep a Tk window off
+    the user's screen, so the draw is stubbed too."""
+    with pytest.raises(AssertionError, match="mock it at the use site"):
+        overlay.run_identify_overlay([])
+
+
+@gated_only
+def test_the_gate_swaps_the_identify_overlay_out_by_default() -> None:
+    assert picker.draw_identify_overlay is not REAL_IDENTIFY_OVERLAY
+
+
 def _funcptr_type() -> type:
     """The type ctypes gives a ``windll`` entry, borrowed from a call the gate
     never touches (``GetSystemMetrics`` only reads the desktop)."""
@@ -102,6 +128,7 @@ def test_the_real_os_marker_lifts_the_gate() -> None:
     """Nothing is injected here - the whole point is that a marked test gets the
     genuine functions back, which is what the opt-in promises."""
     assert picker.pick_region is REAL_PICK_REGION
+    assert picker.draw_identify_overlay is REAL_IDENTIFY_OVERLAY
 
 
 @pytest.mark.real_os

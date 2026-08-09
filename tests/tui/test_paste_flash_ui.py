@@ -148,7 +148,12 @@ async def test_busy_match_turns_the_flash_off(tmp_path: Path) -> None:
         # Only a detector the poller was actually built with closes a tick, so
         # say the busy tracker is the live one before injecting its verdict.
         main._active_detectors = ("busy",)
-        main.post_message(BusyProbed(BusyProbe(BusyState.MATCH, 0.01), main._detector_generation))
+        # A MATCH the tracker actually SAW (``generating_now``): the settling
+        # ticks after the paste's reset carry the same state on no evidence, and
+        # those may not take the banner down - see test_finish_signal_ui.py.
+        main.post_message(
+            BusyProbed(BusyProbe(BusyState.MATCH, 0.01, True), main._detector_generation)
+        )
         await _wait_for(pilot, lambda: _flash(app).display is False, "flash hidden on MATCH")
 
         # CHANGED probes (idle screen) must NOT re-show or re-hide anything.

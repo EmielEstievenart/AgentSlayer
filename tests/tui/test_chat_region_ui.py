@@ -7,8 +7,9 @@ its own suite: test_click_region_ui.py).
 The real picker spawns a tkinter overlay in a child process and the real click
 moves the OS cursor - neither belongs in a test run, so both are monkeypatched
 at their use site (agentclip.tui.screens.main). What we verify is the wiring:
-button -> picker -> sidebar label + session state, click fired after every
-outbound copy, and the calibration surviving /new.
+button -> picker -> sidebar label + session state, the finish detectors
+suspended around the overlay, click fired after every outbound copy, and the
+calibration surviving /new.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from agentclip.config import load_config
 from agentclip.screen.picker import ScreenPickError
 from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.screens.main import MainScreen
 
 from .conftest import send_composer
 
@@ -128,8 +130,68 @@ async def test_picker_failure_is_reported_not_fatal(
         assert main._chat_region is None  # error notified; app carries on
 
 
-async def test_outbound_copy_clicks_the_region_and_it_survives_new(
+def _record_detector_bracket(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Log the suspend/overlay/resume order, keeping the real behaviour."""
+    order: list[str] = []
+    suspend, resume = MainScreen.suspend_detectors, MainScreen.resume_detectors
+    monkeypatch.setattr(
+        MainScreen, "suspend_detectors", lambda self: order.append("suspend") or suspend(self)
+    )
+    monkeypatch.setattr(
+        MainScreen, "resume_detectors", lambda self: order.append("resume") or resume(self)
+    )
+    return order
+
+
+async def test_the_picker_suspends_the_detectors_around_its_overlay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The overlay is a translucent fullscreen child process thrown over the
+    very browser window the finish detectors are watching, and one appearing
+    and vanishing is exactly the sustained large delta that arms the auto-copy
+    trigger on staleness alone. The service editor's capture buttons have been
+    bracketed with suspend/resume for that reason since they shipped (§3.4e);
+    this overlay is the same one and needed the same bracket - without it,
+    letting go of the drag was itself enough to start the copy flow."""
+    order = _record_detector_bracket(monkeypatch)
+    monkeypatch.setattr(
+        main_mod, "pick_region", lambda prompt=None: order.append("overlay") or REGION
+    )
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _click_set_region(app, pilot)
+        await _wait_for(pilot, lambda: main._chat_region == REGION, "region adopted")
+        # Resume last: the adoption above already rebuilt the poller around the
+        # new rectangle, which is what makes the resume the documented no-op.
+        assert order == ["suspend", "overlay", "resume"]
+
+
+async def test_a_cancelled_pick_still_resumes_the_detectors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Esc is the common exit, and it adopts nothing - so nothing else would
+    ever restart the poller the overlay was suspended for."""
+    order = _record_detector_bracket(monkeypatch)
+    monkeypatch.setattr(
+        main_mod, "pick_region", lambda prompt=None: order.append("overlay") or None
+    )
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _click_set_region(app, pilot)
+        await _wait_for(pilot, lambda: order == ["suspend", "overlay", "resume"], "bracket closed")
+        assert main._chat_region is None
+
+
+async def test_outbound_copy_clicks_the_region_and_it_survives_new(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, new_chat_click_lands: None
 ) -> None:
     """The whole point: with only the chat region drawn, every outbound copy
     (here: the bootstrap, then a follow-up) fires a focus click at it - it is the

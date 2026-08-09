@@ -80,6 +80,13 @@ class AgentClipApp(App[None]):
         Binding("f2", "settings", "settings", show=False),
         # f4, not f3: MainScreen already claims f3 (priority binding, toggle_sidebar).
         Binding("f4", "preferences", "preferences", show=False),
+        # The global ARMED switch. show=True and app-level for the same reason
+        # F1 is: it has to work in EVERY state, including before any session
+        # exists and while a flow is mid-turn, so it hangs off no check_action
+        # and no screen. No priority=True needed - function keys already reach
+        # the app with the composer's TextArea focused (f1/f2/f4 prove it), and
+        # only the letter bindings ever needed rescuing from it.
+        Binding("f5", "toggle_armed", "armed"),
     ]
 
     # CSS lives in the class var, not a .tcss file: zero --add-data for PyInstaller.
@@ -198,11 +205,13 @@ class AgentClipApp(App[None]):
     }
     /* The slash-command list: sits directly on top of the composer and shares
        its margin, so the two read as one control. Height is the match count
-       (one row per command, ellipsized rather than wrapped), capped so a very
-       short terminal keeps the transcript. */
+       (one row per command, ellipsized rather than wrapped). */
     #cmd-popup {
         height: auto;
-        max-height: 6;
+        /* The whole registry plus its border - a bare `/` offers everything, and
+           a cap below that would hide the last command rather than shorten the
+           list. Grows with app.commands.COMMANDS (a test pins the two). */
+        max-height: 9;
         background: $surface;
         color: $text;
         border: round $accent;
@@ -235,6 +244,29 @@ class AgentClipApp(App[None]):
         background: $panel;
         border-left: solid $primary;
         padding: 0 1;
+        /* The column is taller than most terminals - the STATE rail, the
+           picker, the chat window and five detector lines come to ~60 rows -
+           so everything below the fold used to be simply
+           unreachable. A one-cell scrollbar (the default two would cost the
+           status lines a character of width) makes the bottom of the column
+           gettable-to; F3 still hides the whole thing. */
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
+    }
+    /* The ELEMENTS column: four crops of what the detectors recognised, beside
+       the sidebar's words about them (§1.7). Deliberately the narrowest column
+       on the screen - an icon is a couple of dozen pixels, so 20 cells (17 of
+       content) draws it life-size-ish, and the chat column keeps the room that
+       diffs and command output need. Scrollable like the sidebar, and hidden by
+       F7 exactly as F3 hides its neighbour. */
+    ElementsPanel {
+        width: 20;
+        height: 1fr;
+        background: $panel;
+        border-left: solid $primary;
+        padding: 0 1;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
     }
     Sidebar .side-title {
         text-style: bold;
@@ -271,6 +303,18 @@ class AgentClipApp(App[None]):
     Sidebar #side-paste-flash.flash-alt {
         color: red;
         background: yellow;
+        border: heavy red;
+    }
+    /* The paste flash's standing sibling: as loud, but it never blinks (it is a
+       fact, not a request), so it has no .flash-alt half. */
+    Sidebar #side-armed-banner {
+        display: none;
+        margin-top: 1;
+        padding: 0 1;
+        text-align: center;
+        text-style: bold;
+        color: white;
+        background: red;
         border: heavy red;
     }
     Sidebar .side-hint {
@@ -319,6 +363,16 @@ class AgentClipApp(App[None]):
         background: $error;
         text-style: bold;
     }
+    /* The DISARMED badge. Reverse-video red rather than a coloured word: it has
+       to be unmissable at a glance on a bar the user has stopped reading, and it
+       must not be confusable with the YOLO badge two segments over - which is
+       why it also has a slot of its own (both can be on at once). Hidden by the
+       widget whenever the app is armed, so this never becomes furniture. */
+    #seg-armed {
+        color: white;
+        background: red;
+        text-style: bold;
+    }
     /* A delegated sub-agent run owns the watcher segment while it lasts; magenta
        is used nowhere else, so "this is not your conversation" reads at a glance. */
     .st-sub {
@@ -326,7 +380,8 @@ class AgentClipApp(App[None]):
         text-style: bold;
     }
 
-    ConfirmScreen, SummaryScreen, HelpScreen, TextEntryScreen, ServiceEditorScreen, SettingsScreen {
+    ConfirmScreen, SummaryScreen, HelpScreen, TextEntryScreen, ServiceEditorScreen,
+    SettingsScreen, LogScreen {
         align: center middle;
     }
     .modal-box {
@@ -352,6 +407,17 @@ class AgentClipApp(App[None]):
     }
     .modal-box Select {
         margin-top: 1;
+    }
+
+    /* The harness log is the one modal whose body must SCROLL: it is hundreds of
+       rows deep and the shared box has no overflow rule, so an auto-height
+       Vertical would silently cut the tail off. A fixed box height gives the
+       VerticalScroll inside it something to be 1fr of. */
+    #log-box {
+        height: 85%;
+    }
+    #log-body {
+        height: 1fr;
     }
 
     #service-editor-box {
@@ -392,18 +458,48 @@ class AgentClipApp(App[None]):
     #svc-appearance-col {
         width: 34;
         margin-left: 2;
+        /* The one column that is NOT sized by its content (which is what the
+           `#svc-body > Vertical` rule above would otherwise give it): seven
+           kinds two rows tall, plus a summary that grows a line for every
+           couple of appearances captured, is more than the modal's own height
+           cap can promise. It takes the body's full height instead and scrolls
+           inside it - a one-cell scrollbar, and only when it is needed. The
+           alternative is what used to happen when the summary wrapped far
+           enough: "Forget appearance" was simply not on screen. */
+        height: 1fr;
+        overflow-y: auto;
+        scrollbar-size-vertical: 1;
     }
     /* The capture buttons and their status lines alternate, so both are one
-       row: six three-row buttons would push the column past the modal. */
+       row: six three-row buttons would push the column past the modal. The
+       per-kind Clear shares the status row rather than the button's, for the
+       same budget - and because the longest "Capture ..." label already fills
+       the column's 34 on its own. */
     #svc-appearance-col .side-status {
         color: $text-muted;
     }
+    /* Two rows, not one: a half-block preview needs a second cell to be a
+       picture rather than a stripe, and two is all seven kinds can afford
+       before the modal runs off a 45-row terminal. */
+    #svc-appearance-col .svc-appearance-row {
+        height: 2;
+    }
+    #svc-appearance-col .svc-appearance-row .side-status {
+        width: 1fr;
+    }
+    /* TEMPLATE_PREVIEW_COLS wide, and it keeps that width whether or not the
+       kind has an image: the status text beside it must not shuffle sideways
+       as captures land. */
+    #svc-appearance-col .svc-tpl-preview {
+        width: 12;
+        height: 2;
+        margin-right: 1;
+    }
+    /* No margin above either: the two rows they used to sit off by are what
+       the per-kind previews spend, and the row above them is already a status
+       line rather than a control. */
     #svc-templates {
         height: auto;
-        margin-top: 1;
-    }
-    #svc-forget-templates-btn {
-        margin-top: 1;
     }
     #svc-signal-warning {
         color: $warning;
@@ -497,6 +593,15 @@ class AgentClipApp(App[None]):
             return
         self.push_screen(HelpScreen())
 
+    def action_toggle_armed(self) -> None:
+        """F5: flip the OS-acting switch. Reaches into MainScreen exactly like
+        the settings action does - the flag is the view's, because every
+        primitive it governs (click, paste, scroll, cursor, focus, the clipboard
+        watcher) is called from there and nowhere else."""
+        main = self.main_screen
+        if main is not None:
+            main.set_os_armed(None)
+
     def action_settings(self) -> None:
         # Also the target of the sidebar's "Edit services..." button. Bound directly
         # to the F2 key, so Textual dispatches it OUTSIDE a worker - push_screen_wait
@@ -539,8 +644,9 @@ class AgentClipApp(App[None]):
         if main is not None:
             main.suspend_detectors()
         try:
+            initial_key = main.selected_service if main is not None else None
             result = await self.push_screen_wait(
-                ServiceEditorScreen(self.app_config, self.profile_root)
+                ServiceEditorScreen(self.app_config, self.profile_root, initial_key)
             )
             if result is None:
                 return  # closed with no changes - nothing to persist or propagate

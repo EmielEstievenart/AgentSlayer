@@ -29,6 +29,10 @@ of them are about the chat box - so "how a line is sent" has to live in one
 place. It stopped being one keypress when slash-command autocomplete landed
 (§3.3a), and six copies of that helper would have been six chances to get the
 Enter count wrong.
+
+Those same suites need ``new_chat_click_lands``: ``/new`` now opens the browser's
+fresh chat *itself* and resets only when that click lands, so a teardown typed by
+a test with no captured new-chat button would be refused rather than performed.
 """
 
 from __future__ import annotations
@@ -42,7 +46,9 @@ from textual.pilot import Pilot
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.profile_store import save_template
+from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.screens.main import MainScreen
 
 
 async def send_composer(app: AgentClipApp, pilot: Pilot, text: str) -> None:
@@ -102,6 +108,11 @@ def seed_templates(profile_root: Path) -> Callable[..., None]:
     it before ``app.run_test`` and the app simply loads them; call it during a
     run and clear ``MainScreen._profiles`` (or go through ``update_config``) to
     make the screen re-read them, exactly as an editor visit does.
+
+    A capture ADDS to its kind (screen.profile), so calling this twice for one
+    kind seeds a two-image stack rather than replacing the first - which is
+    exactly how a test gives a kind more than one appearance, at a different
+    ``size`` so the two are distinguishable.
     """
 
     def seed(
@@ -112,6 +123,25 @@ def seed_templates(profile_root: Path) -> Callable[..., None]:
             save_template(profile_root, key, kind, template_image(width, height))
 
     return seed
+
+
+@pytest.fixture
+def new_chat_click_lands(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let ``/new`` tear a session down without a captured new-chat button.
+
+    Since §3.3a the command drives the browser itself - it clicks the new-chat
+    control in the master window and resets the session only if that click
+    landed - so a suite that types ``/new`` merely to prove its calibration
+    survives a teardown would be refused for want of a button it never captured.
+    This stubs the *browser* half of the shared flow and keeps its tail, which is
+    the reset those suites are actually asking for. The click itself is covered
+    once, in test_newchat_ui.py, and nothing here mocks it away.
+    """
+
+    async def _click_landed(self: MainScreen, slot: AgentSlot) -> None:
+        self._reset_after_new_browser_chat(slot)
+
+    monkeypatch.setattr(MainScreen, "_new_browser_chat", _click_landed)
 
 
 @pytest.fixture(autouse=True)

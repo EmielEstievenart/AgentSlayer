@@ -82,6 +82,12 @@ App
   F2  service profiles: sizes, what each service LOOKS like (the captures the
       automation clicks by), and which finish signals it may watch for
   F3  hide/show the sidebar     F4  appearance (themes)
+  F5  ARM / DISARM the tool (also /armed). Disarmed it still watches and shows
+      everything - detection, the crops, the STATE rail - but never clicks,
+      pastes, moves your mouse or watches your clipboard. Payloads still land
+      on the clipboard for you to paste; press i to ingest a reply by hand.
+  F7  hide/show ELEMENTS - close-ups of the send/busy/idle/copy pictures the
+      automation is recognising right now, in the window it is driving
   ctrl+p   command palette  ctrl+q  quit (confirms when a turn is mid-flight)
 
 The loop: AgentClip copies a payload - paste it into your chat and send.

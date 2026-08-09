@@ -64,6 +64,14 @@ class FakeChatView:
         self.chats_started: list[SessionRef] = []
         self.chats_ended: list[SessionRef] = []
         self.cleared = 0
+        self.new_chats_opened = 0  # /new asking for a fresh BROWSER chat, now
+        self.identify_overlays = 0  # /identify asking for the debug boxes
+        self.harness_logs = 0  # /log asking for the decision log screen
+        # Every /armed target as the controller sent it (None = "toggle"), plus
+        # the state a real view would be in after them - the port is fire-and-
+        # forget, so the fake resolves the toggles the way MainScreen does.
+        self.armed_targets: list[bool | None] = []
+        self.os_armed = True
         self.input_started = 0
         self.exited = False
         self.tasks: list[asyncio.Task[Any]] = []
@@ -78,6 +86,7 @@ class FakeChatView:
         self.decision: tuple[Decision, str | None] = (Decision.APPROVE, None)
         self.clipboard: str | None = None
         self.confirm_result = True
+        self.new_chat_lands = True  # did the browser's new-chat click land?
         self.text_result: str | None = None
         self.summary_action = "close"
         self.delegation = False
@@ -165,6 +174,31 @@ class FakeChatView:
         self.trace.append("copy")
         self.copied.append(text)
 
+    def open_new_chat_now(self) -> None:
+        # Only /new asks for one; the count is what pins that scope down. The
+        # real view clicks the browser and then - on a landed click only - calls
+        # request_new_session back, off a worker; ``new_chat_lands`` scripts the
+        # two outcomes, and ``_later`` keeps the call-back out of the command's
+        # own stack frame the way the worker does.
+        self.new_chats_opened += 1
+        self.trace.append("open-new-chat")
+        if self.new_chat_lands:
+            self._later(self._reset_after_new_chat)
+
+    def show_identify_overlay(self) -> None:
+        # /identify is one call and no answer - the whole feature is the view's.
+        self.identify_overlays += 1
+
+    def show_harness_log(self) -> None:
+        # /log, the same shape again: the decisions it lists were all taken on
+        # this side of the port, so the controller only asks for the screen.
+        self.harness_logs += 1
+
+    def set_os_armed(self, target: bool | None) -> None:
+        # Same shape as show_identify_overlay: one call, no answer, no session.
+        self.armed_targets.append(target)
+        self.os_armed = (not self.os_armed) if target is None else target
+
     async def read_clipboard(self) -> str | None:
         return self.clipboard
 
@@ -236,6 +270,10 @@ class FakeChatView:
         announced - the callback would otherwise race the future's creation."""
         with suppress(RuntimeError):  # no loop (a purely synchronous unit test)
             asyncio.get_running_loop().call_soon(fn)
+
+    def _reset_after_new_chat(self) -> None:
+        if self.controller is not None:
+            self.controller.request_new_session()
 
     def _resolve_gate(self) -> None:
         if self.controller is not None:

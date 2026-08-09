@@ -27,6 +27,7 @@ from agentclip.screen.template import (
     find_all_in_region,
     find_in_region,
     find_lowest_in_region,
+    find_lowest_with_best_miss,
     match_at_xy,
     match_rect,
 )
@@ -359,3 +360,60 @@ def test_a_full_screen_search_is_fast_enough_to_poll() -> None:
     elapsed = time.monotonic() - started
     assert found == RegionMatch(1500, 900, 0.0)
     assert elapsed < 3.0, f"a full-screen search took {elapsed:.2f}s"
+
+
+# -- the near-miss report -----------------------------------------------------
+# ``find_lowest_with_best_miss`` exists so a failed copy-button search can say
+# HOW it failed. "Not found" has two causes that need opposite fixes from the
+# user - the button was not on screen, or the capture has stopped looking like
+# it - and only a number tells them apart. The harness log prints it (`/log`).
+
+
+def test_the_best_miss_is_none_when_the_template_is_simply_found() -> None:
+    patch = noise(20, 16, seed=2)
+    scene = paste(noise(140, 90, seed=1), patch, 37, 24)
+    match, best_miss = find_lowest_with_best_miss(Template.build(patch), scene)
+    assert match == RegionMatch(37, 24, 0.0)
+    assert best_miss is None  # nothing was judged and rejected
+
+
+def test_a_rejected_candidate_reports_how_close_it_came() -> None:
+    """The capture-has-drifted case: the appearance IS there, repainted enough
+    to fail the threshold. A bare None would send the user hunting for a button
+    that is on their screen."""
+    patch = noise(20, 20, seed=2)
+    damaged = paste(patch, noise(20, 3, seed=9), 0, 16)  # 3 of 20 rows repainted
+    scene = paste(noise(140, 90, seed=1), damaged, 37, 24)
+    match, best_miss = find_lowest_with_best_miss(Template.build(patch), scene)
+    assert match is None
+    assert best_miss == pytest.approx(3 / 20)
+    # ...and a threshold that accepts it gets the match instead.
+    match, _ = find_lowest_with_best_miss(Template.build(patch), scene, max_diff=0.2)
+    assert match is not None and (match.x, match.y) == (37, 24)
+
+
+def test_an_empty_region_reports_no_candidate_at_all() -> None:
+    """The other cause: nothing in the scene is even shaped like the template,
+    so there is no number to report and the log says so in words instead."""
+    template = Template.build(noise(20, 16, seed=2))
+    assert find_lowest_with_best_miss(template, noise(140, 90, seed=1)) == (None, None)
+
+
+def test_the_plain_search_is_the_same_search() -> None:
+    """``find_lowest_in_region`` is now the one-line view of it, so the two can
+    never disagree about what a match is."""
+    patch = noise(20, 16, seed=2)
+    scene = paste(paste(noise(140, 90, seed=1), patch, 30, 10), patch, 30, 60)
+    template = Template.build(patch)
+    assert find_lowest_with_best_miss(template, scene)[0] == find_lowest_in_region(template, scene)
+
+
+def test_the_lowest_match_and_a_near_miss_come_back_together() -> None:
+    """A clean occurrence above a damaged one: the search still answers with the
+    clean match, and still says how close the damaged one came."""
+    patch = noise(20, 20, seed=2)
+    damaged = paste(patch, noise(20, 3, seed=9), 0, 16)
+    scene = paste(paste(noise(140, 200, seed=1), patch, 30, 20), damaged, 30, 120)
+    match, best_miss = find_lowest_with_best_miss(Template.build(patch), scene)
+    assert match is not None and (match.x, match.y) == (30, 20)
+    assert best_miss == pytest.approx(3 / 20)

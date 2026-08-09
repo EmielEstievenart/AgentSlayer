@@ -350,13 +350,19 @@ def _candidate_origins(template: Template, scene: RegionImage) -> list[tuple[int
     return origins
 
 
-def _verify(
-    template: Template, scene: RegionImage, tolerance: int, max_diff: float
-) -> Iterator[RegionMatch]:
-    """Candidates that pass both stages, lazily, in candidate order.
+def _scored(template: Template, scene: RegionImage, tolerance: int) -> Iterator[RegionMatch]:
+    """Every candidate that survived stage 1, with the diff stage 2 gave it.
 
-    Lazy so the presence question can stop at the first one, and shared so the
-    stage-2 budget (MAX_VERIFICATIONS) means the same thing to every caller.
+    Judged but NOT filtered, which is the difference between this and
+    :func:`_verify`. A caller that only wants matches takes the filter; a caller
+    that has to explain a MISS needs the numbers behind it, because "not found"
+    and "the closest thing on screen was 0.21 against a 0.08 threshold" send the
+    user to two entirely different fixes (the button is not there / the capture
+    no longer looks like it).
+
+    Lazy so the presence question can still stop at the first hit, and the
+    stage-2 budget (MAX_VERIFICATIONS) is spent here so it means the same thing
+    to every caller.
     """
     budget = MAX_VERIFICATIONS
     for x, y in _candidate_origins(template, scene):
@@ -365,9 +371,14 @@ def _verify(
         if budget <= 0:
             return
         budget -= 1
-        diff = _diff_at_xy(template.image, scene, x, y, tolerance)
-        if diff <= max_diff:
-            yield RegionMatch(x, y, diff)
+        yield RegionMatch(x, y, _diff_at_xy(template.image, scene, x, y, tolerance))
+
+
+def _verify(
+    template: Template, scene: RegionImage, tolerance: int, max_diff: float
+) -> Iterator[RegionMatch]:
+    """Candidates that pass both stages, lazily, in candidate order."""
+    return (match for match in _scored(template, scene, tolerance) if match.diff <= max_diff)
 
 
 def match_at_xy(
@@ -427,10 +438,46 @@ def find_lowest_in_region(
     first: if a repetitive scene exhausts a budget, what is left is the part of
     the scene this question cares about.
     """
-    matches = list(_verify(template, scene, tolerance, max_diff))
+    return find_lowest_with_best_miss(
+        template, scene, tolerance=tolerance, max_diff=max_diff
+    )[0]
+
+
+def find_lowest_with_best_miss(
+    template: Template,
+    scene: RegionImage,
+    *,
+    tolerance: int = DEFAULT_TOLERANCE,
+    max_diff: float = DEFAULT_MAX_DIFF,
+) -> tuple[RegionMatch | None, float | None]:
+    """:func:`find_lowest_in_region`, plus how close the search came to a hit.
+
+    ``(match, best_miss)``. ``best_miss`` is the smallest diff among the
+    candidates that were judged and REJECTED - None when nothing got as far as
+    being judged, which is the honest answer for "the scene contains nothing
+    even shaped like this" and a materially different report from "the closest
+    thing was almost it".
+
+    It exists for the harness log, and specifically for the one question a
+    failed auto-copy always raises: was the copy button not on screen, or has
+    the capture stopped matching it? A bare None cannot tell those apart and a
+    number can. The diff is reported alongside a match too (a match's own diff
+    is on the ``RegionMatch``), so a caller never has to ask twice.
+
+    Same traversal and same budget as the plain search - this is where it is
+    implemented and ``find_lowest_in_region`` is the one-line view of it - so
+    the extra answer costs nothing.
+    """
+    matches: list[RegionMatch] = []
+    best_miss: float | None = None
+    for candidate in _scored(template, scene, tolerance):
+        if candidate.diff <= max_diff:
+            matches.append(candidate)
+        elif best_miss is None or candidate.diff < best_miss:
+            best_miss = candidate.diff
     if not matches:
-        return None
-    return max(matches, key=lambda match: (match.y, match.x))
+        return None, best_miss
+    return max(matches, key=lambda match: (match.y, match.x)), best_miss
 
 
 def find_all_in_region(
@@ -456,3 +503,25 @@ def match_rect(region: ScreenRegion, template: Template, match: RegionMatch) -> 
         template.width,
         template.height,
     )
+
+
+def same_element(one: ScreenRegion, other: ScreenRegion) -> bool:
+    """Are these two matches the same physical thing on screen?
+
+    A template routinely matches its own element at several neighbouring
+    origins - a pixel or two of drift is well inside the diff threshold - so a
+    raw match count says more about anti-aliasing than about how many buttons
+    are on screen. Overlapping rectangles are one element: a genuine second
+    copy of a button cannot be drawn on top of the first.
+
+    Per axis, not as one radius, because a template can be very lopsided. A
+    chat input box is ~800x90, and "within max(width, height)" would fold two
+    input boxes 400px apart - the two windows this whole check exists to tell
+    apart - into one.
+
+    Lives here, beside ``match_rect``, because both callers of it are asking the
+    same question about the same rectangles: the automation folding a kind's
+    matches down to one click target (``MainScreen._find_all``) and the
+    /identify overlay folding them down to one drawn box (screen.identify).
+    """
+    return abs(one.left - other.left) < one.width and abs(one.top - other.top) < one.height

@@ -131,6 +131,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pick-region", action="store_true", help=argparse.SUPPRESS)
     # Hidden: the instruction that overlay shows; only meaningful with --pick-region.
     parser.add_argument("--pick-prompt", default=None, help=argparse.SUPPRESS)
+    # Hidden: /identify's read-only twin of --pick-region - the element list
+    # arrives as JSON on stdin and is drawn where each element sits on screen.
+    parser.add_argument("--show-identify", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"agentclip {__version__}")
     return parser
 
@@ -139,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
     if args.pick_region:
         return _pick_region_child(args.pick_prompt)
+    if args.show_identify:
+        return _show_identify_child(sys.stdin.read())
     try:
         project_root = Path(args.project).resolve(strict=True)
     except OSError as exc:
@@ -189,4 +194,30 @@ def _pick_region_child(prompt: str | None = None) -> int:
         return 1
     if region is not None:
         print(format_region(region))
+    return 0
+
+
+def _show_identify_child(payload: str) -> int:
+    """The --show-identify child: boxes up, wait for a dismissal, exit.
+
+    Prints nothing on success - the overlay IS the result. A malformed payload
+    or a broken environment (no tkinter, no display) is exit 1 with the reason
+    on stderr, which screen.picker surfaces as a ScreenPickError; the parent
+    toasts that instead of leaving the user staring at a screen where nothing
+    happened.
+    """
+    from agentclip.screen.identify import parse_payload
+
+    try:
+        elements = parse_payload(payload)
+    except ValueError as exc:
+        print(f"identify overlay got a bad payload: {exc}", file=sys.stderr)
+        return 1
+    try:
+        from agentclip.screen.overlay import run_identify_overlay
+
+        run_identify_overlay(elements)
+    except Exception as exc:  # anything here means "overlay unavailable"
+        print(f"identify overlay unavailable: {exc}", file=sys.stderr)
+        return 1
     return 0

@@ -18,6 +18,16 @@ not on screen, and the OS refusing the click.
 Every outcome is a toast and only a toast: the button is found on demand rather
 than polled, so there is no verdict worth keeping on screen between presses and
 the sidebar has no line for it.
+
+The last two blocks are the two ways to ask for a fresh chat, which are one
+implementation - ``_new_browser_chat(slot)`` - reached from both ends (§3.3a,
+§1.3):
+
+* the sidebar button: opening a fresh chat under a live master session ends that
+  session too, because the conversation it is having no longer exists.
+* ``/new``: the same flow, pinned to the master window and typed rather than
+  clicked. The browser is touched at command time, and the reset is that flow's
+  tail - so a click that never landed resets nothing at all.
 """
 
 from __future__ import annotations
@@ -37,9 +47,10 @@ from agentclip.config import load_config
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
+from agentclip.screen.slot import AgentSlot
 from agentclip.screen.template import RegionMatch, Template
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.screens.main import MainScreen
+from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 
 from .conftest import send_composer
 
@@ -66,6 +77,9 @@ MISMATCH_TOAST = "not on screen"
 AMBIGUOUS_TOAST = "found several things that look like the new-chat button"
 NOT_CLICKED_TOAST = "did not land"
 CLICKED_TOAST = "new browser chat opened"
+
+# The button's own refusal, which is /new's refusal reworded.
+MID_TURN_TOAST = "can't start a new chat mid-turn"
 
 
 @pytest.fixture(autouse=True)
@@ -431,13 +445,298 @@ async def test_new_preserves_the_capture(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _draw_chat_region(app, pilot, monkeypatch)
-        assert "1/6 captured" in _label(app, "#side-profile-note")
+        assert "1/7 captured" in _label(app, "#side-profile-note")
 
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
 
+        # /new spends the capture on its way past (§3.3a) - which is the point:
+        # the very command that uses it must not consume it.
+        _record_clicks(monkeypatch)
+        _patch_found(monkeypatch, FOUND)
+        _no_real_paste(monkeypatch)
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
         assert main._active_profile().has(TemplateKind.NEW_CHAT)
-        assert "1/6 captured" in _label(app, "#side-profile-note")
+        assert "1/7 captured" in _label(app, "#side-profile-note")
+
+
+# == /new opens the browser's new chat at once (§3.3a) =========================
+#
+# The command is the button typed out: it runs the very same flow, pinned to the
+# MASTER window, and the session reset is that flow's own tail. So the browser
+# and the tool side move together in one beat - a landed click resets, a refused
+# one changes nothing at all, and there is no window in between where the tool
+# has started over and the conversation on screen has not (or the reverse).
+#
+# No chat box is captured in this suite, so the paste's box click falls back to
+# the drawn chat region: the new-chat click and the box click are trivially told
+# apart by where they land.
+
+
+@pytest.fixture
+def _fast_new_chat(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fresh chat's render beat, shrunk. Real value is 0.4 s per paste."""
+    monkeypatch.setattr(main_mod, "_NEW_CHAT_SETTLE_S", 0.01)
+
+
+def _record_clicks(monkeypatch: pytest.MonkeyPatch) -> list[ScreenRegion]:
+    clicks: list[ScreenRegion] = []
+    monkeypatch.setattr(
+        main_mod, "click_region", lambda region, **kw: clicks.append(region) or True
+    )
+    return clicks
+
+
+def _no_real_paste(monkeypatch: pytest.MonkeyPatch) -> list[None]:
+    """Ctrl+V must never escape into the runner's window; record it instead."""
+    pastes: list[None] = []
+    monkeypatch.setattr(main_mod, "send_paste", lambda: pastes.append(None) or True)
+    return pastes
+
+
+async def _start_session(app: AgentClipApp, pilot: Pilot, main: MainScreen) -> None:
+    """Type a task, wait for the bootstrap copy to finish - i.e. reach the
+    ordinary idle-mid-session state both features are reached from."""
+    await _send(app, pilot, "Say hello.")
+    await _wait_for(pilot, lambda: main.session_active, "session armed")
+    await _wait_for(pilot, lambda: not main.busy, "session flow settled")
+
+
+async def test_new_opens_the_fresh_chat_at_command_time(
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
+    _fast_new_chat: None,
+) -> None:
+    """/new means "start over", and the chat on screen is the old conversation -
+    so the command opens a fresh one there and then, exactly as the sidebar
+    button does, and the session reset rides on that click landing."""
+    clicks = _record_clicks(monkeypatch)
+    _no_real_paste(monkeypatch)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    _seed_newchat(app, seed_templates)
+    notes = _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _draw_chat_region(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND)
+        await _start_session(app, pilot, main)
+        clicks.clear()
+
+        await _send(app, pilot, "/new")
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
+        # The button where it was found, and nothing else: no paste is waiting
+        # on it, because the browser side is already finished.
+        assert clicks == [CLICK_TARGET]
+        assert _said(notes, CLICKED_TOAST)
+        assert not main.has_transcript_events()  # the transcript went with it
+        clicks.clear()
+
+        # ...and the session that follows pastes straight into that fresh chat.
+        await main.copy_outbound("the payload")
+        assert clicks == [CHAT_REGION]  # the chat box only, never a second one
+
+
+async def test_the_launch_paste_opens_no_new_chat(
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
+    _fast_new_chat: None,
+) -> None:
+    """Only /new opens one. The first session of the run has no stale
+    conversation behind it - clicking new-chat at launch would throw away
+    whatever the user had already set up in that browser tab."""
+    clicks = _record_clicks(monkeypatch)
+    _no_real_paste(monkeypatch)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    _seed_newchat(app, seed_templates)
+    _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _draw_chat_region(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND)
+
+        await _start_session(app, pilot, main)
+        # The bootstrap was pasted into the chat that was already there.
+        assert CLICK_TARGET not in clicks
+        assert clicks == [CHAT_REGION]
+
+
+async def test_new_with_the_button_gone_clicks_nothing_and_resets_nothing(
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
+    _fast_new_chat: None,
+) -> None:
+    """A refused click leaves the old conversation up, so the session that owns
+    it has to stay too: resetting anyway would leave the next task pasting into
+    a chat full of the previous one, which is the half-reset /new exists to
+    avoid. The user is told which of the four reasons it was."""
+    clicks = _record_clicks(monkeypatch)
+    _no_real_paste(monkeypatch)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    _seed_newchat(app, seed_templates)
+    notes = _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _draw_chat_region(app, pilot, monkeypatch)
+        _patch_found(monkeypatch)  # the page moved on: nothing to click
+        await _start_session(app, pilot, main)
+        clicks.clear()
+
+        await _send(app, pilot, "/new")
+        await _wait_for(pilot, lambda: _said(notes, MISMATCH_TOAST), "the refusal was explained")
+        assert clicks == []  # the browser was not touched
+        assert main.session_active and not main.awaiting_new_session
+        assert main.has_transcript_events()  # ...and the conversation is still here
+
+
+# == the button ends the session too (§1.3) ===================================
+#
+# The other end of the same flow. A fresh chat in the MASTER window means the
+# conversation this session is having no longer exists, so the session goes with
+# it; in the sub-agent's window it means nothing to the master at all.
+
+
+async def test_the_button_on_an_idle_session_resets_the_tool_side_too(
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
+    _fast_new_chat: None,
+) -> None:
+    clicks = _record_clicks(monkeypatch)
+    _no_real_paste(monkeypatch)
+    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    _seed_newchat(app, seed_templates)
+    notes = _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _draw_chat_region(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND)
+        await _start_session(app, pilot, main)
+        assert main.session_active
+        clicks.clear()
+
+        await _press(app, pilot, "#newchat-btn")
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "the session was reset")
+        assert _said(notes, CLICKED_TOAST)
+        assert clicks == [CLICK_TARGET]
+        assert not main.has_transcript_events()  # the transcript went with it
+
+        # This click WAS the fresh chat: the paste that follows goes into it,
+        # and opens nothing.
+        clicks.clear()
+        await main.copy_outbound("the payload")
+        assert clicks == [CHAT_REGION]  # the chat box, and nothing else
+
+
+async def test_the_button_mid_turn_clicks_nothing_and_resets_nothing(
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
+) -> None:
+    """Same refusal /new gives, for the same reason: a turn in flight has
+    results that were never sent to the model, and this would bin them."""
+    clicks = _record_clicks(monkeypatch)
+    _no_real_paste(monkeypatch)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    _seed_newchat(app, seed_templates)
+    notes = _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _draw_chat_region(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND)
+        await _start_session(app, pilot, main)
+        main.busy = True  # a turn is running
+        await pilot.pause()
+        clicks.clear()
+
+        await _press(app, pilot, "#newchat-btn")
+        await pilot.pause(0.3)
+        assert clicks == []  # the browser was not touched
+        assert _said(notes, MID_TURN_TOAST)
+        assert main.session_active and not main.awaiting_new_session  # nothing was reset
+
+
+async def test_the_button_on_the_sub_tab_only_clicks(
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
+    _fast_new_chat: None,
+) -> None:
+    """The sub-agent window hosts delegated runs, which the controller starts
+    and ends. Emptying it says nothing about the master's conversation, so the
+    session it is having stays exactly where it was."""
+    clicks = _record_clicks(monkeypatch)
+    _no_real_paste(monkeypatch)
+    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    _seed_newchat(app, seed_templates)
+    notes = _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _draw_chat_region(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND)
+        await _start_session(app, pilot, main)
+
+        # Point the sidebar at the sub-agent window and draw ITS chat region.
+        main._select_window(SUBAGENT_WINDOW)
+        await _wait_for(pilot, lambda: main._calibrating is AgentSlot.SUBAGENT, "sub tab selected")
+        await _draw_chat_region(app, pilot, monkeypatch)
+        clicks.clear()
+
+        await _press(app, pilot, "#newchat-btn")
+        await _wait_for(pilot, lambda: _said(notes, CLICKED_TOAST), "the sub chat was opened")
+        assert clicks == [CLICK_TARGET]
+        # The master's session is untouched: still armed, still not re-prompting.
+        assert main.session_active and not main.awaiting_new_session
+        assert main._live is AgentSlot.MASTER  # the button never retargets, either
+
+        # Selecting the master tab while the press is still finishing (its focus
+        # beat is an await) must not hand the master a chat opened in the
+        # sub-agent's window - the slot is read before the click, not after it.
+        main._select_window(MASTER_WINDOW)
+        await pilot.pause(0.4)
+        assert main.session_active and not main.awaiting_new_session
+
+        # ...and /new still opens the MASTER's chat while the sidebar points
+        # somewhere else: the command is typed into the master's session, so the
+        # tab the user last clicked on cannot redirect it (nor the reset).
+        main._select_window(SUBAGENT_WINDOW)
+        await _wait_for(pilot, lambda: main._calibrating is AgentSlot.SUBAGENT, "sub tab selected")
+        await _send(app, pilot, "/new")
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
+        assert main._live is AgentSlot.MASTER

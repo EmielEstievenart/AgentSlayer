@@ -72,11 +72,24 @@ COMMANDS: tuple[ChatCommand, ...] = (
     ),
     ChatCommand(
         name="new",
-        summary="clear the chat and start a new session",
+        summary="clear the chat and start a new session (in a new browser chat)",
     ),
     ChatCommand(
         name="abort",
         summary="end the sub-agent run in flight (ctrl+x only cancels the calls running now)",
+    ),
+    ChatCommand(
+        name="identify",
+        summary="draw boxes where the tool sees the chat window's parts",
+    ),
+    ChatCommand(
+        name="log",
+        summary="show why the harness moved through its recent states",
+    ),
+    ChatCommand(
+        name="armed",
+        arg="[on|off]",
+        summary="toggle whether the tool may touch the screen at all (same as F5)",
     ),
     ChatCommand(
         name="yolo",
@@ -127,7 +140,7 @@ def help_text() -> str:
 
 
 def command_list() -> str:
-    """The commands as an English list - ``/help, /new, /abort, or /yolo``."""
+    """The commands as an English list - ``/help, /new, ..., or /yolo``."""
     names = [command.slash for command in COMMANDS]
     if len(names) == 1:
         return names[0]

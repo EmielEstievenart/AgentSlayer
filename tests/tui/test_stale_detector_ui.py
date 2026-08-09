@@ -22,7 +22,7 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from textual.pilot import Pilot
@@ -160,6 +160,22 @@ def _patch_picker(
     return picker
 
 
+class _FrozenWorker:
+    """A poll worker that never polls - cancellable, and above all *present*.
+
+    ``resume_detectors`` restarts only when nothing is running, so a stub that
+    left ``_detector_worker`` at None would turn every no-op resume into a
+    second rebuild the real app never performs, and the restart counts below
+    would be counting the stub.
+    """
+
+    def __init__(self) -> None:
+        self.is_cancelled = False
+
+    def cancel(self) -> None:
+        self.is_cancelled = True
+
+
 def _freeze_detector(monkeypatch: pytest.MonkeyPatch) -> list[None]:
     """Stop the poll THREAD and count how often one would have been started.
 
@@ -172,6 +188,7 @@ def _freeze_detector(monkeypatch: pytest.MonkeyPatch) -> list[None]:
 
     def fake_spawn(self: MainScreen, loop: object) -> None:
         starts.append(None)
+        self._detector_worker = cast(Any, _FrozenWorker())
 
     monkeypatch.setattr(MainScreen, "_spawn_detector_worker", fake_spawn)
     return starts
@@ -612,7 +629,10 @@ async def test_the_box_lands_in_the_tab_that_opened_the_picker(
 
 
 async def test_new_keeps_the_window_and_restarts_the_poller(
-    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    new_chat_click_lands: None,
 ) -> None:
     """/new is a session teardown, not a recalibration: the drawn window
     survives it and a fresh poller takes over watching it."""
@@ -672,16 +692,21 @@ async def test_editing_the_stillness_window_rebuilds_the_poller(
         assert ticks[-1] == 300
 
 
-async def test_calibrating_the_subagent_slot_spares_the_masters_poller(
+async def test_calibrating_the_subagent_slot_never_retargets_the_poller(
     tmp_path: Path,
     profile_root: Path,
     seed_templates: Callable[..., None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The master chat can be mid-generation while the user draws the sub-agent
-    window, and a restart would throw its streaks (and its trackers' previous
-    frames) away. Only what the poller actually hunts may rebuild it: the live
-    slot's window, and the busy/idle appearances."""
+    """Drawing the sub-agent's window must not re-aim the automation.
+
+    The poller keeps watching the MASTER's window - only the live slot's own
+    rectangle (and the busy/idle appearances, which are the service's) compose
+    it. What the sub-agent draw does cost is the suspension every fullscreen
+    overlay gets (§3.4e): the picker covers the whole virtual desktop, so the
+    master's window is behind it whichever tab opened it, and the frames its
+    trackers would carry across describe the overlay rather than the chat.
+    Sparing them there is how an overlay coming down armed the trigger."""
     picker = _patch_picker(monkeypatch)
     starts = _freeze_detector(monkeypatch)
     _record_notifications(monkeypatch)  # toasts would cover the buttons
@@ -704,15 +729,21 @@ async def test_calibrating_the_subagent_slot_spares_the_masters_poller(
             lambda: main._slots[AgentSlot.SUBAGENT].chat_region == SUB_REGION,
             "sub-agent region adopted",
         )
-        await pilot.pause(0.2)  # a restart would have landed by now
-        assert starts == [None]  # a window the poller does not watch: untouched
+        await pilot.pause(0.2)
+        # One restart, and it is the overlay suspension's - not a retarget: the
+        # automation and the poller are both still on the master's window.
+        assert starts == [None, None]
         assert main._live is AgentSlot.MASTER
+        assert main._chat_region == REGION
+        assert "MASTER" in _detection_title(app)
 
         # The busy appearance IS one of the things the poller hunts, and it is
         # the service's - so gaining one rebuilds whichever slot is live.
         _capture_busy(main, seed_templates)
         await _wait_for(
-            pilot, lambda: starts == [None, None], "poller rebuilt for the new busy appearance"
+            pilot,
+            lambda: starts == [None, None, None],
+            "poller rebuilt for the new busy appearance",
         )
         assert main._active_profile().has(TemplateKind.BUSY)
 
@@ -845,7 +876,7 @@ async def test_an_unticked_stale_detector_posts_no_stale_verdicts(
 
 
 async def test_no_window_means_no_poller_at_all(
-    tmp_path: Path, profile_root: Path
+    tmp_path: Path, profile_root: Path, new_chat_click_lands: None
 ) -> None:
     """Nothing to watch: /new on an undrawn app must not spin up a loop."""
     app = _make_app(tmp_path, profile_root)

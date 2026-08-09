@@ -38,10 +38,25 @@ class BusyState(Enum):
 
 @dataclass(frozen=True, slots=True)
 class BusyProbe:
-    """One poll's verdict; ``diff`` is the differing-pixel fraction (None on ERROR)."""
+    """One poll's verdict; ``diff`` is the differing-pixel fraction (None on ERROR).
+
+    ``state`` is de-bounced: it is a reading of a *sequence* of frames, and
+    during the settling window after a reset it reports the "still generating"
+    default with no frame behind it at all (see
+    :mod:`agentclip.screen.presence`). That default is the right bias for a
+    finish decision and a disastrous one for anything that treats a single
+    verdict as proof, so the raw per-frame fact travels alongside it:
+
+    ``generating_now`` is True only when THIS frame's own template search
+    directly says the model is generating - never on a grace-period default,
+    never on an ERROR. Callers that need "the model is visibly generating right
+    now" (arming the auto-copy, overriding the ready-to-send gate) read this;
+    callers deciding "has it finished?" read ``state`` and keep the debounce.
+    """
 
     state: BusyState
     diff: float | None
+    generating_now: bool = False
 
 
 def sample_step(total: int, budget: int, width: int) -> int:

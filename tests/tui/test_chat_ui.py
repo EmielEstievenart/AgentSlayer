@@ -15,7 +15,7 @@ from pathlib import Path
 
 from textual.pilot import Pilot
 from textual.screen import ModalScreen
-from textual.widgets import Button, Select
+from textual.widgets import Button, Select, Static
 
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
@@ -231,7 +231,9 @@ async def test_empty_task_does_not_start_a_session(tmp_path: Path) -> None:
         await _wait_for(pilot, lambda: main.session_active, "session armed")
 
 
-async def test_quit_while_awaiting_a_new_session_does_not_warn(tmp_path: Path) -> None:
+async def test_quit_while_awaiting_a_new_session_does_not_warn(
+    tmp_path: Path, new_chat_click_lands: None
+) -> None:
     """Waiting for a new session parks the session worker on a future, so the
     controller reports `busy` - but there is no turn to lose: quitting from the
     start screen must exit, not push the mid-turn warning."""
@@ -447,7 +449,9 @@ async def test_yolo_command_auto_approves_every_call(tmp_path: Path) -> None:
         await _wait_for(pilot, lambda: main.phase_name == "AWAITING_REPLY", "re-armed")
 
 
-async def test_new_command_clears_and_restarts(tmp_path: Path) -> None:
+async def test_new_command_clears_and_restarts(
+    tmp_path: Path, new_chat_click_lands: None
+) -> None:
     """Typing /new clears the chat window and re-arms the inline start flow -
     still no modal, and the service picker unlocks so the next session can pick
     a different one."""
@@ -474,6 +478,46 @@ async def test_new_command_clears_and_restarts(tmp_path: Path) -> None:
         await pilot.press("enter")
         await _wait_for(pilot, lambda: main.session_active, "second session armed")
         assert "Second task, please." in fake.written[-1]
+
+
+def _watch_segment_text(app: AgentClipApp) -> str:
+    main = app.main_screen
+    assert main is not None
+    return str(main.status_bar.query_one("#seg-watch", Static).render())
+
+
+async def test_status_bar_reads_idle_while_awaiting_the_first_task(tmp_path: Path) -> None:
+    """Regression: while parked on the inline start prompt (launch, and every
+    /new - tui.md section 3.3) the session WORKER is technically busy, but
+    there is no turn for the user to wait on. The bar must say idle, not
+    "working...", or the user reads it as a hang."""
+    app, _fake, _project = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        assert _watch_segment_text(app) == "○ idle"
+        assert main.status_bar.query_one("#seg-watch").has_class("st-dim")
+
+
+async def test_status_bar_reads_idle_again_after_new(
+    tmp_path: Path, new_chat_click_lands: None
+) -> None:
+    """Same regression, on the /new path: a session that started (and so
+    legitimately showed "working..." at some point) must not leave that label
+    behind once /new re-arms the inline start prompt."""
+    app, _fake, _project = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        await _send_command(app, pilot, "/new")
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "inline start flow re-armed")
+
+        assert _watch_segment_text(app) == "○ idle"
+        assert main.status_bar.query_one("#seg-watch").has_class("st-dim")
 
 
 async def test_slash_leading_answer_is_delivered_not_hijacked(tmp_path: Path) -> None:

@@ -1,6 +1,6 @@
 """Headless tests for the per-service detection fields (``total_context_chars``,
-``stable_seconds``, ``finish_signals``, ``hover_scan``) and the service-editor
-persistence path (``save_services``): TOML merge/validation, round-tripping
+``stable_seconds``, ``finish_signals``, ``hover_scan``, ``delivery``) and the
+service-editor persistence path (``save_services``): TOML merge/validation, round-tripping
 through load_config, minimal-diff writes, and the atomic-write mechanics. No
 Textual here - the pilot tests for the editor UI itself live in
 tests/tui/test_service_editor_ui.py."""
@@ -15,9 +15,11 @@ import pytest
 
 from agentclip.config import (
     BUILTIN_SERVICE_KEYS,
+    DEFAULT_DELIVERY,
     DEFAULT_FINISH_SIGNALS,
     DEFAULT_STABLE_SECONDS,
     DEFAULT_THEME,
+    DELIVERY_MODES,
     FINISH_SIGNALS,
     ServicePreset,
     default_global_config_path,
@@ -333,6 +335,7 @@ def test_a_config_written_before_the_detection_fields_still_loads(
     assert cfg.services["claude"].max_paste_chars == 30_000
     assert cfg.services["claude"].finish_signals == DEFAULT_FINISH_SIGNALS
     assert cfg.services["claude"].hover_scan is False
+    assert cfg.services["claude"].delivery == DEFAULT_DELIVERY
     assert not cfg.warnings
 
 
@@ -346,6 +349,87 @@ def test_load_config_new_service_gets_the_default_detection_fields(
     assert cfg.services["mycustom"].finish_signals == DEFAULT_FINISH_SIGNALS
     assert cfg.services["mycustom"].hover_scan is False
     assert not cfg.warnings
+
+
+# -- delivery (how an outbound payload goes into the chat box) -----------------
+
+
+def test_every_builtin_ships_the_single_paste_delivery() -> None:
+    """Chunked delivery is slower and can leave half a message in the box, so
+    nobody gets it without asking for it."""
+    assert DELIVERY_MODES == ("paste", "stream")
+    assert DEFAULT_DELIVERY == "paste"
+    for key, preset in default_services().items():
+        assert preset.delivery == "paste", key
+    assert ServicePreset("k", "K", 1_000, 5_000).delivery == "paste"
+
+
+def test_load_config_reads_a_delivery_override(project: Path, global_path: Path) -> None:
+    global_path.write_text('[services.claude]\ndelivery = "stream"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].delivery == "stream"
+    assert not cfg.warnings
+
+
+def test_load_config_rejects_an_unknown_delivery_mode(project: Path, global_path: Path) -> None:
+    """Silently reading as "paste" is the one outcome a user who wrote this key
+    would not notice - one big paste is exactly what they were escaping."""
+    global_path.write_text('[services.claude]\ndelivery = "typing"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].delivery == "paste"
+    assert any("delivery" in w and "paste, stream" in w for w in cfg.warnings)
+
+
+def test_load_config_rejects_a_non_string_delivery(project: Path, global_path: Path) -> None:
+    global_path.write_text("[services.claude]\ndelivery = true\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].delivery == "paste"
+    assert any("delivery" in w for w in cfg.warnings)
+
+
+def test_save_then_load_round_trips_delivery(project: Path, global_path: Path) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], delivery="stream")
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"]["delivery"] == "stream"
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings
+
+
+def test_save_services_writes_delivery_only_when_it_differs(
+    project: Path, global_path: Path
+) -> None:
+    """It arrived after the rest: a preset whose user never touched it must
+    still be written exactly as earlier versions wrote it."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], max_paste_chars=30_000)
+
+    save_services(services, global_path)
+    assert "delivery" not in tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
+
+    services["my-llm"] = ServicePreset("my-llm", "My LLM", 8_000, 300_000)
+    save_services(services, global_path)
+    assert "delivery" not in tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["my-llm"]
+
+
+def test_save_services_delivery_alone_is_enough_to_write_a_builtin(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["gemini"] = replace(services["gemini"], delivery="stream")
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+
+    assert set(raw["services"]) == {"gemini"}
+    assert raw["services"]["gemini"]["delivery"] == "stream"
 
 
 # -- save_services: round trip + minimal diff ----------------------------------

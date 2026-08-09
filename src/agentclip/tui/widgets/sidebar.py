@@ -9,12 +9,14 @@ unlocks again whenever the app is waiting for a new session's first message.
 
 The widget is dumb on purpose: it holds no session state, exposes ``service``
 (the chosen preset key), ``set_locked``, ``refresh_services``, ``show_slot``,
-``show_profile``, ``update_region``, ``update_template``, ``update_stale`` and
-the ``show_paste_flash``/``hide_paste_flash`` pair; MainScreen owns every bit of
-routing. The paste flash is the one animated thing here - a deliberately
-obnoxious blinking banner that nags the user to Ctrl+V the outbound payload
-into the chat; the blink timer is pure presentation, so the dumb widget may own
-it.
+``show_profile``, ``update_region``, ``update_template``, ``update_stale``,
+``show_loop``, ``show_armed_state`` and the ``show_paste_flash``/
+``hide_paste_flash`` pair; MainScreen owns every bit of routing. The paste
+flash is the one animated thing here - a deliberately obnoxious blinking banner
+that nags the user to Ctrl+V the outbound payload into the chat; the blink timer
+is pure presentation, so the dumb widget may own it. Its structural sibling the
+DISARMED banner (``show_armed_state``) deliberately does NOT blink: see
+``DISARMED_BANNER_TEXT``.
 
 The column is **live status plus the two things you steer with**, and nothing
 that has to be configured. Capturing what a service looks like, and ticking
@@ -23,6 +25,16 @@ are per-service settings that belong next to the service's other settings, and
 six capture buttons with six status lines had grown into two thirds of a 32-cell
 column. What is left is:
 
+* **STATE** - an eight-line rail at the very top of the column, one row per
+  ``tui.loop_state.LoopState``: the browser-automation loop (idle, auto/manual
+  insert, wait send, wait generate, auto/manual copy, interpreting), NOT the
+  engine's task phase. The active state gets a ``▶`` marker and bold/reverse
+  styling, ``LOOP_TRANSITIONS[active]``'s legal next moves read at normal
+  brightness, and everything else is dim. ``show_loop(state)`` repaints it, and
+  MainScreen drives it straight from the automation's own events (the paste
+  attempt, the send gate, the finish detectors, the auto-copy flow, the
+  clipboard capture) - so like DETECTION below it, this block describes the
+  LIVE window's loop, whichever tab the user happens to be looking at.
 * **SERVICE** - the picker, its caption and the read-only appearance summary.
   All three describe the **selected window tab's** service (tui.md 1.6): the
   two browser windows are pointed at a service each, and the tab bar is what
@@ -32,19 +44,24 @@ column. What is left is:
   under it. ``show_slot`` repaints the block from one slot in one go. Unlike the
   service picker it is never locked: drawing the sub-agent window mid-session is
   the normal way to reach delegation.
-* **DETECTION** - four read-only lines the running automation writes into: the
+* **DETECTION** - five read-only lines the running automation writes into: the
+  send gate holding finish detection back until the user presses Enter, the
   busy and idle probes (``update_template``), the staleness verdict
   (``update_stale``), and what the auto-copy flow's last click attempt did.
-  Only these three ``TemplateKind`` values have anything to say at runtime; the
+  Only these four ``TemplateKind`` values have anything to say at runtime; the
   two chat boxes and the new-chat button are found on demand and report through
-  toasts, so they have no line here. Unlike everything above it this block
+  toasts, so they have no line here. These are the WORDS; the pictures behind
+  them - the actual matched pixels, one crop per kind - are the
+  ``ElementsPanel`` column next door (F7, tui.md 1.7), which is written by the
+  same machinery under the same rule.
+  Unlike everything above it this block
   describes the **live** window rather than the selected tab - it is what the
   detectors are doing right now, and mid-delegation that is the sub-agent's
   window while the user reads the master's - so its heading names that window
   (``show_detection_window``) and *only* the detector machinery writes its
   lines. Nothing driven by a tab click may touch them.
 * One read-only **appearance summary** under the service picker
-  (``show_profile``) - "appearance: 4/6 captured" - so "is this service usable
+  (``show_profile``) - "appearance: 4/7 captured" - so "is this service usable
   at all?" is answerable at a glance without opening the editor. It follows the
   picker, so switching tabs can change what it says: two windows on two
   services have two sets of captures.
@@ -69,10 +86,63 @@ from agentclip.config import Config
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, SlotCalibration, can_delegate, missing
+from agentclip.tui.loop_state import LOOP_TRANSITIONS, LoopState
 
-_HINT = "F3 hides this column · F2 settings · F1 help"
+_HINT = "F3 hides this column · F7 elements · F5 armed · F2 settings · F1 help"
+
+# The DISARMED banner, the paste flash's quiet sibling: same shape, same place
+# in the tree, opposite temperament. The flash blinks because it is asking for a
+# keystroke *now* and the user is looking at their browser; this one is a
+# standing fact about the whole app and has to survive being looked at for an
+# hour, so it never animates. It says what stopped, because "disarmed" alone
+# would leave the user wondering whether detection died too (it did not).
+DISARMED_BANNER_TEXT = "⛔ DISARMED\nwatching only - F5 arms"
+
+# The STATE rail: one row per LoopState, painted at the very top of the column
+# so "where in the paste-send-generate-copy loop are we" needs no click
+# anywhere. In loop order, which is why it is a tuple here rather than
+# ``list(LoopState)``: the rail is a picture of the round trip, not of the
+# enum's declaration.
+STATE_TITLE = "STATE"
+_LOOP_ORDER: tuple[LoopState, ...] = (
+    LoopState.IDLE,
+    LoopState.AUTO_INSERT,
+    LoopState.MANUAL_INSERT,
+    LoopState.WAIT_SEND,
+    LoopState.WAIT_GENERATE,
+    LoopState.AUTO_COPY,
+    LoopState.MANUAL_COPY,
+    LoopState.INTERPRETING,
+)
+_LOOP_LABEL: dict[LoopState, str] = {
+    LoopState.IDLE: "idle",
+    LoopState.AUTO_INSERT: "auto insert",
+    LoopState.MANUAL_INSERT: "manual insert",
+    LoopState.WAIT_SEND: "wait send",
+    LoopState.WAIT_GENERATE: "wait generate",
+    LoopState.AUTO_COPY: "auto copy",
+    LoopState.MANUAL_COPY: "manual copy",
+    LoopState.INTERPRETING: "interpreting",
+}
+
+
+def state_row_id(state: LoopState) -> str:
+    return f"side-state-{state.name.lower()}"
+
+
 PASTE_FLASH_TEXT = ">>> PRESS CTRL+V <<<\nin the chat, then send"
 ENTER_FLASH_TEXT = ">>> PRESS ENTER <<<\nreply pasted - just send it"
+# The third thing the same banner can say, and the only one that is not asking
+# for a keystroke: a streamed delivery is pasting the payload in a chunk at a
+# time, and the count is the whole point - a big message takes seconds, and
+# without it the user is watching a chat box fill from nowhere.
+STREAM_FLASH_TEXT = ">>> STREAMING <<<\nchunk {index}/{total} - don't type"
+
+
+def stream_flash_text(index: int, total: int) -> str:
+    return STREAM_FLASH_TEXT.format(index=index, total=total)
+
+
 _FLASH_BLINK_S = 0.4
 _REGION_UNSET = "not set - alt-tab to the chat yourself"
 # The one read-only line about what the selected service LOOKS like. The
@@ -103,11 +173,12 @@ STALE_UNTICKED = "stillness not watched for this service - F2"
 # checklist named, since that is the only place it can be turned back on.
 STALE_OFF = "finish detection off - F2 to configure"
 
-# The DETECTION block: three of the six appearances have something to say while
+# The DETECTION block: four of the seven appearances have something to say while
 # the automation runs, and each gets one line. The lines are otherwise
 # indistinguishable verdicts stacked on top of each other, so the widget names
 # each one as it paints it.
 DETECTOR_LABEL = {
+    TemplateKind.SEND_READY: "send",
     TemplateKind.BUSY: "busy",
     TemplateKind.IDLE: "idle",
     TemplateKind.COPY: "copy",
@@ -121,6 +192,23 @@ COPY_RESTING = "no click yet"
 # against, so the detector is silently skipped. "no verdict yet" for the rest of
 # the run is indistinguishable from a detector that simply never finds anything.
 PROBE_UNCAPTURED = "ticked but not captured - F2"
+
+# The send gate's line (tui.md 3.4b). It is not a finish detector: it reports
+# whether the ready-to-send button is holding finish detection back between
+# AgentClip's paste and the user's Enter. Seven states, because "nothing is
+# happening" has to be told apart from "this service cannot do it at all" - and
+# because the three ways the gate can let go WITHOUT seeing the button vanish
+# are three different things to tell the user about their capture: the model is
+# visibly generating (so the send is proven by better evidence), the button
+# never showed at all, or it showed and then never stopped showing.
+SEND_READY_RESTING = "no gate - not captured"
+SEND_READY_ARMED = "gate armed - holds the next paste"
+SEND_READY_HOLDING = "watching for the send button"
+SEND_READY_SEEN = "on screen - press Enter to send"
+SEND_READY_RELEASED = "gone - sent, finish detection running"
+SEND_READY_OVERRIDDEN = "generating - sent, finish detection running"
+SEND_READY_TIMEOUT = "never appeared - finish detection running"
+SEND_READY_STUCK = "never went away - finish detection running"
 
 # The DETECTION block's heading, which names the window every line under it is
 # about. That is the LIVE window - the one the automation drives - and not the
@@ -202,6 +290,16 @@ class Sidebar(Vertical):
            up and down the column as the poller talks. */
         height: 2;
     }
+    Sidebar .side-state-row {
+        color: $text-muted;
+    }
+    Sidebar .side-state-row.side-state-legal {
+        color: $text;
+    }
+    Sidebar .side-state-row.side-state-active {
+        color: $text;
+        text-style: bold reverse;
+    }
     """
 
     class ServiceChanged(Message):
@@ -228,7 +326,19 @@ class Sidebar(Vertical):
         self._reported_service = self._default_service()
 
     def compose(self) -> ComposeResult:
+        yield Static(Text(STATE_TITLE), classes="side-title")
+        for state in _LOOP_ORDER:
+            yield Static(
+                Text(f"  {_LOOP_LABEL[state]}"),
+                id=state_row_id(state),
+                classes="side-state-row",
+            )
         yield Static(Text(PASTE_FLASH_TEXT), id="side-paste-flash")
+        # Directly under the STATE rail and above everything else: the rail is
+        # the first thing read on this column, and "the loop you are reading is
+        # not allowed to move on its own" belongs against it rather than at the
+        # bottom of a column that scrolls.
+        yield Static(Text(DISARMED_BANNER_TEXT), id="side-armed-banner")
         yield Static(Text("PROJECT"), classes="side-title")
         yield Static(Text(_short_root(self._project_root)), id="side-root")
         yield Static(Text("SERVICE"), classes="side-title")
@@ -247,6 +357,11 @@ class Sidebar(Vertical):
         yield Static(Text(SLOT_NOTE_MASTER), id="side-slot-note", classes="side-status")
         yield Static(
             Text(detection_title("")), id="side-detection-title", classes="side-title"
+        )
+        yield Static(
+            Text(self._probe_line(TemplateKind.SEND_READY, SEND_READY_RESTING)),
+            id=template_status_id(TemplateKind.SEND_READY),
+            classes="side-status side-probe",
         )
         yield Static(
             Text(self._probe_line(TemplateKind.BUSY, PROBE_RESTING)),
@@ -270,6 +385,25 @@ class Sidebar(Vertical):
     @staticmethod
     def _probe_line(kind: TemplateKind, text: str) -> str:
         return f"{DETECTOR_LABEL[kind]} · {text}"
+
+    # -- the STATE rail ---------------------------------------------------------
+
+    def show_loop(self, active: LoopState) -> None:
+        """Repaint the STATE rail from the automation loop's current state.
+
+        MainScreen owns the state and calls this as the loop's own events land
+        (the paste attempt, the send gate, the detectors, the copy flow, the
+        clipboard capture). The legal-next set comes straight out of
+        ``LOOP_TRANSITIONS`` - forward motion only; resets to IDLE are not
+        drawn as legal moves.
+        """
+        legal_next = LOOP_TRANSITIONS.get(active, frozenset())
+        for state in _LOOP_ORDER:
+            row = self.query_one(f"#{state_row_id(state)}", Static)
+            marker = "▶ " if state is active else "  "
+            row.update(Text(f"{marker}{_LOOP_LABEL[state]}"))
+            row.set_class(state is active, "side-state-active")
+            row.set_class(state is not active and state in legal_next, "side-state-legal")
 
     def _preset_caption(self, key: str | None = None) -> str:
         preset = self._config.services.get(key or self._default_service())
@@ -424,8 +558,9 @@ class Sidebar(Vertical):
         """Repaint one detector's live status line, named as it goes in.
 
         Display only, and deliberately text rather than data: the busy/idle
-        detectors report every poll here and the auto-copy flow reports every
-        click attempt, and only MainScreen knows how to word them. Kinds with no
+        detectors report every poll here, the auto-copy flow reports every
+        click attempt and the send gate reports which phase it is in, and only
+        MainScreen knows how to word them. Kinds with no
         runtime status (the two chat boxes, the new-chat button) have no line
         and are silently ignored - they are found on demand and report by toast.
         """
@@ -472,6 +607,18 @@ class Sidebar(Vertical):
 
     def _blink_paste_flash(self) -> None:
         self.query_one("#side-paste-flash", Static).toggle_class("flash-alt")
+
+    # -- the DISARMED banner ----------------------------------------------------
+
+    def show_armed_state(self, armed: bool) -> None:
+        """Show or hide the standing DISARMED banner (MainScreen owns the flag).
+
+        One call for both directions rather than a show/hide pair like the
+        flash's: this banner mirrors a boolean that is always one thing or the
+        other, and the caller repaints it from that boolean on every toggle -
+        there is no "the moment passed" half to hide separately.
+        """
+        self.query_one("#side-armed-banner", Static).display = not armed
 
     def refresh_services(self, config: Config | None = None) -> None:
         """Rebuild the options after the services table changed (service editor hook).

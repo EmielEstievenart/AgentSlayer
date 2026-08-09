@@ -112,10 +112,20 @@ async def _fire(main: MainScreen, pilot: Pilot) -> None:
     ``_active_detectors`` says which detectors the poller would be posting -
     verdicts from any other are dropped as leftovers of a cancelled loop - so
     declaring the busy tracker live is what makes these injected probes count.
+    The session gate is opened the way ``copy_outbound`` opens it, because a
+    verdict may only reach for the mouse while a reply is outstanding
+    (test_finish_signal_ui owns that rule).
     """
     main._active_detectors = ("busy",)
+    main._open_reply_gate()
+    # The MATCH is a frame that really found the busy appearance - the third
+    # field - because only a sighting arms the trigger (test_finish_signal_ui).
     for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
-        main.post_message(BusyProbed(BusyProbe(state, 0.2), main._detector_generation))
+        main.post_message(
+            BusyProbed(
+                BusyProbe(state, 0.2, state is BusyState.MATCH), main._detector_generation
+            )
+        )
         await pilot.pause()
 
 
@@ -192,12 +202,14 @@ async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
 
         looks = {"n": 0}
 
-        def fake_find(template: Template, scene: RegionImage, **kw: object) -> RegionMatch | None:
+        def fake_find(
+            template: Template, scene: RegionImage, **kw: object
+        ) -> tuple[RegionMatch | None, float | None]:
             # Look 1 is the cheap static pass; then one look per hover stop.
             looks["n"] += 1
-            return match if looks["n"] > 3 else None
+            return (match, None) if looks["n"] > 3 else (None, 0.21)
 
-        monkeypatch.setattr(main_mod, "find_lowest_in_region", fake_find)
+        monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", fake_find)
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "clicked (diff 0.04)" in _copy_label(app), "copy clicked")
@@ -225,8 +237,8 @@ async def test_a_static_hit_never_moves_the_cursor(
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
         monkeypatch.setattr(
             main_mod,
-            "find_lowest_in_region",
-            lambda template, scene, **kw: RegionMatch(x=7, y=7, diff=0.01),
+            "find_lowest_with_best_miss",
+            lambda template, scene, **kw: (RegionMatch(x=7, y=7, diff=0.01), None),
         )
 
         await _fire(main, pilot)
@@ -247,7 +259,9 @@ async def test_an_exhausted_scan_reports_not_found_and_never_clicks_the_icon(
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
-        monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda template, scene, **kw: None)
+        monkeypatch.setattr(
+            main_mod, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, 0.21)
+        )
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
@@ -269,7 +283,9 @@ async def test_a_refused_cursor_move_ends_the_scan_immediately(
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         _clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
-        monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda template, scene, **kw: None)
+        monkeypatch.setattr(
+            main_mod, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, 0.21)
+        )
         monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: bool(moves.append((x, y))))
 
         await _fire(main, pilot)
@@ -290,7 +306,9 @@ async def test_hover_scan_is_opt_in_per_service(
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
-        monkeypatch.setattr(main_mod, "find_lowest_in_region", lambda template, scene, **kw: None)
+        monkeypatch.setattr(
+            main_mod, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, 0.21)
+        )
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
@@ -319,14 +337,16 @@ async def test_the_scan_runs_off_the_ui_thread(
 
         looks = {"n": 0}
 
-        def fake_find(template: Template, scene: RegionImage, **kw: object) -> RegionMatch | None:
+        def fake_find(
+            template: Template, scene: RegionImage, **kw: object
+        ) -> tuple[RegionMatch | None, float | None]:
             looks["n"] += 1
             if looks["n"] == 1:
-                return None  # the static pass, still on the flow's worker
+                return None, 0.21  # the static pass, still on the flow's worker
             scan_threads.append(threading.get_ident())
-            return RegionMatch(x=12, y=12, diff=0.02)
+            return RegionMatch(x=12, y=12, diff=0.02), None
 
-        monkeypatch.setattr(main_mod, "find_lowest_in_region", fake_find)
+        monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", fake_find)
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "clicked (diff 0.02)" in _copy_label(app), "copy clicked")

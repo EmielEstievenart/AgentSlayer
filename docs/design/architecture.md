@@ -90,15 +90,23 @@ src/agentclip/
 │
 └── tui/
     ├── app.py             # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
-    ├── messages.py        # ClipboardCaptured, WatcherStateChanged, ... (Textual Message subclasses)
+    ├── messages.py        # ClipboardCaptured + the generation-stamped BusyProbed/IdleProbed/StaleProbed
     ├── screens/
-    │   ├── main.py        # transcript + pending/diff panel + status bar + task input
-    │   ├── approve.py     # ApproveScreen(ModalScreen[Decision]) with y/n/a bindings
-    │   └── settings.py    # M3: config editor screen
+    │   ├── main.py        # the ChatView adapter: tabs, transcripts, sidebar routing, detectors
+    │   ├── service_editor.py # F2: the whole per-service PROFILE editor (tui.md §1.4)
+    │   ├── settings.py    # F4: appearance/theme picker
+    │   ├── help.py        # F1 cheatsheet; its command section renders from app/commands.py
+    │   ├── summary.py     # end-of-session stats + what next (tui.md §1.5)
+    │   ├── confirm.py     # ConfirmScreen(ModalScreen[bool]): quit mid-turn, undo, forget captures
+    │   └── text_entry.py  # TextEntryScreen(ModalScreen[str | None]): one-line prompts
     └── widgets/
         ├── transcript.py  # VerticalScroll of per-message widgets, .anchor() pinning
         ├── window_tabs.py # the two-row tab bar whose tabs ARE browser windows (tui.md §1.6)
-        ├── diffview.py    # Static wrapping rich.syntax.Syntax(diff_text, "diff")
+        ├── composer.py    # the docked chat box: Enter sends, and it drives the popup below
+        ├── command_popup.py # the slash-command list above the composer (tui.md §3.3a)
+        ├── action_panel.py  # the approval gate: title, diff/command body, buttons, reject input
+        ├── running_bar.py   # the "Working... ctrl+x cancels" line while tool calls run
+        ├── sidebar.py     # the settings column: service, chat window, DETECTION (tui.md §1.3)
         └── statusbar.py   # docked Horizontal: watcher state, budget, service, phase
 ```
 
@@ -359,6 +367,27 @@ keep_sessions = 5              # prune older session dirs (incl. their backups) 
 #   reply-copy strips markdown (Copilot, Gemini).
 # attachment_note: bootstrap warns the model that user messages may arrive as an
 #   attached pasted-text file it must read fully. Cheap; on everywhere.
+#
+# The three detection knobs below are per service because they describe that
+# chat's UI, not AgentClip. All three are edited in the service editor (F2,
+# tui.md §1.4) and written back here only when they differ from the built-in, so
+# a file whose user never touched them stays byte-for-byte what it was.
+#
+# stable_seconds: how long the drawn chat region must sit UNCHANGED before the
+#   stale finish detector calls the response done (0.5–60, default 2.0). Per
+#   service because streaming cadence differs - a chat that pauses mid-answer
+#   needs a longer stillness window, or auto-copy fires into the gap.
+# finish_signals: which finish detectors this service's poller may run, from
+#   ["busy", "idle", "stale"] (default ["stale"]). A checklist, not a mode: they
+#   reinforce each other, and the trigger fires only when EVERY one that is
+#   running agrees. "busy"/"idle" additionally need that appearance captured -
+#   ticked without one, the detector is skipped and the sidebar says so. An
+#   EMPTY list is legal and means "never detect a finish here"; the user drives
+#   the copy button themselves. Unknown entries are dropped with a warning.
+# hover_scan: may the auto-copy flow glide the REAL cursor up the chat region
+#   hunting a copy icon that only renders under the pointer (default false)?
+#   Opt-in because it is a visible, slow takeover of the user's mouse, and only
+#   some chats (Claude's) need it at all.
 
 [services.chatgpt]
 label = "ChatGPT web (inline-safe)"
@@ -366,6 +395,9 @@ max_paste_chars = 4000          # stays under ~5k paste-to-attachment threshold
 total_context_chars = 500000    # ~128k-token context
 wrap_blocks_in_fence = false
 attachment_note = true
+stable_seconds = 2.0            # stale detector: this much stillness = finished
+finish_signals = ["stale"]      # busy | idle | stale; [] = no finish detection
+hover_scan = false              # walk the real cursor to reveal the copy icon?
 
 [services.chatgpt-attach]
 label = "ChatGPT web (attachment OK)"

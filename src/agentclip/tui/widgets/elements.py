@@ -193,6 +193,9 @@ class ElementsPanel(Vertical):
         # composed half-block widgets must keep painting half blocks into them.
         self._graphics = terminal_graphics()
         self._rows = crop_rows(self._graphics.cell_height)
+        # What each row is currently showing, so an unchanged crop can be left
+        # alone - see _paint_crop.
+        self._painted: dict[TemplateKind, RegionImage | None] = {}
 
     def compose(self) -> ComposeResult:
         yield Static(Text(elements_title("")), id="elements-title", classes="side-title")
@@ -229,7 +232,18 @@ class ElementsPanel(Vertical):
         return Static(Text(""), id=element_crop_id(kind), classes="el-crop")
 
     def _paint_crop(self, kind: TemplateKind, image: RegionImage | None) -> None:
-        """Draw (or blank) one row's picture, in whichever mode this panel composed."""
+        """Draw (or blank) one row's picture, in whichever mode this panel composed.
+
+        A row showing the same pixels it was already showing is LEFT ALONE. The
+        poller re-cuts the same still icon out of frame after frame, so most
+        ticks would otherwise re-encode a picture nobody can tell from the one
+        already on screen - and the sixel widget rebuilds its child to do it,
+        which on a real terminal is a clear and a redraw twice a second. The
+        comparison is a bytes equality over an icon, i.e. free.
+        """
+        if kind in self._painted and self._painted[kind] == image:
+            return
+        self._painted[kind] = image
         widget = self.query_one(f"#{element_crop_id(kind)}", Widget)
         if isinstance(widget, Static):
             widget.update(Text("") if image is None else half_block_text(image))

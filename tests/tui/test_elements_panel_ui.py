@@ -638,6 +638,42 @@ async def test_a_posted_crop_reaches_the_terminal_as_sixel_data(
         assert "1.2%" in _label(app, TemplateKind.BUSY)
 
 
+async def test_an_unchanged_crop_is_not_redrawn(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A still icon cut out of frame after frame is the normal case, and the
+    sixel widget rebuilds its child every time it is handed an image - which on
+    a real terminal is a clear and a redraw twice a second, of a picture nobody
+    could tell from the one already there. Same pixels, same child."""
+    set_terminal_graphics(SIXEL_TERMINAL)
+    _patch_picker(monkeypatch)
+    _freeze_detector(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        await _polling(app, pilot)
+        assert app.main_screen is not None
+        widget = app.main_screen.query_one(f"#{element_crop_id(TemplateKind.BUSY)}")
+
+        _post(app, {TemplateKind.BUSY: ElementCrop(ICON, 0.012)})
+        await pilot.pause()
+        await pilot.pause()
+        drawn = widget.children[0]
+
+        # A later tick with the same pixels - and a different diff, which is the
+        # label's business, not the picture's.
+        _post(app, {TemplateKind.BUSY: ElementCrop(icon(), 0.031)})
+        await pilot.pause()
+        await pilot.pause()
+        assert widget.children[0] is drawn
+        assert "3.1%" in _label(app, TemplateKind.BUSY)
+
+        # Different pixels do land.
+        _post(app, {TemplateKind.BUSY: ElementCrop(icon(20, 20), 0.012)})
+        await pilot.pause()
+        await pilot.pause()
+        assert widget.children[0] is not drawn
+
+
 async def test_a_missing_element_stops_drawing_sixels(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

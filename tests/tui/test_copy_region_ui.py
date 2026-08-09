@@ -137,7 +137,7 @@ async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
 
 async def _post_probe(main: MainScreen, pilot: Pilot, state: BusyState, diff: float | None) -> None:
     """Inject one busy-poller verdict - the documented path (tui/messages.py)."""
-    main.post_message(BusyProbed(BusyProbe(state, diff)))
+    main.post_message(BusyProbed(BusyProbe(state, diff), main._detector_generation))
     await pilot.pause()
 
 

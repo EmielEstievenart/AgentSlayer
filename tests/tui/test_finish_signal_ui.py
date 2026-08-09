@@ -40,6 +40,8 @@ from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.profile import TemplateKind
+from agentclip.screen.region import ScreenRegion
+from agentclip.screen.slot import AgentSlot
 from agentclip.screen.stale import StaleProbe, StaleState
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.messages import BusyProbed, IdleProbed, StaleProbed
@@ -121,19 +123,19 @@ def _detectors(main: MainScreen, *names: str) -> None:
 
 
 async def _busy(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
-    main.post_message(BusyProbed(BusyProbe(state, 0.2)))
+    main.post_message(BusyProbed(BusyProbe(state, 0.2), main._detector_generation))
     await pilot.pause()
 
 
 async def _idle(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
-    main.post_message(IdleProbed(BusyProbe(state, 0.2)))
+    main.post_message(IdleProbed(BusyProbe(state, 0.2), main._detector_generation))
     await pilot.pause()
 
 
 async def _stale(
     main: MainScreen, pilot: Pilot, state: StaleState, ticks: int = 0, diff: float = 0.001
 ) -> None:
-    main.post_message(StaleProbed(StaleProbe(state, diff, ticks)))
+    main.post_message(StaleProbed(StaleProbe(state, diff, ticks), main._detector_generation))
     await pilot.pause()
 
 
@@ -623,6 +625,56 @@ async def test_a_ghost_verdict_from_a_dropped_detector_cannot_wedge_the_trigger(
         await _stale(main, pilot, StaleState.STALE, ticks=4)
         await _stale(main, pilot, StaleState.STALE, ticks=5)
         await _wait_for(pilot, lambda: len(calls) == 1, "flow fires on the stale detector alone")
+
+
+async def test_a_late_probe_from_the_previous_live_window_arms_nothing(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The cross-window ghost, which the detector NAME alone cannot catch.
+
+    Both windows run a stale detector, so a verdict taken from the sub-agent's
+    window passed a name-only filter unchanged after ``end_browser_chat`` had
+    already handed the automation back to the master. Proven scenario: /abort
+    during a generating sub-run; the cancelled loop's in-flight "still
+    generating" arrived a moment later, armed the trigger, and two quiet ticks
+    fired the copy flow at the MASTER's chat - clicking a copy button under a
+    conversation nobody had sent anything to. Every probe carries the generation
+    of the run that produced it instead.
+    """
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot, seed_templates)
+        # No real poll threads: these are injected verdicts, and a live loop
+        # would race the sequence with readings of its own.
+        monkeypatch.setattr(MainScreen, "_spawn_detector_worker", lambda self, loop: None)
+        main._slots[AgentSlot.MASTER].chat_region = ScreenRegion(0, 0, 400, 300)
+        main._slots[AgentSlot.SUBAGENT].chat_region = ScreenRegion(900, 0, 400, 300)
+
+        main._live = AgentSlot.SUBAGENT  # as start_browser_chat leaves it
+        main._start_detector_worker()
+        sub_generation = main._detector_generation
+        assert main._active_detectors == ("stale",)
+
+        main.end_browser_chat()  # /abort: the master gets the automation back
+        assert main._live is AgentSlot.MASTER
+        assert main._detector_generation != sub_generation
+
+        # ...and now the sub window's last tick lands: a sustained large delta,
+        # which on the live window would arm the trigger outright.
+        for _ in range(main_mod.SEND_ARM_TICKS + 1):
+            main.post_message(
+                StaleProbed(StaleProbe(StaleState.CHANGING, 0.5, 0), sub_generation)
+            )
+            await pilot.pause()
+        assert main._copy_armed is False
+        assert main._stale_arm_streak == 0
+
+        # The master's own chat is sitting still, as it has been all along.
+        for ticks in (4, 5):
+            await _stale(main, pilot, StaleState.STALE, ticks=ticks)
+        await pilot.pause(0.1)
+        assert calls == []
 
 
 # -- no template ------------------------------------------------------------------

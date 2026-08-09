@@ -15,7 +15,10 @@ lowercase-hyphen key plus the other fields, then press "Add service" (enabled
 only once the candidate validates) - keys are one-time (immutable after
 creation), so committing them by an explicit action rather than continuously
 avoids collisions/half-typed keys. Until that press there is no key to file
-anything under, so the capture buttons and the checkboxes are disabled.
+anything under, so the capture buttons and the checkboxes are disabled - but the
+boxes still *show* what the press will create (``_NEW_PRESET_DEFAULTS``), because
+a blank checklist over a preset that is born with "screen stops changing" ticked
+is a lie about the only setting on that form the user cannot see anywhere else.
 
 Captures are the exception to "applies on close": pressing "Capture <thing>..."
 runs the same full-screen draw-a-box overlay the chat region uses and writes the
@@ -82,6 +85,15 @@ from agentclip.screen.profile_store import (
 from agentclip.tui.screens.confirm import ConfirmScreen
 
 _NEW_SENTINEL = "+add-new+"  # not a legal slug (contains '+'), so it can't collide with a key
+# What "+ Add new" is going to create for every field the form does not ask
+# about. The detection checkboxes load from THIS rather than from literals (and
+# _revalidate builds its candidate from the same dataclass defaults), so the
+# form and the preset it produces cannot disagree - an all-unticked form that
+# quietly created a stale-ticked preset was the drift this closes. The three
+# required fields are placeholders; only the defaults below them are read.
+_NEW_PRESET_DEFAULTS = ServicePreset(
+    key="", label="", max_paste_chars=1, total_context_chars=1
+)
 _SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 # The appearance line for a service with nothing captured yet.
 TEMPLATES_NONE = "appearance: nothing captured yet"
@@ -333,12 +345,17 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             total_input.value = str(preset.total_context_chars)
             stable_input.value = str(preset.stable_seconds)
         self._pending_new = None
+        # For "+ Add new", the boxes show what pressing "Add service" is
+        # actually going to create - i.e. the ServicePreset dataclass defaults,
+        # stale ticked and hover off - rather than an all-unticked form that
+        # reads as "no finish detection" and then silently produces the
+        # opposite. They stay disabled until the key exists.
+        shown = preset if preset is not None else _NEW_PRESET_DEFAULTS
+        signals, hover = shown.finish_signals, shown.hover_scan
         for signal in FINISH_SIGNALS:
             box = self.query_one(f"#{signal_checkbox_id(signal)}", Checkbox)
-            box.value = preset is not None and signal in preset.finish_signals
-        self.query_one("#svc-hover-scan", Checkbox).value = (
-            preset is not None and preset.hover_scan
-        )
+            box.value = signal in signals
+        self.query_one("#svc-hover-scan", Checkbox).value = hover
         self._show_appearance(self._profile(key))
         self._revalidate()
 

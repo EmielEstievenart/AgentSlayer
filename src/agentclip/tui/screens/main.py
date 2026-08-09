@@ -180,10 +180,15 @@ from agentclip.tui.widgets.command_popup import CommandPopup
 from agentclip.tui.widgets.composer import ChatComposer
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
+    COPY_RESTING,
     ENTER_FLASH_TEXT,
     PASTE_FLASH_TEXT,
+    PROBE_RESTING,
+    PROBE_UNCAPTURED,
     STALE_CALIBRATED,
     STALE_OFF,
+    STALE_UNSET,
+    STALE_UNTICKED,
     Sidebar,
     slot_note,
 )
@@ -536,6 +541,14 @@ class MainScreen(Screen[None]):
         self._delegation_ready = False  # last-seen SUBAGENT can_delegate, for the one-shot toast
         self._region_click_warned = False
         self._detector_worker: Worker[None] | None = None
+        # Which poller RUN a verdict belongs to. Bumped by every
+        # ``_start_detector_worker``, stamped into every probe message the loop
+        # posts, and checked on the way back in (``_ghost``). Cancelling a thread
+        # worker only raises a flag - the loop it interrupts still finishes its
+        # tick and posts - so without this a probe taken from the window the
+        # automation was driving BEFORE a delegation started or ended arrives
+        # after the retarget and arms the auto-copy against the new window.
+        self._detector_generation = 0
         # Latest verdict per detector: True = finished, False = generating,
         # None = capture error. ``_seen`` is what makes a detector count toward
         # the combined verdict, so a detector that has never reported cannot
@@ -766,6 +779,11 @@ class MainScreen(Screen[None]):
         self._sync_sidebar()
         # Appearances captured on a previous run are already usable: show them.
         self._paint_profile()
+        # Nothing is drawn yet, so this starts no worker - but it is the only
+        # writer of the DETECTION block, and the block has to name the window it
+        # is about (the master's) from the first frame rather than after the
+        # first calibration.
+        self._start_detector_worker()
         self._remember_own_window()  # the user just launched us - focus is our terminal
         self._controller.start()
 
@@ -1022,9 +1040,17 @@ class MainScreen(Screen[None]):
 
         It pointedly does NOT touch ``_live``. Looking at a window is not
         driving it: a click here while a sub-agent is mid-run must not send the
-        next paste into the master's chat.
+        next paste into the master's chat. Nor does it touch the DETECTION
+        block, which reports on the live window and is the detectors' to write.
+
+        Selecting the window that is already selected is a no-op. The tab bar
+        re-posts ``WindowSelected`` for a click on the current tab, and every
+        widget below would otherwise be rebuilt from state that did not change -
+        which is only ever a chance to lose something (a live verdict, a
+        readiness note) for no gain: ``_selected_window`` and the displayed
+        panel move together, so there is never a stale view to correct.
         """
-        if window not in _WINDOW_SLOTS:
+        if window not in _WINDOW_SLOTS or window == self._selected_window:
             return
         self._selected_window = window
         self._calibrating = self._slot_of(window)
@@ -1541,10 +1567,10 @@ class MainScreen(Screen[None]):
         """
         return slot_note(self.calibrating, self._active_profile())
 
-    def _slot_prompt(self, prompt: str) -> str:
+    def _slot_prompt(self, prompt: str, slot: AgentSlot) -> str:
         """Both windows share the picker code, so the sub-agent's prompts have
         to say out loud which window the user is being asked to draw on."""
-        if self._calibrating is AgentSlot.SUBAGENT:
+        if slot is AgentSlot.SUBAGENT:
             return f"SUB-AGENT window · {prompt}"
         return prompt
 
@@ -1571,6 +1597,18 @@ class MainScreen(Screen[None]):
             sidebar = self.sidebar
             sidebar.display = not sidebar.display
 
+    @property
+    def picker_open(self) -> bool:
+        """Is a fullscreen draw-a-box overlay up right now?
+
+        Read by the app before it opens the service editor: the editor has
+        capture buttons of its own, and its guard and this one are separate
+        flags on separate screens - satisfied at the same time, they would let
+        two overlays stack, which no amount of worker cancellation can undo
+        (the overlay is a child process).
+        """
+        return self._picker_open
+
     def _refuse_second_picker(self) -> bool:
         """True (and toast) when an overlay is already up. Worker cancellation
         cannot kill the blocking child overlay process, so the only safe
@@ -1586,15 +1624,30 @@ class MainScreen(Screen[None]):
         event.stop()
         if self._refuse_second_picker():
             return
-        self.run_worker(self._pick_chat_region(), group="regionpick", exclusive=True)
+        # The target slot is decided HERE, when the overlay opens, and travels
+        # with the worker - see _pick_chat_region.
+        self.run_worker(
+            self._pick_chat_region(self._calibrating), group="regionpick", exclusive=True
+        )
 
-    async def _pick_chat_region(self) -> None:
+    async def _pick_chat_region(self, slot: AgentSlot) -> None:
         """Run the draw-a-box overlay (a child process - tkinter cannot live in
-        this one) and adopt the drawn chatbot window for the rest of the session."""
+        this one) and adopt the drawn chatbot window as ``slot``'s.
+
+        The slot is a PARAMETER rather than a read of ``_calibrating`` on the
+        way out, because the overlay blocks for as long as the user takes to
+        drag a box and ``_calibrating`` moves on its own in the meantime: the
+        controller focusing a delegated run's transcript (``focus_session_view``
+        -> ``_select_window``) selects the sub-agent tab. Re-reading it after the
+        await filed the box the user drew around the MASTER's window under the
+        SUBAGENT slot, and restarted the poller against a rectangle nothing is
+        happening in. What was selected when the picker opened is what the user
+        was answering.
+        """
         try:
             region = await asyncio.to_thread(
                 pick_region,
-                prompt=self._slot_prompt(_CHAT_REGION_PROMPT),
+                prompt=self._slot_prompt(_CHAT_REGION_PROMPT, slot),
             )
         except ScreenPickError as exc:
             self.notify(str(exc), severity="error")
@@ -1604,11 +1657,15 @@ class MainScreen(Screen[None]):
         if region is None:
             self.notify("chat region unchanged (selection cancelled)")
             return
-        self.calibrating.chat_region = region
+        self._slots[slot].chat_region = region
         self._region_click_warned = False
-        with suppress(NoMatches):
-            self.sidebar.update_region(region)
-            self.sidebar.update_stale(STALE_CALIBRATED)
+        # Only when the tab it belongs to is still the one on screen: the
+        # sidebar shows ONE window's calibration, and writing this one's box into
+        # a column describing the other is the same mix-up in the other
+        # direction.
+        if slot is self._calibrating:
+            with suppress(NoMatches):
+                self.sidebar.update_region(region)
         self._after_calibration()
         # The drawn window is where every appearance is searched for AND the
         # staleness detector's whole calibration, so the poller has to be
@@ -1617,7 +1674,7 @@ class MainScreen(Screen[None]):
         # normal way to reach delegation, and restarting there would throw away
         # the master's in-flight streaks (and its trackers' previous frames) for
         # a window the automation is not driving.
-        if self._calibrating is self._live:
+        if slot is self._live:
             self._start_detector_worker()
         self.notify(
             f"chat region set ({region.describe()}) - the chatbot window; "
@@ -1684,8 +1741,14 @@ class MainScreen(Screen[None]):
         checklist asks for it (it needs no capture - a drawn region is a finish
         detector all by itself). With no region drawn there is nothing to watch
         and no worker at all; with nothing runnable the worker is likewise not
-        started, and the stale readout says so rather than sitting on a stale
-        "watching" line while auto-copy quietly never fires.
+        started.
+
+        This is also the ONLY writer of the sidebar's DETECTION block
+        (``_paint_detection``): those lines report what is being watched in the
+        LIVE window, so every exit here - including the two that start nothing -
+        leaves them saying what just became true. Nothing driven by the selected
+        tab may touch them, because the tab and the live window part company for
+        the whole of a delegation.
 
         ``_active_detectors`` records which of them will post, in the fixed
         busy -> idle -> stale order, which is what makes the last one the
@@ -1696,9 +1759,12 @@ class MainScreen(Screen[None]):
         likewise built once per run - they carry streaks and a previous frame,
         and all of that describes one window - with the "stable for N seconds"
         wish converted to ticks of the poll cadence here, from the live window's
-        service preset.
+        service preset. The run gets a fresh ``_detector_generation`` too, which
+        every probe it posts carries back (see ``_ghost``).
         """
         self._stop_detector_worker()
+        self._detector_generation += 1
+        generation = self._detector_generation
         # Every tracker is rebuilt below, so the verdicts they produced belong
         # to detectors that no longer exist. The trigger's ARM survives: it
         # records that the model was generating, which recapturing a button
@@ -1714,6 +1780,7 @@ class MainScreen(Screen[None]):
         self._active_detectors = ()
         region = self.live.chat_region
         if region is None:
+            self._paint_detection(STALE_UNSET)
             return
         profile = self._live_profile()
         preset = self._live_preset()
@@ -1756,9 +1823,14 @@ class MainScreen(Screen[None]):
             # silent readout is indistinguishable from a detector that is simply
             # never finding anything, and the consequence (auto-copy will never
             # fire) is invisible until the user waits for a copy that never comes.
-            with suppress(NoMatches):
-                self.sidebar.update_stale(STALE_OFF)
+            self._paint_detection(STALE_OFF)
             return
+        # Whether the stale line is a live verdict or an explanation of its
+        # silence: it is the one detector with no appearance behind it, so
+        # "unticked" is otherwise indistinguishable from "not reporting yet".
+        self._paint_detection(
+            STALE_CALIBRATED if "stale" in self._active_detectors else STALE_UNTICKED
+        )
 
         def loop() -> None:
             worker = get_current_worker()
@@ -1768,11 +1840,11 @@ class MainScreen(Screen[None]):
                 except CaptureError:
                     scene = None  # every detector hears about it the same way
                 if busy is not None:
-                    self.post_message(BusyProbed(busy.observe(scene)))
+                    self.post_message(BusyProbed(busy.observe(scene), generation))
                 if idle is not None:
-                    self.post_message(IdleProbed(idle.observe(scene)))
+                    self.post_message(IdleProbed(idle.observe(scene), generation))
                 if stale is not None:
-                    self.post_message(StaleProbed(stale.observe(scene)))
+                    self.post_message(StaleProbed(stale.observe(scene), generation))
                 # Sleep in short increments so cancellation lands promptly.
                 remaining = _BUSY_POLL_S
                 while remaining > 0 and not worker.is_cancelled:
@@ -1780,14 +1852,78 @@ class MainScreen(Screen[None]):
                     time.sleep(step)
                     remaining -= step
 
+        self._spawn_detector_worker(loop)
+
+    def _spawn_detector_worker(self, loop: Callable[[], None]) -> None:
+        """Run the composed poll loop as a thread worker.
+
+        The seam between deciding *what* to watch and actually watching it, so
+        a test can freeze the polling and still observe the composition - the
+        live loop repaints the DETECTION block within milliseconds, which is
+        exactly what makes its resting lines otherwise unassertable.
+        """
         self._detector_worker = self.run_worker(
             loop, thread=True, group="busyprobe", exit_on_error=False
         )
+
+    def _paint_detection(self, stale_line: str) -> None:
+        """Repaint the sidebar's DETECTION block for the LIVE window.
+
+        Owned by the detector machinery alone, and titled with the window it
+        describes. Both halves of that matter. Nothing driven by the SELECTED
+        tab may write here, because a user reading the master's transcript
+        while a sub-agent runs would otherwise see the master's tab clobber a
+        readout of the sub-agent's window with "watching the chat region" -
+        the exact line that used to overwrite "finish detection off". And with
+        the two pointers apart for the whole of a delegation, a block that does
+        not name its window is read as the selected tab's.
+
+        The busy/idle lines rest either at "no verdict yet" or, when the
+        service's checklist ticks a signal whose appearance was never captured,
+        at a line saying so: that combination runs nothing at all, and the only
+        symptom is an auto-copy that never fires.
+        """
+        signals = self._live_preset().finish_signals
+        profile = self._live_profile()
+        with suppress(NoMatches):
+            sidebar = self.sidebar
+            sidebar.show_detection_window(_WINDOW_NAMES[self._window_of(self._live)])
+            for name, kind in (("busy", TemplateKind.BUSY), ("idle", TemplateKind.IDLE)):
+                ticked_but_blind = name in signals and not profile.has(kind)
+                sidebar.update_template(
+                    kind, PROBE_UNCAPTURED if ticked_but_blind else PROBE_RESTING
+                )
+            sidebar.update_template(TemplateKind.COPY, COPY_RESTING)
+            sidebar.update_stale(stale_line)
 
     def _stop_detector_worker(self) -> None:
         if self._detector_worker is not None:
             self._detector_worker.cancel()
             self._detector_worker = None
+
+    def suspend_detectors(self) -> None:
+        """Stop polling (and disarm the trigger) while a modal owns the screen.
+
+        The service editor is the case this exists for: capturing an appearance
+        there throws the same fullscreen draw-a-box overlay up over the browser
+        the detectors are watching, and an overlay appearing and disappearing is
+        a sustained large delta - which is precisely what arms the auto-copy on
+        staleness alone. Left running, closing the editor would then read the
+        settled screen as a finished response and fire the copy flow at a chat
+        nobody sent anything to. ``resume_detectors`` puts it back.
+        """
+        self._stop_detector_worker()
+        self._reset_finish_trigger()
+
+    def resume_detectors(self) -> None:
+        """Restart polling after ``suspend_detectors``.
+
+        A no-op when something already restarted it - adopting an edited Config
+        does - so the guaranteed call in the caller's ``finally`` cannot cost a
+        second rebuild of a poller that is already watching the right window.
+        """
+        if self._detector_worker is None:
+            self._start_detector_worker()
 
     def _finish_tick_closed_by(self, detector: str) -> bool:
         """Is ``detector``'s message the tick's LAST, given what is running?
@@ -1802,24 +1938,39 @@ class MainScreen(Screen[None]):
         active = self._active_detectors
         return bool(active) and detector == active[-1]
 
-    def _ghost(self, detector: str) -> bool:
-        """Is this verdict from a detector the CURRENT poller does not run?
+    def _ghost(self, detector: str, generation: int) -> bool:
+        """Is this verdict left over from a poller run that is no longer live?
 
         Cancelling a thread worker only raises a flag: the loop it interrupts
         still finishes the tick it was in and posts its verdicts, which land
-        AFTER ``_start_detector_worker`` cleared the ``_*_seen`` flags. When the
-        new detector set is smaller (a forgotten busy appearance, a service
-        switch) those leftovers are verdicts about a detector that no longer
-        exists - and a leaked "still generating" one re-arms the trigger every
-        time, wedging the auto-copy shut for good. Dropping them is safe in the
-        other direction too: a ghost from a detector that IS still running is
+        AFTER ``_start_detector_worker`` rebuilt everything. Two ways that hurts,
+        and the run's ``generation`` stamp is what catches both.
+
+        The stamp is the load-bearing half. A probe is a reading of ONE browser
+        window, and the poller is restarted precisely when the automation
+        changes windows (``start_browser_chat`` / ``end_browser_chat``): /abort
+        during a generating sub-run hands the master back the live slot, and the
+        cancelled loop's in-flight "still generating" then arrives about the
+        SUB-agent's window. Filtering by detector name alone let it through -
+        both windows run a stale detector - so it armed the trigger and two
+        quiet ticks later fired the copy flow at the master's chat. Same story
+        for two runs of the same-named detector across a service switch.
+
+        The name check is the older half: when the new detector set is SMALLER
+        (a forgotten busy appearance, an unticked signal) the leftovers are
+        verdicts about a detector that no longer exists, and a leaked
+        "generating" one re-arms the trigger every time, wedging auto-copy shut.
+
+        Dropping a verdict is always safe: a detector that is still running is
         simply refreshed by the next tick, a poll interval later.
         """
+        if generation != self._detector_generation:
+            return True
         return detector not in self._active_detectors
 
     def on_busy_probed(self, message: BusyProbed) -> None:
         message.stop()
-        if self._ghost("busy"):
+        if self._ghost("busy", message.generation):
             return
         with suppress(NoMatches):
             self.sidebar.update_template(TemplateKind.BUSY, _format_busy_probe(message.probe))
@@ -1830,7 +1981,7 @@ class MainScreen(Screen[None]):
 
     def on_idle_probed(self, message: IdleProbed) -> None:
         message.stop()
-        if self._ghost("idle"):
+        if self._ghost("idle", message.generation):
             return
         with suppress(NoMatches):
             self.sidebar.update_template(TemplateKind.IDLE, _format_idle_probe(message.probe))
@@ -1841,7 +1992,7 @@ class MainScreen(Screen[None]):
 
     def on_stale_probed(self, message: StaleProbed) -> None:
         message.stop()
-        if self._ghost("stale"):
+        if self._ghost("stale", message.generation):
             return
         with suppress(NoMatches):
             self.sidebar.update_stale(_format_stale_probe(message.probe))

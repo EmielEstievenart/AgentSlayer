@@ -503,6 +503,16 @@ class AgentClipApp(App[None]):
         # requires one, hence the run_worker hand-off (same pattern as _confirm_quit).
         if isinstance(self.screen, ServiceEditorScreen):
             return  # already open
+        main = self.main_screen
+        if main is not None and main.picker_open:
+            # The main screen's chat-region overlay is up. The editor has capture
+            # buttons behind its OWN one-overlay-at-a-time flag, so opening it now
+            # is the one way to get two fullscreen child processes fighting over
+            # the screen - and cancelling a worker cannot kill either of them.
+            self.notify(
+                "a region picker is open - finish it or press Esc first", severity="warning"
+            )
+            return
         self.run_worker(self._open_service_editor(), group="settings", exclusive=True)
 
     async def _open_service_editor(self) -> None:
@@ -514,25 +524,42 @@ class AgentClipApp(App[None]):
         to reach MainScreen - it caches profiles per run, paints them in the
         sidebar and hunts for them on a poll timer - so the propagation below
         runs for either, not only for a preset edit.
+
+        The finish detectors are suspended for the whole visit. Capturing an
+        appearance in there throws the same fullscreen overlay up over the very
+        browser window they are watching, and an overlay appearing and vanishing
+        is exactly the sustained large delta that arms the auto-copy trigger on
+        staleness alone - so a poller left running would read the settled screen
+        after the editor closes as a finished response and fire the copy flow at
+        a chat nobody sent anything to. The restart is in a ``finally`` because
+        the early return above it is the common case: an editor closed with no
+        changes propagates nothing at all.
         """
-        result = await self.push_screen_wait(
-            ServiceEditorScreen(self.app_config, self.profile_root)
-        )
-        if result is None:
-            return  # closed with no changes - nothing to persist or propagate
-        if result.services is not None:
-            save_services(result.services, self._global_config_path)
-            self.app_config = replace(self.app_config, services=result.services)
         main = self.main_screen
         if main is not None:
-            # Drops the profile cache, repaints the appearance summary and
-            # rebuilds the detector poller around what is left.
-            main.update_config(self.app_config)
-            main.sidebar.refresh_services(self.app_config)
-        self.notify(
-            "service presets saved" if result.services is not None else "appearance updated",
-            timeout=4,
-        )
+            main.suspend_detectors()
+        try:
+            result = await self.push_screen_wait(
+                ServiceEditorScreen(self.app_config, self.profile_root)
+            )
+            if result is None:
+                return  # closed with no changes - nothing to persist or propagate
+            if result.services is not None:
+                save_services(result.services, self._global_config_path)
+                self.app_config = replace(self.app_config, services=result.services)
+            if main is not None:
+                # Drops the profile cache, repaints the appearance summary and
+                # rebuilds the detector poller around what is left.
+                main.update_config(self.app_config)
+                main.sidebar.refresh_services(self.app_config)
+            self.notify(
+                "service presets saved" if result.services is not None else "appearance updated",
+                timeout=4,
+            )
+        finally:
+            # A no-op when the propagation above already restarted it.
+            if main is not None:
+                main.resume_detectors()
 
     def action_preferences(self) -> None:
         # Bound directly to the F4 key, so Textual dispatches it OUTSIDE a

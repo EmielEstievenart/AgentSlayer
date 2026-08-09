@@ -17,6 +17,7 @@ lives in test_finish_signal_ui.py.
 
 from __future__ import annotations
 
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import replace
@@ -28,16 +29,27 @@ from textual.pilot import Pilot
 from textual.widgets import Button, Static
 
 import agentclip.tui.screens.main as main_mod
+from agentclip.app.types import SessionRef
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
+from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import CaptureError, RegionImage
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, can_finish
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.messages import BusyProbed
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
-from agentclip.tui.widgets.sidebar import STALE_CALIBRATED, STALE_OFF, STALE_UNSET
+from agentclip.tui.widgets.sidebar import (
+    PROBE_RESTING,
+    PROBE_UNCAPTURED,
+    STALE_CALIBRATED,
+    STALE_OFF,
+    STALE_UNSET,
+    STALE_UNTICKED,
+)
+from agentclip.tui.widgets.window_tabs import WindowTabs
 
 from .conftest import send_composer
 
@@ -82,6 +94,11 @@ def _label(app: AgentClipApp, widget_id: str) -> str:
 
 def _stale_label(app: AgentClipApp) -> str:
     return _label(app, "#side-stale")
+
+
+def _detection_title(app: AgentClipApp) -> str:
+    """The DETECTION heading, which names the LIVE window the block is about."""
+    return _label(app, "#side-detection-title")
 
 
 async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
@@ -144,18 +161,19 @@ def _patch_picker(
 
 
 def _freeze_detector(monkeypatch: pytest.MonkeyPatch) -> list[None]:
-    """Stub the poller out and count its starts.
+    """Stop the poll THREAD and count how often one would have been started.
 
-    The live poller repaints ``#side-stale`` with a probe readout within
-    milliseconds, so the static "watching" line and the slot-switch repaint
-    can only be asserted deterministically with nothing polling.
+    Only the spawn is stubbed, not the whole of ``_start_detector_worker``: the
+    composition (which detectors, and the DETECTION block that reports them) is
+    what most of these tests are about, and a live loop repaints ``#side-stale``
+    with a probe readout within milliseconds of it.
     """
     starts: list[None] = []
 
-    def fake_start(self: MainScreen) -> None:
+    def fake_spawn(self: MainScreen, loop: object) -> None:
         starts.append(None)
 
-    monkeypatch.setattr(MainScreen, "_start_detector_worker", fake_start)
+    monkeypatch.setattr(MainScreen, "_spawn_detector_worker", fake_spawn)
     return starts
 
 
@@ -331,14 +349,91 @@ async def test_a_shared_capture_failure_reaches_the_detector_as_an_error(
         await _wait_for(pilot, lambda: "capture failed" in _stale_label(app), "error reported")
 
 
-async def test_switching_slots_repaints_the_readout_from_stored_state(
+async def test_switching_tabs_leaves_the_detection_block_alone(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """``show_slot`` renders the column from ONE slot's drawn window: the
-    master's must not read as watching while the sub-agent slot (which has no
-    window) is selected, and must come back when it is."""
+    """The DETECTION block reports on the LIVE window, not the selected tab.
+
+    It used to be repainted from the selected slot's stored region, which made
+    every tab click (and every F6) claim "watching the chat region" for whatever
+    tab happened to be up - clobbering a real readout of the window the poller
+    is actually on, and clobbering "finish detection off" with a claim that was
+    false for the entire session. Only the detector machinery writes here now,
+    and the block's heading names the window it means.
+    """
     _patch_picker(monkeypatch)
     _freeze_detector(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        assert _detection_title(app) == "DETECTION · MASTER"
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._chat_region == REGION, "master region adopted")
+        assert _stale_label(app) == STALE_CALIBRATED
+
+        # The sub-agent tab has no window of its own, but nothing is watching it
+        # either: the automation is still on the master's.
+        await _select_slot(app, pilot, AgentSlot.SUBAGENT)
+        await pilot.pause()
+        assert _stale_label(app) == STALE_CALIBRATED
+        assert _detection_title(app) == "DETECTION · MASTER"
+        assert main._slots[AgentSlot.SUBAGENT].chat_region is None
+        assert "not set" in _label(app, "#side-region")  # the CHAT WINDOW block DID follow
+
+        await _select_slot(app, pilot, AgentSlot.MASTER)
+        await pilot.pause()
+        assert _stale_label(app) == STALE_CALIBRATED
+
+
+async def test_finish_detection_off_survives_tab_clicks_and_f6(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The regression in its plainest form: a service that detects nothing says
+    so, and browsing the tabs must not talk over it. "watching the chat region"
+    there is a promise of an auto-copy that will never come."""
+    _patch_picker(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        _with_signals(main)  # nothing ticked
+        await pilot.pause()
+        assert _stale_label(app) == STALE_OFF
+
+        await _select_slot(app, pilot, AgentSlot.SUBAGENT)
+        await pilot.pause()
+        assert _stale_label(app) == STALE_OFF
+
+        await pilot.press("f6")
+        await pilot.pause()
+        assert _stale_label(app) == STALE_OFF
+
+        # ...including the tab bar's re-announcement of the tab already selected.
+        main._on_window_selected(WindowTabs.WindowSelected(main._selected_window))
+        await pilot.pause()
+        assert _stale_label(app) == STALE_OFF
+
+
+async def test_reselecting_the_same_tab_never_wipes_a_live_verdict(
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clicking the tab you are already on is a no-op. The bar re-posts
+    ``WindowSelected`` for it, and the repaint that followed reset every probe
+    line to "no verdict yet" - throwing away exactly the readout the user
+    clicked over to look at."""
+    _patch_picker(monkeypatch)
+    _freeze_detector(monkeypatch)
+    _record_notifications(monkeypatch)
     app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
@@ -347,16 +442,71 @@ async def test_switching_slots_repaints_the_readout_from_stored_state(
 
         await _press(app, pilot, "#set-region-btn")
         await _wait_for(pilot, lambda: main._chat_region == REGION, "master region adopted")
-        assert _stale_label(app) == STALE_CALIBRATED
-
-        await _select_slot(app, pilot, AgentSlot.SUBAGENT)
+        seed_templates(main._selected_service(), TemplateKind.BUSY)
+        main._profiles.clear()
+        _with_signals(main, "busy", "stale")
         await pilot.pause()
-        assert _stale_label(app) == STALE_UNSET
-        assert main._slots[AgentSlot.SUBAGENT].chat_region is None
 
-        await _select_slot(app, pilot, AgentSlot.MASTER)
+        main.post_message(
+            BusyProbed(BusyProbe(BusyState.MATCH, 0.42), main._detector_generation)
+        )
+        await _wait_for(pilot, lambda: "GENERATING" in _label(app, "#side-tpl-busy"), "a verdict")
+
+        main._on_window_selected(WindowTabs.WindowSelected(main._selected_window))
         await pilot.pause()
-        assert _stale_label(app) == STALE_CALIBRATED
+        assert "GENERATING" in _label(app, "#side-tpl-busy")
+
+
+async def test_a_ticked_but_uncaptured_signal_says_so_on_its_own_line(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checklist entry with no appearance behind it runs nothing at all, and
+    "no verdict yet" for the rest of the run is indistinguishable from a
+    detector that simply never finds anything."""
+    _patch_picker(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+
+        _with_signals(main, "busy", "stale")  # busy ticked, nothing captured
+        await pilot.pause()
+        assert main._active_detectors == ("stale",)
+        assert PROBE_UNCAPTURED in _label(app, "#side-tpl-busy")
+        assert PROBE_RESTING in _label(app, "#side-tpl-idle")  # not ticked: nothing to say
+
+
+async def test_an_unticked_stale_signal_reads_as_unwatched_not_silent(
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With the icon detectors running and stale unticked, the stale line has no
+    verdict coming - so it says why rather than sitting on whatever it last
+    said."""
+    _patch_picker(monkeypatch)
+    _record_notifications(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: "GENERATING" in _stale_label(app), "a stale probe arrives")
+        _capture_busy(main, seed_templates)
+        await _wait_for(
+            pilot, lambda: main._active_profile().has(TemplateKind.BUSY), "busy appearance known"
+        )
+
+        _with_signals(main, "busy")
+        await _wait_for(pilot, lambda: main._active_detectors == ("busy",), "busy alone")
+        assert _stale_label(app) == STALE_UNTICKED
 
 
 async def test_the_two_slots_keep_their_own_windows(
@@ -387,6 +537,78 @@ async def test_the_two_slots_keep_their_own_windows(
         assert main._chat_region == REGION  # the compatibility proxy is the master's
         assert main._live is AgentSlot.MASTER  # calibrating never retargets the automation
         assert "SUB-AGENT window" in picker.prompts[-1]
+
+
+class _BlockingPicker:
+    """An overlay that stays up until the test says otherwise.
+
+    The real one blocks for as long as the user takes to drag a box, which is
+    exactly the window in which the rest of the app keeps moving - the point of
+    the test below. It runs in a worker thread (``asyncio.to_thread``), so the
+    handshake is two events rather than an await.
+    """
+
+    def __init__(self, region: ScreenRegion | None) -> None:
+        self.region = region
+        self.prompts: list[str] = []
+        self.opened = threading.Event()
+        self.finish = threading.Event()
+
+    def __call__(self, prompt: str = "") -> ScreenRegion | None:
+        self.prompts.append(prompt)
+        self.opened.set()
+        self.finish.wait(10)
+        return self.region
+
+
+async def test_the_box_lands_in_the_tab_that_opened_the_picker(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The selected tab is not fixed while the overlay is up, and reading it
+    afterwards filed the box under whichever tab had moved in underneath.
+
+    ``_calibrating`` moves on its own now: the controller focusing a delegated
+    run's transcript (``open_session_view`` -> ``focus_session_view`` ->
+    ``_select_window``) selects the sub-agent tab. A delegation starting while
+    the user was mid-drag therefore stored the box they drew around the MASTER's
+    window as the SUB-AGENT's, and skipped the poller restart the master needed.
+    """
+    picker = _BlockingPicker(REGION)
+    monkeypatch.setattr(main_mod, "pick_region", picker)
+    monkeypatch.setattr(main_mod, "capture_region", lambda region: FRAME)
+    starts = _freeze_detector(monkeypatch)
+    _record_notifications(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        assert main._calibrating is AgentSlot.MASTER
+
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: picker.opened.is_set(), "the overlay opened")
+        assert "SUB-AGENT window" not in picker.prompts[-1]  # asked about the MASTER's
+
+        # Mid-drag, a delegation opens its transcript and selects the sub tab.
+        await main.open_session_view(
+            SessionRef(id="sub-1", role="subagent", title="read the docs", chat_name="jade-otter")
+        )
+        await pilot.pause()
+        assert main._calibrating is AgentSlot.SUBAGENT
+
+        picker.finish.set()  # ...and only now does the user let go
+        await _wait_for(
+            pilot, lambda: main._slots[AgentSlot.MASTER].chat_region == REGION, "box filed"
+        )
+
+        assert main._slots[AgentSlot.SUBAGENT].chat_region is None
+        # The master's window is the one the automation drives, so its poller
+        # was rebuilt around the box that just changed.
+        assert main._live is AgentSlot.MASTER
+        assert starts == [None]
+        # ...and the sidebar, which is showing the SUB-AGENT tab, was not given
+        # the master's rectangle to display.
+        assert "not set" in _label(app, "#side-region")
 
 
 async def test_new_keeps_the_window_and_restarts_the_poller(

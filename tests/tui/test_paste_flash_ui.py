@@ -148,11 +148,11 @@ async def test_busy_match_turns_the_flash_off(tmp_path: Path) -> None:
         # Only a detector the poller was actually built with closes a tick, so
         # say the busy tracker is the live one before injecting its verdict.
         main._active_detectors = ("busy",)
-        main.post_message(BusyProbed(BusyProbe(BusyState.MATCH, 0.01)))
+        main.post_message(BusyProbed(BusyProbe(BusyState.MATCH, 0.01), main._detector_generation))
         await _wait_for(pilot, lambda: _flash(app).display is False, "flash hidden on MATCH")
 
         # CHANGED probes (idle screen) must NOT re-show or re-hide anything.
-        main.post_message(BusyProbed(BusyProbe(BusyState.CHANGED, 0.4)))
+        main.post_message(BusyProbed(BusyProbe(BusyState.CHANGED, 0.4), main._detector_generation))
         await pilot.pause()
         assert _flash(app).display is False
 
@@ -171,7 +171,9 @@ async def test_a_caret_sized_stale_change_leaves_the_flash_up(tmp_path: Path) ->
 
         main._active_detectors = ("stale",)
         for _ in range(main_mod.SEND_ARM_TICKS + 2):
-            main.post_message(StaleProbed(StaleProbe(StaleState.CHANGING, 0.001, 0)))
+            main.post_message(
+                StaleProbed(StaleProbe(StaleState.CHANGING, 0.001, 0), main._detector_generation)
+            )
             await pilot.pause()
         assert _flash(app).display is True
         assert main._copy_armed is False
@@ -189,7 +191,9 @@ async def test_a_sustained_stale_change_turns_the_flash_off(tmp_path: Path) -> N
 
         main._active_detectors = ("stale",)
         for _ in range(main_mod.SEND_ARM_TICKS):
-            main.post_message(StaleProbed(StaleProbe(StaleState.CHANGING, 0.5, 0)))
+            main.post_message(
+                StaleProbed(StaleProbe(StaleState.CHANGING, 0.5, 0), main._detector_generation)
+            )
             await pilot.pause()
         await _wait_for(pilot, lambda: _flash(app).display is False, "flash hidden on arm")
         assert main._copy_armed is True

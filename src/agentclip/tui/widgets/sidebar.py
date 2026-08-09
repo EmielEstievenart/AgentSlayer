@@ -37,7 +37,12 @@ column. What is left is:
   (``update_stale``), and what the auto-copy flow's last click attempt did.
   Only these three ``TemplateKind`` values have anything to say at runtime; the
   two chat boxes and the new-chat button are found on demand and report through
-  toasts, so they have no line here.
+  toasts, so they have no line here. Unlike everything above it this block
+  describes the **live** window rather than the selected tab - it is what the
+  detectors are doing right now, and mid-delegation that is the sub-agent's
+  window while the user reads the master's - so its heading names that window
+  (``show_detection_window``) and *only* the detector machinery writes its
+  lines. Nothing driven by a tab click may touch them.
 * One read-only **appearance summary** under the service picker
   (``show_profile``) - "appearance: 4/6 captured" - so "is this service usable
   at all?" is answerable at a glance without opening the editor. It follows the
@@ -71,9 +76,10 @@ ENTER_FLASH_TEXT = ">>> PRESS ENTER <<<\nreply pasted - just send it"
 _FLASH_BLINK_S = 0.4
 _REGION_UNSET = "not set - alt-tab to the chat yourself"
 # The one read-only line about what the selected service LOOKS like. The
-# captures themselves live in the service editor now, so this says only whether
-# there are enough of them to be useful, and where to go about it.
-PROFILE_HINT = " · F2 to capture"
+# captures themselves live in the service editor now, and so does the checklist
+# deciding which of them the poller may use - so this says only whether there
+# are enough of them to be useful, and names the door to BOTH halves.
+PROFILE_HINT = " · F2 for captures + detection"
 
 
 def profile_summary(profile: ServiceProfile) -> str:
@@ -81,16 +87,21 @@ def profile_summary(profile: ServiceProfile) -> str:
 
 
 # The stale detector has nothing to capture - it watches the drawn window stop
-# changing - so its readout has only these two resting states, plus whatever
-# live verdict the poller paints over them.
+# changing - so its readout has only these resting states, plus whatever live
+# verdict the poller paints over them.
 STALE_UNSET = "no chat region - staleness check disabled"
 STALE_CALIBRATED = "watching the chat region"
+# The service's checklist does not tick "screen stops changing", but something
+# else does run - so this line has no verdict to show and would otherwise sit
+# blank while the icon detectors do the work.
+STALE_UNTICKED = "stillness not watched for this service - F2"
 # ...plus one more, which is not about the stale detector at all: the service's
 # finish-signal checklist leaves NOTHING running (empty, or asking only for
 # appearances it has none of). It goes here because this is the line the finish
 # verdict is read off, and "auto-copy will never fire" has to be visible
-# somewhere other than in a copy that never arrives.
-STALE_OFF = "finish detection off for this service"
+# somewhere other than in a copy that never arrives - with the door to the
+# checklist named, since that is the only place it can be turned back on.
+STALE_OFF = "finish detection off - F2 to configure"
 
 # The DETECTION block: three of the six appearances have something to say while
 # the automation runs, and each gets one line. The lines are otherwise
@@ -105,6 +116,21 @@ DETECTOR_LABEL = {
 # that is the summary line's job, and the editor's.
 PROBE_RESTING = "no verdict yet"
 COPY_RESTING = "no click yet"
+# ...except for the one combination that will never produce a verdict at all:
+# the checklist ticks this signal and the service has no appearance to match it
+# against, so the detector is silently skipped. "no verdict yet" for the rest of
+# the run is indistinguishable from a detector that simply never finds anything.
+PROBE_UNCAPTURED = "ticked but not captured - F2"
+
+# The DETECTION block's heading, which names the window every line under it is
+# about. That is the LIVE window - the one the automation drives - and not the
+# selected tab, and the two are different for the whole of a delegation: without
+# the name, a sub-agent's verdicts read as the master tab's.
+DETECTION_TITLE = "DETECTION"
+
+
+def detection_title(window_name: str) -> str:
+    return f"{DETECTION_TITLE} · {window_name}" if window_name else DETECTION_TITLE
 
 
 def template_status_id(kind: TemplateKind) -> str:
@@ -219,7 +245,9 @@ class Sidebar(Vertical):
         yield Button("Set chat region...", id="set-region-btn")
         yield Static(Text(_REGION_UNSET), id="side-region", classes="side-status")
         yield Static(Text(SLOT_NOTE_MASTER), id="side-slot-note", classes="side-status")
-        yield Static(Text("DETECTION"), classes="side-title")
+        yield Static(
+            Text(detection_title("")), id="side-detection-title", classes="side-title"
+        )
         yield Static(
             Text(self._probe_line(TemplateKind.BUSY, PROBE_RESTING)),
             id=template_status_id(TemplateKind.BUSY),
@@ -334,18 +362,21 @@ class Sidebar(Vertical):
 
         Called when the window tab bar moves and on session teardown - every
         readout below is a view of ``cal`` and nothing else, which after the
-        slot reduction means the drawn window and the staleness detector that
-        rides on it. The appearance summary is deliberately NOT repainted here:
-        it belongs to the service, and a tab switch may or may not be a service
-        switch (``show_profile`` is its only entry point, and MainScreen drives
-        the two together when it needs to). The stale line falls back to a
-        static "watching" here rather than a live verdict: a probe belongs to
-        whichever window the automation is actually driving, and re-deriving one
-        from a stored region would be a lie.
+        slot reduction means the drawn window and the readiness line under it.
+
+        Two neighbouring blocks are deliberately NOT repainted here. The
+        appearance summary belongs to the service, and a tab switch may or may
+        not be a service switch (``show_profile`` is its only entry point, and
+        MainScreen drives the two together when it needs to). The DETECTION
+        lines belong to the LIVE window rather than the selected one, and only
+        the detector machinery writes them (``update_stale`` /
+        ``update_template``): a stored region says a window was drawn, not that
+        anything is watching it, and painting "watching the chat region" from a
+        tab click is how "finish detection off" used to get overwritten with a
+        claim that was false for the whole session.
         """
         self.update_region(cal.chat_region)
         self.update_slot_note(note)
-        self.update_stale(STALE_CALIBRATED if cal.chat_region is not None else STALE_UNSET)
 
     def update_slot_note(self, note: str) -> None:
         """Repaint just the readiness line (after a single calibration landed)."""
@@ -363,22 +394,31 @@ class Sidebar(Vertical):
     # -- the service's captured appearances -----------------------------------
 
     def show_profile(self, profile: ServiceProfile) -> None:
-        """Repaint everything that depends on WHICH service is selected.
+        """Repaint the SELECTED tab's appearance summary.
 
         The counterpart of ``show_slot``, and the reason the two are separate
         methods: they are repainted by different events. A slot switch changes
         the block above and nothing here; a service switch, or an edit that
         captured or forgot appearances, changes this and nothing there.
 
-        Two things, one call, because both are stale for the same reason: the
-        summary of how much of the new service is captured, and the live probe
-        lines - whose verdicts belonged to the detectors that were watching for
-        the OLD service's appearances and say nothing about these.
+        The probe lines under it used to be reset here as well, on the grounds
+        that a different service's verdicts say nothing about this one. That is
+        true of the service the poller is RUNNING, which is the live window's -
+        not the selected tab's, and clicking between tabs mid-delegation would
+        wipe the sub-agent's live readout. Resetting them belongs to the thing
+        that rebuilds the detectors, and it happens there.
         """
         self.query_one("#side-profile-note", Static).update(Text(profile_summary(profile)))
-        self.update_template(TemplateKind.BUSY, PROBE_RESTING)
-        self.update_template(TemplateKind.IDLE, PROBE_RESTING)
-        self.update_template(TemplateKind.COPY, COPY_RESTING)
+
+    def show_detection_window(self, window_name: str) -> None:
+        """Name the window the DETECTION lines below are about.
+
+        The LIVE window, written by the detector machinery whenever it rebuilds.
+        Without it the block reads as the selected tab's, which is wrong for
+        exactly as long as a delegation lasts - the one time the readout matters
+        most.
+        """
+        self.query_one("#side-detection-title", Static).update(Text(detection_title(window_name)))
 
     def update_template(self, kind: TemplateKind, text: str) -> None:
         """Repaint one detector's live status line, named as it goes in.

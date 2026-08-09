@@ -19,11 +19,21 @@ busy first, then idle, then stale.
   of polls) means "finished". No calibration baseline - stability is relative
   to the previous frame.
 
+All three carry the ``generation`` of the poller run that produced them - a
+monotonic counter MainScreen bumps every time it (re)builds the detectors. A
+cancelled thread worker still finishes the tick it was interrupted in and posts
+its verdicts, so a probe can land after the live browser window has already
+moved (a delegation starting or ending retargets the automation and restarts
+the poller). Those verdicts describe the OLD window and must not arm or fire the
+auto-copy flow against the new one, which the stamp is what makes decidable:
+the detector's *name* alone cannot tell two runs apart.
+
 Posting any of them directly is equivalent to that detector's poll completing,
-and is how the tests drive MainScreen's combined finish logic. Whatever subset
-of the three is calibrated, the tick is *closed* by the LAST calibrated
-detector in the busy -> idle -> stale order - MainScreen evaluates the
-combined verdict exactly once per tick, on the closing message - so a test
+and is how the tests drive MainScreen's combined finish logic - pass
+``main._detector_generation`` as the stamp to speak as the current poller.
+Whatever subset of the three is calibrated, the tick is *closed* by the LAST
+calibrated detector in the busy -> idle -> stale order - MainScreen evaluates
+the combined verdict exactly once per tick, on the closing message - so a test
 exercising a multi-detector path must post the whole tick, in order.
 """
 
@@ -46,22 +56,25 @@ class ClipboardCaptured(Message):
 class BusyProbed(Message):
     """One poll of the busy element (MATCH = generating), or injected by tests."""
 
-    def __init__(self, probe: BusyProbe) -> None:
+    def __init__(self, probe: BusyProbe, generation: int) -> None:
         self.probe = probe
+        self.generation = generation
         super().__init__()
 
 
 class IdleProbed(Message):
     """One poll of the idle element (MATCH = finished), or injected by tests."""
 
-    def __init__(self, probe: BusyProbe) -> None:
+    def __init__(self, probe: BusyProbe, generation: int) -> None:
         self.probe = probe
+        self.generation = generation
         super().__init__()
 
 
 class StaleProbed(Message):
     """One poll of the stale tracker (STALE = finished), or injected by tests."""
 
-    def __init__(self, probe: StaleProbe) -> None:
+    def __init__(self, probe: StaleProbe, generation: int) -> None:
         self.probe = probe
+        self.generation = generation
         super().__init__()

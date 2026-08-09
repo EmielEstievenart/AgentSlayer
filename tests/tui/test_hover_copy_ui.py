@@ -115,7 +115,7 @@ async def _fire(main: MainScreen, pilot: Pilot) -> None:
     """
     main._active_detectors = ("busy",)
     for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
-        main.post_message(BusyProbed(BusyProbe(state, 0.2)))
+        main.post_message(BusyProbed(BusyProbe(state, 0.2), main._detector_generation))
         await pilot.pause()
 
 

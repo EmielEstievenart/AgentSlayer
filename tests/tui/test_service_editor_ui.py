@@ -27,12 +27,15 @@ from textual.message import Message
 from textual.pilot import Pilot
 from textual.widgets import Button, Checkbox, Input, Select, Static
 
+import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
-from agentclip.config import load_config
+from agentclip.config import DEFAULT_FINISH_SIGNALS, FINISH_SIGNALS, load_config
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.profile_store import load_profile, profile_dir, save_template
+from agentclip.screen.region import ScreenRegion
+from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.service_editor import (
@@ -738,3 +741,109 @@ async def test_captures_and_checklist_are_inert_until_the_service_exists(
         await pilot.pause()
         assert not editor.query_one(f"#{capture_button_id(TemplateKind.BUSY)}", Button).disabled
         assert not any(box.disabled for box in editor.query(Checkbox))
+
+
+async def test_the_add_new_form_shows_what_it_is_going_to_create(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The boxes are disabled on "+ Add new", but they still have to be HONEST:
+    an all-unticked checklist over a preset that is born with "screen stops
+    changing" ticked is a lie about the one setting the form is the only place
+    to see. They show the ServicePreset defaults, and the preset that Add
+    actually files matches them."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "+add-new+"
+        await pilot.pause()
+
+        ticked = {
+            signal
+            for signal in FINISH_SIGNALS
+            if editor.query_one(f"#{signal_checkbox_id(signal)}", Checkbox).value
+        }
+        assert ticked == set(DEFAULT_FINISH_SIGNALS)
+        assert not editor.query_one("#svc-hover-scan", Checkbox).value
+
+        editor.query_one("#svc-key", Input).value = "brand-new"
+        editor.query_one("#svc-label", Input).value = "Brand new"
+        editor.query_one("#svc-max", Input).value = "5000"
+        editor.query_one("#svc-total", Input).value = "100000"
+        await pilot.pause()
+        await pilot.click("#svc-add-btn")
+        await _wait_for(pilot, lambda: "brand-new" in editor._services, "the preset was added")
+
+        created = editor._services["brand-new"]
+        assert created.finish_signals == DEFAULT_FINISH_SIGNALS
+        assert created.hover_scan is False
+        # ...and the form now shows exactly what it created.
+        assert {
+            signal
+            for signal in FINISH_SIGNALS
+            if editor.query_one(f"#{signal_checkbox_id(signal)}", Checkbox).value
+        } == set(created.finish_signals)
+
+
+
+# -- the editor and the live automation must not both be driving the screen ------
+
+
+async def test_the_detector_worker_is_paused_for_the_whole_visit(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The editor's capture buttons throw the same fullscreen overlay up over
+    the very browser window the finish detectors are watching, and an overlay
+    appearing and vanishing is exactly the sustained large delta that arms the
+    auto-copy on staleness alone. Left polling, closing the editor read the
+    settled screen as a finished response and fired the copy flow at a chat
+    nobody had sent anything to."""
+    monkeypatch.setattr(main_mod, "capture_region", lambda region: _image(8))
+    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        main._slots[AgentSlot.MASTER].chat_region = ScreenRegion(0, 0, 400, 300)
+        main._start_detector_worker()
+        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        main._copy_armed = True  # as a real generation would have left it
+
+        await _open_editor_via_f2(app, pilot)
+        assert main._detector_worker is None
+        # ...and the arm went with it: whatever the editor does to the screen
+        # says nothing about whether the user sent a message.
+        assert main._copy_armed is False
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller restarted")
+
+
+async def test_f2_is_refused_while_the_chat_region_picker_is_open(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Two one-overlay-at-a-time guards on two screens can both be satisfied at
+    once, and the loser is a pair of fullscreen child processes fighting over
+    the desktop - which no amount of worker cancellation can undo."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        main._picker_open = True  # the chat-region overlay is up
+        await pilot.press("f2")
+        await pilot.pause(0.2)
+        assert app.screen is main
+        assert not isinstance(app.screen, ServiceEditorScreen)
+
+        main._picker_open = False
+        await _open_editor_via_f2(app, pilot)  # ...and it opens again once it is gone

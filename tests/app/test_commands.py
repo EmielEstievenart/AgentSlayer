@@ -21,10 +21,19 @@ from agentclip.app.controller import SessionController
 
 
 def test_the_registry_is_the_four_documented_commands() -> None:
-    """tui.md §3.3a's list, in the order the user meets them."""
-    assert [command.name for command in COMMANDS] == ["yolo", "new", "abort", "help"]
+    """tui.md §3.3a's list, in the order the user meets them - which is also the
+    order the popup lists them in, so the most destructive one is last."""
+    assert [command.name for command in COMMANDS] == ["help", "new", "abort", "yolo"]
     assert lookup("yolo") is not None and lookup("yolo").arg == "[on|off]"  # type: ignore[union-attr]
     assert all(command.summary for command in COMMANDS)
+
+
+def test_yolo_is_never_the_first_row() -> None:
+    """Regression (tui.md §3.3a): the popup renders this tuple as typed, so the
+    top row is whatever a stray Enter is nearest to - and `/yolo` turns EVERY
+    approval gate off. It goes last, behind the reversible ones."""
+    assert COMMANDS[-1].name == "yolo"
+    assert COMMANDS[0].name == "help"  # ...and the top row is the harmless one
 
 
 def test_lookup_resolves_aliases_and_case() -> None:
@@ -61,7 +70,7 @@ def test_unknown_command_hint_lists_every_command() -> None:
     hint = command_list()
     for command in COMMANDS:
         assert command.slash in hint
-    assert hint == "/yolo, /new, /abort, or /help"  # an English list, not a dump
+    assert hint == "/help, /new, /abort, or /yolo"  # an English list, not a dump
 
 
 def test_match_prefix_narrows_as_the_user_types() -> None:

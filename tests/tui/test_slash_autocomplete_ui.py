@@ -10,7 +10,10 @@ model's question, where a leading slash is text.
 The Enter rule is the one worth stating twice: with the popup up, Enter
 *completes* rather than sends. That is only safe because completing appends a
 space, which closes the popup, so the second Enter is an ordinary send - and
-these tests press it twice for exactly that reason.
+these tests press it twice for exactly that reason. It is only safe at all
+while there is something the user CHOSE: a bare `/` lists everything and
+highlights nothing, so slash-Enter-Enter runs no command whatsoever, which is
+the first test below.
 """
 
 from __future__ import annotations
@@ -157,9 +160,17 @@ async def test_every_command_gets_exactly_one_row(tmp_path: Path) -> None:
         assert main.composer.region.y + main.composer.region.height <= 24
 
 
-async def test_down_then_enter_completes_and_sends_nothing(tmp_path: Path) -> None:
-    """Enter with the popup up completes the highlighted row - it must not send,
-    or the user could never see the list they just opened."""
+async def test_a_bare_slash_highlights_nothing_and_two_enters_run_nothing(
+    tmp_path: Path,
+) -> None:
+    """The two-keystroke accident this rule exists to close.
+
+    With the top row pre-selected, `/` + Enter + Enter ran COMMANDS[0] - and
+    when that was `/yolo`, a stray slash in the chat box was two Enters away
+    from silently disabling every approval gate in the app. A list the user has
+    not narrowed arms nothing: Enter completes nothing AND still does not send,
+    so a bare slash cannot execute anything at all.
+    """
     app, fake, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 40)) as pilot:
         await _start_session(app, pilot)
@@ -169,8 +180,39 @@ async def test_down_then_enter_completes_and_sends_nothing(tmp_path: Path) -> No
         writes_before = len(fake.written)
 
         await pilot.press("slash")
+        assert popup.is_open  # the list is up: this is discovery, not a dead key
+        assert popup.index is None
+        assert popup.highlighted is None
+
+        await pilot.press("enter")
+        await pilot.press("enter")
+        await pilot.pause(0.2)
+
+        assert main.composer.text == "/"  # untouched: no completion, no send
+        assert popup.is_open
+        assert main._snap is not None and not main._snap.yolo  # nothing ran
+        assert main.session_active and not main.awaiting_new_session
+        assert len(fake.written) == writes_before
+
+
+async def test_down_then_enter_completes_the_highlighted_row(tmp_path: Path) -> None:
+    """One arrow press is what arms an unnarrowed list, and Enter then completes
+    the highlighted row - it must not send, or the user could never see the list
+    they just opened."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+        popup = main.command_popup
+        writes_before = len(fake.written)
+
+        await pilot.press("slash")
+        assert popup.index is None
+
+        await pilot.press("down")  # arms the list at its top row
         assert popup.index == 0
-        assert popup.highlighted is not None and popup.highlighted.name == "yolo"
+        assert popup.highlighted is not None and popup.highlighted.name == COMMANDS[0].name
 
         await pilot.press("down")
         assert popup.index == 1
@@ -190,7 +232,8 @@ async def test_down_then_enter_completes_and_sends_nothing(tmp_path: Path) -> No
         assert app.focused is main.composer
 
 
-async def test_up_wraps_to_the_last_command(tmp_path: Path) -> None:
+async def test_up_arms_the_list_at_its_last_command(tmp_path: Path) -> None:
+    """Up from no highlight lands where wrapping from the top would have."""
     app, _, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 40)) as pilot:
         await _start_session(app, pilot)
@@ -201,7 +244,35 @@ async def test_up_wraps_to_the_last_command(tmp_path: Path) -> None:
         await pilot.press("slash")
         await pilot.press("up")
         assert popup.index == len(COMMANDS) - 1
-        assert popup.highlighted is not None and popup.highlighted.name == "help"
+        assert popup.highlighted is not None and popup.highlighted.name == COMMANDS[-1].name
+
+        await pilot.press("down")  # ...and it wraps from there as before
+        assert popup.index == 0
+
+
+async def test_one_typed_letter_arms_the_narrowed_list(tmp_path: Path) -> None:
+    """The explicit path stays two keystrokes: `/y` names exactly one command,
+    so Enter completes it - narrowing IS the choice."""
+    app, _, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+        popup = main.command_popup
+
+        await pilot.press("slash", "y")
+        assert _names(app) == ["yolo"]
+        assert popup.index == 0
+        assert popup.highlighted is not None and popup.highlighted.name == "yolo"
+
+        await pilot.press("enter")
+        assert main.composer.text == "/yolo "
+
+        # ...and backspacing to a bare slash disarms it again.
+        main.composer.load_text("/")
+        main.composer.move_cursor(main.composer.document.end)
+        await pilot.pause()
+        assert popup.is_open and popup.index is None
 
 
 async def test_tab_completes_the_same_way_as_enter(tmp_path: Path) -> None:

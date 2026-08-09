@@ -12,7 +12,9 @@ only thing that knows what has been typed, so it decides when the popup is up
 and it owns the four keys that mean something different while it is. Enter is
 the interesting one - it *completes* instead of sending, which is safe precisely
 because completing appends a trailing space and a space closes the popup, so the
-very next Enter sends as it always did.
+very next Enter sends as it always did. It is only safe, though, while there is
+something the user actually chose: a bare ``/`` lists every command but arms
+none of them (``preselect``), so slash-Enter-Enter runs nothing at all.
 
 The popup is a sibling widget rather than a child: this is a TextArea, and the
 list has to render *above* the box. The composer finds it on the screen instead
@@ -86,7 +88,12 @@ class ChatComposer(TextArea):
         if self._verbatim or self.disabled:
             popup.hide()
             return
-        popup.show(match_prefix(self.text))
+        # A bare "/" lists everything but arms nothing: the user has typed no
+        # letter, so there is no command they can be said to have reached for,
+        # and a pre-selected top row would put "/" + Enter + Enter one careless
+        # moment away from running it. One typed character (or one arrow press,
+        # which the popup handles itself) is what makes a row the answer.
+        popup.show(match_prefix(self.text), preselect=len(self.text) > 1)
 
     @on(TextArea.Changed)
     def _text_changed(self, event: TextArea.Changed) -> None:
@@ -122,6 +129,10 @@ class ChatComposer(TextArea):
                 command = popup.highlighted
                 event.stop()
                 event.prevent_default()
+                # No highlight (a bare "/" nobody has narrowed) completes
+                # nothing - and, just as importantly, still does not SEND: the
+                # key is swallowed either way, so the list stays up waiting to
+                # be narrowed instead of the box firing off a lone slash.
                 if command is not None:
                     self._complete(command)
                 return

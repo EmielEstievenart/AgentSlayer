@@ -55,11 +55,20 @@ class ChatCommand:
         return f"{self.slash} {self.arg}" if self.arg else self.slash
 
 
+# Order is a safety property, not a style choice. The popup lists this tuple as
+# typed, so whatever sits at the top is what one careless arrow press (or a
+# future default highlight) lands on - and `/yolo` disables every approval gate
+# in the app. It therefore goes LAST, behind the harmless and the reversible,
+# with `/help` first because it is the one a lost user is reaching for. The
+# popup additionally refuses to pre-select anything until the user has typed at
+# least one letter (see :func:`match_prefix`'s callers), so "the first row" is
+# not reachable by Enter alone either; this ordering is the second lock on the
+# same door.
 COMMANDS: tuple[ChatCommand, ...] = (
     ChatCommand(
-        name="yolo",
-        arg="[on|off]",
-        summary="toggle auto-approve-everything",
+        name="help",
+        summary="list the commands",
+        aliases=("commands", "?"),
     ),
     ChatCommand(
         name="new",
@@ -70,9 +79,9 @@ COMMANDS: tuple[ChatCommand, ...] = (
         summary="end the sub-agent run in flight (ctrl+x only cancels the calls running now)",
     ),
     ChatCommand(
-        name="help",
-        summary="list the commands",
-        aliases=("commands", "?"),
+        name="yolo",
+        arg="[on|off]",
+        summary="toggle auto-approve-everything",
     ),
 )
 
@@ -118,7 +127,7 @@ def help_text() -> str:
 
 
 def command_list() -> str:
-    """The commands as an English list - ``/yolo, /new, /abort, or /help``."""
+    """The commands as an English list - ``/help, /new, /abort, or /yolo``."""
     names = [command.slash for command in COMMANDS]
     if len(names) == 1:
         return names[0]

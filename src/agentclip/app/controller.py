@@ -90,14 +90,30 @@ _NESTED_DELEGATION_BODY = (
     "hint: do this part of the task yourself."
 )
 
+def _gone_service_body(key: str) -> str:
+    return (
+        f"delegation is unavailable: the sub-agent chat is set to the service preset "
+        f"{key!r}, which no longer exists in this AgentClip's configuration. No "
+        "sub-agent was started.\n"
+        f"{_DELEGATION_HINT} Do not retry delegate."
+    )
+
+
 _EMPTY_RESULT_BODY = (
     "the sub-agent finished without stating a result. Treat the sub-task as "
     "unverified and check anything you depended on it for."
 )
 
-# Annotation left on a sub-agent's transcript tab when its run ends, whatever
-# the outcome - the tab stays mounted and readable afterwards.
+# Annotations left on a sub-agent's transcript tab when its run ends - the tab
+# stays mounted and readable afterwards. Two of them, because a run that never
+# produced a deliverable (a refused chat, a bootstrap over budget, an abort, a
+# crash) reaches the same `finally` as one that did, and the success wording was
+# then printed directly under the error explaining why nothing ran.
 _FINISHED_NOTE = "sub-agent run ended - the result above was handed back to the delegating agent"
+_FAILED_NOTE = (
+    "sub-agent run ended WITHOUT a result - the failure above was reported to the "
+    "delegating agent instead"
+)
 
 _ABORT_NOTE = "the user aborted the sub-agent run"
 
@@ -894,6 +910,27 @@ class SessionController:
             )
             return (body, "error", "delegation_unavailable")
 
+        # The sub-agent window's service is frozen at bootstrap (both pickers
+        # lock for the session's life), but the service EDITOR is not: F2
+        # mid-session can delete the very preset that key names. Building the
+        # engine anyway falls through cli.build's "unknown preset" fallback to
+        # [general], so the run would quietly get neither the budget readiness
+        # advertised nor the one the sub window is pointed at. Refuse instead -
+        # a delegation the user can fix by re-picking a service beats one whose
+        # paste budget is a guess.
+        wanted = self._subagent_service
+        if wanted and wanted not in self._config.services:
+            await self._view.add_error(
+                f"delegation refused: the sub-agent's service preset {wanted!r} was "
+                "deleted while this session was running"
+            )
+            self._view.notify(
+                f"the model tried to delegate, but the sub-agent's service {wanted!r} no "
+                "longer exists - /new to pick another",
+                severity="warning",
+            )
+            return (_gone_service_body(wanted), "error", "delegation_unavailable")
+
         master = self._snapshot_ctx()
         master.stats.subagents += 1
         self._sub_index += 1
@@ -905,8 +942,14 @@ class SessionController:
         )
         await self._view.add_note(f"→ delegating to a sub-agent · {ref.title}")
         outcome: tuple[str, ResultStatus, str | None]
+        # Whether this run handed a deliverable back, for the transcript note and
+        # the tab glyph the `finally` writes. Pessimistic by default: every path
+        # out of here except the last line of _sub_run is a failure, including
+        # the ones that raise past `outcome` ever being bound.
+        handed_back = False
         try:
             outcome = await self._sub_run(req, ref, master)
+            handed_back = outcome[1] == "ok"
         except _SubagentAborted:
             await self._view.add_note("✗ sub-agent run aborted by the user")
             outcome = (_ABORTED_BODY, "error", "aborted")
@@ -922,7 +965,11 @@ class SessionController:
             self._sub_aborting = False
             await self._view.end_chat(sub if sub is not None else ref)
             if sub is not None:
-                await self._view.finish_session_view(sub.id, _FINISHED_NOTE)
+                await self._view.finish_session_view(
+                    sub.id,
+                    _FINISHED_NOTE if handed_back else _FAILED_NOTE,
+                    handed_back,
+                )
             self._restore_ctx(master)
             self._view.focus_session_view(master.ref.id)
             await self._refresh_status()

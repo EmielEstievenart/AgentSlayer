@@ -9,7 +9,10 @@ pin down (main.py's ``_select_window`` / ``open_session_view`` / ``render_log``)
   (what the AGENT SLOT picker used to do), while never moving ``_live``;
 * a delegation appends a divider + its run to the sub-agent window's persistent
   panel instead of minting a pane, and the tab carries the live state (``▶``
-  running, ``✓`` idle after a run, bare before the first one);
+  running, ``✓`` after a run that handed a result back, ``✗`` after one that did
+  not, bare before the first one);
+* which service each window tab starts on, including the blank-means-master
+  rule for ``[general] subagent_service``;
 * every later ``add_*`` lands in the FOCUSED window and no other;
 * ``/new`` empties both transcripts and keeps both tabs;
 * the export still carries one heading per RUN, not one per window.
@@ -24,6 +27,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 from textual.pilot import Pilot
@@ -31,7 +35,7 @@ from textual.pilot import Pilot
 from agentclip.app.types import SessionRef
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
-from agentclip.config import load_config
+from agentclip.config import Config, GeneralConfig, load_config
 from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
@@ -92,6 +96,40 @@ def _entries(main: MainScreen, window: str) -> list[str]:
 
 def _label(main: MainScreen, window: str) -> str:
     return main.chat_tabs.tab(window).label_text
+
+
+# -- which service each window tab starts on ----------------------------------
+#
+# ``_initial_services`` is a pure function of the Config, so it is checked
+# without a Pilot: it is the whole of "[general] subagent_service" reaching the
+# UI, and the blank default is what keeps that key invisible to everybody
+# running one service in both windows.
+
+
+def _config_with(**general: str) -> Config:
+    return replace(Config(), general=replace(GeneralConfig(), **general))
+
+
+def test_a_blank_subagent_service_puts_both_tabs_on_the_master_s() -> None:
+    services = MainScreen._initial_services(_config_with(service="claude"))
+    assert services == {MASTER_WINDOW: "claude", SUBAGENT_WINDOW: "claude"}
+
+
+def test_a_named_subagent_service_points_the_second_tab_at_it() -> None:
+    services = MainScreen._initial_services(
+        _config_with(service="claude", subagent_service="gemini")
+    )
+    assert services == {MASTER_WINDOW: "claude", SUBAGENT_WINDOW: "gemini"}
+
+
+def test_a_subagent_service_naming_no_preset_falls_back_to_the_master_s() -> None:
+    """load_config warns and blanks an unknown key, but a hand-built Config (or
+    a preset deleted since) must not point a window at a service that is in no
+    picker - ``Config.preset()``'s fallback would then drive the automation."""
+    services = MainScreen._initial_services(
+        _config_with(service="claude", subagent_service="no-such-service")
+    )
+    assert services == {MASTER_WINDOW: "claude", SUBAGENT_WINDOW: "claude"}
 
 
 async def test_both_window_tabs_exist_before_any_session(tmp_path: Path) -> None:
@@ -165,7 +203,7 @@ async def test_a_second_run_appends_under_a_new_divider(tmp_path: Path) -> None:
 
         await main.open_session_view(SUB_ONE)
         await main.add_note("first run output")
-        await main.finish_session_view("sub-1", "run one ended")
+        await main.finish_session_view("sub-1", "run one ended", True)
         await main.open_session_view(SUB_TWO)
         await main.add_note("second run output")
         await pilot.pause()
@@ -187,7 +225,7 @@ async def test_finishing_rebadges_the_tab_and_leaves_the_transcript(tmp_path: Pa
         await main.open_session_view(SUB_ONE)
         await main.add_note("did the work")
 
-        await main.finish_session_view("sub-1", "sub-agent finished - result handed back")
+        await main.finish_session_view("sub-1", "sub-agent finished - result handed back", True)
         await pilot.pause()
 
         service = main._service_for(AgentSlot.SUBAGENT)
@@ -196,6 +234,32 @@ async def test_finishing_rebadges_the_tab_and_leaves_the_transcript(tmp_path: Pa
         assert any("sub-agent finished" in e for e in entries)
         assert any("did the work" in e for e in entries)  # nothing was cleared
         assert main._panels[SUBAGENT_WINDOW].is_mounted  # nor unmounted
+
+
+async def test_a_failed_run_gets_the_failure_glyph(tmp_path: Path) -> None:
+    """A refused delegation ends through the same call as a delivered one, so
+    the outcome has to travel with it. Badging the tab ✓ over a run that handed
+    nothing back - under a note claiming a result HAD been handed back - is the
+    one reading of that tab a user would take at face value."""
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _ready(app, pilot)
+        await main.open_session_view(SUB_ONE)
+        await main.add_error("could not open a fresh chat for the sub-agent")
+
+        await main.finish_session_view("sub-1", "sub-agent run ended WITHOUT a result", False)
+        await pilot.pause()
+
+        service = main._service_for(AgentSlot.SUBAGENT)
+        assert _label(main, SUBAGENT_WINDOW) == f"✗ SUB-AGENT · {service}"
+
+        # ...and the next run that DOES deliver takes the tab back.
+        await main.open_session_view(SUB_TWO)
+        await pilot.pause()
+        assert _label(main, SUBAGENT_WINDOW).startswith("▶ ")
+        await main.finish_session_view("sub-2", "result handed back", True)
+        await pilot.pause()
+        assert _label(main, SUBAGENT_WINDOW) == f"✓ SUB-AGENT · {service}"
 
 
 async def test_focusing_the_master_reroutes_output_back(tmp_path: Path) -> None:
@@ -304,7 +368,7 @@ async def test_render_log_carries_every_run_under_its_own_heading(tmp_path: Path
 
         await main.open_session_view(SUB_ONE)
         await main.add_note("scanned 12 files")
-        await main.finish_session_view("sub-1", "run one ended")
+        await main.finish_session_view("sub-1", "run one ended", True)
         main.focus_session_view("master")
         await main.add_note("delegation returned")
 
@@ -350,7 +414,7 @@ async def test_new_clears_both_transcripts_and_keeps_both_tabs(tmp_path: Path) -
         main = await _start_session(app, pilot)
         await main.open_session_view(SUB_ONE)
         await main.add_note("sub-agent output")
-        await main.finish_session_view("sub-1", "run one ended")
+        await main.finish_session_view("sub-1", "run one ended", True)
         await pilot.pause()
         assert _label(main, SUBAGENT_WINDOW).startswith("✓ ")
 

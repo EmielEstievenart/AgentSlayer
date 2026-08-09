@@ -289,6 +289,11 @@ class _SubRun:
     ref: SessionRef
     start: int
     end: int | None = None
+    # How it ended, recorded when ``end`` is. False for every way a run can fail
+    # before it produces a deliverable (the fresh chat could not be opened, the
+    # bootstrap did not fit, the user aborted, it crashed) - which is what stops
+    # the window's tab claiming a ``✓`` for a run that handed nothing back.
+    ok: bool = True
 
 
 class ElementClick(Enum):
@@ -968,15 +973,22 @@ class MainScreen(Screen[None]):
         self._focused_panel = window
         self._select_window(window)
 
-    async def finish_session_view(self, session_id: str, note: str) -> None:
+    async def finish_session_view(self, session_id: str, note: str, ok: bool) -> None:
         """A sub-agent run ended: annotate its transcript and re-badge its tab.
 
         Nothing is disabled or removed - the panels are output-only and the
         composer always targets the controller's active session, so leaving the
         run readable costs nothing and is the whole point of keeping it. The
-        tab drops its ``▶`` for a ``✓``: the label belongs to the WINDOW, so it
-        reports whether that window is busy, and the run's own title lives in
-        the divider above its transcript.
+        tab drops its ``▶`` for a ``✓`` or a ``✗``: the label belongs to the
+        WINDOW, so it reports what happened in it, and the run's own title lives
+        in the divider above its transcript.
+
+        ``ok`` is the outcome, and it is a parameter rather than an inference
+        because the caller is the only one who knows: a run that was refused a
+        fresh chat, blew its paste budget or crashed reaches here exactly like a
+        run that finished, through the same ``finally``. Without it the tab
+        showed a success glyph over a failure, directly under a note claiming a
+        result had been handed back.
         """
         window = self._window_of_session(session_id)
         panel = self._panels.get(window) if window is not None else None
@@ -987,6 +999,7 @@ class MainScreen(Screen[None]):
             for run in reversed(self._sub_runs):
                 if run.ref.id == session_id:
                     run.end = len(panel.event_log)
+                    run.ok = ok
                     break
             self._relabel_window(window)
 
@@ -1075,13 +1088,20 @@ class MainScreen(Screen[None]):
         the sub-agent going to open?" would be a question you answer by clicking
         around. The glyph is the sub-agent window's live state, derived from the
         runs rather than stored: none before it has ever run, ``▶`` while a run
-        is in flight (its slice has no end yet), ``✓`` once one has finished.
+        is in flight (its slice has no end yet), and otherwise the LAST run's
+        outcome - ``✓`` when it handed a result back, ``✗`` when it did not.
+        The last one, because the tab is a status light for the window and the
+        thing a user wants to know at a glance is how the most recent attempt
+        went; the earlier runs are still readable in the transcript below it.
         """
         name = _WINDOW_NAMES[window]
         service = self._services.get(window, "")
         glyph = ""
         if window == SUBAGENT_WINDOW and self._sub_runs:
-            glyph = "▶ " if any(run.end is None for run in self._sub_runs) else "✓ "
+            if any(run.end is None for run in self._sub_runs):
+                glyph = "▶ "
+            else:
+                glyph = "✓ " if self._sub_runs[-1].ok else "✗ "
         return f"{glyph}{name} · {service}" if service else f"{glyph}{name}"
 
     def _relabel_window(self, window: str) -> None:

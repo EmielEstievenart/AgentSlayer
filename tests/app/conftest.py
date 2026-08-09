@@ -60,7 +60,7 @@ class FakeChatView:
         self.gates: list[tuple[PendingAction, str]] = []
         self.opened: list[SessionRef] = []
         self.focused: list[str] = []
-        self.finished: list[tuple[str, str]] = []
+        self.finished: list[tuple[str, str, bool]] = []  # (session id, note, handed a result back)
         self.chats_started: list[SessionRef] = []
         self.chats_ended: list[SessionRef] = []
         self.cleared = 0
@@ -184,9 +184,9 @@ class FakeChatView:
     def focus_session_view(self, session_id: str) -> None:
         self.focused.append(session_id)
 
-    async def finish_session_view(self, session_id: str, note: str) -> None:
-        self.trace.append(f"finish:{session_id}")
-        self.finished.append((session_id, note))
+    async def finish_session_view(self, session_id: str, note: str, ok: bool) -> None:
+        self.trace.append(f"finish:{session_id}" if ok else f"finish-failed:{session_id}")
+        self.finished.append((session_id, note, ok))
 
     # -- sub-agent transport --------------------------------------------------
 

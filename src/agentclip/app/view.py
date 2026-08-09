@@ -113,9 +113,16 @@ class ChatView(Protocol):
     # ``finish_session_view`` only annotates and relabels: the view stays mounted
     # and readable (the panels are output-only anyway), so the user can go back
     # and read what a sub-agent did after the master has moved on.
+    #
+    # ``ok`` is that run's outcome, and it is a parameter because the view
+    # cannot work it out: every ending - a result handed back, a refused chat, a
+    # bootstrap over budget, an abort, a crash - arrives through the controller's
+    # one `finally`, so a view left to guess labels failures as successes. Plain
+    # data, like every other argument here: the view decides what a failed run
+    # LOOKS like (a glyph, a colour), the controller decides what happened.
     async def open_session_view(self, session: SessionRef) -> None: ...
     def focus_session_view(self, session_id: str) -> None: ...
-    async def finish_session_view(self, session_id: str, note: str) -> None: ...
+    async def finish_session_view(self, session_id: str, note: str, ok: bool) -> None: ...
 
     # -- sub-agent transport --------------------------------------------------
     # ``delegation_available`` is asked BEFORE a sub-agent engine is built, so an

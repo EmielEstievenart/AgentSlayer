@@ -20,6 +20,7 @@ window. In particular:
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from agentclip.app.controller import SessionController
@@ -307,13 +308,86 @@ async def test_a_failed_new_chat_click_pastes_nothing(
         "open:sub-1",
         "start_chat",  # refused
         "end_chat",
-        "finish:sub-1",
+        "finish-failed:sub-1",  # ...and the view is TOLD it failed
         "copy",  # the master's results, carrying the error
     ]
     payload = view.copied[-1]
     assert "could not open a fresh chat" in payload
     assert "status=error" in payload
     assert controller._sub is None
+
+
+async def test_a_run_that_handed_nothing_back_is_annotated_as_a_failure(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """The tab note and the tab glyph both come off this call, and every failure
+    reaches it through the same ``finally`` as a success. Told nothing, the view
+    printed "the result above was handed back" directly under the error saying
+    no chat could be opened - and badged the tab ✓."""
+    await _delegating_session(controller, view)
+    view.start_chat_ok = False
+
+    controller.submit_clipboard(delegate_reply("Read every file."))
+    await settle(view)
+
+    session_id, note, ok = view.finished[-1]
+    assert (session_id, ok) == ("sub-1", False)
+    assert "WITHOUT a result" in note
+    assert "was handed back to the delegating agent" not in note
+
+
+async def test_a_run_that_delivered_is_annotated_as_a_success(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    await _delegating_session(controller, view)
+    controller.submit_clipboard(delegate_reply("Read the docs."))
+    await _feed_sub(controller, task_done_reply("read", result="notes", chat=SUB))
+    await settle(view)
+
+    session_id, note, ok = view.finished[-1]
+    assert (session_id, ok) == ("sub-1", True)
+    assert "handed back to the delegating agent" in note
+
+
+async def test_an_aborted_run_is_annotated_as_a_failure(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """Aborting is a failure of the RUN even though nothing malfunctioned: the
+    delegating agent got an error result, so the tab must not claim otherwise."""
+    await _delegating_session(controller, view)
+    view.on_start_chat = lambda: controller.submit_message("/abort")
+
+    controller.submit_clipboard(delegate_reply("Read every file."))
+    await settle(view)
+
+    assert view.finished[-1][2] is False
+    assert "aborted" in view.copied[-1]
+
+
+async def test_a_deleted_sub_agent_service_refuses_the_delegation(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """The sub window's service is frozen at bootstrap; the service editor is
+    not. Deleting that preset mid-session used to fall through to the [general]
+    fallback, so the sub-agent ran on neither the preset readiness advertised nor
+    the one its window is pointed at - and its paste budget was a guess."""
+    requests = _record_engine_requests(controller)
+    await _delegating_session(controller, view, subagent_service="gemini")
+
+    services = {k: v for k, v in controller._config.services.items() if k != "gemini"}
+    controller.update_config(replace(controller._config, services=services))
+
+    controller.submit_clipboard(delegate_reply("Read every file."))
+    await settle(view)
+
+    payload = view.copied[-1]
+    assert "delegation is unavailable" in payload
+    assert "'gemini'" in payload and "no longer exists" in payload
+    assert "status=error" in payload
+    assert view.opened == []  # no tab, no run
+    assert view.chats_started == []
+    assert [req.role for req in requests] == ["master"]  # ...and no sub engine
+    assert any("deleted while this session was running" in text for text in view.errors())
 
 
 async def test_a_sub_agent_that_states_no_result_still_hands_something_back(

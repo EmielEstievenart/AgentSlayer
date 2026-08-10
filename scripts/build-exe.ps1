@@ -72,9 +72,27 @@ try {
 
     # Not --no-default-groups: that would uninstall pytest/ruff/mypy and break
     # the dev loop. Dev deps are kept out of the binary by the spec's excludes.
-    Write-Step 'Syncing dependencies (uv sync --group build)'
-    uv sync --group build
+    #
+    # --extra cv is not optional HERE even though it is optional for a
+    # from-source install: the shipped exe bundles the OpenCV matcher backend
+    # (architecture.md 6), and PyInstaller can only collect a package that is
+    # present in the environment it is pointed at. Worse, leaving it off does
+    # not merely skip it - `uv sync` prunes to exactly what was asked for, so a
+    # sync without this flag would UNINSTALL opencv/numpy from the shared .venv
+    # and then build a lean exe without a word.
+    Write-Step 'Syncing dependencies (uv sync --group build --extra cv)'
+    uv sync --group build --extra cv
     if ($LASTEXITCODE -ne 0) { throw "uv sync failed with exit code $LASTEXITCODE." }
+
+    # And prove it before spending two minutes on a build that cannot be right.
+    # A missing cv2 produces no build error at all: the exe starts, runs, and
+    # silently gives every service the anchor search while the editor tells the
+    # user their build does not include OpenCV.
+    Write-Step 'Verifying the cv extra is importable'
+    uv run --group build python -c "import cv2, numpy; print(f'cv2 {cv2.__version__}, numpy {numpy.__version__}')"
+    if ($LASTEXITCODE -ne 0) {
+        throw "The cv extra is not importable, so the exe would be built without the OpenCV matcher backend. Fix the environment and re-run."
+    }
 
     # --- build ---------------------------------------------------------------
 
@@ -98,6 +116,25 @@ try {
         throw "Smoke test failed (exit code $LASTEXITCODE). Not installing the broken exe."
     }
     Write-Host "    $($version.Trim())" -ForegroundColor Green
+
+    # --- bundled-backend check -----------------------------------------------
+
+    # --version proves the app imports; it says nothing about a backend that is
+    # only ever imported inside a function on a poll tick. --list-matchers
+    # actually imports each one and reports what happened, run against the exe
+    # that was just built - so this catches both halves of the failure: cv2 not
+    # collected at all, and cv2 collected but unable to load its DLLs out of a
+    # onefile extraction directory. Neither is visible at runtime until
+    # somebody opens the service editor and is told their build does not
+    # include OpenCV, which is exactly the report this check exists to stop
+    # shipping.
+    Write-Step 'Verifying the OpenCV backend is bundled AND loads'
+    $matchers = & $DistExe --list-matchers 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0 -or $matchers -match 'NOT AVAILABLE') {
+        Write-Host $matchers
+        throw "The frozen exe cannot run the OpenCV matcher, so every service would silently fall back to the anchor search. Check that the cv extra is installed and packaging/agentclip.spec's hiddenimports still name cv2/numpy."
+    }
+    $matchers.Trim() -split "`n" | ForEach-Object { Write-Host "    $($_.Trim())" -ForegroundColor Green }
 
     $sizeMb = [math]::Round((Get-Item $DistExe).Length / 1MB, 1)
 

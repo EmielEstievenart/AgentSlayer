@@ -61,6 +61,7 @@ from agentclip.screen.capture import RegionImage
 from agentclip.screen.template import (
     DEFAULT_MAX_DIFF,
     DEFAULT_TOLERANCE,
+    CandidateSource,
     RegionMatch,
     Template,
     find_in_region,
@@ -93,12 +94,18 @@ class PresenceTracker:
         required_ticks: int = DEFAULT_REQUIRED_TICKS,
         tolerance: int = DEFAULT_TOLERANCE,
         max_diff: float = DEFAULT_MAX_DIFF,
+        matcher: CandidateSource | None = None,
     ) -> None:
         self._templates = tuple(templates)
         self._found_is_busy = found_is_busy
         self._required_ticks = max(1, required_ticks)
         self._tolerance = tolerance
         self._max_diff = max_diff
+        # Which way of proposing candidate origins this service asked for
+        # (screen.matchers). None is the built-in anchor search. It is held
+        # rather than looked up per frame because resolving it can import cv2,
+        # and this runs on a poll timer.
+        self._matcher = matcher
         # Consecutive frames arguing for the *finished* verdict. The generating
         # verdict needs no counter: it is adopted on sight.
         self._streak = 0
@@ -127,7 +134,11 @@ class PresenceTracker:
         """
         for template in self._templates:
             match = find_in_region(
-                template, scene, tolerance=self._tolerance, max_diff=self._max_diff
+                template,
+                scene,
+                tolerance=self._tolerance,
+                max_diff=self._max_diff,
+                matcher=self._matcher,
             )
             if match is not None:
                 return (template, match)

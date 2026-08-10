@@ -10,7 +10,7 @@ Always deploy the exe onto PATH when building. Use the build script — never ru
 .\scripts\build-exe.ps1
 ```
 
-This builds from `packaging/agentclip.spec`, smoke-tests the frozen exe, and copies it into the PATH folder (`$env:AGENTCLIP_INSTALL_DIR` if set, otherwise `$HOME\Documents\PATH`). Whenever a change should be usable from the terminal — or the user asks for a build — finish by running this script so the installed `agentclip.exe` is up to date. Only skip the install step (`-NoInstall`) if the user explicitly asks for a build without deploying.
+This syncs the build environment (including the `cv` extra, which the exe bundles), builds from `packaging/agentclip.spec`, smoke-tests the frozen exe, verifies the OpenCV matcher backend actually loads inside it, and copies it into the PATH folder (`$env:AGENTCLIP_INSTALL_DIR` if set, otherwise `$HOME\Documents\PATH`). Whenever a change should be usable from the terminal — or the user asks for a build — finish by running this script so the installed `agentclip.exe` is up to date. Only skip the install step (`-NoInstall`) if the user explicitly asks for a build without deploying.
 
 ## Workflow
 

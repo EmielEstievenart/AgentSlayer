@@ -72,7 +72,8 @@ src/agentclip/
 │   ├── view.py            # ChatView Protocol (the one UI seam) + SessionView state snapshot
 │   └── types.py           # SessionSpec, SessionRef, EngineRequest, SessionStats
 │
-├── screen/                # OS screen layer (like clip: imported ONLY by tui/cli; stdlib-only)
+├── screen/                # OS screen layer (like clip: imported ONLY by tui/cli; stdlib-only
+│                          # AT MODULE LEVEL — cv2/numpy are lazy, function-body imports, see matchers.py)
 │   ├── region.py          # ScreenRegion dataclass + the "left top width height" wire format
 │   ├── overlay.py         # draw-a-box tkinter overlay; runs in a CHILD process (--pick-region)
 │   ├── picker.py          # spawns the child (works frozen and from source), parses its stdout
@@ -86,7 +87,10 @@ src/agentclip/
 │   ├── profile.py         # TemplateKind + ServiceProfile: what a SERVICE looks like (not where)
 │   ├── profile_store.py   # one folder of PNGs + a manifest per service; load never raises
 │   ├── slot.py            # AgentSlot (MASTER/SUBAGENT) + SlotCalibration: the drawn window per slot (= per tab)
-│   └── template.py        # anchor-based 2D search for an appearance inside a captured region
+│   ├── matchers.py        # the pluggable HALF of a search: anchors | opencv candidate generation.
+│   │                      # cv2/numpy imported inside the function; falls back to anchors when absent
+│   └── template.py        # 2D search for an appearance: dual-ruler anchors + the SHARED verification
+│                          # every backend is judged by (tui.md §3.4g)
 │
 └── tui/
     ├── app.py             # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
@@ -563,6 +567,22 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
 | `pillow` | `>=11,<12` | scaling and encoding the ELEMENTS column's crops for sixel (tui.md §1.7); a compiled dep, accepted after half-block close-ups were rejected on quality — PyInstaller has a built-in hook for it |
 | `textual-image` | `>=0.13,<1` | the sixel renderer and the Textual widget that can inject sixel data into a composited screen. Used **explicitly** (`textual_image.widget.sixel.Image`), never through its auto-detecting alias — see tui.md §1.7 for why that distinction is load-bearing |
 
+**Optional extras (`[project.optional-dependencies]`):**
+
+| Extra | Packages | Status |
+|---|---|---|
+| `cv` | `opencv-python-headless>=4.10`, `numpy>=2` | the OpenCV matcher backend (tui.md §3.4g), opt in per service in the editor's MATCHING block. **Optional from source; BUNDLED in the shipped exe** |
+
+It earns its place because the alternative is worse than its weight: an exhaustive correlation sweep is the only thing that covers the anchors' residual quantisation blind spot, and that blind spot is a real, reproduced failure on a real chat UI. It is an *extra* rather than a hard runtime dependency because a from-source install must not be taxed ~40 MB for a feature most users leave off, and the built-in anchor search needs nothing at all. Three properties make it safe to be absent: `cv2`/`numpy` are imported **inside the function** (`screen/matchers.py`), so §0's stdlib-only rule for the screen layer still holds at module level and `tests/test_layering.py` passes unchanged (its AST checker explicitly permits function-body imports, the same allowance `clip/copykitten_provider.py` uses); selecting the backend without it installed **falls back to anchors and says so** in the editor rather than crashing or silently searching nothing; and the tests that exercise it skip cleanly. Install with `pip install agentclip[cv]` (or `uv sync --extra cv`).
+
+**The frozen exe bundles it, and this supersedes the earlier "keep the exe lean" reasoning.** That argument was made in the abstract and lost on contact with a user: the editor correctly reported *"OpenCV is not installed — install it with `pip install agentclip[cv]`"* inside `agentclip.exe`, where there is no environment to install into and the advice is unactionable. A knob that cannot be turned is not a lean build, it is a broken one — so the exe now carries the extra and the whole feature works out of the box. Consequences, all of them enforced rather than remembered:
+
+- **The build environment needs the extra.** `scripts/build-exe.ps1` syncs `uv sync --group build --extra cv`. Leaving the flag off does not merely skip it — `uv sync` prunes to exactly what was asked for, so it would *uninstall* opencv/numpy from the shared `.venv` and then build a lean exe without a word.
+- **Reachability is named, collection is not.** `packaging/agentclip.spec` lists `cv2`/`numpy` in `hiddenimports` for the same reason it lists `copykitten` and `tkinter`: the import is lazy and `try`-guarded, so missing it produces no error, just a silent fallback. The binaries themselves need no help — PyInstaller ships `hook-numpy` and pyinstaller-hooks-contrib ships `hook-cv2`.
+- **The 29 MB FFmpeg video-I/O plugin is dropped** (`a.binaries` filter in the spec). AgentClip decodes no video: the backend calls exactly `matchTemplate` and `dilate`, both core imgproc, and cv2 loads that plugin lazily only for `VideoCapture`. Verified, not assumed — with the DLL removed, cv2 still imports and both calls return identical results.
+- **The build proves it, twice.** It refuses to start if `import cv2` fails in the build env, and after building it runs the frozen exe's own `--list-matchers`, which imports each backend and reports what happened. That second check is the one that matters: "the file is in the archive" is a weaker claim than "a onefile extraction can load its DLLs".
+- **Cost, measured:** 24.8 MiB → 64.1 MiB (+39.3 MiB). `cv2.pyd` is the bulk of it; numpy's OpenBLAS DLL (19.5 MB) is kept because numpy imports `linalg` eagerly.
+
 **Dev (PEP 735 `[dependency-groups]`, uv-native):** `pytest`, `pytest-asyncio`, `pytest-textual-snapshot`, `textual-dev`, `ruff`, `mypy`.
 
 **Deliberately NOT added:**
@@ -597,6 +617,9 @@ dependencies = [
   "pillow>=11,<12",
   "textual-image>=0.13,<1",
 ]
+
+[project.optional-dependencies]
+cv = ["opencv-python-headless>=4.10", "numpy>=2"]   # the OpenCV matcher backend (tui.md §3.4g)
 
 [project.scripts]
 agentclip = "agentclip.cli:main"

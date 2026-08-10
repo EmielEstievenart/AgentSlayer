@@ -17,10 +17,15 @@ from agentclip.config import (
     BUILTIN_SERVICE_KEYS,
     DEFAULT_DELIVERY,
     DEFAULT_FINISH_SIGNALS,
+    DEFAULT_MATCHER,
     DEFAULT_STABLE_SECONDS,
     DEFAULT_THEME,
+    DEFAULT_TOLERANCE,
     DELIVERY_MODES,
     FINISH_SIGNALS,
+    MATCHERS,
+    TOLERANCE_MAX,
+    TOLERANCE_MIN,
     ServicePreset,
     default_global_config_path,
     default_profile_dir,
@@ -799,6 +804,118 @@ def test_save_theme_creates_missing_parent_dirs(tmp_path: Path) -> None:
     assert nested.exists()
     raw = tomllib.loads(nested.read_text(encoding="utf-8"))
     assert raw["general"]["theme"] == "claude-warm"
+
+
+# -- matching (how a captured appearance is hunted for, and how strictly) ------
+
+
+def test_every_builtin_ships_the_built_in_matcher_at_the_shipped_tolerance() -> None:
+    """Both knobs are opt-in: OpenCV is an optional dependency nobody is made
+    to install, and 24 is the tolerance every search used before the slider
+    existed - so an untouched install behaves exactly as it always did."""
+    assert MATCHERS == ("anchors", "opencv")
+    assert DEFAULT_MATCHER == "anchors"
+    assert (TOLERANCE_MIN, DEFAULT_TOLERANCE, TOLERANCE_MAX) == (0, 24, 64)
+    for key, preset in default_services().items():
+        assert preset.matcher == "anchors", key
+        assert preset.tolerance == 24, key
+    fresh = ServicePreset("k", "K", 1_000, 5_000)
+    assert (fresh.matcher, fresh.tolerance) == ("anchors", 24)
+
+
+def test_load_config_reads_a_matcher_and_tolerance_override(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        '[services.gemini]\nmatcher = "opencv"\ntolerance = 40\n', encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["gemini"].matcher == "opencv"
+    assert cfg.services["gemini"].tolerance == 40
+    assert not cfg.warnings
+
+
+def test_load_config_rejects_an_unknown_matcher(project: Path, global_path: Path) -> None:
+    """Falling back silently is the one outcome a user who wrote this key would
+    not notice - the search they were trying to move off is the search they get."""
+    global_path.write_text('[services.gemini]\nmatcher = "sift"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["gemini"].matcher == "anchors"
+    assert any("matcher" in w and "anchors, opencv" in w for w in cfg.warnings)
+
+
+def test_load_config_rejects_a_non_string_matcher(project: Path, global_path: Path) -> None:
+    global_path.write_text("[services.gemini]\nmatcher = 3\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["gemini"].matcher == "anchors"
+    assert any("matcher" in w for w in cfg.warnings)
+
+
+def test_load_config_rejects_a_tolerance_outside_its_bounds(
+    project: Path, global_path: Path
+) -> None:
+    """The bounds the slider can express, enforced on load too - so a value the
+    editor accepts is never silently replaced on the next start, and a
+    hand-written one that is out of range is complained about rather than used."""
+    global_path.write_text("[services.gemini]\ntolerance = 250\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["gemini"].tolerance == DEFAULT_TOLERANCE
+    assert any("tolerance" in w and "0..64" in w for w in cfg.warnings)
+
+
+def test_load_config_rejects_a_non_integer_tolerance(project: Path, global_path: Path) -> None:
+    global_path.write_text('[services.gemini]\ntolerance = "loose"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["gemini"].tolerance == DEFAULT_TOLERANCE
+    assert any("tolerance" in w for w in cfg.warnings)
+
+
+def test_save_then_load_round_trips_the_matching_fields(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["gemini"] = replace(services["gemini"], matcher="opencv", tolerance=31)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["gemini"]["matcher"] == "opencv"
+    assert raw["services"]["gemini"]["tolerance"] == 31
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["gemini"] == services["gemini"]
+    assert not cfg2.warnings
+
+
+def test_untouched_matching_fields_are_not_written_at_all(
+    project: Path, global_path: Path
+) -> None:
+    """The minimal-diff convention every later field has followed: a user who
+    has never opened the MATCHING block gets a file that does not mention it,
+    so a future change to the shipped defaults keeps applying to them."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["gemini"] = replace(services["gemini"], max_paste_chars=30_000)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert "matcher" not in raw["services"]["gemini"]
+    assert "tolerance" not in raw["services"]["gemini"]
+
+
+def test_a_config_written_before_the_matching_fields_existed_still_loads(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        '[services.gemini]\nlabel = "Gemini"\nmax_paste_chars = 24000\n'
+        'total_context_chars = 800000\ndelivery = "stream"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["gemini"].matcher == DEFAULT_MATCHER
+    assert cfg.services["gemini"].tolerance == DEFAULT_TOLERANCE
+    assert cfg.services["gemini"].delivery == "stream"
+    assert not cfg.warnings
 
 
 def test_default_profile_dir_sits_beside_the_global_config() -> None:

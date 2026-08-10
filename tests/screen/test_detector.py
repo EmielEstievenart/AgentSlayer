@@ -52,11 +52,17 @@ def paste(scene: RegionImage, patch: RegionImage, x: int, y: int) -> RegionImage
 SEND_BUTTON = noise(20, 16, seed=2)
 COPY_ICON = noise(18, 14, seed=3)
 BUSY_ICON = noise(16, 12, seed=4)
+# The wide, short one: a captured chat input box is hundreds of pixels across
+# and a handful tall, which is a different shape of search from an icon and the
+# reason these kinds are worth their own case.
+CHAT_BOX = noise(120, 6, seed=5)
+NEW_CHAT_BUTTON = noise(22, 10, seed=6)
 EMPTY = noise(REGION.width, REGION.height, seed=1)
 SEND_ON_SCREEN = paste(EMPTY, SEND_BUTTON, 60, 40)
 COPY_ON_SCREEN = paste(EMPTY, COPY_ICON, 20, 70)
 BOTH_ON_SCREEN = paste(SEND_ON_SCREEN, COPY_ICON, 20, 70)
 BUSY_ON_SCREEN = paste(EMPTY, BUSY_ICON, 10, 10)
+CHAT_BOX_ON_SCREEN = paste(EMPTY, CHAT_BOX, 10, 60)
 
 
 def profile_with(**kinds: RegionImage) -> ServiceProfile:
@@ -81,11 +87,22 @@ class Clock:
 
 
 def test_every_calibrated_kind_is_searched_on_every_frame() -> None:
-    """The whole point. No gate, no flow and no session state can reach in
-    here, so there is nothing that could make a calibrated kind skip a frame."""
+    """The whole point, and EVERY kind means every kind.
+
+    No gate, no flow and no session state can reach in here, so there is nothing
+    that could make a calibrated kind skip a frame - including the three the
+    automation only ever clicks on demand. A picture of it is the whole of the
+    calibration, and the column has a row for each.
+    """
     detector = build_detector(
         REGION,
-        profile_with(busy=BUSY_ICON, send_ready=SEND_BUTTON, copy=COPY_ICON),
+        profile_with(
+            busy=BUSY_ICON,
+            send_ready=SEND_BUTTON,
+            copy=COPY_ICON,
+            chatbox_ongoing=CHAT_BOX,
+            new_chat=NEW_CHAT_BUTTON,
+        ),
         signals=("busy", "stale"),
         required_ticks=2,
     )
@@ -93,15 +110,62 @@ def test_every_calibrated_kind_is_searched_on_every_frame() -> None:
         TemplateKind.SEND_READY,
         TemplateKind.BUSY,
         TemplateKind.COPY,
+        TemplateKind.CHATBOX_ONGOING,
+        TemplateKind.NEW_CHAT,
     )
 
     for _ in range(3):
         tick = detector.observe(BOTH_ON_SCREEN)
         assert tick.searched(TemplateKind.SEND_READY)
         assert tick.searched(TemplateKind.COPY)
+        assert tick.searched(TemplateKind.CHATBOX_ONGOING)
+        assert tick.searched(TemplateKind.NEW_CHAT)
         assert tick.present(TemplateKind.SEND_READY) is True
         assert tick.present(TemplateKind.COPY) is True
         assert tick.present(TemplateKind.BUSY) is False
+        assert tick.present(TemplateKind.CHATBOX_ONGOING) is False
+
+
+def test_a_chat_box_is_found_on_the_timer_not_only_by_the_click() -> None:
+    """The rule that used to have three exceptions.
+
+    The chat boxes and the new-chat button were left out because nothing on the
+    poll timer consumed them - which made what gets searched a fact about the
+    automation instead of about the profile, and left their rows in the ELEMENTS
+    column unable to say anything at all. A capture that has stopped matching is
+    now visible on the frame it stops matching on.
+    """
+    detector = build_detector(
+        REGION,
+        profile_with(chatbox_ongoing=CHAT_BOX, new_chat=NEW_CHAT_BUTTON),
+        signals=(),
+        required_ticks=2,
+    )
+
+    assert detector.watching is True
+    tick = detector.observe(CHAT_BOX_ON_SCREEN)
+
+    sighting = tick.found(TemplateKind.CHATBOX_ONGOING)
+    assert sighting is not None
+    assert (sighting.match.x, sighting.match.y) == (10, 60)
+    assert tick.present(TemplateKind.NEW_CHAT) is False
+
+
+def test_both_chat_box_layouts_are_searched_and_one_of_them_misses() -> None:
+    """Only one layout is on screen at a time - a chat is either fresh or
+    ongoing - so the expected reading of a fully calibrated service is one row
+    found and the other "not on screen". Both are still searched, because either
+    capture can rot and a row that is never searched cannot say so."""
+    detector = build_detector(
+        REGION,
+        profile_with(chatbox_initial=CHAT_BOX, chatbox_ongoing=NEW_CHAT_BUTTON),
+        signals=(),
+        required_ticks=2,
+    )
+    tick = detector.observe(CHAT_BOX_ON_SCREEN)
+
+    assert tick.present(TemplateKind.CHATBOX_INITIAL) is True
+    assert tick.present(TemplateKind.CHATBOX_ONGOING) is False
 
 
 def test_an_uncalibrated_kind_is_never_searched_and_says_nothing() -> None:
@@ -152,12 +216,23 @@ def test_send_and_copy_alone_are_still_worth_a_poll_loop() -> None:
 
 
 def test_the_order_it_reports_in_is_the_columns_order() -> None:
+    """A fully calibrated service searches for all seven, in the order the
+    ELEMENTS column lists its rows in - the column is the picture of this."""
     detector = build_detector(
         REGION,
-        profile_with(busy=BUSY_ICON, idle=SEND_BUTTON, send_ready=SEND_BUTTON, copy=COPY_ICON),
+        profile_with(
+            busy=BUSY_ICON,
+            idle=SEND_BUTTON,
+            send_ready=SEND_BUTTON,
+            copy=COPY_ICON,
+            chatbox_initial=CHAT_BOX,
+            chatbox_ongoing=CHAT_BOX,
+            new_chat=NEW_CHAT_BUTTON,
+        ),
         signals=("busy", "idle", "stale"),
         required_ticks=2,
     )
+    assert len(RUNTIME_KINDS) == len(TemplateKind)
     assert detector.searched_kinds == RUNTIME_KINDS
     assert detector.active_detectors == ("busy", "idle", "stale")
 

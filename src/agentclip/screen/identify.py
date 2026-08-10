@@ -31,7 +31,13 @@ from dataclasses import dataclass
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
-from agentclip.screen.template import find_all_in_region, match_rect, same_element
+from agentclip.screen.template import (
+    DEFAULT_TOLERANCE,
+    CandidateSource,
+    find_all_in_region,
+    match_rect,
+    same_element,
+)
 
 # What the drawn chat region itself is called in the list. It is not a
 # TemplateKind (nothing was matched to find it - the user drew it), and it is
@@ -72,7 +78,12 @@ class IdentifiedElement:
 
 
 def identify_elements(
-    region: ScreenRegion, profile: ServiceProfile, scene: RegionImage
+    region: ScreenRegion,
+    profile: ServiceProfile,
+    scene: RegionImage,
+    *,
+    tolerance: int = DEFAULT_TOLERANCE,
+    matcher: CandidateSource | None = None,
 ) -> list[IdentifiedElement]:
     """Every appearance ``profile`` can find in ``scene``, as screen rectangles.
 
@@ -90,6 +101,11 @@ def identify_elements(
 
     The drawn region is always the first entry, so the list is never empty and
     the overlay always shows where the tool was looking.
+
+    ``tolerance`` and ``matcher`` are the live service's own search settings and
+    must be passed through by the caller: this overlay is the user's answer to
+    "why is my button not being found", and an overlay that searched with
+    different settings from the poller would answer a question nobody asked.
     """
     elements = [IdentifiedElement(CHAT_REGION_LABEL, region)]
     for kind in TemplateKind:
@@ -100,7 +116,12 @@ def identify_elements(
             (template, match)
             for template in templates
             for match in find_all_in_region(
-                template, scene, max_diff=kind.max_diff, limit=MAX_MATCHES
+                template,
+                scene,
+                tolerance=tolerance,
+                max_diff=kind.max_diff,
+                limit=MAX_MATCHES,
+                matcher=matcher,
             )
         ]
         # Reading order across the whole union before the fold, so which variant

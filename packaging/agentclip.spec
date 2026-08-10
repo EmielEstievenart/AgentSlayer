@@ -10,6 +10,12 @@ CSS lives in a class var, the protocol templates are string constants, and
 nothing resolves paths relative to ``__file__``. So there are no ``datas`` of
 our own here - everything below exists to work around *dependency* dynamism
 that PyInstaller's static analysis cannot see.
+
+The build environment must have the ``cv`` extra installed: the exe bundles the
+OpenCV matcher backend, and PyInstaller can only collect a package that is
+there. ``scripts/build-exe.ps1`` syncs it and then refuses to build without it,
+because the failure is otherwise silent - an exe missing cv2 starts, runs, and
+quietly gives every service the anchor search.
 """
 
 import os
@@ -68,6 +74,20 @@ hiddenimports = (
     # tk-less Linux still runs the rest of the app; name it explicitly so the
     # frozen build can never silently lose the picker.
     + ["tkinter"]
+    # The OpenCV matcher backend (screen/matchers.py, tui.md S3.4g). Same lazy,
+    # try/except-guarded shape as copykitten and for the same reason - a
+    # from-source install without the `cv` extra has to keep working - and the
+    # same consequence if it is missed: no error, just a service configured for
+    # the exhaustive sweep silently getting the anchors, with the editor
+    # blaming the build. The exe BUNDLES it (architecture.md S6), so the build
+    # environment needs `uv sync --group build --extra cv`; scripts/build-exe.ps1
+    # does that and fails loudly if cv2 is not importable.
+    #
+    # Collection itself needs no help: PyInstaller ships hook-numpy and
+    # pyinstaller-hooks-contrib ships hook-cv2, and both pull their own binary
+    # extensions once the module is reachable. Naming them is about
+    # REACHABILITY, which is exactly what a lazy import makes fragile.
+    + ["cv2", "numpy"]
 )
 
 # The dev group shares the same .venv. None of this is reachable from our
@@ -101,6 +121,16 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# OpenCV's hook collects the whole wheel, including the 29 MB FFmpeg video-I/O
+# plugin. AgentClip decodes no video: the matcher backend calls exactly
+# ``matchTemplate`` and ``dilate`` (screen/matchers.py), both core imgproc, and
+# the plugin is loaded lazily by cv2 the first time something opens a
+# VideoCapture - which nothing here ever does. Verified rather than assumed:
+# with this DLL removed from the environment, cv2 still imports and both calls
+# return the same answers. Dropping it is a third of the cost of bundling
+# OpenCV at all, so it is worth the four lines.
+a.binaries = [entry for entry in a.binaries if "opencv_videoio_ffmpeg" not in entry[0]]
 
 pyz = PYZ(a.pure)
 

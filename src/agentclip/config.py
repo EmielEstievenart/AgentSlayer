@@ -106,6 +106,41 @@ DELIVERY_MODES: tuple[str, ...] = (DELIVERY_PASTE, DELIVERY_STREAM)
 DEFAULT_DELIVERY = DELIVERY_PASTE
 
 
+# How a service's captured appearances are hunted for on a frame:
+#   "anchors" - the built-in fingerprint search (screen.template). No
+#               dependency, fast, and blind to a capture whose shades have
+#               drifted past a quantisation edge.
+#   "opencv"  - an exhaustive correlation sweep (screen.matchers). Needs the
+#               optional `agentclip[cv]` extra; falls back to anchors, with a
+#               warning in the editor, when it is not installed.
+# Only CANDIDATE GENERATION differs: both are verified by the same tolerant
+# per-pixel comparison, which is why one `tolerance` below governs both.
+#
+# Spelled out here rather than imported from screen.matchers: config is a
+# stdlib-only leaf that may not import the screen layer (architecture.md 0),
+# exactly as VALID_THEMES is spelled out rather than asked of Textual.
+# tests/screen/test_matchers.py asserts the two lists agree.
+MATCHER_ANCHORS = "anchors"
+MATCHER_OPENCV = "opencv"
+MATCHERS: tuple[str, ...] = (MATCHER_ANCHORS, MATCHER_OPENCV)
+DEFAULT_MATCHER = MATCHER_ANCHORS
+
+# How far a single colour channel may drift before a pixel counts as different.
+# Per service because it is a fact about a browser and a theme, not about a
+# button: a chat rendered with heavy sub-pixel anti-aliasing, or one whose page
+# tints its controls on hover, needs more slack than a flat dark UI.
+#
+# Deliberately NOT the same knob as `max_diff`, which stays per TemplateKind
+# (screen.profile): tolerance is how different one PIXEL may be, max_diff is how
+# many pixels may be that different, and the second is a property of the kind of
+# control being looked for (an icon sitting on whatever text is behind it needs
+# a looser one than a chat box). The value below must match
+# screen.template.DEFAULT_TOLERANCE - asserted by tests/screen/test_matchers.py.
+DEFAULT_TOLERANCE = 24
+TOLERANCE_MIN = 0
+TOLERANCE_MAX = 64
+
+
 def normalize_finish_signals(values: Iterable[str]) -> tuple[str, ...]:
     """Drop unknown entries, dedupe, and return them in :data:`FINISH_SIGNALS`
     order, so a hand-written (or future editor-written) checklist can never make
@@ -135,6 +170,10 @@ class ServicePreset:
     # slower and leaves a half-written message in the box if it is interrupted,
     # so it is worth it only where a single large paste visibly stalls the page.
     delivery: str = DEFAULT_DELIVERY
+    # One of MATCHERS: how this service's appearances are hunted for (see above).
+    matcher: str = DEFAULT_MATCHER
+    # Per-channel slack in the shared verification, 0..64 (see above).
+    tolerance: int = DEFAULT_TOLERANCE
 
 
 def default_services() -> dict[str, ServicePreset]:
@@ -390,6 +429,24 @@ def _take_delivery(table: dict, default: str, ctx: str, warnings: list[str]) -> 
     return value
 
 
+def _take_matcher(table: dict, default: str, ctx: str, warnings: list[str]) -> str:
+    """Read a candidate-generation backend, falling back to ``default`` for
+    anything that is not one of :data:`MATCHERS`. Warned about rather than
+    accepted, for the same reason as :func:`_take_delivery`: a user who writes
+    this key has a search that is not finding their buttons, and silently
+    running the backend they were trying to move off is the one outcome that
+    teaches them nothing. (Whether the named backend can actually RUN is a
+    different question, answered per machine by screen.matchers and surfaced in
+    the editor - an uninstallable name is not a config error.)"""
+    value = table.get("matcher", default)
+    if not isinstance(value, str) or value not in MATCHERS:
+        warnings.append(
+            f"config: [{ctx}] matcher must be one of {', '.join(MATCHERS)}; using {default!r}"
+        )
+        return default
+    return value
+
+
 def load_config(
     project_root: Path,
     *,
@@ -459,6 +516,16 @@ def load_config(
             hover_scan=_take_bool(table, "hover_scan", base.hover_scan if base else False, ctx, warnings),
             delivery=_take_delivery(
                 table, base.delivery if base else DEFAULT_DELIVERY, ctx, warnings
+            ),
+            matcher=_take_matcher(table, base.matcher if base else DEFAULT_MATCHER, ctx, warnings),
+            tolerance=_take_int(
+                table,
+                "tolerance",
+                base.tolerance if base else DEFAULT_TOLERANCE,
+                TOLERANCE_MIN,
+                TOLERANCE_MAX,
+                ctx,
+                warnings,
             ),
         )
         if preset.max_paste_chars > preset.total_context_chars:
@@ -594,6 +661,12 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
             services_table[key]["hover_scan"] = preset.hover_scan
         if preset.delivery != (base.delivery if base else DEFAULT_DELIVERY):
             services_table[key]["delivery"] = preset.delivery
+        # The matching knobs, newest of all, under the same rule: a user who has
+        # never opened the MATCHING block gets a file that does not mention it.
+        if preset.matcher != (base.matcher if base else DEFAULT_MATCHER):
+            services_table[key]["matcher"] = preset.matcher
+        if preset.tolerance != (base.tolerance if base else DEFAULT_TOLERANCE):
+            services_table[key]["tolerance"] = preset.tolerance
 
     data = dict(data)
     if services_table:

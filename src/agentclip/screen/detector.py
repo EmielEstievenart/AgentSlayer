@@ -10,8 +10,9 @@ drifted had no way to see it until an automation silently failed. The state
 machine has been demoted to a *reader* of this module: it consumes verdicts and
 sightings, it never decides what gets looked for.
 
-**The policy here is calibration and nothing else.** Every kind the live
-window's service is calibrated for is searched on every frame:
+**The policy here is calibration and nothing else.** EVERY kind the live
+window's service has a picture of is searched on every frame - all seven of
+them, not the four the automation happens to consume:
 
 * ``BUSY`` / ``IDLE`` through a :class:`~agentclip.screen.presence.PresenceTracker`
   each - calibrated meaning the service's finish-signal checklist ticks the
@@ -20,19 +21,36 @@ window's service is calibrated for is searched on every frame:
 * the drawn region's own stillness through a
   :class:`~agentclip.screen.stale.StaleTracker`, when the checklist ticks it -
   the one detector with no appearance behind it;
-* ``SEND_READY`` and ``COPY`` as plain presence searches, calibrated meaning
-  simply that the service has a capture of them. They have no checklist entry
-  because there is nothing to decide: a service either shows such a control or
-  it does not (tui.md 3.4d).
+* every remaining kind - ``SEND_READY``, ``COPY``, both chat boxes and
+  ``NEW_CHAT`` - as a plain presence search, calibrated meaning simply that the
+  service has a capture of it. None of them has a checklist entry because there
+  is nothing to decide: a service either shows such a control or it does not
+  (tui.md 3.4d).
+
+The three that used to be excluded (the two chat boxes and the new-chat button)
+were left out because nothing on the poll timer *consumed* them - they are found
+on demand, by the click that is about to use them. That was the state machine
+deciding what the detector looks at through the back door, and it cost the user
+the only readout there is: their rows in the ELEMENTS column (tui.md 1.7) could
+never say anything, so a chat-box capture that had stopped matching was
+invisible until a paste went into the wrong place. What is searched is now a
+function of the profile alone. **The two chat boxes are mutually exclusive in
+practice** - a chat is either fresh or ongoing, so one layout is on screen -
+and both are still searched and still reported every frame; the miss is the
+answer, and a row that reads "not on screen" for the one that is not the
+current layout is correct rather than a fault.
 
 There is deliberately no session state, no gate, no flow and no loop phase in
-that list, and no way to pass one in.
+that list, and no way to pass one in. The on-demand searches still exist and are
+untouched (``MainScreen._chatbox_region``, ``_click_profile_element``): a
+remembered location is not a click target, so anything about to touch the mouse
+re-searches a fresh capture of its own.
 
 **One frame feeds all of them.** The caller captures once and calls
 :meth:`ScreenDetector.observe`; every verdict in the returned
 :class:`DetectionSnapshot` therefore describes the same instant of a moving
-screen rather than four moments of it, and a failed capture reaches all of them
-as the same ERROR. The snapshot is immutable and is published by a single
+screen rather than a handful of moments of it, and a failed capture reaches all
+of them as the same ERROR. The snapshot is immutable and is published by a single
 attribute assignment, which is what makes it safe to observe on a worker thread
 and read on another: a reader either sees the previous whole answer or the new
 whole answer, never half of one.
@@ -54,27 +72,47 @@ from dataclasses import dataclass
 
 from agentclip.screen.busy import BusyProbe
 from agentclip.screen.capture import RegionImage
+from agentclip.screen.matchers import DEFAULT_MATCHER, Matcher, select_matcher
 from agentclip.screen.presence import PresenceTracker
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.stale import StaleProbe, StaleTracker
-from agentclip.screen.template import RegionMatch, Template, find_in_region, match_rect
+from agentclip.screen.template import (
+    DEFAULT_TOLERANCE,
+    CandidateSource,
+    RegionMatch,
+    Template,
+    find_in_region,
+    match_rect,
+)
 
-# The appearances that are searched for while the automation runs, in the order
-# the ELEMENTS column lists them. The other three kinds (the two chat boxes, the
-# new-chat button) are found on demand by a click, never on a timer.
+# Every appearance a profile can hold, in the order the ELEMENTS column lists
+# them: the four the loop turns on first (the send button holds the gate, busy
+# and idle decide when generating stopped, the copy button harvests), then the
+# three a click uses on demand. All of them, because what gets searched is a
+# question about the profile and not about the automation - and because a row
+# that can never say anything is not a readout. Same tuple, same order, as
+# ``tui.widgets.elements.ELEMENT_ORDER``: the column is the picture of this list.
 RUNTIME_KINDS: tuple[TemplateKind, ...] = (
     TemplateKind.SEND_READY,
     TemplateKind.BUSY,
     TemplateKind.IDLE,
     TemplateKind.COPY,
+    TemplateKind.CHATBOX_INITIAL,
+    TemplateKind.CHATBOX_ONGOING,
+    TemplateKind.NEW_CHAT,
 )
 
 # The kinds this module searches for DIRECTLY, rather than through a tracker:
-# presence questions with no de-bounce, because neither of them is a finish
+# presence questions with no de-bounce, because none of them is a finish
 # detector. A tracker would actively harm the send gate - "not seen yet" and
 # "has gone" are opposite answers and a debounce cannot tell them apart.
-PROBE_KINDS: tuple[TemplateKind, ...] = (TemplateKind.SEND_READY, TemplateKind.COPY)
+# Derived rather than retyped, so the two lists cannot drift: everything that is
+# not busy or idle is a plain search.
+_TRACKED_KINDS: tuple[TemplateKind, ...] = (TemplateKind.BUSY, TemplateKind.IDLE)
+PROBE_KINDS: tuple[TemplateKind, ...] = tuple(
+    kind for kind in RUNTIME_KINDS if kind not in _TRACKED_KINDS
+)
 
 # The finish detectors, in the canonical order they are built, observed and
 # posted in - the same order as config.FINISH_SIGNALS.
@@ -146,7 +184,12 @@ class DetectionSnapshot:
 
 
 def _first_match(
-    templates: Sequence[Template], scene: RegionImage, *, max_diff: float
+    templates: Sequence[Template],
+    scene: RegionImage,
+    *,
+    max_diff: float,
+    tolerance: int = DEFAULT_TOLERANCE,
+    matcher: CandidateSource | None = None,
 ) -> tuple[Template, RegionMatch] | None:
     """The first of a kind's images that is on screen, with where it is.
 
@@ -158,7 +201,9 @@ def _first_match(
     a chat live.
     """
     for template in templates:
-        match = find_in_region(template, scene, max_diff=max_diff)
+        match = find_in_region(
+            template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher
+        )
         if match is not None:
             return (template, match)
     return None
@@ -184,12 +229,22 @@ class ScreenDetector:
         idle: PresenceTracker | None = None,
         stale: StaleTracker | None = None,
         templates: Mapping[TemplateKind, Sequence[Template]] | None = None,
+        tolerance: int = DEFAULT_TOLERANCE,
+        matcher: Matcher | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.region = region
         self.busy = busy
         self.idle = idle
         self.stale = stale
+        # How a pixel comparison is judged, and how origins to compare are
+        # proposed: both are per-service policy (config.ServicePreset), decided
+        # by whoever built this detector. Held as one object rather than a name
+        # so nothing on the poll path has to know that "opencv" is a string, or
+        # that it might not have been available - ``build_detector`` resolved
+        # that once, and ``matcher.name`` is what is actually running.
+        self.tolerance = tolerance
+        self.matcher = matcher if matcher is not None else select_matcher(DEFAULT_MATCHER)
         # Empty stacks are dropped rather than kept: "calibrated" and "has at
         # least one picture" are the same statement, and a kind mapped to an
         # empty tuple would report itself searched every tick while searching
@@ -209,8 +264,9 @@ class ScreenDetector:
     def active_detectors(self) -> tuple[str, ...]:
         """The FINISH detectors that will report, in canonical order.
 
-        Only the three: the send button and the copy button close no tick and
-        fold into no verdict, and the tick-closing rule (``_finish_tick_closed_by``)
+        Only the three: none of the plain searches (the send button, the copy
+        button, the two chat boxes, the new-chat button) closes a tick or folds
+        into a verdict, and the tick-closing rule (``_finish_tick_closed_by``)
         reads exactly this.
         """
         return tuple(
@@ -270,7 +326,15 @@ class ScreenDetector:
                     sightings[kind] = self._sight(kind, tracker.last_sighting, at)
             for kind, templates in self._templates.items():
                 sightings[kind] = self._sight(
-                    kind, _first_match(templates, scene, max_diff=kind.max_diff), at
+                    kind,
+                    _first_match(
+                        templates,
+                        scene,
+                        max_diff=kind.max_diff,
+                        tolerance=self.tolerance,
+                        matcher=self.matcher.origins,
+                    ),
+                    at,
                 )
         snapshot = DetectionSnapshot(
             at=at,
@@ -342,6 +406,8 @@ def build_detector(
     *,
     signals: Sequence[str],
     required_ticks: int,
+    tolerance: int = DEFAULT_TOLERANCE,
+    matcher: str = DEFAULT_MATCHER,
     clock: Callable[[], float] = time.monotonic,
 ) -> ScreenDetector:
     """Compose a detector from a drawn region and one service's calibration.
@@ -351,14 +417,25 @@ def build_detector(
     (``ServicePreset.finish_signals``) and ``profile`` is what it has pictures
     of. Busy and idle need both halves - a ticked signal with no capture
     searches for nothing, a capture the checklist does not tick is not wanted -
-    while stale needs no picture at all and the send/copy buttons need no tick.
+    while stale needs no picture at all and the other five kinds need no tick:
+    having a picture of one IS the whole of their calibration, so every one the
+    profile holds is handed over and searched on every frame.
 
     Every image the service has of a kind is passed on, not one: the searches OR
     them, so a second capture of the same control drawn differently is one more
     way to see it and never a replacement.
+
+    ``tolerance`` and ``matcher`` are the service's two search settings, and
+    they arrive as plain values from ``config.ServicePreset`` because this is
+    the one place that turns policy into a composed object: the name is
+    resolved to a real candidate source HERE (``screen.matchers``), once per
+    detector rather than once per frame, and every tracker below is handed the
+    same tolerance so a service cannot end up with its busy probe judging
+    pixels differently from its copy button.
     """
     busy_templates = profile.variants(TemplateKind.BUSY) if "busy" in signals else ()
     idle_templates = profile.variants(TemplateKind.IDLE) if "idle" in signals else ()
+    source = select_matcher(matcher)
     return ScreenDetector(
         region,
         busy=(
@@ -366,7 +443,9 @@ def build_detector(
                 busy_templates,
                 found_is_busy=True,
                 required_ticks=required_ticks,
+                tolerance=tolerance,
                 max_diff=TemplateKind.BUSY.max_diff,
+                matcher=source.origins,
             )
             if busy_templates
             else None
@@ -376,14 +455,22 @@ def build_detector(
                 idle_templates,
                 found_is_busy=False,
                 required_ticks=required_ticks,
+                tolerance=tolerance,
                 max_diff=TemplateKind.IDLE.max_diff,
+                matcher=source.origins,
             )
             if idle_templates
             else None
         ),
         # No ``capture=``: the caller hands every tick's single frame to
         # ``observe``, so this tracker never captures for itself.
-        stale=StaleTracker(region, required_ticks=required_ticks) if "stale" in signals else None,
+        stale=(
+            StaleTracker(region, required_ticks=required_ticks, tolerance=tolerance)
+            if "stale" in signals
+            else None
+        ),
         templates={kind: profile.variants(kind) for kind in PROBE_KINDS},
+        tolerance=tolerance,
+        matcher=source,
         clock=clock,
     )

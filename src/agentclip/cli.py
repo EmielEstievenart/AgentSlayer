@@ -16,6 +16,7 @@ from agentclip.config import Config, load_config
 from agentclip.engine.engine import Engine
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.names import generate_chat_name
+from agentclip.screen.matchers import MATCHERS, select_matcher
 from agentclip.store.backups import BackupStore
 from agentclip.store.session import SessionStore, prune_sessions
 from agentclip.tools.registry import default_registry
@@ -135,8 +136,37 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Hidden: /identify's read-only twin of --pick-region - the element list
     # arrives as JSON on stdin and is drawn where each element sits on screen.
     parser.add_argument("--show-identify", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--list-matchers",
+        action="store_true",
+        help="print which appearance-matcher backends this build can run, and exit",
+    )
     parser.add_argument("--version", action="version", version=f"agentclip {__version__}")
     return parser
+
+
+def _list_matchers() -> int:
+    """Say which candidate-generation backends this build can actually run.
+
+    The service editor already reports this where a user configures it, but by
+    then it is a complaint rather than a check - and it is unanswerable from
+    outside the TUI, which is the one place a *build* has to be able to answer
+    it. Bundling OpenCV into the frozen exe (architecture.md 6) is only correct
+    if it is really in there and really loads, and "the file is in the archive"
+    is not the same claim: a onefile build extracts to a temp directory and a
+    compiled extension can still fail to find its DLLs. So this actually
+    imports the backend and reports what happened, which is what
+    scripts/build-exe.ps1 runs against the exe it just produced.
+    """
+    frozen = bool(getattr(sys, "frozen", False))
+    print(f"agentclip {__version__} ({'frozen build' if frozen else 'from source'})")
+    for name in MATCHERS:
+        chosen = select_matcher(name)
+        if chosen.name == name:
+            print(f"  {name:<8} available")
+        else:
+            print(f"  {name:<8} NOT AVAILABLE - would fall back to {chosen.name!r}")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -145,6 +175,8 @@ def main(argv: list[str] | None = None) -> int:
         return _pick_region_child(args.pick_prompt)
     if args.show_identify:
         return _show_identify_child(sys.stdin.read())
+    if args.list_matchers:
+        return _list_matchers()
     try:
         project_root = Path(args.project).resolve(strict=True)
     except OSError as exc:

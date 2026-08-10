@@ -64,7 +64,9 @@ class ParseIssue:
     missing_end, bad_header, duplicate_id, renumbered, unterminated_heredoc,
     unknown_param, truncation_suspected, calls_count_mismatch, unknown_keyword,
     client_mangled_heredoc (transport corruption, not a model mistake - see
-    parser._client_mangled_opener)
+    parser._client_mangled_opener), flattened_reply (ditto: the reply's line
+    breaks were lost, gluing whole blocks onto a sentinel line - see
+    parser._Parser._check_flattened)
     """
 
     kind: str

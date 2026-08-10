@@ -1,0 +1,29 @@
+===CLIP:CALL id=1 tool=task_done===
+summary << EOT
+Requested comparison of:
+
+1. git -C .. status
+   - Command was denied by the tool permission rules.
+   - Rule blocking it: pattern "git -C*" action "deny".
+
+2. git status
+   - exit 0
+   - Branch: main (up to date with origin/main)
+   - Modified:
+     - CMakeLists.txt
+   - Untracked:
+     - .github/
+     - run_tests.ps1
+     - src/lib/
+     - tests/
+
+Summary:
+- The parent-directory status could not be obtained because the command was explicitly blocked by permissions.
+- The current repository is on main, synchronized with origin/main, with one modified file and four untracked paths.
+EOT
+===CLIP:END===
+
+
+===CLIP:EOM calls=1 chat=swift-forge===~~~~ ===CLIP:CALL id=1 tool=run_command=== command: echo hello world ===CLIP:END===
+
+===CLIP:EOM calls=1 chat=swift-forge===

@@ -100,10 +100,11 @@ text from another chat (or a stray copy-paste) for your work.
 # Included in section 3 only when preset.wrap_blocks_in_fence is set.
 FENCE_INSTRUCTION = """\
 
-Put ALL CLIP blocks inside ONE fenced code block opened and closed with ~~~~
-(four tildes, alone on a line). Never split blocks across multiple fences;
-prose goes outside the fence. If a content line starts with 3+ tildes, fence
-with MORE tildes than that line."""
+Put ALL CLIP blocks AND the final EOM line inside ONE fenced code block
+opened and closed with ~~~~ (four tildes, alone on a line) - the fence
+closes AFTER the EOM line. Never split them across multiple fences; prose
+goes outside the fence. If a content line starts with 3+ tildes, fence with
+MORE tildes than that line."""
 
 SECTION_GRAMMAR = """\
 SECTION 3 - HOW TO EMIT CALLS

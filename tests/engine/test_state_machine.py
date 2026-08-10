@@ -40,6 +40,18 @@ path: README.md
 ===CLIP:EOM calls=1===
 """
 
+# A reply the chat rendered outside a ~~~~ fence: markdown ate the newlines, so
+# the copy glued a whole follow-up message onto the previous EOM line. The chat
+# name is RIGHT - only the line breaks are gone (protocol.md 1.4 tolerance #14).
+FLATTENED_REPLY = """===CLIP:CALL id=1 tool=task_done===
+summary: earlier work finished
+===CLIP:END===
+===CLIP:EOM calls=1 chat=amber-falcon===~~~~ ===CLIP:CALL id=1 \
+tool=run_command=== command: echo hello world ===CLIP:END===
+
+===CLIP:EOM calls=1 chat=amber-falcon===
+"""
+
 # Sentinels present, no EOM at all: the truncation signature, which must stay
 # on the truncated-reply path instead of tripping the chat gate.
 TRUNCATED_REPLY = """===CLIP:CALL id=1 tool=write_file===
@@ -167,6 +179,22 @@ def test_chat_name_match_is_case_and_quote_tolerant(engine: Engine) -> None:
     engine.start_task("t")
     reply = READ_REPLY.replace("chat=amber-falcon", "chat=`Amber-Falcon`")
     assert isinstance(engine.ingest(reply), NewTurn)
+
+
+def test_flattened_reply_is_refused_and_blames_the_transport(engine: Engine) -> None:
+    """The paste is ours - the chat name survived - but the reply is not whole:
+    a `run_command` block is glued onto the EOM line and was never parsed. It
+    must not execute the fragment that did parse, and the error must name the
+    lost line breaks rather than the chat name."""
+    engine.start_task("t")
+    result = engine.ingest(FLATTENED_REPLY)
+    assert isinstance(result, ProtocolError)
+    assert "line breaks" in result.detail and "~~~~" in result.detail
+    assert "chat name" not in result.detail
+    assert engine.status().phase is Phase.AWAITING_REPLY  # nothing ran
+    # Not remembered, like a chat-gate rejection: a re-paste says the same thing
+    # instead of decaying into "duplicate".
+    assert isinstance(engine.ingest(FLATTENED_REPLY), ProtocolError)
 
 
 def test_truncated_reply_without_eom_skips_the_chat_gate(engine: Engine) -> None:

@@ -273,10 +273,12 @@ class Engine:
         other phase returns Noise("wrong-phase") and the TUI decides what to
         show (e.g. the unexpected-reply modal).
 
-        Gate order is load-bearing: wrong-phase, not-protocol, duplicate, then
-        the chat name. Dedup stays ahead of the chat gate so re-pasting the
-        same accepted reply is still reported as a duplicate rather than as a
-        chat mismatch."""
+        Gate order is load-bearing: wrong-phase, not-protocol, duplicate, the
+        chat name, then the flattened-reply check. Dedup stays ahead of the chat
+        gate so re-pasting the same accepted reply is still reported as a
+        duplicate rather than as a chat mismatch; the flattening check comes
+        last so a corrupt paste from ANOTHER chat is still reported as the
+        foreign paste it is."""
         if self._phase is not Phase.AWAITING_REPLY:
             return Noise("wrong-phase")
         reply = parse_reply(text)
@@ -289,6 +291,17 @@ class Engine:
             # Not remembered: a foreign paste must report the same reason every
             # time, not decay into "duplicate" on the second attempt.
             return chat_noise
+        flattened = next((w for w in reply.warnings if w.kind == "flattened_reply"), None)
+        if flattened is not None:
+            # The paste is ours (it passed the chat gate) but it is not a whole
+            # reply: its line breaks were lost in transport, so blocks are glued
+            # onto sentinel lines and were never parsed. Executing the fragment
+            # that did parse would silently drop the rest - the one failure mode
+            # the design forbids. Not remembered, for the chat gate's reason.
+            return ProtocolError(
+                f"{flattened.detail}. Nothing ran - ask the chat to resend the whole "
+                "reply with every CLIP block inside one ~~~~ fence"
+            )
         self._remember_hash(reply.normalized_hash)
         self._session.append_event("inbound", raw=text)
         self._session.append_event(

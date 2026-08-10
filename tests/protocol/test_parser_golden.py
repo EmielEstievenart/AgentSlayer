@@ -19,6 +19,7 @@ from agentclip.protocol.parser import (
     normalize,
     normalized_hash,
     parse_reply,
+    peek_chat_name,
 )
 from agentclip.protocol.types import ParsedReply, ParseIssue
 
@@ -87,6 +88,7 @@ def test_golden_corpus_is_complete() -> None:
         "024-calls-mismatch",
         "025-noise",
         "026-swallowed-call-recovery",
+        "027-flattened-eom",
     }
     assert required <= names
     for p in GOLDEN_INPUTS:
@@ -370,6 +372,55 @@ def test_sentinel_text_on_a_non_opener_line_is_not_flagged() -> None:
     )
     assert reply.calls[0].issues == ()
     assert "CLIP:END" in reply.calls[0].params["content"]
+
+
+# --- tolerance #14: a reply whose line breaks were lost in transport ----------
+
+# The real wreckage from the second incident: the model's blocks were rendered
+# outside a ~~~~ fence, so markdown ate the newlines and the copy handed over
+# one line - the previous message's EOM, the closing fence, and the WHOLE next
+# message riding behind it.
+FLATTENED_EOM = (
+    "===CLIP:EOM calls=1 chat=swift-forge===~~~~ ===CLIP:CALL id=1 "
+    "tool=run_command=== command: echo hello world ===CLIP:END===\n"
+)
+
+
+def test_flattened_eom_keeps_its_chat_name_and_is_flagged() -> None:
+    reply = parse_reply(FLATTENED_EOM)
+    # The `===` terminator and everything behind it must not end up in the chat
+    # name: the engine gates on it, and blaming the chat name for a transport
+    # fault sends the user hunting the wrong thing.
+    assert reply.eom.chat == "swift-forge"
+    assert reply.eom.calls == 1
+    warning = next(w for w in reply.warnings if w.kind == "flattened_reply")
+    assert warning.line == 1
+    assert "line breaks" in warning.detail
+    # Nothing is reassembled from the glued text - not even the CALL header that
+    # is plainly visible in it.
+    assert reply.calls == ()
+
+
+def test_a_flattened_call_header_is_flagged_too() -> None:
+    reply = parse_reply(
+        "===CLIP:CALL id=1 tool=run_command=== command: echo hello ===CLIP:END===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
+    )
+    assert any(w.kind == "flattened_reply" for w in reply.warnings)
+    assert reply.eom.chat == "amber-falcon"
+    assert reply.calls[0].tool == "run_command"
+    assert "command" not in reply.calls[0].params  # never guessed back out
+
+
+def test_trailing_words_without_a_sentinel_are_not_flattening() -> None:
+    # Both halves are required here as in #13: trailing text AND `CLIP:` in it.
+    reply = parse_reply(_eom_reply("===CLIP:EOM calls=1 chat=amber-falcon=== thanks!"))
+    assert reply.warnings == ()
+    assert reply.eom.chat == "amber-falcon"
+
+
+def test_peek_chat_name_ignores_a_glued_terminator() -> None:
+    assert peek_chat_name(FLATTENED_EOM) == "swift-forge"
 
 
 def test_unknown_tool_name_passed_through_unvalidated() -> None:

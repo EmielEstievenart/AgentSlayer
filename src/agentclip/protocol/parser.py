@@ -45,6 +45,17 @@ _MANGLED_HEREDOC_RE = re.compile(
 )
 _MANGLE_MARKERS = ("CLIP:END", "CLIP:EOM")
 
+# The half of PROTOCOL_MARKER that survives being glued onto another line (the
+# leading `===` may have been eaten by the terminator run in front of it).
+_GLUED_MARKER = "CLIP:"
+
+# The closing `===` of a sentinel line, when the line did NOT end there. The
+# regex above lets the attribute section run to the end of the line, so on a
+# line that had text glued after its terminator (see _split_sentinel_section)
+# every one of those words would otherwise be read as an attribute -- and the
+# terminator itself would end up inside the last VALUE (`chat=amber-falcon===`).
+_ATTR_TERMINATOR_RE = re.compile(r"={3,}")
+
 # Inline param: `key: value` or `key=value` (LLMs drift between separators).
 _PARAM_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)\s*[:=]\s*(.*)$")
 
@@ -117,7 +128,7 @@ def peek_chat_name(text: str) -> str | None:
         match = _SENTINEL_RE.match(line.strip())
         if match is None or match.group(1).upper() not in _CHAT_STAMPED_KEYWORDS:
             continue
-        attrs, _ = _parse_attrs(match.group(2))
+        attrs, _ = _parse_attrs(_split_sentinel_section(match.group(2))[0])
         return normalize_chat_name(attrs.get("chat"))
     return None
 
@@ -154,6 +165,22 @@ def _to_int(value: str | None) -> int | None:
         return int(value)
     except ValueError:
         return None
+
+
+def _split_sentinel_section(section: str) -> tuple[str, str]:
+    """Split a sentinel line's tail into `(attributes, text glued on after it)`.
+
+    A sentinel line ends at its `===` terminator, so a run of 3+ `=` INSIDE the
+    matched tail means the line kept going after the marker closed: the text
+    behind it belongs to a line that no longer exists (tolerance #14). The
+    attributes before it are still perfectly good and are parsed as usual - the
+    chat name in particular, which the engine gates on, must not inherit the
+    terminator.
+    """
+    match = _ATTR_TERMINATOR_RE.search(section)
+    if match is None:
+        return section, ""
+    return section[: match.start()], section[match.end() :]
 
 
 def _parse_attrs(section: str) -> tuple[dict[str, str], list[str]]:
@@ -210,7 +237,9 @@ class _Parser:
                 continue
             self.saw_sentinel = True
             keyword = match.group(1).upper()
-            attrs, positional = _parse_attrs(match.group(2))
+            section, tail = _split_sentinel_section(match.group(2))
+            attrs, positional = _parse_attrs(section)
+            self._check_flattened(i, keyword, tail)
             if keyword == "CALL":
                 self._flush_prose()
                 i = self._parse_call(i, attrs)
@@ -235,6 +264,29 @@ class _Parser:
         self._flush_prose()
 
     # -- sentinel handlers ---------------------------------------------------
+
+    def _check_flattened(self, i: int, keyword: str, tail: str) -> None:
+        """Flag a sentinel line that another sentinel was glued onto (#14).
+
+        Two signals together, like tolerance #13: text after the marker's `===`
+        terminator AND `CLIP:` inside that text. A reply rendered outside a
+        ~~~~ fence comes back through the clipboard with its newlines collapsed
+        to spaces, so whole CALL blocks end up riding on the previous line and
+        are never seen. Nothing here is recovered: the words survive but the
+        line structure they were parsed by does not, and guessing where the
+        breaks went would mean executing a command AgentClip reassembled.
+        """
+        if _GLUED_MARKER not in tail.upper():
+            return
+        self.warnings.append(
+            ParseIssue(
+                "flattened_reply",
+                i + 1,
+                f"the ===CLIP:{keyword}=== line has more CLIP text glued onto it - this "
+                "reply lost its line breaks in transport, so any block behind that "
+                "marker was never parsed",
+            )
+        )
 
     def _handle_eom(self, i: int, attrs: dict[str, str]) -> None:
         if self.eom_present:

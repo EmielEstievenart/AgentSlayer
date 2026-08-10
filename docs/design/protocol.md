@@ -103,6 +103,7 @@ Rejected alternative: **turn echo** (`===CLIP:EOM calls=N turn=T===`, reply drop
 | 11 | Whole reply has no sentinel lines | Not protocol traffic — watcher ignores (pre-filter is the literal substring `===CLIP:` per the clipboard research) |
 | 12 | `chat=` missing / wrong / differently-cased / backticked on EOM or ACK/NACK | Parser records it verbatim-but-normalized and never rejects; the *engine* gates (§6.2) |
 | 13 | Reply flattened by the chat client into one HTML element (see below) | Per-call `client_mangled_heredoc` issue, fatal — call never executes, and the id=0 "reply was cut off" result is suppressed because it would send the model in a loop |
+| 14 | Sentinel line with another `CLIP:` marker glued on after its `===` (see below) | Attributes before the terminator still parse; reply-level `flattened_reply` warning, and the *engine* refuses the whole reply (§6.2) |
 
 **Tolerance #11 has one scoped opt-out.** A service preset may set `capture_prose` (default off), which lets the auto-copy flow's **verified copy click** — and only that click — hand its harvest to the session even when it carries no `===CLIP:` at all; the text is shown in the transcript as prose and nothing in it executes (the engine still answers `Noise("not-protocol")` — §6.2's gate order is untouched). The watcher's pre-filter itself never loosens: it sees every copy the user makes and must keep ignoring the non-protocol ones, while the flow just watched the copy button write *this* text, so it alone knows the text is the model's reply. Display-only, per tolerance #2's rule: prose reaches the transcript, never the executor.
 
@@ -111,6 +112,10 @@ Rejected alternative: **turn echo** (`===CLIP:EOM calls=N turn=T===`, reply drop
 Detection needs two signals together, which is why false positives are ~nil: a line matching the heredoc-opener shape *with trailing content*, **and** `CLIP:END` or `CLIP:EOM` somewhere in that trailing text (`parser._client_mangled_opener`). A well-formed reply never puts a sentinel behind a heredoc tag on the same line.
 
 Response: fail the call with `code=client_mangled_reply` and a message addressed to the **user**, not the model. "Resend this call" — correct for every other parse error — is an infinite loop here: the model emits valid text and the client mangles it identically. Nothing is recovered on purpose; `task_done`'s `summary` is the only thing handed back to a delegating agent, and silently accepting a sorted word-salad is worse than an error. The structural prevention is the mandatory space in `key << TAG` (§1.2), which makes the opener un-tag-shaped in the first place.
+
+**Tolerance #14 — the other flattening: a reply that was never fenced.** CLIP blocks emitted *outside* a `~~~~` fence render as markdown prose, where single newlines are not line breaks; the copy button then hands over one long line — an EOM with the next message's whole `CALL … END` sequence riding behind it. Two consequences, both silent before this tolerance: the marker's own `===` terminator landed inside the last attribute value (`chat=swift-forge===~~~~`, which then failed the §6.2 chat gate and blamed the *chat name* for a transport fault), and the blocks behind it were never parsed at all — a reply whose one surviving call happened to satisfy `calls=` executed as if nothing were missing.
+
+Detection is two signals together, as in #13: text after the sentinel's `===` terminator, **and** `CLIP:` inside that text. The attributes ahead of the terminator parse as usual, so the chat gate sees the real name; the glued text is *not* re-split into blocks. Reassembling it would mean guessing where the model's line breaks were and then executing the result — `run_command` included — from a line the transport already proved it mangled. Instead the parser records one reply-level `flattened_reply` warning and `Engine.ingest` refuses the whole reply as a `ProtocolError` naming the real fault, so nothing executes and nothing is silently dropped. Recovery is the user's: ask the chat to resend inside one `~~~~` fence (bootstrap §3 already requires it).
 
 ### 1.5 Why line-oriented, not JSON (one line, since it's decided)
 
@@ -168,10 +173,13 @@ the relay." Then:
 SECTION 3 — HOW TO EMIT CALLS (~1,800 chars)
 Exact grammar: CALL header, key: value lines, heredoc rule, END line,
 EOM line — the §1.2/§1.3 forms shown as two short examples, plus:
-- Put ALL CLIP blocks inside ONE fenced code block opened and closed
-  with ~~~~ (four tildes). Never split blocks across multiple fences.
+- Put ALL CLIP blocks AND the final EOM line inside ONE fenced code
+  block opened and closed with ~~~~ (four tildes) — the fence closes
+  AFTER the EOM line. Never split them across multiple fences.
   [tilde fence: immune to backticks in file content; gives Copilot/
-   Gemini users the per-block copy button — research §5d]
+   Gemini users the per-block copy button — research §5d. The EOM must
+   ride inside the fence: outside it the host renders the line as
+   prose, and prose copy loses line breaks (tolerance #14's origin)]
 - Fence collision rule: if any content line starts with three or more
   tildes, the outer fence must use MORE tildes than that line. Same
   shape as the heredoc collision rule below, same reason: the outer
@@ -378,8 +386,9 @@ Explicit ranged requests (`start`/`end`, `max`) are honored up to 4× budget —
    | 2 | no sentinel lines at all | `Noise("not-protocol")` |
    | 3 | normalized hash in the last 20 seen | `Noise("duplicate")` |
    | 4 | chat name (below) | `Noise("missing-chat")` / `Noise("wrong-chat")` |
+   | 5 | a sentinel line carries glued-on `CLIP:` text (§1.4 #14) | `ProtocolError` — the paste is ours but is not a whole reply; nothing executes |
 
-   Dedup stays **ahead** of the chat check so that re-pasting a reply AgentClip already ran still reads as "duplicate reply ignored" — the accurate diagnosis — instead of being re-litigated on identity. Conversely a paste rejected at step 4 is *not* added to the seen-hash set: a foreign paste must report the same reason every time rather than decaying into "duplicate" on the second attempt.
+   Dedup stays **ahead** of the chat check so that re-pasting a reply AgentClip already ran still reads as "duplicate reply ignored" — the accurate diagnosis — instead of being re-litigated on identity. Conversely a paste rejected at step 4 or 5 is *not* added to the seen-hash set: a foreign or mangled paste must report the same reason every time rather than decaying into "duplicate" on the second attempt. Step 5 comes last so a *flattened* paste from another chat is still reported as the foreign paste it is.
 
    The chat check applies exactly where the model was told to write the name:
    - reply with an EOM line ⇒ `eom.chat` must equal the session chat name;

@@ -68,11 +68,11 @@ if TYPE_CHECKING:  # the sixel widget is imported lazily - see tui.graphics
 ELEMENTS_TITLE = "ELEMENTS"
 ELEMENTS_HINT = "F7 hides this column"
 
-# The four appearances that are searched for while the automation runs, in the
-# order they matter in the loop: the send button holds the gate, the busy and
-# idle icons decide when generating stopped, the copy button harvests. Same set
-# as the sidebar's DETECTOR_LABEL, and deliberately so - one block says what was
-# decided, this one shows what it was decided from.
+# The four appearances the detector searches for on every tick it is calibrated
+# for them, in the order they matter in the loop: the send button holds the
+# gate, the busy and idle icons decide when generating stopped, the copy button
+# harvests. Same set as the sidebar's DETECTOR_LABEL, and deliberately so - one
+# block says what was decided, this one shows what it was decided from.
 ELEMENT_ORDER: tuple[TemplateKind, ...] = (
     TemplateKind.SEND_READY,
     TemplateKind.BUSY,
@@ -100,7 +100,10 @@ ELEMENT_CROP_ROWS = 6
 # What a row says instead of a picture. Three states, because "nothing has been
 # looked for yet" and "we looked and it is not there" are opposite readings of
 # the same blank space - and the second is the one that explains a send gate
-# that will not release or an auto-copy that never fires.
+# that will not release or an auto-copy that never fires. A row that STAYS at
+# "no match yet" while the tool runs now says something precise: this service
+# has no capture of that appearance, because everything captured is searched
+# for twice a second whatever the automation is doing.
 ELEMENT_RESTING = "no match yet"
 ELEMENT_MISSING = "not on screen"
 
@@ -266,9 +269,10 @@ class ElementsPanel(Vertical):
     def show_matches(self, crops: Mapping[TemplateKind, ElementCrop | None]) -> None:
         """Repaint the rows this tick has something to say about, and no others.
 
-        A kind ABSENT from ``crops`` is a kind that was not searched - the send
-        button outside the gate, the copy button on any tick at all - and its
-        row keeps its last picture rather than being blanked by a tick that
+        A kind ABSENT from ``crops`` is a kind the live window's service is not
+        calibrated for, which is the only reason a tick says nothing about one
+        (screen/detector.py searches every calibrated kind on every frame), and
+        its row keeps its last picture rather than being blanked by a tick that
         never looked. Present-and-``None`` is the opposite claim, that the
         search ran and found nothing, and it clears the row.
 

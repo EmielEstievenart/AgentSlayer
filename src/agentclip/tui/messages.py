@@ -27,8 +27,12 @@ closes no tick and folds into no verdict.
 ``SendReadyProbed`` is the fourth, and it is not a finish detector at all: it
 answers "is the ready-to-send button on screen?" for the send gate (tui.md
 §3.4b), which holds finish detection back between AgentClip's paste and the
-user's Enter. Posted only while that gate is holding, so most ticks carry
-nothing. ``found`` is True (on screen), False (not on screen) or None (the
+user's Enter. Posted on every tick the live window's service has a capture of
+that button - the detector searches on calibration alone (screen/detector.py)
+and the gate is a READER of the answer, not the thing that asks the question -
+so a tick lands whether or not anything is waiting for one, and
+``on_send_ready_probed`` ignores the ones that arrive while the gate is not
+holding. ``found`` is True (on screen), False (not on screen) or None (the
 tick's capture failed).
 
 All of them carry the ``generation`` of the poller run that produced them - a
@@ -123,10 +127,12 @@ class ElementsMatched(Message):
     * a kind present with an ``ElementCrop`` - found, here it is;
     * a kind present with ``None`` - searched this tick and not on screen;
     * a kind ABSENT - not searched at all this tick, so its row keeps whatever
-      it last said. The send button is only looked for while the send gate is
-      holding, and the copy button is not a per-tick detector at all (the
-      auto-copy flow posts its one crop from its own search), so most ticks
-      carry two entries, not four.
+      it last said. That means one thing only: the live window's service is not
+      CALIBRATED for it (no capture, or - for busy/idle - a checklist that does
+      not tick it). A fully calibrated service carries all four entries on every
+      tick, because the detector searches for everything it can see regardless
+      of what the state machine is doing (screen/detector.py). A tick whose
+      capture failed carries nothing at all.
 
     Like ``SendReadyProbed`` it closes no tick and folds into no verdict - these
     are pictures, and their only job is letting the user see that the detectors

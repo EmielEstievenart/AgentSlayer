@@ -8,6 +8,10 @@ wiring and the ownership rules:
 
 * a tick's crops reach the rows they belong to, and a row nobody searched this
   tick is left alone rather than blanked,
+* every CALIBRATED appearance reaches the column on every tick - including the
+  send button with no gate open and the copy button with no flow running, which
+  is the whole point of the detector being independent of the state machine
+  (screen/detector.py),
 * crops from a poller run that is no longer live do NOT land (the generation
   stamp, exactly as for the four probes),
 * a detector rebuild clears the column, because its heading may have just been
@@ -15,8 +19,8 @@ wiring and the ownership rules:
 * nothing driven by the SELECTED tab repaints it, because the crops are of the
   LIVE window and the two part company for the whole of a delegation,
 * F7 hides and shows the whole column, as F3 does its neighbour,
-* and the copy button - which is not a per-tick detector - gets its one crop
-  from the auto-copy flow's own search.
+* and the auto-copy flow still posts its own copy-button crop, from the frame
+  it aimed the click at.
 
 ``capture_region`` is monkeypatched at its use site (``main_mod``) throughout -
 no test here goes near the real screen, every RegionImage is hand-built, and
@@ -270,9 +274,16 @@ async def test_a_searched_and_missing_element_says_so(
 async def test_a_kind_the_tick_never_searched_is_left_alone(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The send button is only looked for while the gate holds and the copy
-    button is not a per-tick detector at all, so most ticks say nothing about
-    them. A tick that never looked must not blank a row."""
+    """A tick that never looked must not blank a row.
+
+    The three-state contract is unchanged by the detector extraction; what
+    changed is which kinds land in the third state. A tick now says something
+    about every kind the live service is CALIBRATED for - the send button
+    outside the gate window included - so the row this protects is the row of an
+    appearance nobody has captured, plus the tick a detector rebuild leaves
+    mid-flight. The map is still the carrier of "not searched", and posting one
+    without a kind in it must still leave that kind alone.
+    """
     _patch_picker(monkeypatch)
     _freeze_detector(monkeypatch)
     app = _make_app(tmp_path, profile_root)
@@ -284,7 +295,7 @@ async def test_a_kind_the_tick_never_searched_is_left_alone(
         painted = _picture(app, TemplateKind.SEND_READY)
         assert HALF_BLOCK in painted
 
-        # A later tick outside the gate carries busy only.
+        # A later tick from a run with no send capture carries busy only.
         _post(app, {TemplateKind.BUSY: None})
         await pilot.pause()
         assert _picture(app, TemplateKind.SEND_READY) == painted
@@ -492,6 +503,91 @@ async def test_the_running_poller_draws_what_it_recognised(
             pilot, lambda: _drawn(app, TemplateKind.BUSY), "the busy crop reaches the column"
         )
         assert "found" in _label(app, TemplateKind.BUSY)
+
+
+async def test_the_send_and_copy_rows_are_alive_with_nothing_going_on(
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason the detector was pulled out of the state machine.
+
+    No session, no outbound, no gate holding and no flow running - and the send
+    button and the copy button are both recognised in the captured frame and
+    drawn. Before this, the send row was only searched inside the gate's window
+    and the copy row only by the harvest, so a user whose capture had drifted
+    could not find that out until an automation silently failed.
+    """
+    app = _make_app(tmp_path, profile_root)
+    service = sorted(app.app_config.services)[0]
+    if app.app_config.general.service in app.app_config.services:
+        service = app.app_config.general.service
+    seed_templates(service, TemplateKind.SEND_READY, size=(24, 24))
+    seed_templates(service, TemplateKind.COPY, size=(28, 28))
+
+    # One frame with both appearances stamped into it, well apart.
+    scene = bytearray(_frame(REGION).pixels)
+    for image, left, top in (
+        (template_image(24, 24), 200, 100),
+        (template_image(28, 28), 60, 400),
+    ):
+        for row in range(image.height):
+            start = ((top + row) * REGION.width + left) * 4
+            width = image.width * 4
+            scene[start : start + width] = image.pixels[row * width : (row + 1) * width]
+    frame = RegionImage(REGION.width, REGION.height, bytes(scene))
+
+    monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
+    monkeypatch.setattr(main_mod, "capture_region", lambda region: frame)
+    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _polling(app, pilot)
+        assert main._send_gate is None  # nothing is waiting for the button
+        assert main._awaiting_pasted_reply is False
+
+        await _wait_for(
+            pilot,
+            lambda: _drawn(app, TemplateKind.SEND_READY) and _drawn(app, TemplateKind.COPY),
+            "the send and copy crops reach the column",
+        )
+        assert "found" in _label(app, TemplateKind.SEND_READY)
+        assert "found" in _label(app, TemplateKind.COPY)
+
+
+async def test_an_uncaptured_appearance_is_the_row_that_stays_resting(
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other side of the same rule: what a row resting at "no match yet"
+    means is now precise - this service has no capture of that appearance.
+    Everything captured is searched for on every tick."""
+    app = _make_app(tmp_path, profile_root)
+    service = sorted(app.app_config.services)[0]
+    if app.app_config.general.service in app.app_config.services:
+        service = app.app_config.general.service
+    seed_templates(service, TemplateKind.COPY, size=COPY_ICON)
+
+    monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
+    monkeypatch.setattr(main_mod, "capture_region", _frame)
+    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+
+    async with app.run_test(size=SIZE) as pilot:
+        await _polling(app, pilot)
+
+        # The copy button IS captured, so it is searched and reported missing
+        # from this blank frame...
+        await _wait_for(
+            pilot,
+            lambda: ELEMENT_MISSING in _label(app, TemplateKind.COPY),
+            "the copy row reports what the search found",
+        )
+        # ...while the send button is not captured at all, so nothing is ever
+        # claimed about it.
+        assert ELEMENT_RESTING in _label(app, TemplateKind.SEND_READY)
 
 
 async def test_the_auto_copy_flow_posts_the_copy_buttons_crop(

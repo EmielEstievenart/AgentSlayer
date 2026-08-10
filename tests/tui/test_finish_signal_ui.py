@@ -1510,6 +1510,44 @@ async def test_the_poller_thread_really_looks_for_the_button(
         await _wait_for(pilot, lambda: main._send_gate is None, "the gate timed out on real probes")
 
 
+async def test_the_button_is_looked_for_whether_or_not_anyone_is_waiting(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The detector searches on calibration alone (screen/detector.py), so the
+    probes arrive on every tick and the gate is a READER of them.
+
+    Two halves. The stream exists with no gate open - which is what keeps the
+    ELEMENTS column's send row honest on a resting chat - and a probe that lands
+    while nothing is holding changes nothing at all: the gate is opened by the
+    paste, never by a sighting.
+    """
+    _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
+        assert main._send_gate is None
+        assert main._detector is not None
+        assert main._detector.searches(TemplateKind.SEND_READY)
+
+        # The button is on screen (the composer holds something the user typed
+        # themselves) and then goes. Outside a gate that is not a send, and not
+        # anybody's business.
+        await _send_ready(main, pilot, True)
+        await _send_ready(main, pilot, False)
+        assert main._send_gate is None
+        assert main._send_gate_ticks == 0
+        assert main._awaiting_pasted_reply is False
+
+        # ...and the gate the paste opens still works exactly as it did.
+        await main.copy_outbound("the payload")
+        await pilot.pause()
+        assert main._send_gate is main_mod.SendGate.HOLD
+        await _send_ready(main, pilot, True)
+        assert main._send_gate is main_mod.SendGate.SEEN
+        await _send_ready(main, pilot, False)
+        assert main._send_gate is None
+
+
 async def test_a_probe_from_a_dead_poller_run_cannot_release_the_gate(
     tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
 ) -> None:

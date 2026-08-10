@@ -103,11 +103,12 @@ EMPTY_LOG_LINE = (
 
 
 def render_entries(entries: list[HarnessEntry]) -> str:
-    """The log as the screen shows it: oldest first, newest last.
+    """The log as the pane shows it: oldest first, newest last.
 
     Newest LAST, unlike a notification feed, because this is read as a story -
     the interesting entry is the one at the end, and the ones above it are how
-    the harness got there. The screen scrolls to the bottom for the same reason.
+    the harness got there. The pane opens at the bottom and follows it for the
+    same reason (tui/widgets/log_pane.py).
     """
     if not entries:
         return EMPTY_LOG_LINE

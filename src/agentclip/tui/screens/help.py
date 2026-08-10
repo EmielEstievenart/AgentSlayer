@@ -88,6 +88,9 @@ App
       on the clipboard for you to paste; press i to ingest a reply by hand.
   F7  hide/show ELEMENTS - close-ups of the send/busy/idle/copy pictures the
       automation is recognising right now, in the window it is driving
+  F8  hide/show the HARNESS DECISION LOG along the bottom (also /log) - every
+      move the loop makes and WHY, as it happens. Scroll up and it holds still;
+      scroll back to the bottom and it follows the newest line again.
   ctrl+p   command palette  ctrl+q  quit (confirms when a turn is mid-flight)
 
 The loop: AgentClip copies a payload - paste it into your chat and send.

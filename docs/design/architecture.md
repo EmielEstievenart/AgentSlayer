@@ -109,6 +109,8 @@ src/agentclip/
         ├── action_panel.py  # the approval gate: title, diff/command body, buttons, reject input
         ├── running_bar.py   # the "Working... ctrl+x cancels" line while tool calls run
         ├── sidebar.py     # the settings column: service, chat window, DETECTION (tui.md §1.3)
+        ├── elements.py    # the ELEMENTS column: the crops the detectors matched (tui.md §1.7)
+        ├── log_pane.py    # the full-width live harness decision log, /log + F8 (tui.md §3.3b)
         └── statusbar.py   # docked Horizontal: watcher state, budget, service, phase
 ```
 

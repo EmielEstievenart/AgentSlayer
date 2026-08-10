@@ -21,7 +21,7 @@ boxes still *show* what the press will create (``_NEW_PRESET_DEFAULTS``), becaus
 a blank checklist over a preset that is born with "screen stops changing" ticked
 is a lie about the only setting on that form the user cannot see anywhere else.
 
-Captures are the exception to "applies on close": pressing "Capture <thing>..."
+Captures are the exception to "applies on close": pressing a kind's "Capture"
 runs the same full-screen draw-a-box overlay the chat region uses and writes the
 PNG to the profile store *immediately*, exactly as "Forget appearance" deletes
 immediately. Only one overlay may be up at a time (cancelling a worker cannot
@@ -164,8 +164,10 @@ SIGNAL_TEMPLATE = {
 HOVER_SCAN_LABEL = "hover-scan for copy icon"
 # The delivery mode, as a tick rather than a picker: there are exactly two modes
 # and one of them is the default, so "off" says "paste" without a second row of
-# form to read. Worded as what the user will SEE, like the signal labels.
-STREAM_DELIVERY_LABEL = "paste in chunks (big messages)"
+# form to read. Worded as what the user will SEE, like the signal labels - and
+# sized to its column: the checkbox glyph costs four cells of the 32, and a
+# label that outgrows what is left ends in an ellipsis mid-sentence.
+STREAM_DELIVERY_LABEL = "paste the payload in chunks"
 # A ticked busy/idle entry whose appearance was never captured runs nothing at
 # all (config.py's checklist and the profile are ANDed). Silent dead weight is
 # exactly the failure that shows up as an auto-copy that never fires, so it is
@@ -232,11 +234,10 @@ def clear_button_id(kind: TemplateKind) -> str:
     return f"{_CLEAR_PREFIX}{kind}{_BUTTON_SUFFIX}"
 
 
-# The picture beside each appearance's status line. "40×40 · captured" says a
+# The picture at the head of each appearance's row. "40×40 · captured" says a
 # capture happened; it cannot say WHAT was captured, and a drag that caught the
 # background beside the stop button reads exactly the same. So the first image
-# of each kind is drawn here, in the 12 cells of width the 34-cell column can
-# spare.
+# of each kind is drawn there, twelve cells wide.
 #
 # The ROW budget is the HALF-BLOCK one: two cells, i.e. 12x4 pixels, far too
 # coarse to read a glyph and quite enough to tell an orange icon from a slab of
@@ -248,6 +249,19 @@ def clear_button_id(kind: TemplateKind) -> str:
 TEMPLATE_PREVIEW_COLS = 12
 TEMPLATE_PREVIEW_ROWS = 2
 
+# The sixel row's ceiling, in cells. crop_rows answers "what does the ELEMENTS
+# column's ~56px budget cost in this font" and on a small font that is four
+# rows or more - which ELEMENTS can absorb, because it stacks four crops in a
+# column that owns the terminal's whole height. This column stacks SEVEN, and
+# every one of them must always be entirely on screen: sixel escapes bypass
+# the compositor (tui.graphics), so a preview half scrolled or half clipped
+# keeps painting over whatever Textual believes is there - the smeared bands
+# this screen used to leave across the terminal. Seven rows of four plus the
+# readouts under them outgrow the modal's share of a 45-row terminal; seven
+# rows of three never do, and three cells of real bitmap still answer the only
+# question the thumbnail exists for.
+SIXEL_PREVIEW_MAX_ROWS = 3
+
 
 def preview_rows(graphics: TerminalGraphics) -> int:
     """How many cell rows one appearance thumbnail occupies, in this terminal.
@@ -255,11 +269,13 @@ def preview_rows(graphics: TerminalGraphics) -> int:
     Fixed for the life of the screen either way, so the column's rows are a
     constant height and a capture landing cannot make the block below it jump.
     Half blocks keep their two rows exactly (the fallback is unchanged in every
-    respect); sixel takes ``graphics.crop_rows``, the same ~56px budget the
-    ELEMENTS column reserves, because the picture is a real bitmap there and two
-    rows of a small font is not enough of one to answer the question.
+    respect); sixel takes ``graphics.crop_rows``, the same pixel budget the
+    ELEMENTS column reserves, capped at :data:`SIXEL_PREVIEW_MAX_ROWS` because
+    seven always-visible rows cannot spend what a four-row column can.
     """
-    return crop_rows(graphics.cell_height) if graphics.sixel else TEMPLATE_PREVIEW_ROWS
+    if not graphics.sixel:
+        return TEMPLATE_PREVIEW_ROWS
+    return min(SIXEL_PREVIEW_MAX_ROWS, crop_rows(graphics.cell_height))
 
 
 def template_status_id(kind: TemplateKind) -> str:
@@ -340,11 +356,16 @@ def template_preview(profile: ServiceProfile | None, kind: TemplateKind) -> Text
 
 
 def _templates_line(profile: ServiceProfile | None) -> str:
-    """The one-line summary of what this service LOOKS like."""
+    """The one-line summary of what this service LOOKS like.
+
+    The count and nothing else: every kind's row above this line already
+    carries its own name and status, so repeating the captured names here only
+    made the summary wrap - by a different number of rows per service, which
+    walked the button under it up and down on every selection change.
+    """
     if profile is None or not profile.captured:
         return TEMPLATES_NONE
-    names = ", ".join(kind.label for kind in profile.captured)
-    return f"appearance: {profile.describe()} ({names})"
+    return f"appearance: {profile.describe()}"
 
 
 def _signal_warning(preset: ServicePreset | None, profile: ServiceProfile | None) -> str:
@@ -458,7 +479,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                         )
                     yield Checkbox(HOVER_SCAN_LABEL, id="svc-hover-scan", compact=True)
                     yield Static("", id="svc-signal-warning")
-                    yield Static(Text("DELIVERY · how the payload goes in"), classes="side-title")
+                    yield Static(Text("DELIVERY · how it goes in"), classes="side-title")
                     yield Checkbox(
                         STREAM_DELIVERY_LABEL, id="svc-stream-delivery", compact=True
                     )
@@ -479,65 +500,84 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                         id="svc-tolerance",
                     )
                 with Vertical(id="svc-form-col"):
+                    # Compact fields, because this column is the flexible one
+                    # (see the CSS): its labels and values must survive being
+                    # narrowed, and a bordered Input spends two of its three
+                    # rows on frame the label above it already provides.
                     yield Static(Text("Key"), classes="side-title")
-                    yield Input(id="svc-key", placeholder="lowercase-with-hyphens")
+                    yield Input(
+                        id="svc-key", placeholder="lowercase-with-hyphens", compact=True
+                    )
                     yield Static(Text("Name"), classes="side-title")
-                    yield Input(id="svc-label", placeholder="display name")
-                    yield Static(Text("Max input size (chars per paste)"), classes="side-title")
-                    yield Input(id="svc-max", placeholder="e.g. 12000")
+                    yield Input(id="svc-label", placeholder="display name", compact=True)
+                    yield Static(Text("Max paste size (chars)"), classes="side-title")
+                    yield Input(id="svc-max", placeholder="e.g. 12000", compact=True)
                     yield Static(Text("Total context size (chars)"), classes="side-title")
-                    yield Input(id="svc-total", placeholder="e.g. 500000")
-                    yield Static(Text("Stale after (seconds unchanged)"), classes="side-title")
-                    yield Input(id="svc-stable", placeholder="e.g. 2.0")
+                    yield Input(id="svc-total", placeholder="e.g. 500000", compact=True)
+                    yield Static(Text("Stale (seconds unchanged)"), classes="side-title")
+                    yield Input(id="svc-stable", placeholder="e.g. 2.0", compact=True)
                     yield Static("", id="svc-error")
-                    with Horizontal(id="svc-actions"):
-                        yield Button("Add service", id="svc-add-btn", variant="primary")
-                        yield Button("Reset to default", id="svc-reset-btn")
-                        yield Button("Delete", id="svc-delete-btn", variant="error")
                 with Vertical(id="svc-appearance-col"):
-                    yield Static(Text("APPEARANCE"), classes="side-title")
+                    yield Static(Text("APPEARANCE · what it looks like"), classes="side-title")
+                    # One fixed-height row per kind: the picture, the kind's
+                    # name over its status, and the two actions stacked at the
+                    # right edge. The name carries the row, so the buttons can
+                    # be one word instead of seven "Capture <thing>..." labels
+                    # that each filled a column on their own - and every text
+                    # in the row has a lane wide enough to render uncut.
                     for kind in TemplateKind:
-                        yield Button(
-                            f"Capture {kind.label}...",
-                            id=capture_button_id(kind),
-                            classes=CAPTURE_CLASS,
-                            compact=True,
-                        )
-                        # The preview and Clear both ride on the status line
-                        # rather than beside the capture button: the column is
-                        # 34 wide and the longest capture label already fills
-                        # it. In half blocks the row is two cells tall - the
-                        # fewest that draw a picture at all - and that is the
-                        # whole of the height budget: a third row, times seven
-                        # kinds, pushes the modal off a 45-row terminal. A sixel
-                        # row is taller (preview_rows) and pays for it out of
-                        # the column's scrollbar, which the block already has.
                         with self._appearance_row():
                             yield self._preview_widget(kind)
-                            yield Static(
-                                Text(TEMPLATE_UNSET),
-                                id=template_status_id(kind),
-                                classes="side-status",
-                            )
-                            yield Button(
-                                CLEAR_LABEL,
-                                id=clear_button_id(kind),
-                                classes=CLEAR_CLASS,
-                                compact=True,
-                            )
+                            with Vertical(classes="svc-kind-text"):
+                                yield Static(
+                                    Text(kind.label.capitalize()),
+                                    classes="svc-kind-label",
+                                )
+                                yield Static(
+                                    Text(TEMPLATE_UNSET),
+                                    id=template_status_id(kind),
+                                    classes="side-status",
+                                )
+                            with Vertical(classes="svc-kind-actions"):
+                                yield Button(
+                                    "Capture",
+                                    id=capture_button_id(kind),
+                                    classes=CAPTURE_CLASS,
+                                    compact=True,
+                                )
+                                yield Button(
+                                    CLEAR_LABEL,
+                                    id=clear_button_id(kind),
+                                    classes=CLEAR_CLASS,
+                                    compact=True,
+                                )
                     yield Static(Text(TEMPLATES_NONE), id="svc-templates")
                     yield Button("Forget appearance", id="svc-forget-templates-btn", compact=True)
-            yield Static(
-                "escape closes (applies valid edits) · built-ins: edit or reset, never delete",
-                classes="hint",
-            )
+            # One footer row carries the hint AND the add/reset/delete action:
+            # exactly one of the three is displayed at a time (_update_buttons),
+            # and the footer is the one strip whose width no column can squeeze.
+            # In the form column, where they used to live, a narrow terminal
+            # chopped "Reset to default" mid-word - the column that flexes must
+            # hold nothing whose truncation reads as a different label.
+            with Horizontal(id="svc-footer"):
+                yield Static(
+                    "escape closes (applies valid edits) · built-ins: edit or reset, never delete",
+                    classes="hint",
+                )
+                yield Button("Add service", id="svc-add-btn", variant="primary", compact=True)
+                yield Button("Reset to default", id="svc-reset-btn", compact=True)
+                yield Button("Delete", id="svc-delete-btn", variant="error", compact=True)
 
     def _appearance_row(self) -> Horizontal:
-        """One kind's picture/status/Clear row, tall enough for its renderer.
+        """One kind's whole row, exactly as tall as its renderer's picture.
 
         The height is on the ROW as well as on the picture inside it: the class
         rule pins two cells (the half-block budget), and a sixel thumbnail that
-        is three or four rows tall inside a two-row container is simply cropped.
+        is taller than its container is simply cropped - which for sixel means
+        painted anyway, over whatever sits below. Inline rather than a second
+        class rule because the number is this terminal's; the name/status pair
+        beside the picture needs two rows either way, and ``preview_rows``
+        never goes below two (``crop_rows`` floors there).
         """
         row = Horizontal(classes="svc-appearance-row")
         if self._graphics.sixel:

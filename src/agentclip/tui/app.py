@@ -434,19 +434,30 @@ class AgentClipApp(App[None]):
 
     #service-editor-box {
         width: 112;
-        /* Three columns of form; the tallest is ~34 rows, so the shared 85% cap
-           clipped the hint line off the bottom on a 45-row terminal. */
+        /* The tallest column plus the footer is ~33 rows, so the shared 85%
+           cap clipped the bottom off a 45-row terminal. 95% also keeps the
+           whole box on screen down to ~35 rows, which is what lets the
+           appearance column give up scrolling entirely (see below). */
         max-height: 95%;
     }
     #svc-body {
         height: auto;
     }
     /* Vertical defaults to height: 1fr, which made the auto-height body (and so
-       the whole modal) stretch to the max-height cap and push the hint line off
+       the whole modal) stretch to the max-height cap and push the footer off
        the bottom. The columns are as tall as their content; the tallest sets
        the box. */
     #svc-body > Vertical {
         height: auto;
+    }
+    /* The three columns are one form, so every section heading in them sits
+       off its predecessor by a row - except the one that starts a column. */
+    #svc-body .side-title {
+        text-style: bold;
+        margin-top: 1;
+    }
+    #svc-body .side-title:first-of-type {
+        margin-top: 0;
     }
     #svc-list-col {
         width: 32;
@@ -456,68 +467,99 @@ class AgentClipApp(App[None]):
         width: 1fr;
         margin-top: 0;
     }
+    /* The one column that flexes, which makes it the one that absorbs a
+       narrow terminal - deliberately: the other two hold prose and pictures
+       whose truncation reads as a different text ("captu"), while this one
+       holds values, and a squeezed Input scrolls its content and stays fully
+       editable. Its labels are chosen to fit the width the 120-cell layout
+       gives it, and to end in an ellipsis rather than a chop below that. */
     #svc-form-col {
         width: 1fr;
     }
-    /* The three columns are one form, so every section heading in them sits
-       off its predecessor by a row - except the one that starts a column. */
-    #svc-body .side-title {
+    #svc-form-col .side-title {
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    /* Compact fields on the box's own background disappear into it; $boost is
+       the "one layer up" tint every theme defines, so the field reads as a
+       field without costing the two border rows the bordered Input spends. */
+    #svc-form-col Input {
+        background: $boost;
+        padding: 0 1;
+    }
+    #svc-error {
+        color: $error;
+        height: auto;
+        /* The line is reserved even while empty so appearing does not shove
+           the column - same stability rule as the two warning lines. */
+        min-height: 1;
         margin-top: 1;
     }
-    #svc-body .side-title:first-of-type {
-        margin-top: 0;
-    }
+    /* APPEARANCE. Sized so that every text in it renders whole: 12 preview
+       cells, a gutter, 21 for the longest kind name and the widest status a
+       capture produces, and 9 for the stacked action buttons. Fixed, because
+       those texts are fixed - the form column is what gives. And neither a
+       scrollbar nor a height cap, on purpose: sixel escapes bypass the
+       compositor (tui.graphics), so a preview half scrolled out of a
+       container keeps painting over whatever Textual thinks is there - the
+       smeared bands across the terminal that the old scrolling column left.
+       The rows are capped (SIXEL_PREVIEW_MAX_ROWS) so the whole column
+       always fits the modal instead. */
     #svc-appearance-col {
-        width: 34;
+        width: 44;
         margin-left: 2;
-        /* The one column that is NOT sized by its content (which is what the
-           `#svc-body > Vertical` rule above would otherwise give it): seven
-           kinds two rows tall, plus a summary that grows a line for every
-           couple of appearances captured, is more than the modal's own height
-           cap can promise. It takes the body's full height instead and scrolls
-           inside it - a one-cell scrollbar, and only when it is needed. The
-           alternative is what used to happen when the summary wrapped far
-           enough: "Forget appearance" was simply not on screen. */
-        height: 1fr;
-        overflow-y: auto;
-        scrollbar-size-vertical: 1;
     }
-    /* The capture buttons and their status lines alternate, so both are one
-       row: six three-row buttons would push the column past the modal. The
-       per-kind Clear shares the status row rather than the button's, for the
-       same budget - and because the longest "Capture ..." label already fills
-       the column's 34 on its own. */
-    #svc-appearance-col .side-status {
-        color: $text-muted;
-    }
-    /* Two rows, not one: a half-block preview needs a second cell to be a
-       picture rather than a stripe, and two is all seven kinds can afford
-       before the modal runs off a 45-row terminal. Both this and the preview's
-       own height are overridden inline on a sixel terminal
-       (ServiceEditorScreen._appearance_row), where the budget is in pixels. */
-    #svc-appearance-col .svc-appearance-row {
+    /* The half-block budget; overridden inline to preview_rows on a sixel
+       terminal (ServiceEditorScreen._appearance_row). Pinned on the row as
+       well as on the picture inside it, because a bitmap taller than its row
+       is cropped - and cropped sixel is exactly the bleed above. */
+    .svc-appearance-row {
         height: 2;
     }
-    #svc-appearance-col .svc-appearance-row .side-status {
-        width: 1fr;
-    }
     /* TEMPLATE_PREVIEW_COLS wide, and it keeps that width whether or not the
-       kind has an image: the status text beside it must not shuffle sideways
-       as captures land. */
-    #svc-appearance-col .svc-tpl-preview {
+       kind has an image: the text beside it must not shuffle sideways as
+       captures land. */
+    .svc-appearance-row .svc-tpl-preview {
         width: 12;
         height: 2;
         margin-right: 1;
     }
-    /* No margin above either: the two rows they used to sit off by are what
-       the per-kind previews spend, and the row above them is already a status
-       line rather than a control. */
-    #svc-templates {
+    .svc-kind-text {
+        width: 1fr;
         height: auto;
+    }
+    /* Never a mid-word chop: the column is sized so these fit, and a future
+       status that outgrows it anyway ends in an ellipsis, not in "captu". */
+    .svc-kind-text .svc-kind-label,
+    .svc-kind-text .side-status {
+        height: 1;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    .svc-kind-text .side-status {
+        color: $text-muted;
+    }
+    .svc-kind-actions {
+        width: 9;
+        height: auto;
+        margin-left: 1;
+    }
+    /* Button's default min-width is 16 - wider than this whole stack. */
+    .svc-kind-actions Button {
+        min-width: 0;
+        width: 100%;
+    }
+    #svc-templates {
+        height: 1;
+        color: $text-muted;
+        margin-top: 1;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
     #svc-signal-warning {
         color: $warning;
         height: auto;
+        min-height: 1;
         margin-top: 1;
     }
     /* MATCHING. The RadioSet loses its border: two options in a 32-wide column
@@ -534,23 +576,28 @@ class AgentClipApp(App[None]):
     #svc-matcher-warning {
         color: $warning;
         height: auto;
+        min-height: 1;
     }
     #svc-tolerance {
         width: 1fr;
     }
-    #svc-error {
-        color: $error;
-        height: auto;
-        min-height: 1;
-        margin-top: 1;
-    }
-    #svc-actions {
+    /* One footer row carries the hint and the add/reset/delete action -
+       exactly one of the three buttons is displayed at a time, and the footer
+       is the one strip whose width no column can squeeze, so their labels
+       survive every terminal the modal itself survives. */
+    #svc-footer {
         height: auto;
         margin-top: 1;
     }
-    #svc-actions Button {
-        margin-right: 2;
-        width: auto;
+    #svc-footer .hint {
+        width: 1fr;
+        margin-top: 0;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
+    #svc-footer Button {
+        margin-left: 2;
+        min-width: 0;
     }
 
     #settings-box {

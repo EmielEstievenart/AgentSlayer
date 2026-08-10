@@ -53,6 +53,7 @@ from agentclip.tui.pixels import HALF_BLOCK
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.main import SUBAGENT_WINDOW
 from agentclip.tui.screens.service_editor import (
+    CLEAR_LABEL,
     OPENCV_MISSING_FROZEN,
     OPENCV_MISSING_SOURCE,
     SIGNAL_UNCAPTURED,
@@ -61,11 +62,13 @@ from agentclip.tui.screens.service_editor import (
     TEMPLATES_NONE,
     ServiceEditorScreen,
     capture_button_id,
+    clear_button_id,
     matcher_radio_id,
     opencv_missing_note,
     preview_rows,
     signal_checkbox_id,
     template_preview_id,
+    template_status_id,
 )
 from agentclip.tui.widgets.sidebar import Sidebar
 from agentclip.tui.widgets.slider import Slider
@@ -462,8 +465,11 @@ async def test_the_editor_reports_what_a_service_looks_like(
         await pilot.pause()
         line = str(editor.query_one("#svc-templates", Static).render())
         assert "2/7 captured" in line
-        assert "busy indicator" in line
-        assert "copy button" in line
+        # The names moved off the summary and onto the rows themselves: each
+        # kind carries its own status line, so the summary only counts - a
+        # names list made it wrap by a different number of rows per service.
+        assert "· captured" in str(editor.query_one("#svc-tpl-busy", Static).render())
+        assert "· captured" in str(editor.query_one("#svc-tpl-copy", Static).render())
         assert editor.query_one("#svc-forget-templates-btn", Button).display
 
         # A service with nothing captured says so, and offers nothing to forget.
@@ -724,6 +730,97 @@ async def test_a_terminal_without_sixel_still_gets_half_blocks(
         assert isinstance(widget, Static)
         assert widget.region.height == TEMPLATE_PREVIEW_ROWS
         assert HALF_BLOCK in _preview(editor, TemplateKind.COPY)
+
+
+# -- the layout itself: nothing readable cut, nothing sixel ever part-hidden --
+#
+# The screen's whole geometry contract in two tests, at the SMALLEST terminal
+# the modal promises to stay whole on. 120x45 (every test above) is where the
+# layout is roomy; 100x35 is where the old fixed columns chopped "captured"
+# down to "captu" and where the scrolling appearance column could park a sixel
+# row half off its viewport - which keeps painting anyway, because sixel
+# escapes bypass the compositor (tui.graphics).
+
+NARROW = (100, 35)
+
+
+async def test_appearance_texts_survive_a_narrow_terminal_uncut(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Every kind name, status line and button label renders whole at 100x35.
+
+    The appearance column holds prose, and prose truncation reads as a
+    different text - so IT keeps its width and the form column (whose Inputs
+    scroll) is the one that gives. Region-vs-text, not a rendered-strip diff:
+    a widget at least as wide as its content cannot be showing a chopped word.
+    """
+    save_template(profile_root, "claude", TemplateKind.COPY, _image())
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=NARROW) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+
+        box = editor.query_one("#service-editor-box")
+        column = editor.query_one("#svc-appearance-col")
+        assert box.region.contains_region(column.region)
+
+        labels = list(editor.query(".svc-kind-label").results(Static))
+        assert len(labels) == len(TemplateKind)
+        for label in labels:
+            assert label.region.width >= len(str(label.render()))
+        for kind in TemplateKind:
+            status = editor.query_one(f"#{template_status_id(kind)}", Static)
+            assert status.region.width >= len(str(status.render()))
+            # Compact buttons pad their label by a cell each side (line-pad).
+            capture = editor.query_one(f"#{capture_button_id(kind)}", Button)
+            assert capture.region.width >= len("Capture") + 2
+            clear = editor.query_one(f"#{clear_button_id(kind)}", Button)
+            assert clear.region.width >= len(CLEAR_LABEL) + 2
+
+
+async def test_sixel_previews_sit_whole_inside_the_modal_at_a_narrow_terminal(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """All seven sixel rows are entirely on screen, with nothing to scroll.
+
+    The residue this pins against: the appearance column used to scroll, and a
+    sixel picture half scrolled out of a scrollable container is painted
+    anyway, straight over whatever the compositor believes is there. The fix
+    is structural - the rows are capped (SIXEL_PREVIEW_MAX_ROWS) so the whole
+    column always fits the modal - so the test asserts the structure: full
+    preview height for every kind, every row inside the box, no overflow for
+    a scrollbar to hide.
+    """
+    save_template(profile_root, "claude", TemplateKind.COPY, _image())
+    set_terminal_graphics(SIXEL_TERMINAL)
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=NARROW) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        await pilot.pause()
+
+        box = editor.query_one("#service-editor-box")
+        column = editor.query_one("#svc-appearance-col")
+        expected = preview_rows(SIXEL_TERMINAL)
+        for kind in TemplateKind:
+            widget = editor.query_one(f"#{template_preview_id(kind)}")
+            assert widget.region.height == expected  # never squashed to fit
+            assert box.region.contains_region(widget.region)  # never half off
+        assert column.max_scroll_y == 0  # nothing left for a scrollbar to hide
 
 
 async def test_forgetting_an_appearance_leaves_the_preset_alone(

@@ -34,9 +34,16 @@ _SENTINEL_RE = re.compile(
 # language tag. Only consulted OUTSIDE heredocs.
 _FENCE_RE = re.compile(r"^(?:`{3,}|~{3,})\s*[\w+.\-]*\s*$")
 
-# Heredoc opener: `key <<TAG` (2+ '<' accepted; a stray colon after the key is
-# tolerated). Tag = 1-32 chars of [A-Za-z0-9_-].
+# Heredoc opener: `key << TAG` (2+ '<' accepted, space optional, a stray colon
+# after the key tolerated). Tag = 1-32 chars of [A-Za-z0-9_-].
 _HEREDOC_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)\s*:?\s*<{2,}\s*([A-Za-z0-9_-]{1,32})\s*$")
+
+# Same shape but with trailing content on the opener line: the fingerprint of a
+# chat client that read `<TAG` as an HTML start tag. See _client_mangled_opener.
+_MANGLED_HEREDOC_RE = re.compile(
+    r"^([A-Za-z][A-Za-z0-9_-]*)\s*:?\s*<{2,}\s*([A-Za-z0-9_-]{1,32})\s+\S"
+)
+_MANGLE_MARKERS = ("CLIP:END", "CLIP:EOM")
 
 # Inline param: `key: value` or `key=value` (LLMs drift between separators).
 _PARAM_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)\s*[:=]\s*(.*)$")
@@ -113,6 +120,31 @@ def peek_chat_name(text: str) -> str | None:
         attrs, _ = _parse_attrs(match.group(2))
         return normalize_chat_name(attrs.get("chat"))
     return None
+
+
+def _client_mangled_opener(line: str) -> tuple[str, str] | None:
+    """`(key, tag)` when `line` bears the fingerprint of a chat client that
+    mistook a heredoc opener for an HTML start tag, else None.
+
+    Such a client sees `<TAG` inside a glued `key <<TAG` opener, treats the rest
+    of the reply as that tag's attributes - collapsing it onto one line, sorting
+    it, quoting it - and re-emits the lot as a single element. The wreckage is
+    unrecoverable: the words come back in ASCII sort order, so there is nothing
+    to salvage and nothing for the model to fix by resending.
+
+    Detection needs both halves, which is why false positives are ~nil: an
+    opener with trailing content AND a CLIP sentinel in that trailing text. A
+    well-formed reply never puts ===CLIP:END=== or the EOM line behind a heredoc
+    tag on the same line, and prose that happens to look like an opener does not
+    carry sentinels.
+    """
+    match = _MANGLED_HEREDOC_RE.match(line)
+    if match is None:
+        return None
+    upper = line.upper()
+    if not any(marker in upper for marker in _MANGLE_MARKERS):
+        return None
+    return match.group(1), match.group(2)
 
 
 def _to_int(value: str | None) -> int | None:
@@ -328,6 +360,24 @@ class _Parser:
                 j = self.n
                 closed = True
                 break
+            mangled = _client_mangled_opener(stripped)
+            if mangled is not None:
+                # Transport corruption, not a model mistake: the reply was
+                # flattened before it ever reached the clipboard. Fail the call
+                # (the engine tells the USER, not the model - resending cannot
+                # help) and keep scanning; nothing here is recoverable.
+                key, tag = mangled
+                issue = ParseIssue(
+                    "client_mangled_heredoc",
+                    j + 1,
+                    f"heredoc opener '{key} << {tag}' was flattened onto one line that "
+                    "also swallowed CLIP sentinel text; the chat client mangled this "
+                    "reply in transport (it read the tag as an HTML start tag)",
+                )
+                issues.append(issue)
+                self.warnings.append(issue)
+                j += 1
+                continue
             param = _PARAM_RE.match(stripped)
             if param:
                 # Unknown keys are kept verbatim; the engine validates them.

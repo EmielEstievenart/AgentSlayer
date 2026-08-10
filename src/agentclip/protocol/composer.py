@@ -257,7 +257,10 @@ class Composer:
         for result, body in zip(results, bodies, strict=True):
             tag = pick_heredoc_tag(body, base=f"R{result.call_id}")
             lines.append(self._result_header(result))
-            lines.append(f"body <<{tag}")
+            # Space before the tag: outbound is the example the model imitates,
+            # and a glued `<<TAG` is what chat clients read as an HTML start tag
+            # (parser._client_mangled_opener).
+            lines.append(f"body << {tag}")
             if body:
                 lines.append(body)
             lines.append(tag)

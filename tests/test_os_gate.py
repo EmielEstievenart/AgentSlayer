@@ -52,6 +52,19 @@ def test_scrolling_never_reaches_the_wheel() -> None:
 
 
 @gated_only
+def test_enter_never_reaches_the_keyboard() -> None:
+    """The auto-submit tap: a real one would SEND whatever sits half-typed in
+    the user's focused window."""
+    assert focus.send_enter() is False
+
+
+@gated_only
+def test_scroll_keys_never_reach_the_keyboard() -> None:
+    assert focus.send_scroll_key("page_down", 8) is False
+    assert focus.send_scroll_key("end") is False
+
+
+@gated_only
 def test_cursor_moves_never_reach_the_pointer() -> None:
     assert focus.move_cursor(60, 60) is False
 

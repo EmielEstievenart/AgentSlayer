@@ -48,10 +48,28 @@ Pixel comparison is the house style from screen.busy: strided sampling with a
 fixed budget, per-channel tolerance on B/G/R, the undefined X byte skipped.
 Deliberately a pure function of its inputs - no capture, no ctypes, no OS - so
 it is unit-testable anywhere.
+
+Uniform sampling has its own blind spot, and it is the mirror image of the
+anchors'. Copilot's chat input box is a 1030x97 crop of which 97% is one flat
+dark surface; everything that makes it THAT box - the hairline border, the
+placeholder text, two icons - is the remaining 3%. A uniform stride gives
+those pixels 3% of the votes, so a comparison against any similar dark
+rectangle elsewhere on the page disagrees on almost nothing it sampled: the
+impostor scores ~0.06 against the chatbox's 0.20 threshold, and a search that
+accepts the first verified candidate hands back whichever dark patch its
+candidate order visited first. No threshold can fix that - tightening it below
+the impostor's score would reject the real box the moment its placeholder text
+moves. The fix is representation, not strictness: Template.build records which
+pixels DEVIATE from the template's dominant shade (the border, the glyphs -
+whatever survives SALIENT_DELTA), and stage 2 samples those alongside the
+uniform sweep with equal budget. At the real box the salient pixels agree
+almost perfectly; on a flat impostor they disagree almost totally, which
+drags its pooled diff to ~0.5 and far past any threshold in use.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 
@@ -69,6 +87,19 @@ DEFAULT_MAX_DIFF = 0.08
 # Pixels compared per verified candidate. A whole browser window yields many
 # anchor hits, so the per-candidate cost is what keeps a poll affordable.
 MAX_SAMPLES = 1024
+# A pixel is salient when any channel sits further than this from the
+# template's dominant shade. One quantisation bucket: closer than that and the
+# pixel is the background with noise on it, which is exactly what the salient
+# set exists to exclude. Measured against the real profiles this keeps the
+# hairline border, the placeholder text and the icons of a chat input box
+# (~3% of its area) and nothing of the flat surface.
+SALIENT_DELTA = 32
+# Fewer salient pixels than this and the set is noise, not structure - a
+# near-flat template (a solid send button) simply has no distinguishing pixels
+# to insist on, and insisting on a handful would let single-pixel flicker veto
+# a match. Such a template skips the salient sampling entirely and behaves as
+# it always did.
+SALIENT_MIN = 16
 
 
 # Quantisation table for bytes.translate: 256 shades collapse to 8 buckets, so
@@ -199,6 +230,33 @@ def _spread(count: int, budget: int) -> range:
     return range(0, count, -(-count // budget))
 
 
+def _salient_indices(image: RegionImage) -> tuple[int, ...]:
+    """Row-major indices of the pixels that distinguish this template from a
+    flat rectangle of its own dominant shade (see the module docstring).
+
+    The dominant shade is the per-channel mode - not the mean, which a bright
+    logo on a dark surface would drag off both of them. A pixel is kept when
+    ANY channel strays beyond SALIENT_DELTA, via one translate per channel and
+    a big-int OR so the scan over 100k pixels of a chat-box-sized template
+    stays in C. Capped by an even stride at MAX_SAMPLES so a busy template
+    (where most pixels deviate) costs no more than the uniform sweep it
+    supplements; empty below SALIENT_MIN, which callers read as "nothing to
+    insist on".
+    """
+    total = image.width * image.height
+    marks = 0
+    for channel in range(3):
+        plane = image.pixels[channel : total * 4 : 4]
+        mode = Counter(plane).most_common(1)[0][0]
+        table = bytes(1 if abs(value - mode) > SALIENT_DELTA else 0 for value in range(256))
+        marks |= int.from_bytes(plane.translate(table), "big")
+    flags = marks.to_bytes(total, "big")
+    salient = [index for index, flag in enumerate(flags) if flag]
+    if len(salient) < SALIENT_MIN:
+        return ()
+    return tuple(salient[index] for index in _spread(len(salient), MAX_SAMPLES))
+
+
 def _choose_anchors(plane: bytes, width: int, height: int) -> tuple[Anchor, ...]:
     """The ANCHOR_COUNT most distinctive windows of one quantised plane.
 
@@ -279,11 +337,19 @@ class Template:
     ``offset_anchors`` defaults to empty so a Template can still be assembled
     by hand from one ruler's worth of anchors, which is what a test that wants
     to watch a single ruler fail needs.
+
+    ``salient`` is the third precomputed fact: the row-major indices of the
+    pixels that distinguish this appearance from a flat rectangle of its own
+    background (see _salient_indices). Like the anchors it depends only on the
+    template, never the scene, so it is paid for once. Defaults to empty -
+    a hand-built Template verifies exactly as it did before the salient stage
+    existed.
     """
 
     image: RegionImage
     anchors: tuple[Anchor, ...]
     offset_anchors: tuple[Anchor, ...] = ()
+    salient: tuple[int, ...] = ()
 
     @property
     def width(self) -> int:
@@ -325,6 +391,7 @@ class Template:
             image,
             _choose_anchors(_quantised_plane(image, QUANT), width, height),
             _choose_anchors(_quantised_plane(image, QUANT_OFFSET), width, height),
+            _salient_indices(image),
         )
 
 
@@ -360,7 +427,14 @@ def _probe_at(template: RegionImage, scene: RegionImage, x: int, y: int, toleran
     return True
 
 
-def _diff_at_xy(template: RegionImage, scene: RegionImage, x: int, y: int, tolerance: int) -> float:
+def _diff_at_xy(
+    template: RegionImage,
+    scene: RegionImage,
+    x: int,
+    y: int,
+    tolerance: int,
+    salient: tuple[int, ...] = (),
+) -> float:
     """Stage 2: the strided full comparison of ``_diff_at``, at a 2D origin.
 
     Same sampling discipline (at most MAX_SAMPLES pixels, uniform stride over
@@ -368,6 +442,13 @@ def _diff_at_xy(template: RegionImage, scene: RegionImage, x: int, y: int, toler
     including the stride's coprimality with the width, which for a template as
     wide as a chat input box is the difference between reading every column and
     reading sixteen of them (busy.sample_step).
+
+    ``salient`` indices are sampled on top of the uniform stride, into the same
+    pooled fraction. Equal budgets, so a template that is nearly all flat
+    surface still casts half its votes on the pixels that make it recognisable
+    (see the module docstring) - and a template with an empty salient set gets
+    exactly the historical uniform diff. Some pixels are counted by both walks;
+    that is the weighting, not an accident.
     """
     total = template.width * template.height
     step = sample_step(total, MAX_SAMPLES, template.width)
@@ -379,6 +460,17 @@ def _diff_at_xy(template: RegionImage, scene: RegionImage, x: int, y: int, toler
         there = ((y + ty) * scene.width + (x + tx)) * 4
         sampled += 1
         # Byte 3 of each BGRX pixel is undefined in a GDI capture - skip it.
+        if (
+            abs(left[here] - right[there]) > tolerance
+            or abs(left[here + 1] - right[there + 1]) > tolerance
+            or abs(left[here + 2] - right[there + 2]) > tolerance
+        ):
+            differing += 1
+    for index in salient:
+        ty, tx = divmod(index, template.width)
+        here = index * 4
+        there = ((y + ty) * scene.width + (x + tx)) * 4
+        sampled += 1
         if (
             abs(left[here] - right[there]) > tolerance
             or abs(left[here + 1] - right[there + 1]) > tolerance
@@ -487,7 +579,9 @@ def _scored(
         if budget <= 0:
             return
         budget -= 1
-        yield RegionMatch(x, y, _diff_at_xy(template.image, scene, x, y, tolerance))
+        yield RegionMatch(
+            x, y, _diff_at_xy(template.image, scene, x, y, tolerance, template.salient)
+        )
 
 
 def _verify(

@@ -134,6 +134,9 @@ def state_row_id(state: LoopState) -> str:
 
 PASTE_FLASH_TEXT = ">>> PRESS CTRL+V <<<\nin the chat, then send"
 ENTER_FLASH_TEXT = ">>> PRESS ENTER <<<\nreply pasted - just send it"
+# auto_submit tapped Enter itself; the flash stays up until the send gate sees
+# the send land, so the second line covers the tap not taking.
+AUTO_SEND_FLASH_TEXT = ">>> AUTO-SENT <<<\nEnter was tapped for you"
 # The third thing the same banner can say, and the only one that is not asking
 # for a keystroke: a streamed delivery is pasting the payload in a chunk at a
 # time, and the count is the whole point - a big message takes seconds, and

@@ -10,12 +10,15 @@ import sys
 import pytest
 
 from agentclip.screen.focus import (
+    SCROLL_KEYS,
     click_region,
     focus_window,
     foreground_window,
     move_cursor,
     scroll_region,
+    send_enter,
     send_paste,
+    send_scroll_key,
     virtual_screen_bounds,
 )
 from agentclip.screen.region import ScreenRegion
@@ -61,6 +64,36 @@ def test_a_settling_click_is_unavailable_off_windows() -> None:
 @off_windows_only
 def test_paste_is_unavailable_off_windows() -> None:
     assert send_paste() is False
+
+
+@off_windows_only
+def test_enter_is_unavailable_off_windows() -> None:
+    assert send_enter() is False
+
+
+@off_windows_only
+def test_scroll_keys_are_unavailable_off_windows() -> None:
+    assert send_scroll_key("page_down") is False
+    assert send_scroll_key("end") is False
+
+
+def test_scroll_key_names_match_the_config_actions() -> None:
+    """config.py spells the names again (it is a stdlib-only leaf that may not
+    import the screen layer), so the two lists have to be held together here -
+    the same arrangement as MATCHERS."""
+    from agentclip.config import SCROLL_ACTIONS, SCROLL_WHEEL
+
+    assert set(SCROLL_KEYS) == set(SCROLL_ACTIONS) - {SCROLL_WHEEL}
+
+
+def test_an_unknown_scroll_key_is_refused() -> None:
+    """Reported as False and, crucially, sends nothing - on every platform."""
+    assert send_scroll_key("home") is False
+
+
+def test_zero_scroll_taps_are_a_no_op() -> None:
+    assert send_scroll_key("end", 0) is False
+    assert send_scroll_key("page_down", -1) is False
 
 
 @off_windows_only

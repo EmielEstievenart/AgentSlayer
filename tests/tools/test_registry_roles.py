@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import re
+
+import pytest
+
 from agentclip.tools.registry import default_registry
 
 
@@ -35,8 +39,17 @@ def test_subagent_never_gets_delegate_even_when_asked() -> None:
 def test_subagent_task_done_doc_teaches_the_result_param() -> None:
     doc = default_registry(role="subagent").get("task_done").catalog_doc
     assert "task_done(summary, result*)" in doc
-    assert "result <<EOT" in doc
+    assert "result << EOT" in doc
     assert "the ONLY thing they" in doc
+
+
+@pytest.mark.parametrize("role", ["master", "subagent"])
+def test_no_catalog_doc_shows_a_glued_heredoc_opener(role: str) -> None:
+    # `key <<TAG` puts `<TAG` in the model's mouth, and at least one chat client
+    # parses that as an HTML start tag and eats the rest of the reply. Every
+    # example we ship must keep the space.
+    catalog = default_registry(role=role, allow_delegate=True).render_catalog()
+    assert re.search(r"<<\S", catalog) is None
 
 
 def test_master_task_done_doc_does_not_mention_result() -> None:

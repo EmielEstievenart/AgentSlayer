@@ -36,6 +36,7 @@ from agentclip.protocol.parser import normalized_hash, parse_reply
 from agentclip.protocol.types import (
     Outbound,
     ParsedReply,
+    ParseIssue,
     ResultStatus,
     ToolCall,
     ToolResult,
@@ -49,7 +50,9 @@ _MUTATING_TOOLS = frozenset({"write_file", "edit_file", "delete_file"})
 
 # Per-call ParseIssue kinds that make a call non-executable (the parser keeps
 # benign tolerances at reply level; anything attached to the call is fatal).
-_FATAL_ISSUES = frozenset({"bad_header", "unterminated_heredoc", "missing_end"})
+_FATAL_ISSUES = frozenset(
+    {"bad_header", "unterminated_heredoc", "missing_end", "client_mangled_heredoc"}
+)
 
 # Reply-level warning kinds surfaced to the LLM as NOTE lines in the results.
 _NOTE_WARNINGS = frozenset({"renumbered", "duplicate_id", "missing_end", "unknown_param"})
@@ -556,6 +559,8 @@ class Engine:
 
     def _parse_issue_result(self, call: ToolCall) -> ToolResult:
         fatal = [i for i in call.issues if i.kind in _FATAL_ISSUES]
+        if any(i.kind == "client_mangled_heredoc" for i in fatal):
+            return _client_mangled_result(call, fatal)
         if any(i.kind == "unterminated_heredoc" for i in fatal):
             code = "unterminated_heredoc"
             hint = "resend this call; terminate every heredoc with its tag alone on a line."
@@ -569,7 +574,7 @@ class Engine:
             + "\noffending block (first lines):\n"
             + "\n".join(raw_lines)
             + "\ngrammar reminder: ===CLIP:CALL id=N tool=name=== then key: value lines"
-            " and/or key <<TAG heredocs, then ===CLIP:END==="
+            " and/or key << TAG heredocs, then ===CLIP:END==="
         )
         return error_result(call, code, message, hint)
 
@@ -717,7 +722,10 @@ class Engine:
         if exec_.backup_started:
             self._backups.finish_turn()
         results = list(exec_.results)
-        if reply.truncated:
+        if reply.truncated and not _client_mangled(reply):
+            # A mangled reply always looks truncated (the client ate the EOM
+            # line), but "your reply was cut off - resend the rest" is exactly
+            # the advice that loops here. The per-call result says the truth.
             results.insert(0, _truncated_result(reply))
         notes = [f"note: {w.detail}" for w in reply.warnings if w.kind in _NOTE_WARNINGS]
         if not reply.calls and not reply.truncated and exec_.done_summary is None:
@@ -829,6 +837,41 @@ def _cancelled_skip_result(call: ToolCall) -> ToolResult:
         "nothing changed for this call - ask what the user wants instead, or resend"
         " it only if they still want it.",
     )
+
+
+def _client_mangled(reply: ParsedReply) -> bool:
+    """True when the chat client corrupted this reply in transport."""
+    return any(i.kind == "client_mangled_heredoc" for c in reply.calls for i in c.issues)
+
+
+def _client_mangled_result(call: ToolCall, fatal: list[ParseIssue]) -> ToolResult:
+    """The one parse failure that happened before the clipboard: the chat client
+    flattened the reply into a single HTML element (protocol.md section 1.4).
+
+    Addressed to the USER, not the model. "Resend this call" - the answer to
+    every other parse error - is an infinite loop here: the model sends valid
+    text, the client mangles it identically, forever.
+    """
+    message = (
+        f"call id={call.id} arrived corrupted and was NOT executed.\n"
+        "The chat client mangled this reply in transport: it read the heredoc tag"
+        " as an HTML start tag and absorbed the rest of the reply -"
+        " ===CLIP:END===, the EOM line, the closing fence - into it as sorted"
+        " attributes. The words come back in ASCII order, so nothing in the"
+        " parameter can be recovered.\n"
+        + "\n".join(i.detail for i in fatal)
+        + "\nThe model's output was valid; resending this reply UNCHANGED will not"
+        " help, because the client will mangle it the same way again.\n"
+        "offending block (first lines):\n"
+        + "\n".join(call.raw.split("\n")[:10])
+    )
+    hint = (
+        "do not just resend: change the shape. Send this call again with every"
+        " parameter as a single-line `key: value` - no heredoc, so there is no tag"
+        " for the client to mistake for HTML. If a value truly needs newlines,"
+        " keep the heredoc but put a space between << and the tag."
+    )
+    return error_result(call, "client_mangled_reply", message, hint)
 
 
 def _truncated_result(reply: ParsedReply) -> ToolResult:

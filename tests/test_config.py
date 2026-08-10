@@ -18,12 +18,14 @@ from agentclip.config import (
     DEFAULT_DELIVERY,
     DEFAULT_FINISH_SIGNALS,
     DEFAULT_MATCHER,
+    DEFAULT_SCROLL_ACTION,
     DEFAULT_STABLE_SECONDS,
     DEFAULT_THEME,
     DEFAULT_TOLERANCE,
     DELIVERY_MODES,
     FINISH_SIGNALS,
     MATCHERS,
+    SCROLL_ACTIONS,
     TOLERANCE_MAX,
     TOLERANCE_MIN,
     ServicePreset,
@@ -435,6 +437,141 @@ def test_save_services_delivery_alone_is_enough_to_write_a_builtin(
 
     assert set(raw["services"]) == {"gemini"}
     assert raw["services"]["gemini"]["delivery"] == "stream"
+
+
+# -- scroll_action (how the auto-copy flow reaches the newest reply) ------------
+
+
+def test_every_builtin_ships_the_wheel_scroll() -> None:
+    """The keyboard forms only work on pages that scroll on those keys, so
+    nobody gets one without asking for it."""
+    assert SCROLL_ACTIONS == ("scroll", "page_down", "end")
+    assert DEFAULT_SCROLL_ACTION == "scroll"
+    for key, preset in default_services().items():
+        assert preset.scroll_action == "scroll", key
+    assert ServicePreset("k", "K", 1_000, 5_000).scroll_action == "scroll"
+
+
+@pytest.mark.parametrize("action", ["page_down", "end"])
+def test_load_config_reads_a_scroll_action_override(
+    project: Path, global_path: Path, action: str
+) -> None:
+    global_path.write_text(f'[services.claude]\nscroll_action = "{action}"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].scroll_action == action
+    assert not cfg.warnings
+
+
+def test_load_config_rejects_an_unknown_scroll_action(project: Path, global_path: Path) -> None:
+    """Silently flicking the wheel is the one outcome a user who wrote this key
+    would not notice - the wheel not reaching their page is what they were
+    escaping."""
+    global_path.write_text('[services.claude]\nscroll_action = "home"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].scroll_action == "scroll"
+    assert any("scroll_action" in w and "scroll, page_down, end" in w for w in cfg.warnings)
+
+
+def test_load_config_rejects_a_non_string_scroll_action(project: Path, global_path: Path) -> None:
+    global_path.write_text("[services.claude]\nscroll_action = 3\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].scroll_action == "scroll"
+    assert any("scroll_action" in w for w in cfg.warnings)
+
+
+def test_save_then_load_round_trips_scroll_action(project: Path, global_path: Path) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], scroll_action="end")
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"]["scroll_action"] == "end"
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings
+
+
+def test_save_services_writes_scroll_action_only_when_it_differs(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], max_paste_chars=30_000)
+
+    save_services(services, global_path)
+    assert "scroll_action" not in tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
+
+    services["my-llm"] = ServicePreset("my-llm", "My LLM", 8_000, 300_000)
+    save_services(services, global_path)
+    assert "scroll_action" not in tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["my-llm"]
+
+
+# -- auto_submit + capture_prose (the two automation opt-ins) --------------------
+
+
+def test_the_automation_opt_ins_ship_off() -> None:
+    """A synthetic Enter and a prose ingest are both acts the loop otherwise
+    always leaves to the user, so nobody gets either without asking."""
+    for key, preset in default_services().items():
+        assert preset.auto_submit is False, key
+        assert preset.capture_prose is False, key
+    fresh = ServicePreset("k", "K", 1_000, 5_000)
+    assert fresh.auto_submit is False
+    assert fresh.capture_prose is False
+
+
+@pytest.mark.parametrize("field", ["auto_submit", "capture_prose"])
+def test_load_config_reads_an_automation_opt_in(
+    project: Path, global_path: Path, field: str
+) -> None:
+    global_path.write_text(f"[services.claude]\n{field} = true\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert getattr(cfg.services["claude"], field) is True
+    assert not cfg.warnings
+
+
+@pytest.mark.parametrize("field", ["auto_submit", "capture_prose"])
+def test_load_config_rejects_a_non_bool_automation_opt_in(
+    project: Path, global_path: Path, field: str
+) -> None:
+    global_path.write_text(f'[services.claude]\n{field} = "yes"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert getattr(cfg.services["claude"], field) is False
+    assert any(field in w for w in cfg.warnings)
+
+
+@pytest.mark.parametrize("field", ["auto_submit", "capture_prose"])
+def test_save_then_load_round_trips_an_automation_opt_in(
+    project: Path, global_path: Path, field: str
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], **{field: True})
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"][field] is True
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings
+
+
+def test_save_services_writes_the_opt_ins_only_when_they_differ(
+    project: Path, global_path: Path
+) -> None:
+    """They arrived after the rest: a preset whose user never touched them must
+    still be written exactly as earlier versions wrote it."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], max_paste_chars=30_000)
+
+    save_services(services, global_path)
+    written = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
+    assert "auto_submit" not in written
+    assert "capture_prose" not in written
 
 
 # -- save_services: round trip + minimal diff ----------------------------------

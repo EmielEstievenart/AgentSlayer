@@ -217,6 +217,33 @@ def test_truncated_reply_gets_id0_result(project: Path, engine: Engine) -> None:
     assert not (project / "notes.txt").exists()  # the partial call did NOT run
 
 
+# A chat client flattened this task_done into one HTML element before the user
+# could copy it: the heredoc opener swallowed the content, ===CLIP:END===, the
+# EOM line and the closing fence, and the words came back in ASCII sort order.
+MANGLED_TASK_DONE = (
+    "===CLIP:CALL id=1 tool=task_done===\n"
+    'summary <<SUMMARY_TAG 01 16 All CTest. Completed SUMMARY_TAG="==CLIP:END===" '
+    'Spec Standards against and backend calls="1" chat="amber-falcon===" code for '
+    'full integration integration. passed review tests unit via ~~~~="==CLIP:EOM">\n'
+)
+
+
+def test_client_mangled_reply_blames_the_client_and_never_completes(engine: Engine) -> None:
+    engine.start_task("t")
+    result = engine.ingest(MANGLED_TASK_DONE)
+    assert isinstance(result, NewTurn)
+    step = engine.execute()
+    # Not Done: a garbled summary is the one thing task_done must never accept.
+    assert isinstance(step, Send)
+    payload = step.outbound.chunks[0]
+    assert "===CLIP:RESULT id=1 status=error code=client_mangled_reply===" in payload
+    assert "mangled this reply in transport" in payload
+    assert "will not\nhelp" in payload or "will not help" in payload
+    # The truncation notice is suppressed: "resend the rest" is the infinite loop.
+    assert "code=reply_truncated" not in payload
+    assert "Your reply was cut off" not in payload
+
+
 DUPLICATE_IDS_REPLY = """===CLIP:CALL id=5 tool=read_file===
 path: README.md
 ===CLIP:END===

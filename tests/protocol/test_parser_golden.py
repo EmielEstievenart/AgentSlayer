@@ -275,6 +275,103 @@ def test_heredoc_tag_is_case_sensitive_and_trim_terminated() -> None:
     assert not reply.truncated
 
 
+_SPACED_BLOCK = (
+    "===CLIP:CALL id=1 tool=write_file===\n"
+    "path: a.txt\n"
+    "{opener}\n"
+    "hello\n"
+    "world\n"
+    "EOT\n"
+    "===CLIP:END===\n"
+    "===CLIP:EOM calls=1===\n"
+)
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "content << EOT",  # canonical since the HTML-mangling incident
+        "content <<EOT",  # the old canonical spelling, still accepted
+        "content <<  EOT",
+        "content: << EOT",
+        "content <<< EOT",
+    ],
+)
+def test_heredoc_opener_spacing_is_equivalent(opener: str) -> None:
+    reply = parse_reply(_SPACED_BLOCK.format(opener=opener))
+    assert reply.calls[0].params == {"path": "a.txt", "content": "hello\nworld"}
+    assert reply.calls[0].issues == ()
+    assert not reply.truncated
+
+
+def test_tilde_line_inside_heredoc_is_content_not_a_fence() -> None:
+    # The fence-collision rule (bootstrap) exists for the chat client's markdown
+    # renderer, which would close a ~~~~ fence early. The parser is immune either
+    # way: inside a heredoc only the tag terminates, so tildes are just content.
+    reply = parse_reply(
+        "~~~~~\n"  # outer fence, wider than the content line below
+        "===CLIP:CALL id=1 tool=write_file===\n"
+        "path: README.md\n"
+        "content << EOT\n"
+        "~~~~\n"
+        "still content\n"
+        "EOT\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1===\n"
+        "~~~~~\n"
+    )
+    assert reply.calls[0].params["content"] == "~~~~\nstill content"
+    assert not reply.truncated
+
+
+# The real wreckage from the incident: a chat client read `<SUMMARY_TAG` as an
+# HTML start tag, absorbed the rest of the reply as attributes, sorted them
+# (note the ASCII order of the words), quoted them - eating one `=` per `===`
+# run - and re-emitted one element.
+MANGLED_OPENER = (
+    'summary <<SUMMARY_TAG 01 16 All CTest. Completed SUMMARY_TAG="==CLIP:END===" '
+    'SlayerGit Slice Spec Standards against and backend calls="1" chat="gentle-mesa===" '
+    'code for full integration integration. passed review tests unit via ~~~~="==CLIP:EOM">'
+)
+
+
+def test_client_mangled_opener_is_a_fatal_per_call_issue() -> None:
+    reply = parse_reply("===CLIP:CALL id=1 tool=task_done===\n" + MANGLED_OPENER + "\n")
+    call = reply.calls[0]
+    assert "client_mangled_heredoc" in [i.kind for i in call.issues]
+    assert any(w.kind == "client_mangled_heredoc" for w in reply.warnings)
+    # Deliberately nothing recovered: the words are in ASCII sort order, so a
+    # "summary" built from them would be a bag of tokens.
+    assert "summary" not in call.params
+
+
+def test_opener_shaped_junk_without_a_sentinel_is_not_flagged() -> None:
+    # Both halves are required, which is what keeps false positives at ~nil.
+    reply = parse_reply(
+        "===CLIP:CALL id=1 tool=read_file===\n"
+        "path: a.py\n"
+        "note <<EOT and some trailing words\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1===\n"
+    )
+    assert reply.calls[0].issues == ()
+    assert reply.calls[0].params == {"path": "a.py"}
+
+
+def test_sentinel_text_on_a_non_opener_line_is_not_flagged() -> None:
+    reply = parse_reply(
+        "===CLIP:CALL id=1 tool=write_file===\n"
+        "path: doc.md\n"
+        "content << EOT\n"
+        'quoting the protocol: SUMMARY_TAG="==CLIP:END===" is what mangling looks like\n'
+        "EOT\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1===\n"
+    )
+    assert reply.calls[0].issues == ()
+    assert "CLIP:END" in reply.calls[0].params["content"]
+
+
 def test_unknown_tool_name_passed_through_unvalidated() -> None:
     reply = parse_reply(
         "===CLIP:CALL id=1 tool=summon_demon===\nname: bob\n===CLIP:END===\n===CLIP:EOM calls=1===\n"

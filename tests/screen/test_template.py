@@ -178,7 +178,10 @@ def test_a_difference_beyond_max_diff_is_rejected() -> None:
     assert find_in_region(template, scene) is None
     found = find_in_region(template, scene, max_diff=0.2)
     assert found is not None and (found.x, found.y) == (37, 24)
-    assert found.diff == pytest.approx(3 / 20)
+    # Approximate, not exact: a noise template is nearly all salient, so the
+    # salient walk re-samples most pixels on top of the uniform one and the
+    # pooled fraction lands near - not on - the damaged-row share.
+    assert found.diff == pytest.approx(3 / 20, abs=0.01)
 
 
 def test_the_search_ignores_the_undefined_x_byte() -> None:
@@ -386,7 +389,9 @@ def test_a_rejected_candidate_reports_how_close_it_came() -> None:
     scene = paste(noise(140, 90, seed=1), damaged, 37, 24)
     match, best_miss = find_lowest_with_best_miss(Template.build(patch), scene)
     assert match is None
-    assert best_miss == pytest.approx(3 / 20)
+    # Near, not on, 3/20: the salient walk re-samples the noise (see
+    # test_a_difference_beyond_max_diff_is_rejected).
+    assert best_miss == pytest.approx(3 / 20, abs=0.01)
     # ...and a threshold that accepts it gets the match instead.
     match, _ = find_lowest_with_best_miss(Template.build(patch), scene, max_diff=0.2)
     assert match is not None and (match.x, match.y) == (37, 24)
@@ -416,4 +421,6 @@ def test_the_lowest_match_and_a_near_miss_come_back_together() -> None:
     scene = paste(paste(noise(140, 200, seed=1), patch, 30, 20), damaged, 30, 120)
     match, best_miss = find_lowest_with_best_miss(Template.build(patch), scene)
     assert match is not None and (match.x, match.y) == (30, 20)
-    assert best_miss == pytest.approx(3 / 20)
+    # Near, not on, 3/20: the salient walk re-samples the noise (see
+    # test_a_difference_beyond_max_diff_is_rejected).
+    assert best_miss == pytest.approx(3 / 20, abs=0.01)

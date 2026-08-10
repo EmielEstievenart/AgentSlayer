@@ -233,7 +233,7 @@ async def test_the_action_finds_it_clicks_it_and_hands_focus_back(
     )
     monkeypatch.setattr(
         main_mod,
-        "focus_window",
+        "focus_window_verified",
         lambda handle: bool(focus_calls.append(handle)) or bool(events.append("focus")) or True,
     )
 
@@ -261,6 +261,42 @@ async def test_the_action_finds_it_clicks_it_and_hands_focus_back(
         assert [(scene.width, scene.height) for scene in scenes] == [
             (CHAT_REGION.width, CHAT_REGION.height)
         ]
+
+
+async def test_the_button_learns_our_window_before_it_hands_focus_away(
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
+) -> None:
+    """Pressing a button in the sidebar is proof AgentClip has the OS focus at
+    that instant, so the handle is read there too - not only at mount and at
+    every composer send. Without it, a run whose mount reading came back empty
+    (mid focus switch) and whose composer was never used has nothing to snap
+    back to, and the press leaves the user staring at the browser."""
+    readings: list[int | None] = [None]  # mount catches a focus switch: no handle
+    monkeypatch.setattr(main_mod, "foreground_window", lambda: readings[-1])
+    focus_calls: list[int] = []
+    monkeypatch.setattr(
+        main_mod, "focus_window_verified", lambda handle: focus_calls.append(handle) or True
+    )
+    _record_clicks(monkeypatch)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    _seed_newchat(app, seed_templates)
+    _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        assert main._own_window is None
+
+        await _draw_chat_region(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND)
+        readings.append(4242)  # the press itself: our terminal is in front
+
+        await _press(app, pilot, "#newchat-btn")
+        await _wait_for(pilot, lambda: focus_calls == [4242], "focus snapped back")
 
 
 async def test_not_on_screen_warns_and_clicks_nothing(
@@ -363,7 +399,7 @@ async def test_a_refused_click_is_reported_separately(
     story to tell than "this button is not on screen"."""
     focus_calls: list[int] = []
     monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: False)
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: focus_calls.append(handle) or True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: focus_calls.append(handle) or True)
 
     app, _ = _make_app(tmp_path, profile_root)
     _seed_newchat(app, seed_templates)
@@ -684,7 +720,7 @@ async def test_the_button_on_an_idle_session_resets_the_tool_side_too(
 ) -> None:
     clicks = _record_clicks(monkeypatch)
     _no_real_paste(monkeypatch)
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
 
     app, _ = _make_app(tmp_path, profile_root)
     _seed_newchat(app, seed_templates)
@@ -758,7 +794,7 @@ async def test_the_button_on_the_sub_tab_only_clicks(
     session it is having stays exactly where it was."""
     clicks = _record_clicks(monkeypatch)
     _no_real_paste(monkeypatch)
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
 
     app, _ = _make_app(tmp_path, profile_root)
     _seed_newchat(app, seed_templates)

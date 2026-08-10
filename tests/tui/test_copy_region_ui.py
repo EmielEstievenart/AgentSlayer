@@ -349,7 +349,7 @@ async def test_flow_searches_the_chat_region_and_clicks_the_lowest_match(
         main_mod, "scroll_region", lambda region, n: scrolls.append((region, n)) or True
     )
     monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)
@@ -398,7 +398,7 @@ async def test_the_lowest_match_across_every_captured_image_wins(
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "click_region", fake_click)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
     monkeypatch.setattr(
         main_mod,
         "find_lowest_with_best_miss",
@@ -458,7 +458,7 @@ async def test_not_found_notifies_and_does_not_click(
         main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21)
     )
     monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: False)  # no hover scan either
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
 
     app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
@@ -522,7 +522,7 @@ async def test_flow_snaps_focus_back_to_the_tool(
         events.append("focus")
         return True
 
-    monkeypatch.setattr(main_mod, "focus_window", fake_focus)
+    monkeypatch.setattr(main_mod, "focus_window_verified", fake_focus)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)
@@ -559,7 +559,7 @@ async def test_verified_click_retries_at_an_offset_on_no_change(
     monkeypatch.setattr(main_mod, "click_region", fake_click)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
     monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)
@@ -599,7 +599,7 @@ async def test_verified_click_exhausts_retries_and_leaves_focus(
     monkeypatch.setattr(main_mod, "click_region", fake_click)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
     monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: focus_calls.append(handle) or True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: focus_calls.append(handle) or True)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)

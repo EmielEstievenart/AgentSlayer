@@ -151,7 +151,7 @@ def patched(monkeypatch: pytest.MonkeyPatch, trace: list[tuple[str, object]]) ->
     # would fire the auto-copy flow into the middle of the traced sequence.
     monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
     monkeypatch.setattr(main_mod, "send_paste", lambda: True)
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
     monkeypatch.setattr(main_mod, "foreground_window", lambda: None)
     monkeypatch.setattr(
         main_mod,

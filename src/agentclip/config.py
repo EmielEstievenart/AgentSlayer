@@ -106,6 +106,24 @@ DELIVERY_MODES: tuple[str, ...] = (DELIVERY_PASTE, DELIVERY_STREAM)
 DEFAULT_DELIVERY = DELIVERY_PASTE
 
 
+# How the auto-copy flow snaps the transcript to the bottom before hunting for
+# the newest copy button:
+#   "scroll"    - a mouse-wheel flick over the chat region (the default; needs
+#                 no keyboard focus at all).
+#   "page_down" - a burst of Page Down taps into the focused chat window.
+#   "end"       - one End tap into the focused chat window.
+# The keyboard forms exist for pages where a wheel flick does not land (a
+# virtualized transcript, a chat that captures wheel events) - but they go to
+# whatever has FOCUS, so they only work where the chat scrolls on those keys
+# with its input box focused. Per service, because that is a fact about the
+# page.
+SCROLL_WHEEL = "scroll"
+SCROLL_PAGE_DOWN = "page_down"
+SCROLL_END = "end"
+SCROLL_ACTIONS: tuple[str, ...] = (SCROLL_WHEEL, SCROLL_PAGE_DOWN, SCROLL_END)
+DEFAULT_SCROLL_ACTION = SCROLL_WHEEL
+
+
 # How a service's captured appearances are hunted for on a frame:
 #   "anchors" - the built-in fingerprint search (screen.template). No
 #               dependency, fast, and blind to a capture whose shades have
@@ -174,6 +192,21 @@ class ServicePreset:
     matcher: str = DEFAULT_MATCHER
     # Per-channel slack in the shared verification, 0..64 (see above).
     tolerance: int = DEFAULT_TOLERANCE
+    # One of SCROLL_ACTIONS: how the auto-copy flow reaches the newest reply
+    # (see above). "scroll" everywhere by default - the keyboard forms only
+    # work on pages that scroll on those keys.
+    scroll_action: str = DEFAULT_SCROLL_ACTION
+    # May AgentClip press Enter itself right after a successful auto-paste?
+    # Off by default: submitting a message is the one act the loop otherwise
+    # always leaves to the user, and a synthetic Enter into the wrong widget is
+    # a sent half-thought. The send gate still verifies the send either way.
+    auto_submit: bool = False
+    # May the auto-copy flow's verified copy click ingest a reply that carries
+    # NO CLIP blocks at all, showing it in the transcript as prose? Off by
+    # default per protocol.md 1.4 tolerance #11 (non-protocol clipboard text is
+    # ignored); scoped to the flow's own click - the watcher never loosens, so
+    # the user's ordinary copies stay invisible either way.
+    capture_prose: bool = False
 
 
 def default_services() -> dict[str, ServicePreset]:
@@ -429,6 +462,22 @@ def _take_delivery(table: dict, default: str, ctx: str, warnings: list[str]) -> 
     return value
 
 
+def _take_scroll_action(table: dict, default: str, ctx: str, warnings: list[str]) -> str:
+    """Read an auto-copy scroll action, falling back to ``default`` for anything
+    that is not one of :data:`SCROLL_ACTIONS`. Warned about rather than
+    accepted, for the same reason as :func:`_take_delivery`: a user who writes
+    this key has a transcript the wheel flick is not reaching, and silently
+    flicking the wheel anyway is the one outcome that teaches them nothing."""
+    value = table.get("scroll_action", default)
+    if not isinstance(value, str) or value not in SCROLL_ACTIONS:
+        warnings.append(
+            f"config: [{ctx}] scroll_action must be one of {', '.join(SCROLL_ACTIONS)}; "
+            f"using {default!r}"
+        )
+        return default
+    return value
+
+
 def _take_matcher(table: dict, default: str, ctx: str, warnings: list[str]) -> str:
     """Read a candidate-generation backend, falling back to ``default`` for
     anything that is not one of :data:`MATCHERS`. Warned about rather than
@@ -526,6 +575,15 @@ def load_config(
                 TOLERANCE_MAX,
                 ctx,
                 warnings,
+            ),
+            scroll_action=_take_scroll_action(
+                table, base.scroll_action if base else DEFAULT_SCROLL_ACTION, ctx, warnings
+            ),
+            auto_submit=_take_bool(
+                table, "auto_submit", base.auto_submit if base else False, ctx, warnings
+            ),
+            capture_prose=_take_bool(
+                table, "capture_prose", base.capture_prose if base else False, ctx, warnings
             ),
         )
         if preset.max_paste_chars > preset.total_context_chars:
@@ -667,6 +725,14 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
             services_table[key]["matcher"] = preset.matcher
         if preset.tolerance != (base.tolerance if base else DEFAULT_TOLERANCE):
             services_table[key]["tolerance"] = preset.tolerance
+        # The automation knobs that arrived with the scroll/auto-submit wave,
+        # under the same write-only-when-moved rule as everything above.
+        if preset.scroll_action != (base.scroll_action if base else DEFAULT_SCROLL_ACTION):
+            services_table[key]["scroll_action"] = preset.scroll_action
+        if preset.auto_submit != (base.auto_submit if base else False):
+            services_table[key]["auto_submit"] = preset.auto_submit
+        if preset.capture_prose != (base.capture_prose if base else False):
+            services_table[key]["capture_prose"] = preset.capture_prose
 
     data = dict(data)
     if services_table:

@@ -17,14 +17,21 @@ Point-aimed input:
 * ``move_cursor`` - park the real pointer on a virtual-screen point. Claude's
   chat only *renders* a response's copy button while the pointer hovers that
   response, so the copy hunt has to drag the cursor up the transcript and
-  re-look after every stop (screen.hover picks the stops). This has to be a
-  synthetic mouse MOVE, not ``SetCursorPos``: a teleported pointer does not
-  reliably make the browser fire its ``:hover``.
+  re-look after every stop (screen.hover picks the stops). It is also what
+  parks the pointer over the transcript before the scroll below, for the pages
+  that scroll only the pane under the cursor. This has to be a synthetic mouse
+  MOVE, not ``SetCursorPos``: a teleported pointer does not reliably make the
+  browser fire its ``:hover``.
 
 Keyboard input, aimed at whatever has focus rather than at a region:
 
 * ``send_paste`` - a synthetic Ctrl+V, so the TUI can drop the outbound payload
   into the chat's input field itself right after ``click_region`` focused it.
+* ``send_enter`` - a synthetic Enter, the opt-in "auto submit" tap that sends
+  what ``send_paste`` just dropped in (``ServicePreset.auto_submit``).
+* ``send_scroll_key`` - Page Down / End taps, the opt-in keyboard alternative
+  to ``scroll_region``'s wheel flick (``ServicePreset.scroll_action``) for
+  pages the wheel does not reach.
 
 Window focus, for snapping back to AgentClip after the auto-copy click:
 
@@ -33,6 +40,11 @@ Window focus, for snapping back to AgentClip after the auto-copy click:
 * ``focus_window`` - bring a recorded window back to the foreground. Windows
   refuses ``SetForegroundWindow`` from a background process, so a zero-effect
   ALT tap is sent first - the documented input-recency loophole.
+* ``focus_window_verified`` - the same ask, repeated until the window really
+  holds the foreground. Every caller here snaps back right after clicking in a
+  browser, and the browser is still activating itself from that click: one
+  request loses the race often enough that "back to AgentClip" silently did not
+  happen. This is the form the TUI uses.
 
 Windows-only, pure stdlib: ``SetCursorPos`` + ``SendInput`` via ctypes. Other
 platforms return False/None so the caller can tell the user once instead of
@@ -68,6 +80,15 @@ _KEYEVENTF_KEYUP = 0x0002
 _VK_MENU = 0x12  # the ALT key
 _VK_CONTROL = 0x11
 _VK_V = 0x56
+_VK_RETURN = 0x0D
+_VK_NEXT = 0x22  # Page Down
+_VK_END = 0x23
+
+# The keyboard alternatives to the wheel flick, by the names config.py's
+# SCROLL_ACTIONS uses for them (config is a stdlib-only leaf that may not
+# import this layer, so the names are spelled twice and a test asserts they
+# agree - the same arrangement as MATCHERS).
+SCROLL_KEYS: dict[str, int] = {"page_down": _VK_NEXT, "end": _VK_END}
 # One wheel detent, as Windows defines it. Negative scrolls down.
 WHEEL_DELTA = 120
 
@@ -301,6 +322,35 @@ def send_paste() -> bool:
     )
 
 
+def send_enter() -> bool:
+    """Type Enter into whatever window has focus right now. False = nothing was
+    typed (unsupported platform, or SendInput refused).
+
+    Un-aimed for the same reason as ``send_paste``: the caller has just focused
+    the chat box and pasted into it, and this is the "auto submit" tap that
+    sends the message the way the user's own Enter would. Both events go out in
+    one burst.
+    """
+    return _send_keys([(_VK_RETURN, 0), (_VK_RETURN, _KEYEVENTF_KEYUP)])
+
+
+def send_scroll_key(key: str, taps: int = 1) -> bool:
+    """Tap a scroll key (``"page_down"`` / ``"end"``, see ``SCROLL_KEYS``)
+    ``taps`` times into whatever window has focus. False = nothing was sent
+    (unknown key, ``taps`` < 1, unsupported platform, or SendInput refused).
+
+    The keyboard counterpart of ``scroll_region``'s wheel flick, for pages the
+    wheel does not reach. All taps go out in one SendInput burst, matching the
+    flick's no-smoothing shape: the caller wants the transcript at the bottom,
+    not an animation. Un-aimed like every keyboard send here - the caller
+    focuses the chat window first.
+    """
+    vk = SCROLL_KEYS.get(key)
+    if vk is None or taps < 1:
+        return False
+    return _send_keys([(vk, 0), (vk, _KEYEVENTF_KEYUP)] * taps)
+
+
 def foreground_window() -> int | None:
     """The handle of the window that has focus right now, or None (unsupported
     platform, or Windows says no window has focus - e.g. mid focus switch).
@@ -347,3 +397,41 @@ def focus_window(handle: int) -> bool:
     user32.SetForegroundWindow(handle)
     current = user32.GetForegroundWindow()
     return bool(current) and int(current) == handle
+
+
+# How many times ``focus_window_verified`` asks, and the beat it waits before
+# believing the answer. The beat GROWS with the attempt (0.05s, 0.10s, ...), so
+# the whole budget is 0.5s at these defaults - long enough to outlast a
+# browser's own activation, short enough that a window that will never come
+# forward does not hang the flow that asked.
+REFOCUS_ATTEMPTS = 4
+REFOCUS_SETTLE_S = 0.05
+
+
+def focus_window_verified(
+    handle: int, *, attempts: int = REFOCUS_ATTEMPTS, settle_s: float = REFOCUS_SETTLE_S
+) -> bool:
+    """``focus_window`` until that window ACTUALLY holds the foreground. False =
+    it still does not, after every attempt (or the platform/handle is refused
+    outright).
+
+    Focus is a race here, not a call. Callers ask right after clicking inside a
+    browser window, and the browser's own activation from that click can arrive
+    *after* our ``SetForegroundWindow`` - so a single request can be granted and
+    then quietly taken back. Hence the settle before the check: it verifies the
+    state the user ends up in, not the one that existed for an instant.
+
+    Blocks the calling thread for up to ``attempts``/``settle_s`` worth of
+    beats, which is fine - callers do this off the UI thread, and the budget is
+    documented above.
+    """
+    if sys.platform != "win32" or not handle:
+        return False
+    import time
+
+    for attempt in range(1, attempts + 1):
+        focus_window(handle)
+        time.sleep(settle_s * attempt)  # let a competing activation land first
+        if foreground_window() == handle:
+            return True
+    return False

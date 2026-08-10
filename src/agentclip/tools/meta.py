@@ -51,7 +51,7 @@ task_done(summary)
   changed and how you verified it in summary. Do not emit further calls after
   task_done.
 ===CLIP:CALL id=1 tool=task_done===
-summary <<EOT
+summary << EOT
 Fixed parse_date (src/utils.py line 88); pytest: 5 passed.
 EOT
 ===CLIP:END==="""
@@ -64,7 +64,7 @@ task_done(summary, result*)
   asked for. `summary` is a short line for the human's log.
 ===CLIP:CALL id=1 tool=task_done===
 summary: surveyed the screen package
-result <<EOT
+result << EOT
 capture.grab_region() -> RegionImage, handed to matcher.find_template().
 EOT
 ===CLIP:END==="""
@@ -79,7 +79,7 @@ delegate(task*, context)
   it for bounded chunks (surveys, large-file reading, self-contained edits) that
   would otherwise flood your own context.
 ===CLIP:CALL id=1 tool=delegate===
-task <<EOT
+task << EOT
 Read every file under src/agentclip/screen/ and report, in <=25 lines, how a
 region capture reaches the template matcher. Quote exact function names.
 EOT

@@ -80,7 +80,7 @@ def extract_result_bodies(payload: str) -> dict[int, str]:
         if header:
             current_id = int(header.group(1))
         elif line.startswith("body <<") and current_id is not None:
-            tag = line[len("body <<") :]
+            tag = line[len("body <<") :].strip()
             content: list[str] = []
             i += 1
             while lines[i].strip() != tag:
@@ -295,7 +295,7 @@ def test_results_skipped_status_renders() -> None:
 def test_results_heredoc_tag_avoids_collision_with_body() -> None:
     body = "grep output:\nR1\nmore lines\nR1x is mentioned but not alone? no:\nR1x"
     payload = make_composer().results(2, [ToolResult(1, "ok", body)]).chunks[0]
-    assert "body <<R1xx\n" in payload
+    assert "body << R1xx\n" in payload
     lines = payload.split("\n")
     assert "R1" in lines  # the colliding content line survives verbatim
     assert extract_result_bodies(payload)[1] == body

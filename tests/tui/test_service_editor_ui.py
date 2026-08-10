@@ -37,6 +37,7 @@ from agentclip.config import (
     DEFAULT_DELIVERY,
     DEFAULT_FINISH_SIGNALS,
     DEFAULT_MATCHER,
+    DEFAULT_SCROLL_ACTION,
     DEFAULT_TOLERANCE,
     FINISH_SIGNALS,
     Config,
@@ -66,6 +67,7 @@ from agentclip.tui.screens.service_editor import (
     matcher_radio_id,
     opencv_missing_note,
     preview_rows,
+    scroll_radio_id,
     signal_checkbox_id,
     template_preview_id,
     template_status_id,
@@ -1091,6 +1093,105 @@ async def test_the_checkboxes_follow_the_selected_service(
         await pilot.pause()
         assert not editor.query_one(f"#{signal_checkbox_id('idle')}", Checkbox).value
         assert editor._services["gemini"] == before_gemini
+
+
+async def test_the_automation_ticks_round_trip_into_the_saved_services(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """``auto_submit`` and ``capture_prose`` are per-service policy like every
+    other tick on this column: the working copy, then the close-and-persist
+    path, nothing of their own."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        # The shipped defaults: both acts stay the user's.
+        assert not editor.query_one("#svc-auto-submit", Checkbox).value
+        assert not editor.query_one("#svc-capture-prose", Checkbox).value
+
+        editor.query_one("#svc-auto-submit", Checkbox).value = True
+        await pilot.pause()
+        editor.query_one("#svc-capture-prose", Checkbox).value = True
+        await pilot.pause()
+        assert editor._services["claude"].auto_submit is True
+        assert editor._services["claude"].capture_prose is True
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["claude"].auto_submit is True
+        assert app.app_config.services["claude"].capture_prose is True
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["claude"]["auto_submit"] is True
+        assert raw["services"]["claude"]["capture_prose"] is True
+
+
+# -- SCROLL: how the auto-copy flow reaches the newest reply --------------------
+
+
+async def test_the_scroll_choice_round_trips_into_the_saved_services(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Per-service policy on the same close-and-persist path, written to disk
+    as the action name."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        assert editor.query_one(f"#{scroll_radio_id(DEFAULT_SCROLL_ACTION)}", RadioButton).value
+
+        editor.query_one(f"#{scroll_radio_id('end')}", RadioButton).value = True
+        await pilot.pause()
+        assert editor._services["gemini"].scroll_action == "end"
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["gemini"].scroll_action == "end"
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["gemini"]["scroll_action"] == "end"
+
+
+async def test_the_scroll_choice_follows_the_selected_service(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Switching the picker reloads the radio, and the echo Textual fires while
+    it is being pressed must not leak the previous service's answer into the
+    new one - the same bug the delivery tick's twin test exists to catch."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        before_gemini = editor._services["gemini"]
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        editor.query_one(f"#{scroll_radio_id('page_down')}", RadioButton).value = True
+        await pilot.pause()
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        assert editor.query_one(f"#{scroll_radio_id(DEFAULT_SCROLL_ACTION)}", RadioButton).value
+        assert editor._services["gemini"] == before_gemini
+        assert editor._services["claude"].scroll_action == "page_down"
 
 
 # -- MATCHING: which backend hunts for the appearances, and how strictly -------

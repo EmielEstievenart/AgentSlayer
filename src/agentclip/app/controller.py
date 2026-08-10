@@ -289,7 +289,7 @@ class SessionController:
 
     # -- view-facing events ---------------------------------------------------
 
-    def submit_clipboard(self, text: str) -> None:
+    def submit_clipboard(self, text: str, *, accept_prose: bool = False) -> None:
         """A captured (or injected) clipboard reply, routed to the session that
         claimed it. Queued if that session's turn is busy.
 
@@ -300,6 +300,14 @@ class SessionController:
         swallowed and never seen. An unnamed paste (an ACK, or a model that
         dropped the attribute) falls through to whichever session is live - the
         engine's own chat gate is the backstop.
+
+        ``accept_prose`` marks text the caller KNOWS is the model's reply (the
+        auto-copy flow's verified click put it there - ``capture_prose``): if
+        the engine judges it not-protocol, it is shown in the transcript as
+        prose instead of being dropped with a toast, the same treatment a
+        forced ingest (the `i` key) has always given it. Master path only; a
+        sub-agent's reply must carry CLIP blocks to mean anything to the run
+        that is waiting on it.
         """
         if not self._session_active or self._engine is None:
             return
@@ -319,7 +327,9 @@ class SessionController:
             self._queued_capture = text  # depth-1 queue, newest wins
             self._view.notify("reply received mid-turn - queued (newest wins)", severity="warning")
             return
-        self._spawn_flow(self._ingest_flow(text))
+        # ``forced`` is exactly the accept-prose behaviour: a not-protocol
+        # verdict shows the text as prose instead of dropping it.
+        self._spawn_flow(self._ingest_flow(text, forced=accept_prose))
 
     def _route_to_subagent(self, text: str, name: str | None, sub: SessionRef) -> None:
         """Hand a paste to the parked sub-run, or explain why it was dropped.

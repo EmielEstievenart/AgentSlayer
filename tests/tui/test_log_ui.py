@@ -472,7 +472,7 @@ def _patch_flow_io(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: True)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
     monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: False)
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
 
 
 def _blank(region: ScreenRegion) -> RegionImage:

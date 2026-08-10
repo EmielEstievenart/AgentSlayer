@@ -102,7 +102,8 @@ FENCE_INSTRUCTION = """\
 
 Put ALL CLIP blocks inside ONE fenced code block opened and closed with ~~~~
 (four tildes, alone on a line). Never split blocks across multiple fences;
-prose goes outside the fence."""
+prose goes outside the fence. If a content line starts with 3+ tildes, fence
+with MORE tildes than that line."""
 
 SECTION_GRAMMAR = """\
 SECTION 3 - HOW TO EMIT CALLS
@@ -114,10 +115,13 @@ path: src/utils.py
 ===CLIP:END===
 
 Single-line parameters are `key: value` lines. Multi-line parameters use a
-tagged heredoc: a line `key <<TAG`, then the verbatim content lines, then a
+tagged heredoc: a line `key << TAG`, then the verbatim content lines, then a
 line that is exactly TAG. Nothing else terminates a heredoc - not
 ===CLIP:END===, not a fence, nothing. The default tag is EOT; tags are 1-32
 characters from letters, digits, _ and -.
+
+The space before TAG is required: glued, some chat clients read it as HTML and
+swallow the rest of your reply.
 
 Collision rule: if any line of your content is exactly the tag, use a
 different tag - e.g. EOT2, RAW_A. Check before you write. Worked example,
@@ -125,7 +129,7 @@ writing a file that itself contains a line "EOT":
 
 ===CLIP:CALL id=2 tool=write_file===
 path: notes.txt
-content <<EOT2
+content << EOT2
 first line
 EOT
 last line

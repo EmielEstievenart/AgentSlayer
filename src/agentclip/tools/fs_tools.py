@@ -768,7 +768,7 @@ write_file(path*, content*, mode)
 ===CLIP:CALL id=1 tool=write_file===
 path: src/new.py
 mode: create
-content <<EOT
+content << EOT
 print("hello")
 EOT
 ===CLIP:END==="""
@@ -782,10 +782,10 @@ edit_file(path*, find*, replace*, occurrence)
   get the closest near-miss region - re-read it, then resend exact text.
 ===CLIP:CALL id=1 tool=edit_file===
 path: src/utils.py
-find <<EOT
+find << EOT
     return parse(s, OLD_FMT)
 EOT
-replace <<EOT
+replace << EOT
     return parse(s, NEW_FMT)
 EOT
 ===CLIP:END==="""

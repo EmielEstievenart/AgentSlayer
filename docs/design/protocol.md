@@ -35,10 +35,10 @@ Keyword matching is case-insensitive. Trailing `===` is decorative and optional.
 ===CLIP:CALL id=1 tool=edit_file===
 path: src/utils.py
 occurrence: 1
-find <<EOT
+find << EOT
     return datetime.strptime(s, "%d/%m/%Y")
 EOT
-replace <<EOT
+replace << EOT
     return datetime.strptime(s, "%Y-%m-%d")
 EOT
 ===CLIP:END===
@@ -51,12 +51,12 @@ EOT
 **Heredoc params** (any param may be heredoc form; required for multi-line values):
 
 ```
-key <<TAG
+key << TAG
 ...verbatim lines, completely uninterpreted...
 TAG
 ```
 
-- Opener: `key <<TAG` — 2 or more `<` accepted (`<<` canonical, `<<<` tolerated since the legacy example used it).
+- Opener: `key << TAG` — 2 or more `<` accepted (`<<` canonical, `<<<` tolerated since the legacy example used it), and the space before the tag is optional to the parser but **mandatory in everything we teach or emit**. HTML only opens an element when a letter follows `<` immediately, so `< T` is inert text while `<TAG` is a start tag — and at least one chat client parses the glued form as one, absorbing the whole rest of the reply into it (tolerance #13).
 - `TAG`: 1–32 chars of `[A-Za-z0-9_-]`. Canonical default is `EOT`.
 - Terminator: a line equal to `TAG` after whitespace trim. Nothing else terminates a heredoc — not `===CLIP:END===`, not a fence, nothing. **All collision risk therefore reduces to the tag**, and the tag is free to vary.
 - **Collision rule (taught verbatim in bootstrap):** *"If any line of your content is exactly the tag, use a different tag — e.g. EOT2, RAW_A. Check before you write."* The tool's own outbound payloads pick tags programmatically (`R1`, `R1x`, … — guaranteed collision-free by scanning content, which the tool can do perfectly).
@@ -102,6 +102,15 @@ Rejected alternative: **turn echo** (`===CLIP:EOM calls=N turn=T===`, reply drop
 | 10 | Duplicate / missing / non-integer `id` | Renumber sequentially, report mapping |
 | 11 | Whole reply has no sentinel lines | Not protocol traffic — watcher ignores (pre-filter is the literal substring `===CLIP:` per the clipboard research) |
 | 12 | `chat=` missing / wrong / differently-cased / backticked on EOM or ACK/NACK | Parser records it verbatim-but-normalized and never rejects; the *engine* gates (§6.2) |
+| 13 | Reply flattened by the chat client into one HTML element (see below) | Per-call `client_mangled_heredoc` issue, fatal — call never executes, and the id=0 "reply was cut off" result is suppressed because it would send the model in a loop |
+
+**Tolerance #11 has one scoped opt-out.** A service preset may set `capture_prose` (default off), which lets the auto-copy flow's **verified copy click** — and only that click — hand its harvest to the session even when it carries no `===CLIP:` at all; the text is shown in the transcript as prose and nothing in it executes (the engine still answers `Noise("not-protocol")` — §6.2's gate order is untouched). The watcher's pre-filter itself never loosens: it sees every copy the user makes and must keep ignoring the non-protocol ones, while the flow just watched the copy button write *this* text, so it alone knows the text is the model's reply. Display-only, per tolerance #2's rule: prose reaches the transcript, never the executor.
+
+**Tolerance #13 — the one corruption that is not the model's fault.** A chat client that renders `key <<TAG` sees `<TAG` and parses a start tag. It then absorbs everything after it — the content lines, `===CLIP:END===`, the EOM line, the closing `~~~~` fence — as *attributes* of that element: collapsed onto one line, sorted alphabetically, quoted (which eats one `=` from each `===` run), and re-emitted with a closing `>`. The tell is the sort: the words come back in ASCII order, so the parameter is a bag of tokens with no recoverable order. This is visible in the chat window before the user copies anything; AgentClip only inherits it.
+
+Detection needs two signals together, which is why false positives are ~nil: a line matching the heredoc-opener shape *with trailing content*, **and** `CLIP:END` or `CLIP:EOM` somewhere in that trailing text (`parser._client_mangled_opener`). A well-formed reply never puts a sentinel behind a heredoc tag on the same line.
+
+Response: fail the call with `code=client_mangled_reply` and a message addressed to the **user**, not the model. "Resend this call" — correct for every other parse error — is an infinite loop here: the model emits valid text and the client mangles it identically. Nothing is recovered on purpose; `task_done`'s `summary` is the only thing handed back to a delegating agent, and silently accepting a sorted word-salad is worse than an error. The structural prevention is the mandatory space in `key << TAG` (§1.2), which makes the opener un-tag-shaped in the first place.
 
 ### 1.5 Why line-oriented, not JSON (one line, since it's decided)
 
@@ -163,8 +172,16 @@ EOM line — the §1.2/§1.3 forms shown as two short examples, plus:
   with ~~~~ (four tildes). Never split blocks across multiple fences.
   [tilde fence: immune to backticks in file content; gives Copilot/
    Gemini users the per-block copy button — research §5d]
+- Fence collision rule: if any content line starts with three or more
+  tildes, the outer fence must use MORE tildes than that line. Same
+  shape as the heredoc collision rule below, same reason: the outer
+  delimiter must not be reachable from inside. The parser already
+  accepts `~{3,}`, so nothing downstream changes.
 - Heredoc collision rule, verbatim from §1.2, with a 4-line worked
   example writing a file that itself contains a line "EOT".
+- The space in `key << TAG` is required, with the reason attached (a
+  glued tag reads as HTML to some chat clients and costs the whole
+  reply — §1.4 tolerance #13).
 - ids: integers from 1, unique per reply.
 - End every reply with ===CLIP:EOM calls=N chat={chat_name}===, where
   {chat_name} is written exactly as shown, plus the consequence of
@@ -202,6 +219,8 @@ SECTION 6 — THE TASK (~variable)
 {user task text}
 ===CLIP:EOM turn=1 chat={chat_name}===
 ```
+
+**Budget headroom — read before adding prose here.** The whole bootstrap must fit ONE paste: there is no chunked-bootstrap fallback, so over-budget means `BudgetExceeded`, an error toast, and a session that never arms. Assembled with a real skills library it measures ~11.8k against the smallest presets' 12,000-char `max_paste_chars` — roughly 200 chars of slack, and the skills listing is only capped at budget/6, not fitted to what's left. Every sentence added to sections 1–5 spends that slack. Measure before and after (`Engine.start_task` on a `max_paste_chars=12000` preset), and if a rule can be stated in one line, state it in one line.
 
 ### 2.1 Sub-agent bootstrap variant
 
@@ -263,12 +282,12 @@ Same grammar, `RESULT` blocks keyed by call id, in execution order:
 ```
 ===CLIP:RESULTS turn=4===
 ===CLIP:RESULT id=1 status=ok===
-body <<R1
+body << R1
 replaced 1 occurrence at line 88
 R1
 ===CLIP:END===
 ===CLIP:RESULT id=2 status=error code=match_not_found===
-body <<R2
+body << R2
 find-block not found in src/utils.py.
 Closest near-miss at lines 86-89 (differs in indentation):
     def parse_date(s):
@@ -315,7 +334,7 @@ Triggers: missing `EOM`; `calls=` ≠ parsed block count; unterminated heredoc/C
 ```
 ===CLIP:RESULTS turn=5===
 ===CLIP:RESULT id=0 status=error code=reply_truncated===
-body <<R0
+body << R0
 Your reply was cut off. Received 1 complete call (id=1, executed; result
 below) and a partial call id=2 (tool=write_file, heredoc 'content' not
 terminated). Partial call was NOT executed.
@@ -395,10 +414,10 @@ I'll fix the date format and run the tests to verify.
 ~~~~
 ===CLIP:CALL id=1 tool=edit_file===
 path: src/utils.py
-find <<EOT
+find << EOT
     return datetime.strptime(s, "%d/%m/%Y")
 EOT
-replace <<EOT
+replace << EOT
     return datetime.strptime(s, "%Y-%m-%d")
 EOT
 ===CLIP:END===
@@ -415,12 +434,12 @@ command: pytest tests/test_utils.py -q
 ```
 ===CLIP:RESULTS turn=2===
 ===CLIP:RESULT id=1 status=ok===
-body <<R1
+body << R1
 replaced 1 occurrence at line 88
 R1
 ===CLIP:END===
 ===CLIP:RESULT id=2 status=ok===
-body <<R2
+body << R2
 exit 0 (1.4s)
 .....                                                            [100%]
 5 passed in 0.31s
@@ -435,7 +454,7 @@ All five tests pass; the fix is verified.
 
 ~~~~
 ===CLIP:CALL id=1 tool=task_done===
-summary <<EOT
+summary << EOT
 Changed parse_date in src/utils.py to ISO format (%Y-%m-%d), line 88.
 Verified: pytest tests/test_utils.py - 5 passed.
 EOT

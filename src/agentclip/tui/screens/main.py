@@ -161,7 +161,13 @@ from agentclip.app.view import Severity
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.clip.chunking import STREAM_CHUNK_CHARS, split_for_stream
 from agentclip.clip.watcher import SelfWriteSet, watch, write_via
-from agentclip.config import DELIVERY_STREAM, Config, ServicePreset
+from agentclip.config import (
+    DELIVERY_STREAM,
+    SCROLL_END,
+    SCROLL_PAGE_DOWN,
+    Config,
+    ServicePreset,
+)
 from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnapshot
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
@@ -170,11 +176,13 @@ from agentclip.screen.capture import CaptureError, RegionImage, capture_region
 from agentclip.screen.detector import ScreenDetector, Sighting, build_detector
 from agentclip.screen.focus import (
     click_region,
-    focus_window,
+    focus_window_verified,
     foreground_window,
     move_cursor,
     scroll_region,
+    send_enter,
     send_paste,
+    send_scroll_key,
 )
 from agentclip.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
 from agentclip.screen.hover import hover_scan_points
@@ -239,6 +247,7 @@ from agentclip.tui.widgets.elements import (
 from agentclip.tui.widgets.log_pane import HarnessLogPane
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
+    AUTO_SEND_FLASH_TEXT,
     COPY_RESTING,
     ENTER_FLASH_TEXT,
     PASTE_FLASH_TEXT,
@@ -323,6 +332,17 @@ _NEW_CHAT_SETTLE_S = 0.4
 # one mid-repaint. Only between chunks: the last one is followed by the settle
 # the user's own Enter provides.
 _STREAM_CHUNK_SETTLE_S = 0.12
+# How many Page Down taps a "page_down" scroll action sends in one burst
+# (ServicePreset.scroll_action). Sized like the wheel flick's -40 detents: a
+# generous over-shoot that stops at the bottom, because the flow wants the
+# newest reply on screen, not a measured scroll. End needs no such count - one
+# tap is the bottom by definition.
+_PAGE_DOWN_TAPS = 8
+# How far ABOVE the chat box a keyboard-scroll focus click lands (see
+# ``_above_chatbox``). The gap between the transcript and the input box is
+# padding, and this is deliberately a small number: a few pixels higher is the
+# last response itself, where a click could land on a link or select text.
+_ABOVE_CHATBOX_PX = 10
 
 # What the user is asked to draw for a slot. It is the ONLY thing they draw
 # per window now, and it has to be generous rather than tight: everything else
@@ -452,6 +472,30 @@ def _distinct_rects(
         if not any(same_element(rect, other) for other in kept):
             kept.append(rect)
     return kept
+
+
+def _above_chatbox(box: ScreenRegion, region: ScreenRegion) -> ScreenRegion | None:
+    """A one-pixel click target in the padding just above ``box``, horizontally
+    centred on it - or None when that point is not inside ``region``.
+
+    For the focus click that precedes a KEYBOARD snap to the bottom. Clicking
+    the chat box itself puts a caret in the text field, and End there moves the
+    caret to the end of the line - the transcript never scrolls at all. The
+    padding strip above the box focuses the same page with nothing typable
+    under the pointer.
+
+    None is the "keep clicking the box" answer, and it covers the case that
+    matters: with no chat box calibrated ``_chatbox_region`` hands back the
+    whole drawn window, whose top edge has no padding above it inside the
+    region. Aiming above THAT would click outside the chat entirely.
+    """
+    x, _ = box.center
+    y = box.top - _ABOVE_CHATBOX_PX
+    if not (region.left <= x < region.left + region.width):
+        return None
+    if not (region.top <= y < region.top + region.height):
+        return None
+    return ScreenRegion(x, y, 1, 1)
 
 
 def _lowest_match(
@@ -1069,6 +1113,22 @@ class MainScreen(Screen[None]):
         if handle is not None:
             self._own_window = handle
 
+    async def _snap_focus_back(self) -> bool:
+        """Bring AgentClip's own window back to the foreground after a click in
+        the browser. False = it never got there (nothing recorded, or Windows
+        kept focus in the browser); the caller carries on either way.
+
+        Verified and retried (``focus_window_verified``) rather than asked once:
+        the click that preceded this is *also* an activation request, and the
+        browser's own is still in flight when we make ours - a single
+        ``SetForegroundWindow`` wins the race often enough to look like it works
+        and loses it often enough to be the bug. Off the UI thread, because the
+        verification sleeps between tries.
+        """
+        if self._own_window is None:
+            return False
+        return await asyncio.to_thread(focus_window_verified, self._own_window)
+
     # -- dynamic bindings -----------------------------------------------------
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
@@ -1628,10 +1688,27 @@ class MainScreen(Screen[None]):
         # reasons, not two, because "the Ctrl+V is yours" has two very different
         # causes and only one of them is a failure - the switch the user threw
         # themselves reads as a fault otherwise.
+        auto_sent = False
         if pasted:
             self._set_loop_state(
                 LoopState.WAIT_SEND, "the payload was pasted into the chat box"
             )
+            if self._live_preset().auto_submit:
+                # Opt-in per service: tap Enter ourselves instead of waiting
+                # for the user's. Still WAIT_SEND, and deliberately so - the
+                # tap is an attempt, not a fact, and the send gate's evidence
+                # (the ready button vanishing, the busy icon appearing) stays
+                # the only thing that moves the loop to WAIT_GENERATE, exactly
+                # as for a human Enter. If the tap did not take, the gate times
+                # out as ever, and the flash below says whose Enter it is now.
+                await asyncio.sleep(0.15)  # let the paste render before submitting it
+                auto_sent = await asyncio.to_thread(send_enter)
+                self._log_harness(
+                    KIND_GATE,
+                    "auto-submit tapped Enter after the paste"
+                    if auto_sent
+                    else "auto-submit could not type Enter - the send is yours",
+                )
         elif not self._os_armed:
             self._set_loop_state(
                 LoopState.MANUAL_INSERT,
@@ -1655,11 +1732,18 @@ class MainScreen(Screen[None]):
         # user still has to send it themselves, the payload is out and the next
         # thing to happen in that chat is the answer to it.
         self._open_reply_gate()
-        # The payload now waits on the user's Enter (pasted) or Ctrl+V+Enter
-        # (not pasted) - nag until the busy region reports the model chewing
-        # (or a new capture/reset happens).
+        # The payload now waits on the user's Enter (pasted), Ctrl+V+Enter (not
+        # pasted), or on the send gate confirming the Enter auto-submit already
+        # tapped - nag until the busy region reports the model chewing (or a
+        # new capture/reset happens).
         with suppress(NoMatches):
-            self.sidebar.show_paste_flash(ENTER_FLASH_TEXT if pasted else PASTE_FLASH_TEXT)
+            self.sidebar.show_paste_flash(
+                AUTO_SEND_FLASH_TEXT
+                if auto_sent
+                else ENTER_FLASH_TEXT
+                if pasted
+                else PASTE_FLASH_TEXT
+            )
 
     async def _stream_outbound(self, text: str) -> bool:
         """Walk ``text`` into the focused chat box a chunk at a time (opt-in per
@@ -1846,7 +1930,20 @@ class MainScreen(Screen[None]):
         region = await self._chatbox_region()
         if region is None:
             return False
-        clicked = await asyncio.to_thread(click_region, region)
+        return await self._focus_click(region)
+
+    async def _focus_click(self, target: ScreenRegion) -> bool:
+        """Click ``target``'s centre to put the chat's window in front, warning
+        once - never per copy - if the OS refuses. True only when the click
+        landed, which is what tells a caller it is safe to type into whatever
+        that click just focused.
+
+        Split from ``_click_after_response`` because WHERE to click is the
+        caller's decision: the paste path wants the chat box itself (a caret in
+        the input field is the point), while a keyboard scroll wants anywhere
+        but (see ``_above_chatbox``).
+        """
+        clicked = await asyncio.to_thread(click_region, target)
         if not clicked and not self._region_click_warned:
             self._region_click_warned = True  # once, not on every copy
             self.notify(
@@ -1880,8 +1977,8 @@ class MainScreen(Screen[None]):
         It is enforced at four chokepoints rather than sprinkled through the
         callers, because the acting primitives are five imported functions
         (``click_region``, ``scroll_region``, ``move_cursor``, ``send_paste``,
-        ``focus_window``) and every one of them is reached through exactly one
-        of these doors:
+        ``focus_window_verified``) and every one of them is reached through
+        exactly one of these doors:
 
         1. the paste path (``copy_outbound``), which stops clicking and pasting
            but still WRITES the payload to the clipboard, so the user can paste
@@ -3558,11 +3655,48 @@ class MainScreen(Screen[None]):
             )
             return
 
-        await self._click_after_response()  # the live chat box, else the chat region
+        # Focus the chat window, then snap the transcript to the bottom the way
+        # this service says it scrolls (``ServicePreset.scroll_action``): the
+        # wheel flick by default, or Page Down / End taps for pages the wheel
+        # does not reach.
+        #
+        # The keyboard forms ride this focus click - keys go to whatever has
+        # focus - so the click may not land in the CHAT BOX the way the paste
+        # path's deliberately does: a caret in the input field swallows End
+        # outright (it means "end of line" there) and the transcript never
+        # moves. The padding just above the box focuses the same window with
+        # nothing typable under the pointer. The wheel is aimed by coordinates
+        # and does not care either way, so it keeps the plain box click.
+        #
+        # Whatever the click focused, the pointer is then parked on the
+        # transcript's center before anything scrolls, because some chat pages
+        # only scroll the pane the pointer is over: with the cursor left sitting
+        # in the input box the wheel turns against a one-line field and the keys
+        # go nowhere the reader can see. It has to be ``move_cursor`` - a real
+        # synthetic MOVE - and not the ``SetCursorPos`` teleport inside
+        # ``scroll_region``, since a teleported pointer does not reliably make a
+        # browser fire the hover chain those pages track. Best-effort: a move
+        # that does not happen (unsupported platform, disarmed) leaves the snap
+        # exactly as it was before this step existed, which is worth trying
+        # anyway.
+        scroll_action = self._live_preset().scroll_action
+        box = await self._chatbox_region()  # the live chat box, else the chat region
+        if box is not None:
+            target = box
+            if scroll_action in (SCROLL_PAGE_DOWN, SCROLL_END):
+                target = _above_chatbox(box, region) or box
+            await self._focus_click(target)
         await asyncio.sleep(0.15)
+        await asyncio.to_thread(move_cursor, *region.center)
+        await asyncio.sleep(0.1)  # let the page's hover tracking register it
 
-        await asyncio.to_thread(scroll_region, region, -40)
-        await asyncio.sleep(0.4)  # let the page settle/render after the flick
+        if scroll_action == SCROLL_PAGE_DOWN:
+            await asyncio.to_thread(send_scroll_key, "page_down", _PAGE_DOWN_TAPS)
+        elif scroll_action == SCROLL_END:
+            await asyncio.to_thread(send_scroll_key, "end")
+        else:
+            await asyncio.to_thread(scroll_region, region, -40)
+        await asyncio.sleep(0.4)  # let the page settle/render after the snap
 
         try:
             scene = await asyncio.to_thread(capture_region, region)
@@ -3643,7 +3777,8 @@ class MainScreen(Screen[None]):
             # short beat first so the click registers before focus moves away.
             if self._own_window is not None:
                 await asyncio.sleep(0.15)
-                await asyncio.to_thread(focus_window, self._own_window)
+                await self._snap_focus_back()
+            await self._ingest_prose_harvest()
             return
 
         # Every attempt clicked but the clipboard never changed - leave the
@@ -3662,6 +3797,42 @@ class MainScreen(Screen[None]):
             LoopState.MANUAL_COPY,
             "the copy click did not take - click the response's copy button yourself",
         )
+
+    async def _ingest_prose_harvest(self) -> None:
+        """Hand a verified copy click's harvest to the session even when it has
+        no CLIP blocks, if this service opted in (``ServicePreset.capture_prose``).
+
+        The one loosening of protocol.md 1.4 tolerance #11, and deliberately
+        scoped to the flow's own click rather than to the watcher: THIS
+        clipboard text is known to be the model's reply - the flow just watched
+        the copy button put it there - while the watcher sees every copy the
+        user makes and must keep ignoring the non-protocol ones. Protocol-shaped
+        harvests are left alone entirely; the watcher ingests those on its own,
+        exactly as before, and reading them here too would ingest them twice.
+
+        The prose is only ever DISPLAYED (the controller shows it in the
+        transcript and invites a follow-up); nothing in it executes, and the
+        engine still counts it as noise.
+        """
+        if not self._live_preset().capture_prose:
+            return
+        try:
+            text = await asyncio.to_thread(self._provider.read_text)
+        except ClipboardUnavailable:
+            return
+        if not text or looks_like_protocol(text):
+            return  # protocol traffic: the watcher's job, untouched
+        with suppress(NoMatches):
+            self.sidebar.hide_paste_flash()
+        self._log_harness(
+            KIND_CLIPBOARD,
+            f"the harvested reply has no CLIP blocks ({len(text)} chars); "
+            "capture_prose is on, so it goes to the transcript as prose",
+        )
+        self._set_loop_state(
+            LoopState.INTERPRETING, "the reply has no CLIP blocks - showing it as prose"
+        )
+        self._controller.submit_clipboard(text, accept_prose=True)
 
     # Small offsets from the matched rect, still inside a ~24 px icon.
     _COPY_CLICK_OFFSETS = ((0, 0), (-3, -3), (3, 3))
@@ -3760,6 +3931,12 @@ class MainScreen(Screen[None]):
                 severity="warning",
             )
             return
+        # A mouse press on OUR sidebar means our terminal has the OS focus right
+        # now, so this reading is trustworthy - and it is the one moment before
+        # the flow's snap-back where the handle can still be learned. Without it
+        # a run whose composer was never used (calibrate, press, done) has no
+        # window to come back to, and the click leaves the user in the browser.
+        self._remember_own_window()
         self.run_worker(self._new_browser_chat(self._calibrating), group="newchat", exclusive=True)
 
     def _mid_turn(self) -> bool:
@@ -3843,7 +4020,7 @@ class MainScreen(Screen[None]):
         # moves away, then bring the user back to AgentClip.
         if self._own_window is not None:
             await asyncio.sleep(0.15)
-            await asyncio.to_thread(focus_window, self._own_window)
+            await self._snap_focus_back()
         self._reset_after_new_browser_chat(slot)
 
     def _reset_after_new_browser_chat(self, slot: AgentSlot) -> bool:

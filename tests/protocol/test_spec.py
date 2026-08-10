@@ -171,6 +171,21 @@ def test_chat_name_substituted_everywhere_it_is_taught() -> None:
     assert "amber-falcon" in grammar
 
 
+def test_heredoc_opener_space_taught_as_mandatory() -> None:
+    text = render()
+    assert "key << TAG" in text
+    assert "The space before TAG is required" in text
+    # The glued form must appear nowhere in what we teach: `<TAG` is exactly what
+    # an HTML parser reads as a start tag, and one chat client does.
+    assert "<<EOT" not in text
+    assert "<<TAG" not in text
+
+
+def test_fence_collision_rule_rides_with_the_fence_instruction() -> None:
+    assert "MORE tildes" in render(fence=True)
+    assert "MORE tildes" not in render(fence=False)
+
+
 def test_heredoc_collision_rule_and_worked_example() -> None:
     text = render()
     assert "if any line of your content is exactly the tag" in text
@@ -180,7 +195,7 @@ def test_heredoc_collision_rule_and_worked_example() -> None:
     example_end = text.index("===CLIP:END===", example_start)
     example = text[example_start:example_end]
     lines = example.split("\n")
-    assert "content <<EOT2" in lines
+    assert "content << EOT2" in lines
     assert "EOT" in lines  # the content line that would collide with the default tag
     assert "EOT2" in lines  # the chosen non-colliding terminator
 

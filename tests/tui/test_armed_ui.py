@@ -4,7 +4,8 @@ DISARMED is one promise - *this app does not touch your machine* - and the only
 way to test a promise about the OS is to prove the calls are never made. So
 every acting primitive is monkeypatched at its use site
 (``main_mod.click_region`` / ``send_paste`` / ``move_cursor`` / ``scroll_region``
-/ ``focus_window``) with a fake that appends to a list, and the assertion is that
+/ ``focus_window_verified``) with a fake that appends to a list, and the
+assertion is that
 the list is still EMPTY. That is the whole shape of this file, and it is the same
 patching the suite-wide gate in tests/conftest.py sits underneath: nothing here
 may reach the real ``user32``, whether or not a test remembers to patch.
@@ -158,7 +159,7 @@ def _patch_os(monkeypatch: pytest.MonkeyPatch, fake: FakeClipboard) -> _OsCalls:
     monkeypatch.setattr(
         main_mod, "scroll_region", lambda region, n: bool(calls.scrolls.append((region, n))) or True
     )
-    monkeypatch.setattr(main_mod, "focus_window", lambda h: bool(calls.focuses.append(h)) or True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda h: bool(calls.focuses.append(h)) or True)
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     return calls
 

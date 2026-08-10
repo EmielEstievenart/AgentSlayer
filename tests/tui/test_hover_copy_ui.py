@@ -41,6 +41,12 @@ from agentclip.tui.screens.main import MainScreen
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 COPY_ICON = ScreenRegion(1830, 612, 24, 24)
+# Where the flow parks the pointer before it snaps the transcript, on every run
+# and whatever the scroll action is - chat pages that scroll only the pane under
+# the cursor need it there (test_scroll_action_ui owns that rule). It is a
+# ``move_cursor`` like the scan's own stops, so it is the first thing every
+# ``moves`` list here records, and ``_scan`` below is what tells them apart.
+PARK = CHAT_REGION.center
 
 SIZE = (110, 100)
 
@@ -181,9 +187,15 @@ def _patch_flow_io(
     monkeypatch.setattr(main_mod, "capture_region", fake_capture)
     monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: bool(moves.append((x, y))) or True)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
     monkeypatch.setattr(main_mod, "_HOVER_STEP_DELAY_S", 0.0)
     return clicks, moves, captures
+
+
+def _scan(moves: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The stops the HOVER SCAN made: everything after the pre-snap park."""
+    assert moves[:1] == [PARK], f"the flow did not park the pointer first: {moves[:1]}"
+    return moves[1:]
 
 
 async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
@@ -214,7 +226,7 @@ async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "clicked (diff 0.04)" in _copy_label(app), "copy clicked")
 
-        assert moves == hover_scan_points(CHAT_REGION)[:3], (
+        assert _scan(moves) == hover_scan_points(CHAT_REGION)[:3], (
             "scanned exactly up to the first appearance"
         )
         expected = ScreenRegion(
@@ -223,14 +235,15 @@ async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
         assert clicks[-1] == expected  # region-local offset translated back to the screen
 
 
-async def test_a_static_hit_never_moves_the_cursor(
+async def test_a_static_hit_never_starts_a_scan(
     tmp_path: Path,
     profile_root: Path,
     seed_templates: Callable[..., None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The cheap path stays cheap: chats that render the icon unconditionally
-    must not pay for a hover scan."""
+    must not pay for a hover scan. The one move they do pay for is the park in
+    front of the snap, which every run makes before anything is searched for."""
     app, fake = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
@@ -243,7 +256,7 @@ async def test_a_static_hit_never_moves_the_cursor(
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "clicked (diff 0.01)" in _copy_label(app), "copy clicked")
-        assert moves == []
+        assert _scan(moves) == []
         assert clicks[-1].top == CHAT_REGION.top + 7
 
 
@@ -266,7 +279,7 @@ async def test_an_exhausted_scan_reports_not_found_and_never_clicks_the_icon(
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
 
-        assert moves == hover_scan_points(CHAT_REGION)  # the whole region, bottom to top
+        assert _scan(moves) == hover_scan_points(CHAT_REGION)  # the whole region, bottom to top
         # The only click was the focus poke at the chat region, never the icon.
         assert clicks == [CHAT_REGION]
 
@@ -278,7 +291,9 @@ async def test_a_refused_cursor_move_ends_the_scan_immediately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Off Windows every move is refused - the scan must bail out rather than
-    sleep its way up a region it can never influence."""
+    sleep its way up a region it can never influence. The park in front of the
+    snap is refused by the same stub and is the opposite case: nothing reads its
+    answer, so the flow gets all the way here regardless."""
     app, fake = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
@@ -290,7 +305,7 @@ async def test_a_refused_cursor_move_ends_the_scan_immediately(
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
-        assert len(moves) == 1
+        assert len(_scan(moves)) == 1
 
 
 async def test_hover_scan_is_opt_in_per_service(
@@ -300,8 +315,8 @@ async def test_hover_scan_is_opt_in_per_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """With ``hover_scan`` off - the default - a static miss is simply a miss:
-    the same not-found report as an exhausted scan, but the user's cursor is
-    never touched."""
+    the same not-found report as an exhausted scan, and the user's cursor is
+    never walked up the transcript (the snap's own park aside)."""
     app, fake = _make_app(tmp_path, profile_root, hover_scan=False)
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
@@ -313,7 +328,7 @@ async def test_hover_scan_is_opt_in_per_service(
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
 
-        assert moves == []  # the cursor stayed where the user left it
+        assert _scan(moves) == []  # no stop-by-stop climb, just the park
         assert "hover" not in _copy_label(app)
         assert clicks == [CHAT_REGION]  # only the focus poke, never the icon
 

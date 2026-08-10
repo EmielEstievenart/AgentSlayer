@@ -683,7 +683,7 @@ async def test_the_auto_copy_flow_posts_the_copy_buttons_crop(
     monkeypatch.setattr(main_mod, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
     monkeypatch.setattr(main_mod, "click_region", lambda region, settle_s=0.0: True)
-    monkeypatch.setattr(main_mod, "focus_window", lambda handle: True)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
     monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
     _freeze_detector(monkeypatch)
 

@@ -52,6 +52,7 @@ ERROR_CODES = frozenset(
         "unterminated_heredoc",
         "reply_truncated",
         "unknown_skill",
+        "client_mangled_reply",
     }
 )
 
@@ -61,7 +62,9 @@ class ParseIssue:
     """A tolerated anomaly found while parsing. kind values include:
 
     missing_end, bad_header, duplicate_id, renumbered, unterminated_heredoc,
-    unknown_param, truncation_suspected, calls_count_mismatch, unknown_keyword
+    unknown_param, truncation_suspected, calls_count_mismatch, unknown_keyword,
+    client_mangled_heredoc (transport corruption, not a model mistake - see
+    parser._client_mangled_opener)
     """
 
     kind: str

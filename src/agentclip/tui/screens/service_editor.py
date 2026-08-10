@@ -3,8 +3,11 @@
 Replaces the never-built ConfigScreen sketch in tui.md section 1.4 - the scope
 is everything that is a property of *one chat service*: its name, its two size
 budgets, the stale detector's stillness window, what it LOOKS like (the seven
-captured appearances), which finish signals its poller may run, and how an
-outbound payload is delivered into its chat box (one paste or a chunked stream).
+captured appearances), which finish signals its poller may run, how an outbound
+payload is delivered into its chat box (one paste or a chunked stream, with an
+optional Enter tap right after), how the auto-copy flow scrolls to the newest
+reply (wheel flick, Page Down or End), and whether a harvested reply with no
+CLIP blocks is ingested as prose or ignored.
 
 Model: the screen works on an in-memory *working copy* of ``config.services``
 (``self._services``). Editing an existing preset's label/sizes applies live -
@@ -84,6 +87,10 @@ from agentclip.config import (
     MATCHER_ANCHORS,
     MATCHER_OPENCV,
     MATCHERS,
+    SCROLL_ACTIONS,
+    SCROLL_END,
+    SCROLL_PAGE_DOWN,
+    SCROLL_WHEEL,
     TOLERANCE_MAX,
     TOLERANCE_MIN,
     Config,
@@ -162,12 +169,20 @@ SIGNAL_TEMPLATE = {
     "idle": TemplateKind.IDLE,
 }
 HOVER_SCAN_LABEL = "hover-scan for copy icon"
+# The auto-copy click's opt-in for replies that carry no CLIP blocks at all:
+# harvested and shown in the transcript as prose (never executed) instead of
+# ignored. Rides the DETECTION column because it is a fact about what the
+# harvest may ingest, worded - like everything here - as what the user SEES.
+CAPTURE_PROSE_LABEL = "ingest replies with no CLIP"
 # The delivery mode, as a tick rather than a picker: there are exactly two modes
 # and one of them is the default, so "off" says "paste" without a second row of
 # form to read. Worded as what the user will SEE, like the signal labels - and
 # sized to its column: the checkbox glyph costs four cells of the 32, and a
 # label that outgrows what is left ends in an ellipsis mid-sentence.
 STREAM_DELIVERY_LABEL = "paste the payload in chunks"
+# The other delivery tick: tap Enter right after the auto-paste instead of
+# waiting for the user's. Same 28-cell label budget as the tick above.
+AUTO_SUBMIT_LABEL = "press Enter after auto-paste"
 # A ticked busy/idle entry whose appearance was never captured runs nothing at
 # all (config.py's checklist and the profile are ANDed). Silent dead weight is
 # exactly the failure that shows up as an auto-copy that never fires, so it is
@@ -187,6 +202,22 @@ MATCHER_LABELS: dict[str, str] = {
     MATCHER_OPENCV: "OpenCV (exhaustive)",
 }
 _MATCHER_RADIO_PREFIX = "svc-matcher-"
+
+# The SCROLL block: how the auto-copy flow snaps this service's transcript to
+# the bottom before hunting the newest copy button. Named as the input the
+# page will receive, because that is what the user can try by hand to find out
+# which one their chat obeys.
+SCROLL_LABELS: dict[str, str] = {
+    SCROLL_WHEEL: "mouse wheel flick",
+    SCROLL_PAGE_DOWN: "Page Down taps",
+    SCROLL_END: "End key",
+}
+_SCROLL_RADIO_PREFIX = "svc-scroll-"
+
+
+def scroll_radio_id(action: str) -> str:
+    return f"{_SCROLL_RADIO_PREFIX}{action}"
+
 TOLERANCE_LABEL = "Pixel tolerance"
 # Said next to the radio button rather than only in the docs, because this is
 # the one failure the user cannot see: the setting persists, the search runs,
@@ -478,10 +509,20 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                             SIGNAL_LABELS[signal], id=signal_checkbox_id(signal), compact=True
                         )
                     yield Checkbox(HOVER_SCAN_LABEL, id="svc-hover-scan", compact=True)
+                    yield Checkbox(CAPTURE_PROSE_LABEL, id="svc-capture-prose", compact=True)
                     yield Static("", id="svc-signal-warning")
                     yield Static(Text("DELIVERY · how it goes in"), classes="side-title")
                     yield Checkbox(
                         STREAM_DELIVERY_LABEL, id="svc-stream-delivery", compact=True
+                    )
+                    yield Checkbox(AUTO_SUBMIT_LABEL, id="svc-auto-submit", compact=True)
+                    yield Static(Text("SCROLL · reaching the reply"), classes="side-title")
+                    yield RadioSet(
+                        *[
+                            RadioButton(SCROLL_LABELS[name], id=scroll_radio_id(name))
+                            for name in SCROLL_ACTIONS
+                        ],
+                        id="svc-scroll-set",
                     )
                     yield Static(Text("MATCHING · how it is found"), classes="side-title")
                     yield RadioSet(
@@ -688,7 +729,12 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             box = self.query_one(f"#{signal_checkbox_id(signal)}", Checkbox)
             box.value = signal in signals
         self.query_one("#svc-hover-scan", Checkbox).value = hover
+        self.query_one("#svc-capture-prose", Checkbox).value = shown.capture_prose
         self.query_one("#svc-stream-delivery", Checkbox).value = shown.delivery == DELIVERY_STREAM
+        self.query_one("#svc-auto-submit", Checkbox).value = shown.auto_submit
+        # The SCROLL radio follows the selection the same way the MATCHING one
+        # below does - press the right one, the set unpresses the rest.
+        self.query_one(f"#{scroll_radio_id(shown.scroll_action)}", RadioButton).value = True
         # The MATCHING block follows the selection exactly as the ticks above
         # do. Pressing the right radio unpresses whichever was pressed, so only
         # the target is written; the slider is filled in WITHOUT notifying,
@@ -767,8 +813,9 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             )
         for box in self.query(Checkbox):
             box.disabled = is_new
-        # Same rule for the MATCHING block: nothing to file a search setting
-        # under until "Add service" has created the key.
+        # Same rule for the SCROLL and MATCHING blocks: nothing to file a
+        # setting under until "Add service" has created the key.
+        self.query_one("#svc-scroll-set", RadioSet).disabled = is_new
         self.query_one("#svc-matcher-set", RadioSet).disabled = is_new
         self.query_one("#svc-tolerance", Slider).disabled = is_new
 
@@ -898,6 +945,8 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             finish_signals=signals,
             hover_scan=hover,
             delivery=DELIVERY_STREAM if streaming else DELIVERY_PASTE,
+            capture_prose=self.query_one("#svc-capture-prose", Checkbox).value,
+            auto_submit=self.query_one("#svc-auto-submit", Checkbox).value,
         )
         self._paint_signal_warning(self._profile(key))
 
@@ -930,6 +979,24 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         if key is None or key not in self._services:
             return
         self._services[key] = replace(self._services[key], matcher=matcher)
+
+    @on(RadioSet.Changed, "#svc-scroll-set")
+    def _on_scroll_changed(self, event: RadioSet.Changed) -> None:
+        """Write the chosen scroll action into the working copy, live.
+
+        The MATCHING radio's twin, echo-immune the same way: the pressed id is
+        read back and stored, so ``_load_service`` pressing the loaded
+        service's own radio writes that value onto itself.
+        """
+        event.stop()
+        radio_id = event.pressed.id
+        key = self._selected_key
+        if radio_id is None or key is None or key not in self._services:
+            return
+        action = radio_id.removeprefix(_SCROLL_RADIO_PREFIX)
+        if action not in SCROLL_ACTIONS:
+            return
+        self._services[key] = replace(self._services[key], scroll_action=action)
 
     @on(Slider.Changed, "#svc-tolerance")
     def _on_tolerance_changed(self, event: Slider.Changed) -> None:

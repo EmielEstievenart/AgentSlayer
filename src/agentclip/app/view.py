@@ -110,9 +110,12 @@ class ChatView(Protocol):
     # view knows what a new-chat button is - so the controller states the intent
     # and the view does the whole thing, right now: find the control, click it,
     # hand focus back. Never blocking (it returns as soon as the work is
-    # scheduled), and all-or-nothing on the tool side: the view calls
-    # ``request_new_session`` itself when - and only when - the click landed, so
-    # a refused click leaves the old chat AND the session it belongs to alone.
+    # scheduled). The view calls ``request_new_session`` itself, and does so
+    # whether or not the click landed: the browser half needs a calibrated,
+    # armed, findable button and the tool half needs nothing, so tying the one
+    # AgentClip can always do to the one it often cannot left /new inert in the
+    # states it is reached for (tui.md section 3.3a). The toast there is what
+    # tells the user the browser chat is still theirs to open.
     # That is the same path the sidebar's "New browser chat" takes, deliberately:
     # two ways to ask for one thing, one implementation of it.
     def open_new_chat_now(self) -> None: ...

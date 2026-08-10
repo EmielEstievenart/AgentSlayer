@@ -176,14 +176,16 @@ class FakeChatView:
 
     def open_new_chat_now(self) -> None:
         # Only /new asks for one; the count is what pins that scope down. The
-        # real view clicks the browser and then - on a landed click only - calls
-        # request_new_session back, off a worker; ``new_chat_lands`` scripts the
-        # two outcomes, and ``_later`` keeps the call-back out of the command's
-        # own stack frame the way the worker does.
+        # real view clicks the browser and calls request_new_session back off a
+        # worker WHETHER OR NOT that click landed (view.py): the tool side is the
+        # half it can always deliver, and the browser half becomes a line in a
+        # toast. So ``new_chat_lands`` scripts only what the browser did - a fact
+        # the controller is never told, which is why it changes nothing here but
+        # the trace. ``_later`` keeps the call-back out of the command's own
+        # stack frame the way the worker does.
         self.new_chats_opened += 1
-        self.trace.append("open-new-chat")
-        if self.new_chat_lands:
-            self._later(self._reset_after_new_chat)
+        self.trace.append("open-new-chat" if self.new_chat_lands else "open-new-chat-refused")
+        self._later(self._reset_after_new_chat)
 
     def show_identify_overlay(self) -> None:
         # /identify is one call and no answer - the whole feature is the view's.

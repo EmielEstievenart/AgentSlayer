@@ -478,10 +478,11 @@ class SessionController:
         /new is the one command that asks the view to touch the browser (tui.md
         section 3.3a): the user wants a new conversation, and the one on screen
         is the old one's. The whole flow is the view's - it clicks the new-chat
-        control immediately and, on a landed click, calls ``request_new_session``
-        back into this controller, which is the *same* path the sidebar's "New
-        browser chat" button takes. So the reset is not started here: a click
-        that never landed must leave the session on the chat it is still having.
+        control immediately and calls ``request_new_session`` back into this
+        controller, which is the *same* path the sidebar's "New browser chat"
+        button takes. So the reset is not started here even though it always
+        happens: only the view knows whether the click landed, and only the view
+        can tell the user that the fresh chat is now theirs to open.
 
         Only here. The launch, the budget-exceeded retry and the summary
         screen's *new session* reach ``_reset_session`` too, and none of them
@@ -497,9 +498,10 @@ class SessionController:
 
         The tool-side half of /new, public because the browser side runs in the
         view: both the sidebar's "New browser chat" on the master tab and /new
-        itself land here *after* the click (tui.md sections 1.3 and 3.3a), to
-        reset the conversation to match the chat that just replaced it. Returns
-        whether the reset started, and toasts the refusal when it did not.
+        itself land here *after* the click has been attempted (tui.md sections
+        1.3 and 3.3a), to reset the conversation to match the chat that replaced
+        it - or the one the user is about to open by hand. Returns whether the
+        reset started, and toasts the refusal when it did not.
         """
         if not self._new_session_allowed():
             return False

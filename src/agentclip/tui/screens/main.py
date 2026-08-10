@@ -3774,6 +3774,34 @@ class MainScreen(Screen[None]):
             return False
         return self.busy or self.pending_approval or self.awaiting_answer
 
+    # Why the browser's button went unclicked, one reason per outcome, each with
+    # the way out of it. The toast is the only place the user learns that the
+    # half AgentClip could not do is now theirs, so none of them may stop at
+    # "it failed" - and none of them may claim a reset that did not happen,
+    # which is what the two tails below are for.
+    _NO_CLICK_REASONS = {
+        ElementClick.DISARMED: (
+            "disarmed - no new chat was opened in the browser (nothing was clicked); "
+            "press F5 to arm"
+        ),
+        ElementClick.NOT_CALIBRATED: (
+            'capture the browser\'s new-chat button first (F2 > "New-chat button" > '
+            "Capture) and draw the chat window it lives in - nothing was clicked"
+        ),
+        ElementClick.MISMATCH: (
+            "the new-chat button is not on screen in the chat window - nothing "
+            "was clicked; recapture it or redraw the window"
+        ),
+        ElementClick.AMBIGUOUS: (
+            "found several things that look like the new-chat button in the chat "
+            "window - nothing was clicked; redraw the window so it contains only "
+            "this chat"
+        ),
+        ElementClick.NOT_CLICKED: "the new-chat click did not land (it is Windows-only)",
+    }
+    _RESTARTED_TAIL = ". AgentClip is on a fresh session anyway - open a new browser chat yourself"
+    _NOT_RESTARTED_TAIL = ". Nothing on the tool side to renew - open a new browser chat yourself"
+
     async def _new_browser_chat(self, slot: AgentSlot) -> None:
         """Click ``slot``'s browser new-chat button, then hand focus back here.
 
@@ -3784,7 +3812,13 @@ class MainScreen(Screen[None]):
         ``start_browser_chat``'s job alone.
 
         Located first: if the button is not on screen nothing is clicked, because
-        the alternative is a blind click somewhere in a browser window.
+        the alternative is a blind click somewhere in a browser window. But the
+        click is BEST-EFFORT, not a precondition. AgentClip owns one half of a
+        fresh chat and the user owns the other, and refusing the half it can do
+        because it could not do the half it cannot made ``/new`` useless in
+        precisely the situation it was needed - a window not calibrated, or not
+        calibrated any more. So every outcome resets the session, and a failed
+        click spends its toast saying which half is left to the user.
 
         Which slot this is runs as an ARGUMENT rather than a re-read, because it
         is decided once before the click - the same rule the region picker
@@ -3794,42 +3828,15 @@ class MainScreen(Screen[None]):
         sub-agent's window - and end the master's session for it.
         """
         outcome = await self._click_profile_element(slot, TemplateKind.NEW_CHAT)
-        if outcome is ElementClick.DISARMED:
-            # Nothing was clicked and - just as important - nothing was reset:
-            # the session is still the one the chat on screen is having.
-            self.notify(
-                "disarmed - no new chat was opened (nothing was clicked); press F5 "
-                "to arm, or start the chat yourself",
-                severity="warning",
-            )
-            return
-        if outcome is ElementClick.NOT_CALIBRATED:
-            self.notify(
-                'capture the browser\'s new-chat button first (F2 > "Capture new-chat '
-                'button...") and draw the chat window it lives in',
-                severity="warning",
-            )
-            return
-        if outcome is ElementClick.MISMATCH:
-            self.notify(
-                "the new-chat button is not on screen in the chat window - nothing "
-                "was clicked; recapture it or redraw the window",
-                severity="warning",
-            )
-            return
-        if outcome is ElementClick.AMBIGUOUS:
-            self.notify(
-                "found several things that look like the new-chat button in the chat "
-                "window - nothing was clicked; redraw the window so it contains only "
-                "this chat",
-                severity="warning",
-            )
-            return
-        if outcome is ElementClick.NOT_CLICKED:
-            self.notify(
-                "the new-chat click did not land (it is Windows-only) - start the chat yourself",
-                severity="warning",
-            )
+        if outcome is not ElementClick.CLICKED:
+            # Reset first, only so the toast can say truthfully whether it
+            # happened: on the sub-agent tab, and with no session running, there
+            # is no tool side to renew and promising one would be a lie.
+            # No refocus either - the browser is where the user has to finish
+            # the job, so it keeps whatever focus it already has.
+            restarted = self._reset_after_new_browser_chat(slot)
+            tail = self._RESTARTED_TAIL if restarted else self._NOT_RESTARTED_TAIL
+            self.notify(self._NO_CLICK_REASONS[outcome] + tail, severity="warning")
             return
         self.notify("new browser chat opened")
         # Same beat as the auto-copy flow: let the click register before focus
@@ -3839,31 +3846,38 @@ class MainScreen(Screen[None]):
             await asyncio.to_thread(focus_window, self._own_window)
         self._reset_after_new_browser_chat(slot)
 
-    def _reset_after_new_browser_chat(self, slot: AgentSlot) -> None:
+    def _reset_after_new_browser_chat(self, slot: AgentSlot) -> bool:
         """Start a fresh SESSION too, when the chat just emptied was the master's.
 
         A new browser chat on the master tab means the conversation this session
         is having no longer exists, so leaving the session running would paste
-        its next turn into a chat with none of its history in it. Only on a
-        landed click (a refused one leaves the old chat exactly as it was) and
-        only on the master tab: the sub-agent window hosts delegated runs, which
-        are the controller's to start and end, never the user's.
+        its next turn into a chat with none of its history in it. Only on the
+        master tab: the sub-agent window hosts delegated runs, which are the
+        controller's to start and end, never the user's.
+
+        Whether the click landed is deliberately not a condition. The user asked
+        for a new conversation, and the tool side is the part AgentClip can
+        always deliver; withholding it when the browser could not be reached
+        leaves the user with neither half and no way to get the first one. So a
+        refused click still lands here - ``_new_browser_chat``'s toast is what
+        tells them the browser is still showing the old chat.
 
         This is also the *whole* tool-side of ``/new``: the command asks the
-        view to open the chat, and the reset it wanted arrives here, on the same
-        condition. A command whose click was refused resets nothing either.
+        view to open the chat, and the reset it wanted arrives here.
 
         With no session running there is nothing to reset - the start screen
         just got itself a clean chat to start in - and that is not an error.
+        Returns whether a fresh session actually started, which is what lets a
+        failed click's toast say so without guessing.
 
         ``slot`` is the window the click actually went to, read before the
         click rather than after it - see ``_new_browser_chat``.
         """
         if slot is not AgentSlot.MASTER:
-            return
+            return False
         if not self.session_active:
-            return
-        self._controller.request_new_session()
+            return False
+        return self._controller.request_new_session()
 
     # -- sub-agent transport: opening a chat and retargeting the automation ----
 

@@ -27,7 +27,9 @@ implementation - ``_new_browser_chat(slot)`` - reached from both ends (§3.3a,
   session too, because the conversation it is having no longer exists.
 * ``/new``: the same flow, pinned to the master window and typed rather than
   clicked. The browser is touched at command time, and the reset is that flow's
-  tail - so a click that never landed resets nothing at all.
+  tail - which runs whether or not the click landed. The click is best-effort:
+  the tool side is the half AgentClip can always deliver, and withholding it
+  because the browser could not be reached left the user with neither half.
 """
 
 from __future__ import annotations
@@ -80,6 +82,12 @@ CLICKED_TOAST = "new browser chat opened"
 
 # The button's own refusal, which is /new's refusal reworded.
 MID_TURN_TOAST = "can't start a new chat mid-turn"
+# Every failed click ends by handing the browser half back to the user, and says
+# whether the tool half was renewed - the pair that stops a "fresh session"
+# claim on a tab that never had one.
+DISARMED_TOAST = "no new chat was opened"
+RESTARTED_TAIL = "fresh session anyway"
+YOURSELF_TAIL = "open a new browser chat yourself"
 
 
 @pytest.fixture(autouse=True)
@@ -395,8 +403,13 @@ async def test_nothing_captured_means_nothing_is_even_searched_for(
         await pilot.pause(0.3)
         assert clicks == []
         assert scenes == []
-        # The toast is the only feedback, and it points at the editor.
+        # The toast is the only feedback, and it points at the editor. No
+        # session is running, so there is no tool side to renew either - and the
+        # toast may not claim one.
         assert _said(notes, NOT_CALIBRATED_TOAST)
+        assert _said(notes, YOURSELF_TAIL)
+        assert not _said(notes, RESTARTED_TAIL)
+        assert main.awaiting_new_session and not main.session_active
 
 
 async def test_no_chat_region_means_nowhere_to_look(
@@ -427,6 +440,9 @@ async def test_no_chat_region_means_nowhere_to_look(
         assert clicks == []
         assert scenes == []
         assert _said(notes, NOT_CALIBRATED_TOAST)
+        assert _said(notes, YOURSELF_TAIL)
+        assert not _said(notes, RESTARTED_TAIL)  # nothing running to renew
+        assert main.awaiting_new_session and not main.session_active
 
 
 async def test_new_preserves_the_capture(
@@ -465,10 +481,12 @@ async def test_new_preserves_the_capture(
 # == /new opens the browser's new chat at once (§3.3a) =========================
 #
 # The command is the button typed out: it runs the very same flow, pinned to the
-# MASTER window, and the session reset is that flow's own tail. So the browser
-# and the tool side move together in one beat - a landed click resets, a refused
-# one changes nothing at all, and there is no window in between where the tool
-# has started over and the conversation on screen has not (or the reverse).
+# MASTER window, and the session reset is that flow's own tail. The two halves
+# of a fresh chat are not equally available, though - the tool side always is,
+# the browser side needs a calibrated window and an armed switch - so the tail
+# runs either way and the toast says which halves the user got. Making the reset
+# wait for the click meant /new did nothing at all in exactly the state it was
+# reached for: a window whose new-chat button can no longer be found.
 #
 # No chat box is captured in this suite, so the paste's box click falls back to
 # the drawn chat region: the new-chat click and the box click are trivially told
@@ -574,17 +592,18 @@ async def test_the_launch_paste_opens_no_new_chat(
         assert clicks == [CHAT_REGION]
 
 
-async def test_new_with_the_button_gone_clicks_nothing_and_resets_nothing(
+async def test_new_with_the_button_gone_still_starts_the_fresh_session(
     tmp_path: Path,
     profile_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     seed_templates: Callable[..., None],
     _fast_new_chat: None,
 ) -> None:
-    """A refused click leaves the old conversation up, so the session that owns
-    it has to stay too: resetting anyway would leave the next task pasting into
-    a chat full of the previous one, which is the half-reset /new exists to
-    avoid. The user is told which of the four reasons it was."""
+    """The button being unfindable is a fact about the browser, not about what
+    the user asked for. AgentClip still cannot click blind - so it clicks
+    nothing - but the half it CAN do is done, and the toast hands the other half
+    over: the tool side is new, the browser is showing the old chat, go open one.
+    Refusing both halves made /new useless in the one state it was reached for."""
     clicks = _record_clicks(monkeypatch)
     _no_real_paste(monkeypatch)
 
@@ -602,10 +621,51 @@ async def test_new_with_the_button_gone_clicks_nothing_and_resets_nothing(
         clicks.clear()
 
         await _send(app, pilot, "/new")
-        await _wait_for(pilot, lambda: _said(notes, MISMATCH_TOAST), "the refusal was explained")
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
         assert clicks == []  # the browser was not touched
-        assert main.session_active and not main.awaiting_new_session
-        assert main.has_transcript_events()  # ...and the conversation is still here
+        assert _said(notes, MISMATCH_TOAST)  # which of the reasons it was...
+        assert _said(notes, RESTARTED_TAIL)  # ...and that the tool side went ahead
+        assert _said(notes, YOURSELF_TAIL)
+        assert not main.has_transcript_events()  # the transcript went with it
+
+
+async def test_new_while_disarmed_still_starts_the_fresh_session(
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
+    _fast_new_chat: None,
+) -> None:
+    """Disarmed, nothing on screen may be touched - that is the whole promise of
+    the switch, and it is kept here: no capture, no search, no click. It says
+    nothing about the tool's own session, though, so /new still starts one and
+    the toast names the switch as the reason the browser was left alone."""
+    clicks = _record_clicks(monkeypatch)
+    _no_real_paste(monkeypatch)
+    scenes = _patch_found(monkeypatch, FOUND)  # findable, if anyone were looking
+
+    app, _ = _make_app(tmp_path, profile_root)
+    _seed_newchat(app, seed_templates)
+    notes = _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _draw_chat_region(app, pilot, monkeypatch)
+        await _start_session(app, pilot, main)
+        main.set_os_armed(False)
+        clicks.clear()
+        scenes.clear()
+
+        await _send(app, pilot, "/new")
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
+        assert clicks == []
+        assert scenes == []  # the switch is answered before anything is searched
+        assert _said(notes, DISARMED_TOAST)
+        assert _said(notes, RESTARTED_TAIL)
+        assert _said(notes, YOURSELF_TAIL)
+        assert not main.has_transcript_events()
 
 
 # == the button ends the session too (§1.3) ===================================

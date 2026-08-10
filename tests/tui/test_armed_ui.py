@@ -388,16 +388,18 @@ async def test_the_same_outbound_armed_does_click_and_paste(
 # == chokepoint 2: the find-then-click primitive ===============================
 
 
-async def test_disarmed_new_refuses_to_open_a_browser_chat_and_resets_nothing(
+async def test_disarmed_new_opens_no_browser_chat_but_still_resets_the_tool_side(
     tmp_path: Path,
     profile_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     seed_templates: Callable[..., None],
 ) -> None:
-    """`/new` is the command that drives the browser, so disarmed it must refuse
-    - and refuse ALL of it. The session it would have replaced is still the one
-    the chat on screen is having, so tearing it down for a click that never
-    happened would leave the user's conversation and the tool's out of step.
+    """`/new` is the command that drives the browser, and disarmed the browser
+    half is refused entire: nothing captured, nothing searched, nothing clicked
+    or focused. What the switch does NOT cover is the tool's own session - the
+    user asked for a new conversation and that half costs the machine nothing -
+    so it starts, and the toast names the switch as the reason the chat on
+    screen is still the old one.
 
     The new-chat button is captured and the window drawn, so nothing but the
     switch itself can be doing the refusing."""
@@ -415,12 +417,12 @@ async def test_disarmed_new_refuses_to_open_a_browser_chat_and_resets_nothing(
 
         await send_composer(app, pilot, "/new")
         await _wait_for(pilot, lambda: _said(notes, "disarmed"), "the refusal toast")
-        await pilot.pause(0.1)
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "the fresh session")
 
         assert calls.nothing(), calls.summary()
         assert _said(notes, "no new chat was opened")
-        assert main.session_active  # nothing was reset behind the refusal
-        assert main.transcript.entries  # ...and the transcript was not cleared
+        assert _said(notes, "open a new browser chat yourself")
+        assert not main.transcript.entries  # the tool side really did start over
 
 
 async def test_a_disarmed_delegation_is_refused_before_anything_is_pasted(

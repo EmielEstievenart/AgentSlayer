@@ -487,6 +487,115 @@ def list_dir(ctx: ToolContext, call: ToolCall) -> str:
 
 
 # -- glob ------------------------------------------------------------------------
+#
+# The pattern language is pathlib's, but the traversal is ours, because
+# Path.glob offers no way to say "do not go in there". It walks everything the
+# pattern reaches and hands back the lot; excluding .venv/.git/build afterwards
+# still pays for reading them, and in a real project those ARE the tree - a
+# single .venv is thousands of files, so `**/README*` spent seconds on
+# directories whose every hit was destined for the bin. So, like _grep_files
+# below, we prune: an excluded directory is never descended into at all.
+#
+# What follows therefore has to reproduce pathlib's matching rules exactly:
+# '**' spans zero or more directories (so `**/README*` still finds a top-level
+# README), a trailing '**' or '/' selects directories only, '**' beside other
+# characters is an error, and each component is fnmatch against one name -
+# case-insensitively on Windows, as pathlib is. The parity test in
+# tests/tools/test_fs_tools.py pins that agreement to Path.glob itself.
+
+# pathlib matches names case-insensitively on Windows and sensitively elsewhere.
+_GLOB_RE_FLAGS = re.IGNORECASE if os.name == "nt" else 0
+
+
+def _glob_parts(norm: str) -> tuple[list[str], bool]:
+    """Split a pattern into components; report whether it asked for directories only.
+
+    Raises ValueError - in pathlib's own wording - for the patterns pathlib
+    itself refuses, so the error the LLM sees is unchanged. The one deviation is
+    a pattern that survives to nothing at all ("." or "./"), which pathlib
+    answers with a bare IndexError; here it joins the other rejects.
+    """
+    dir_only = norm.endswith("/")
+    parts = [p for p in norm.split("/") if p not in ("", ".")]
+    if not parts:
+        raise ValueError(f"Unacceptable pattern: {norm!r}")
+    for part in parts:
+        if "**" in part and part != "**":
+            raise ValueError("Invalid pattern: '**' can only be an entire path component")
+    # Runs of '**' select the same directories as a single one; collapsing them
+    # keeps the same file from arriving twice by two different splits.
+    collapsed = [p for i, p in enumerate(parts) if p != "**" or i == 0 or parts[i - 1] != "**"]
+    return collapsed, dir_only
+
+
+def _scan(directory: Path) -> list[os.DirEntry[str]]:
+    """Children of a directory, or none if it cannot be read (pathlib skips those too)."""
+    try:
+        with os.scandir(directory) as it:
+            return list(it)
+    except OSError:
+        return []
+
+
+def _glob_select(ctx: ToolContext, base: Path, parts: list[str], dir_only: bool) -> list[Path]:
+    """Every path under base matching the parsed pattern, excluded subtrees unvisited."""
+    # One compiled matcher per component, built once rather than per directory
+    # entry. fnmatch.translate anchors its output, so .match is a full match.
+    matchers = [re.compile(fnmatch.translate(part), _GLOB_RE_FLAGS).match for part in parts]
+    found: list[Path] = []
+
+    def starting_points(directory: Path) -> list[Path]:
+        """The directory itself plus every included directory beneath it - the span of '**'."""
+        points = [directory]
+        for entry in _scan(directory):
+            # '**' recursion does not follow symlinked directories, as pathlib's
+            # does not: a link back up the tree would never terminate.
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            child = directory / entry.name
+            if ctx.workspace.is_excluded(child):
+                continue  # the prune: nothing under here is ever read
+            points.extend(starting_points(child))
+        return points
+
+    def select(directory: Path, index: int) -> None:
+        last = index == len(parts) - 1
+        if parts[index] == "**":
+            for start in starting_points(directory):
+                if last:
+                    # A pattern ending in '**' selects directories, not files.
+                    found.append(start)
+                else:
+                    select(start, index + 1)
+            return
+        match = matchers[index]
+        for entry in _scan(directory):
+            if not match(entry.name):
+                continue
+            child = directory / entry.name
+            # Excluded FILES are skipped as well as excluded directories: an
+            # entry named in the exclusion list is invisible whatever it is.
+            if ctx.workspace.is_excluded(child):
+                continue
+            try:
+                # Non-recursive components do follow symlinks, so src/*.py works
+                # through a symlinked src.
+                is_dir = entry.is_dir()
+            except OSError:
+                is_dir = False
+            if last:
+                if is_dir or not dir_only:
+                    found.append(child)
+            elif is_dir:
+                select(child, index + 1)
+
+    select(base, 0)
+    # A path can be reachable by two different splits of a pattern with several
+    # '**'s; pathlib reports it once, so do we.
+    return list(dict.fromkeys(found))
 
 
 @tool_handler
@@ -515,10 +624,11 @@ def glob(ctx: ToolContext, call: ToolCall) -> str:
             "glob only searches inside the project root.",
         )
     try:
+        parts, dir_only = _glob_parts(norm)
         found = [
             p
-            for p in base.glob(norm)
-            if p.is_relative_to(ctx.workspace.root) and not ctx.workspace.is_excluded(p)
+            for p in _glob_select(ctx, base, parts, dir_only)
+            if p.is_relative_to(ctx.workspace.root)
         ]
     except (ValueError, NotImplementedError) as exc:
         raise ToolError(

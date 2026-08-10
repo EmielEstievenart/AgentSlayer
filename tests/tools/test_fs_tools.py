@@ -355,6 +355,76 @@ def test_glob_rejects_absolute_and_dotdot_patterns(ctx: ToolContext) -> None:
         assert res.status == "error" and res.code == "bad_param"
 
 
+def test_glob_never_reads_inside_an_excluded_directory(
+    ctx: ToolContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exclusion prunes the walk; it is not a filter over its results.
+
+    Filtering afterwards is what made `**/README*` crawl a real project's .venv.
+    Recording every path the traversal asks about proves the walk stops at the
+    excluded directory instead of descending and discarding.
+    """
+    _write(tmp_path, "src/a.py", "a\n")
+    for i in range(20):
+        _write(tmp_path, f".venv/lib/mod{i}.py", "x\n")
+
+    asked: list[Path] = []
+    real = Workspace.is_excluded
+
+    def recording(self: Workspace, p: Path) -> bool:
+        asked.append(p)
+        return real(self, p)
+
+    monkeypatch.setattr(Workspace, "is_excluded", recording)
+    res = fs_tools.glob(ctx, make_call("glob", pattern="**/*.py"))
+
+    assert res.status == "ok"
+    assert res.body.split("\n")[-1] == "1 matches"
+    venv = tmp_path / ".venv"
+    assert venv in asked  # the directory itself is judged...
+    assert not [p for p in asked if venv in p.parents]  # ...and nothing under it is
+
+
+def test_glob_double_star_spans_zero_directories(ctx: ToolContext, tmp_path: Path) -> None:
+    _write(tmp_path, "README.md", "top\n")
+    _write(tmp_path, "docs/README.txt", "nested\n")
+    _write(tmp_path, "docs/deep/README", "deeper\n")
+    res = fs_tools.glob(ctx, make_call("glob", pattern="**/README*"))
+    lines = res.body.split("\n")
+    assert lines == ["README.md", "docs/README.txt", "docs/deep/README", "3 matches"]
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    ["**/*.py", "*.md", "src/**/*.py", "**/README*", "docs/*", "*", "src/*/", "**/pkg/*.py"],
+)
+def test_glob_matches_pathlib_semantics(ctx: ToolContext, tmp_path: Path, pattern: str) -> None:
+    """The pruned walk must still agree with the pattern language it replaced."""
+    for rel in (
+        "README.md",
+        "docs/README.txt",
+        "docs/guide.md",
+        "src/a.py",
+        "src/pkg/b.py",
+        "src/pkg/__init__.py",
+        "node_modules/evil.py",
+        ".git/hooks/pre-commit.py",
+    ):
+        _write(tmp_path, rel, "x\n")
+    (tmp_path / "empty").mkdir()
+
+    matches = sorted(
+        (p for p in tmp_path.glob(pattern) if not ctx.workspace.is_excluded(p)),
+        key=lambda p: p.as_posix(),
+    )
+    expected = [p.relative_to(tmp_path).as_posix() + ("/" if p.is_dir() else "") for p in matches]
+    res = fs_tools.glob(ctx, make_call("glob", pattern=pattern))
+    assert res.status == "ok"
+    lines = res.body.split("\n")
+    assert lines[-1] == f"{len(expected)} matches"
+    assert lines[:-1] == expected
+
+
 # -- grep -------------------------------------------------------------------------
 
 

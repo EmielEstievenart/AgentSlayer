@@ -35,6 +35,7 @@ from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.capture import CaptureError, RegionImage
+from agentclip.screen.detector import build_detector
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
@@ -382,6 +383,53 @@ async def test_a_near_miss_on_the_copy_button_logs_how_close_it_came(
         needed = f"{TemplateKind.COPY.max_diff:.2f}"
         assert f"copy button not found (best candidate diff 0.21, needs ≤ {needed})" in text
         assert "AUTO_COPY → MANUAL_COPY — the copy button was not found on screen" in text
+
+
+async def test_a_failed_harvest_also_says_what_the_poller_has_seen(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second half of the same diagnosis, and what the always-running
+    detector (§3.4f) is read for.
+
+    "How close did THIS frame come" separates a drifted capture from an absent
+    icon; "has the poller ever seen one in this window" separates a capture that
+    matches nothing ever from an icon that was there a moment ago and is simply
+    not drawn on this response. The flow still never CLICKS anything it
+    remembers - it re-searches - so this is a sentence in a log and nothing else.
+    """
+    _patch_flow_io(monkeypatch)
+    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21))
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _at_the_task_prompt(app, pilot)
+        _seed_and_reload(main, seed_templates, TemplateKind.COPY)
+        main._chat_region = CHAT_REGION
+        # A detector of the kind the poller builds, and one frame with the
+        # captured icon actually in it - so the memory has something in it.
+        main._detector = build_detector(
+            CHAT_REGION, main._live_profile(), signals=(), required_ticks=4
+        )
+        assert (
+            main._copy_last_seen_note() == "; the poller has never seen it in this window either"
+        )
+
+        icon = main._live_profile().variants(TemplateKind.COPY)[0].image
+        scene = bytearray(_blank(CHAT_REGION).pixels)
+        row = icon.width * 4
+        for line in range(icon.height):
+            start = ((40 + line) * CHAT_REGION.width + 30) * 4
+            scene[start : start + row] = icon.pixels[line * row : (line + 1) * row]
+        main._detector.observe(RegionImage(CHAT_REGION.width, CHAT_REGION.height, bytes(scene)))
+        assert "the poller last saw one 0s ago" in main._copy_last_seen_note()
+
+        main._open_reply_gate()
+        _detectors(main, "busy")
+        await _finishes(main, pilot)
+        await _wait_for(pilot, lambda: main._loop_state.name == "MANUAL_COPY", "the flow gave up")
+
+        text = await _read_log(app, pilot)
+        assert "best candidate diff 0.21" in text
+        assert "the poller last saw one" in text
 
 
 async def test_a_search_with_nothing_even_shaped_like_it_says_so_in_words(

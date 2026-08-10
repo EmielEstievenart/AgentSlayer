@@ -7,9 +7,10 @@ never touches the clipboard, and never imports Textual (enforced by
 tests/test_layering.py). The TUI calls it from exactly one worker thread.
 
 Semantics implemented here (protocol.md sections 4-6 + plan synthesis):
-- ingest: dedup over the last 20 normalized hashes, the chat-name gate, tool
-  name validation (unknown tool -> pre-resolved unknown_tool result), fatal
-  per-call parse issues -> pre-resolved error results;
+- ingest: own-outbound suppression (the hashes of our own composed payloads,
+  last 20), the chat-name gate, the DONE-reopen rule, tool name validation
+  (unknown tool -> pre-resolved unknown_tool result), fatal per-call parse
+  issues -> pre-resolved error results;
 - plan: one approval verdict per call (engine/approval.py); a call a permission
   rule DENIES is pre-resolved as a denied result and the turn carries on -
   only an interactive rejection aborts the rest of it;
@@ -105,7 +106,8 @@ class ChunkAck:
 
 @dataclass(frozen=True, slots=True)
 class Noise:
-    reason: str  # "wrong-phase" | "not-protocol" | "duplicate" | "missing-chat" | "wrong-chat"
+    # "wrong-phase" | "not-protocol" | "own-outbound" | "missing-chat" | "wrong-chat"
+    reason: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,7 +222,10 @@ class Engine:
         self._chat_name = normalize_chat_name(chat_name) or chat_name
         self._phase = Phase.IDLE
         self._turn = 0  # number of the last outbound payload (ordering only)
-        self._seen_hashes: deque[str] = deque(maxlen=20)
+        # Hashes of OUR OWN composed payloads only (a session can have several
+        # outbounds live in the model's scrollback). Accepted replies are never
+        # remembered - see ingest().
+        self._outbound_hashes: deque[str] = deque(maxlen=20)
         self._reply: ParsedReply | None = None
         self._plan: list[_Planned] = []
         self._exec: _ExecState | None = None
@@ -269,28 +274,50 @@ class Engine:
     # -- inbound -------------------------------------------------------------
 
     def ingest(self, text: str) -> IngestResult:
-        """Parse one clipboard text. Only meaningful in AWAITING_REPLY: any
-        other phase returns Noise("wrong-phase") and the TUI decides what to
-        show (e.g. the unexpected-reply modal).
+        """Parse one clipboard text. Meaningful in AWAITING_REPLY and in DONE
+        (a valid reply reopens a completed session); any other phase returns
+        Noise("wrong-phase") and the TUI decides what to show (e.g. the
+        unexpected-reply modal).
 
-        Gate order is load-bearing: wrong-phase, not-protocol, duplicate, the
-        chat name, then the flattened-reply check. Dedup stays ahead of the chat
-        gate so re-pasting the same accepted reply is still reported as a
-        duplicate rather than as a chat mismatch; the flattening check comes
-        last so a corrupt paste from ANOTHER chat is still reported as the
-        foreign paste it is."""
-        if self._phase is not Phase.AWAITING_REPLY:
+        A paste is eligible for interpretation on exactly two preconditions:
+        the CLIPBOARD CHANGED, and the CHAT NAME MATCHES. The first is the clip
+        watcher's job - it forwards byte-level changes only, and our own writes
+        advance its baseline - so by the time text reaches here, it is always a
+        NEW copy. Therefore re-pasting a reply AgentClip already ran RE-RUNS it,
+        by design: a user deliberately re-copying an older message is asking for
+        it to be re-interpreted, and a model that sends the identical response
+        twice means it twice. Accepted replies are consequently never
+        remembered; the hash set holds only our own outbound payloads, which are
+        suppressed because a results payload contains `===CLIP:` and would
+        otherwise read as a reply.
+
+        Gate order is load-bearing: wrong-phase, not-protocol, own-outbound, the
+        chat name, the DONE-reopen rule, then the flattened-reply check. The
+        flattening check comes last so a corrupt paste from ANOTHER chat is
+        still reported as the foreign paste it is."""
+        if self._phase not in (Phase.AWAITING_REPLY, Phase.DONE):
             return Noise("wrong-phase")
         reply = parse_reply(text)
         if reply.kind == "noise":
             return Noise("not-protocol")
-        if reply.normalized_hash in self._seen_hashes:
-            return Noise("duplicate")  # duplicate copy or our own outbound: silent
+        if reply.normalized_hash in self._outbound_hashes:
+            return Noise("own-outbound")  # the user copied our payload back: silent
         chat_noise = self._chat_gate(reply)
         if chat_noise is not None:
             # Not remembered: a foreign paste must report the same reason every
-            # time, not decay into "duplicate" on the second attempt.
+            # time it is pasted.
             return chat_noise
+        if self._phase is Phase.DONE:
+            # The session is complete; only a whole reply that PROVED it belongs
+            # to this chat may reopen it. A present EOM that survived the chat
+            # gate is that proof. An ACK/NACK is meaningless once the session is
+            # over, and a truncated reply carries no chat name at all (the gate
+            # deliberately skips it), so neither may reopen - that would run
+            # text we never established was ours.
+            if reply.kind != "reply" or not reply.eom.present:
+                return Noise("wrong-phase")
+            self._set_phase(Phase.AWAITING_REPLY)  # reopen the completed session
+            self._session.append_event("reopened", turn=self._turn)
         flattened = next((w for w in reply.warnings if w.kind == "flattened_reply"), None)
         if flattened is not None:
             # The paste is ours (it passed the chat gate) but it is not a whole
@@ -302,7 +329,6 @@ class Engine:
                 f"{flattened.detail}. Nothing ran - ask the chat to resend the whole "
                 "reply with every CLIP block inside one ~~~~ fence"
             )
-        self._remember_hash(reply.normalized_hash)
         self._session.append_event("inbound", raw=text)
         self._session.append_event(
             "parsed",
@@ -900,7 +926,7 @@ class Engine:
 
     def _register_outbound(self, outbound: Outbound) -> None:
         """Persist + audit one composed payload and pre-register its hash so a
-        re-ingest of our own text is dropped as a duplicate."""
+        re-ingest of our own text is dropped as Noise("own-outbound")."""
         self._session.write_outbound(outbound.turn, _CHUNK_SEPARATOR.join(outbound.chunks))
         self._session.append_event(
             "outbound",
@@ -910,12 +936,10 @@ class Engine:
             chunks=len(outbound.chunks),
         )
         for chunk in outbound.chunks:
-            self._remember_hash(normalized_hash(chunk))
+            digest = normalized_hash(chunk)
+            if digest not in self._outbound_hashes:
+                self._outbound_hashes.append(digest)
         self._last_outbound_chars = outbound.total_chars
-
-    def _remember_hash(self, digest: str) -> None:
-        if digest not in self._seen_hashes:
-            self._seen_hashes.append(digest)
 
     def _require_phase(self, phase: Phase, method: str) -> None:
         if self._phase is not phase:

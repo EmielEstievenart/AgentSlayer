@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agentclip.engine.engine import Done, Engine, NewTurn, Noise, Send
+from agentclip.engine.engine import Done, Engine, NewTurn, Send
 from agentclip.engine.states import Decision, EngineStateError, Phase
 
 
@@ -391,10 +391,16 @@ def test_undo_after_done_reopens_session(project: Path, engine: Engine) -> None:
     assert isinstance(engine.ingest(reply_to_notice), NewTurn)
 
 
-def test_duplicate_ingest_is_noise(engine: Engine) -> None:
+def test_re_ingesting_the_same_reply_runs_it_again(engine: Engine) -> None:
+    """Re-pasting an already-executed reply re-executes it. Eligibility is only
+    "the clipboard changed" (the watcher's byte-level guard, which our own
+    writes advance past) plus "the chat name matches" - so a second arrival of
+    identical text is a second deliberate copy, not an accident to suppress."""
     engine.start_task("t")
     assert isinstance(engine.ingest(EDIT_FOR_UNDO_REPLY), NewTurn)
     engine.decide(1, Decision.APPROVE)
     engine.execute()
     again = engine.ingest(EDIT_FOR_UNDO_REPLY)
-    assert isinstance(again, Noise) and again.reason == "duplicate"
+    assert isinstance(again, NewTurn)
+    engine.decide(1, Decision.APPROVE)
+    assert isinstance(engine.execute(), Send)  # the turn really re-runs

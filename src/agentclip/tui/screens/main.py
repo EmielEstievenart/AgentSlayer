@@ -1631,8 +1631,8 @@ class MainScreen(Screen[None]):
         The ChatView half of the command: the controller has said *this
         conversation is over*, and the browser is the view's to drive. It runs
         the very flow the sidebar's "New browser chat" button runs - find the
-        control, click it, hand focus back, and reset the session only if the
-        click landed - so the two ways of asking cannot drift apart.
+        control, click it, hand focus back, and reset the session whether or not
+        the click landed - so the two ways of asking cannot drift apart.
 
         Always the MASTER window, never ``_calibrating``: /new is a command
         typed into the master's session, and the sidebar happening to point at
@@ -3933,12 +3933,16 @@ class MainScreen(Screen[None]):
     @on(Button.Pressed, "#newchat-btn")
     def _on_newchat(self, event: Button.Pressed) -> None:
         event.stop()
-        # Refused before anything is clicked, for the same reason /new is: the
-        # button now ends the session too (see _reset_after_new_browser_chat),
-        # and there is no way to end one whose turn is still in flight.
-        if self._mid_turn():
+        # One refusal left, and it is not about the master's turn: a mid-run
+        # press on the SUB-AGENT tab would empty the chat a delegated run is
+        # still talking to, destroying the run's conversation without ending the
+        # run. On the master tab there is nothing to refuse - the press ends the
+        # session, and request_new_session aborts the turn in flight to do it
+        # (§1.3).
+        if self._mid_turn() and self._calibrating is not AgentSlot.MASTER:
             self.notify(
-                "can't start a new chat mid-turn - answer or finish the current step first",
+                "the sub-agent window's chat belongs to the run in flight - /abort ends "
+                "it, or start the new chat from the master tab",
                 severity="warning",
             )
             return
@@ -3957,6 +3961,12 @@ class MainScreen(Screen[None]):
         message the session worker is technically busy, and there is no turn
         there to lose - the same distinction ``AgentClipApp.action_quit`` draws
         before it warns about quitting.
+
+        One caller left, and one meaning with it: the sub-agent tab's new-chat
+        refusal above. The master tab used to ask this too and refuse; it now
+        goes ahead and the controller aborts the turn for it, which is the
+        difference between "you cannot leave this conversation" and "leaving it
+        ends what it was doing".
         """
         if self.awaiting_new_session:
             return False
@@ -4052,6 +4062,12 @@ class MainScreen(Screen[None]):
 
         This is also the *whole* tool-side of ``/new``: the command asks the
         view to open the chat, and the reset it wanted arrives here.
+
+        Whether a turn is in flight is not a condition either, and not this
+        side's business: ``request_new_session`` aborts one if it finds one
+        (poisoning whatever park it is on, cancelling an executing step) and
+        resets when it has unwound. It still returns True for that - the fresh
+        session is coming, a beat later than usual.
 
         With no session running there is nothing to reset - the start screen
         just got itself a clean chat to start in - and that is not an error.

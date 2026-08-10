@@ -93,9 +93,10 @@ def normalize(text: str) -> str:
 
 
 def normalized_hash(text: str) -> str:
-    """Dedup key (protocol design section 6.1): blake2b-128 hex over the
-    normalized text with fence lines stripped and per-line trailing whitespace
-    stripped. Stable across fenced/unfenced, CRLF/LF, and BOM variants."""
+    """Self-write suppression key (protocol design section 6.1): blake2b-128
+    hex over the normalized text with fence lines stripped and per-line trailing
+    whitespace stripped. Stable across fenced/unfenced, CRLF/LF, and BOM
+    variants."""
     lines = [
         line.rstrip()
         for line in normalize(text).split("\n")

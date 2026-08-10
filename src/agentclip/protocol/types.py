@@ -113,7 +113,7 @@ class ParsedReply:
     warnings: tuple[ParseIssue, ...] = ()
     eom: EomInfo = EomInfo(present=False)
     truncated: bool = False  # missing EOM / unterminated structures / count mismatch
-    normalized_hash: str = ""  # blake2b hex over the normalized text (dedup key)
+    normalized_hash: str = ""  # blake2b hex over the normalized text (self-write key)
     ack_part: int | None = None  # k in ACK/NACK k/n
     ack_total: int | None = None  # n in ACK/NACK k/n
     ack_chat: str | None = None  # chat= on the ACK/NACK line (gated like eom.chat)

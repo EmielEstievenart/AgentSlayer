@@ -24,7 +24,10 @@ implementation - ``_new_browser_chat(slot)`` - reached from both ends (§3.3a,
 §1.3):
 
 * the sidebar button: opening a fresh chat under a live master session ends that
-  session too, because the conversation it is having no longer exists.
+  session too, because the conversation it is having no longer exists - and it
+  does so mid-turn as well, aborting the turn in flight rather than refusing.
+  The user must always be able to start a new chat; the only tab that still says
+  no is the sub-agent's, whose chat belongs to a delegated run.
 * ``/new``: the same flow, pinned to the master window and typed rather than
   clicked. The browser is touched at command time, and the reset is that flow's
   tail - which runs whether or not the click landed. The click is best-effort:
@@ -52,6 +55,7 @@ from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.screen.template import RegionMatch, Template
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.messages import ClipboardCaptured
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 
 from .conftest import send_composer
@@ -71,6 +75,24 @@ JITTERED = RegionMatch(x=FOUND.x + 3, y=FOUND.y + 2, diff=0.04)
 SECOND_WINDOW = RegionMatch(x=FOUND.x + 400, y=FOUND.y, diff=0.03)
 SIZE = (110, 100)
 
+# Pinned so the mid-turn tests can address a reply to this session's chat.
+CHAT_NAME = "amber-falcon"
+# An edit, which gates by default: the cheapest way to park a real turn where
+# the old busy guard used to refuse.
+EDIT_REPLY = f"""On it.
+
+===CLIP:CALL id=1 tool=edit_file===
+path: notes.txt
+find <<EOT
+one
+EOT
+replace <<EOT
+two
+EOT
+===CLIP:END===
+===CLIP:EOM calls=1 chat={CHAT_NAME}===
+"""
+
 # The four things the button can say. Nothing captured and no window drawn are
 # one branch (there is nowhere to look, or nothing to look for), and it is the
 # branch that sends the user to the editor.
@@ -80,8 +102,10 @@ AMBIGUOUS_TOAST = "found several things that look like the new-chat button"
 NOT_CLICKED_TOAST = "did not land"
 CLICKED_TOAST = "new browser chat opened"
 
-# The button's own refusal, which is /new's refusal reworded.
-MID_TURN_TOAST = "can't start a new chat mid-turn"
+# The one refusal the button has left: the SUB-AGENT tab, mid-run. On the master
+# tab a press mid-turn aborts the turn instead (§1.3), and says so.
+SUB_MID_RUN_TOAST = "the sub-agent window's chat belongs to the run in flight"
+ABORT_TOAST = "aborting the current step - starting a fresh session"
 # Every failed click ends by handing the browser half back to the user, and says
 # whether the tool half was renewed - the pair that stops a "fresh session"
 # claim on a tab that never had one.
@@ -123,7 +147,7 @@ def _make_app(tmp_path: Path, profile_root: Path) -> tuple[AgentClipApp, FakeCli
     app = AgentClipApp(
         config=config,
         provider=fake,
-        engine_factory=make_engine_factory(lambda: app.app_config, project),
+        engine_factory=make_engine_factory(lambda: app.app_config, project, CHAT_NAME),
         project_root=project,
         profile_root=profile_root,
     )
@@ -749,18 +773,26 @@ async def test_the_button_on_an_idle_session_resets_the_tool_side_too(
         assert clicks == [CHAT_REGION]  # the chat box, and nothing else
 
 
-async def test_the_button_mid_turn_clicks_nothing_and_resets_nothing(
+async def test_the_button_mid_turn_aborts_the_turn_and_starts_over(
     tmp_path: Path,
     profile_root: Path,
     monkeypatch: pytest.MonkeyPatch,
     seed_templates: Callable[..., None],
+    _fast_new_chat: None,
 ) -> None:
-    """Same refusal /new gives, for the same reason: a turn in flight has
-    results that were never sent to the model, and this would bin them."""
+    """The press used to be refused here, which put the only way out of a
+    conversation behind the very turn the user wanted out of. It now does what
+    it says: the turn in flight is aborted (this one is parked on an approval
+    gate, so the gate's future is poisoned), and then the ordinary click-and-
+    reset runs. The pending edit is never applied - the decision it was waiting
+    for never came."""
     clicks = _record_clicks(monkeypatch)
     _no_real_paste(monkeypatch)
+    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
 
     app, _ = _make_app(tmp_path, profile_root)
+    target = tmp_path / "project" / "notes.txt"
+    target.write_text("one\n", encoding="utf-8", newline="")
     _seed_newchat(app, seed_templates)
     notes = _toasts(monkeypatch)
     async with app.run_test(size=SIZE) as pilot:
@@ -771,15 +803,63 @@ async def test_the_button_mid_turn_clicks_nothing_and_resets_nothing(
         await _draw_chat_region(app, pilot, monkeypatch)
         _patch_found(monkeypatch, FOUND)
         await _start_session(app, pilot, main)
-        main.busy = True  # a turn is running
-        await pilot.pause()
+        main.post_message(ClipboardCaptured(EDIT_REPLY))
+        await _wait_for(pilot, lambda: main.pending_approval, "the edit to reach the gate")
+        clicks.clear()
+
+        await _press(app, pilot, "#newchat-btn")
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "the session was reset")
+
+        assert _said(notes, ABORT_TOAST)
+        assert clicks == [CLICK_TARGET]  # the browser WAS touched, unlike before
+        assert _said(notes, CLICKED_TOAST)
+        assert not main.pending_approval  # the drawer came down with the turn
+        assert not main.has_transcript_events()
+        assert target.read_text() == "one\n"  # the ungated edit never ran
+
+
+async def test_the_button_on_the_sub_tab_is_refused_mid_turn(
+    tmp_path: Path,
+    profile_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    seed_templates: Callable[..., None],
+) -> None:
+    """The one refusal left, and it is not the master's to give.
+
+    The sub-agent window hosts delegated runs, and a run keeps the master busy
+    for its whole length - so a press here while a turn is in flight would empty
+    the chat a sub-agent is still talking to, destroying its conversation
+    without ending the run. Nothing is reset either way on this tab, so there is
+    no fresh session to offer in exchange: the toast points at `/abort` and at
+    the master tab instead."""
+    clicks = _record_clicks(monkeypatch)
+    _no_real_paste(monkeypatch)
+
+    app, _ = _make_app(tmp_path, profile_root)
+    (tmp_path / "project" / "notes.txt").write_text("one\n", encoding="utf-8", newline="")
+    _seed_newchat(app, seed_templates)
+    notes = _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _draw_chat_region(app, pilot, monkeypatch)
+        _patch_found(monkeypatch, FOUND)
+        await _start_session(app, pilot, main)
+        main._select_window(SUBAGENT_WINDOW)
+        await _wait_for(pilot, lambda: main._calibrating is AgentSlot.SUBAGENT, "sub tab selected")
+        await _draw_chat_region(app, pilot, monkeypatch)
+        main.post_message(ClipboardCaptured(EDIT_REPLY))
+        await _wait_for(pilot, lambda: main.pending_approval, "a turn in flight")
         clicks.clear()
 
         await _press(app, pilot, "#newchat-btn")
         await pilot.pause(0.3)
         assert clicks == []  # the browser was not touched
-        assert _said(notes, MID_TURN_TOAST)
-        assert main.session_active and not main.awaiting_new_session  # nothing was reset
+        assert _said(notes, SUB_MID_RUN_TOAST)
+        assert main.pending_approval  # and the turn is exactly where it was
+        assert main.session_active and not main.awaiting_new_session
 
 
 async def test_the_button_on_the_sub_tab_only_clicks(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agentclip.engine.engine import (
@@ -143,10 +145,10 @@ def test_non_protocol_text_is_noise(engine: Engine) -> None:
     assert engine.status().phase is Phase.AWAITING_REPLY
 
 
-def test_own_outbound_is_suppressed_as_duplicate(engine: Engine) -> None:
+def test_own_outbound_is_suppressed(engine: Engine) -> None:
     out = engine.start_task("t")
     result = engine.ingest(out.chunks[0])
-    assert isinstance(result, Noise) and result.reason == "duplicate"
+    assert isinstance(result, Noise) and result.reason == "own-outbound"
 
 
 def test_chat_name_is_stamped_on_the_bootstrap(engine: Engine) -> None:
@@ -192,8 +194,7 @@ def test_flattened_reply_is_refused_and_blames_the_transport(engine: Engine) -> 
     assert "line breaks" in result.detail and "~~~~" in result.detail
     assert "chat name" not in result.detail
     assert engine.status().phase is Phase.AWAITING_REPLY  # nothing ran
-    # Not remembered, like a chat-gate rejection: a re-paste says the same thing
-    # instead of decaying into "duplicate".
+    # Like a chat-gate rejection: a re-paste says the same thing every time.
     assert isinstance(engine.ingest(FLATTENED_REPLY), ProtocolError)
 
 
@@ -247,14 +248,21 @@ def test_review_and_execute_flow(engine: Engine) -> None:
     assert snap.turn == 2
 
 
-def test_duplicate_reply_after_roundtrip(engine: Engine) -> None:
-    """Dedup runs BEFORE the chat gate, so a re-pasted reply that carries the
-    right chat name is still diagnosed as a duplicate, not re-litigated."""
+def test_re_pasted_reply_is_reinterpreted(engine: Engine) -> None:
+    """A reply AgentClip already ran, pasted again, RE-RUNS by design.
+
+    Eligibility has exactly two preconditions: the clipboard CHANGED (the clip
+    watcher enforces that byte-wise, and our own writes advance its baseline)
+    and the chat name MATCHES. So identical text arriving here twice is always
+    two deliberate copies - either the user re-copying an older message to have
+    it re-interpreted, or a model that meant its answer twice."""
     engine.start_task("t")
     assert isinstance(engine.ingest(READ_REPLY), NewTurn)
     engine.execute()
     again = engine.ingest(READ_REPLY)
-    assert isinstance(again, Noise) and again.reason == "duplicate"
+    assert isinstance(again, NewTurn)
+    assert engine.status().phase is Phase.REVIEW
+    assert isinstance(engine.execute(), Send)  # and it really runs again
 
 
 def test_execute_requires_all_decisions(engine: Engine) -> None:
@@ -304,7 +312,9 @@ def test_task_done_alone_no_outbound(engine: Engine) -> None:
     assert step.summary.strip() == "All done."
     assert step.outbound is None
     assert engine.status().phase is Phase.DONE
-    assert isinstance(engine.ingest(READ_REPLY), Noise)  # ingest stays inert until reopened
+    # A stray ACK cannot revive a completed session; only a whole, chat-stamped
+    # reply reopens it (the DONE-reopen tests below).
+    assert engine.ingest("===CLIP:ACK 1/2 chat=amber-falcon===") == Noise("wrong-phase")
     with pytest.raises(EngineStateError):
         engine.start_task("next")  # the bootstrap is one-shot; continue via follow_up
     # task_done completes the session, but the user may continue: a follow-up reopens it.
@@ -338,6 +348,65 @@ def test_follow_up_reopens_completed_session(engine: Engine) -> None:
     assert isinstance(engine.ingest(next_reply), NewTurn)
     assert isinstance(engine.execute(), Send)
     assert engine.status().turn == 3  # follow-up=2, its results=3
+
+
+def _drive_to_done(engine: Engine) -> None:
+    """start_task -> task_done -> execute: leaves the engine in Phase.DONE."""
+    engine.start_task("t")
+    assert isinstance(engine.ingest(DONE_REPLY), NewTurn)
+    assert isinstance(engine.execute(), Done)
+    assert engine.status().phase is Phase.DONE
+
+
+def test_valid_reply_in_done_reopens_the_session(engine: Engine) -> None:
+    """A paste is eligible when the clipboard changed and the chat name matches
+    - completion is not a third precondition. A whole, chat-stamped reply
+    arriving after task_done reopens the session and runs."""
+    _drive_to_done(engine)
+    result = engine.ingest(READ_REPLY)
+    assert isinstance(result, NewTurn)
+    assert engine.status().phase is Phase.REVIEW
+    assert isinstance(engine.execute(), Send)
+    events = [
+        json.loads(line)
+        for line in (engine.status().session_dir / "transcript.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line
+    ]
+    assert any(e["t"] == "reopened" for e in events)  # the reopen is audited
+
+
+def test_ack_in_done_does_not_reopen(engine: Engine) -> None:
+    """An ACK belongs to a PART handshake; once the session is complete there is
+    nothing for it to acknowledge, so it must not revive the session."""
+    _drive_to_done(engine)
+    assert engine.ingest("===CLIP:ACK 2/3 chat=amber-falcon===") == Noise("wrong-phase")
+    assert engine.status().phase is Phase.DONE
+
+
+def test_truncated_paste_in_done_does_not_reopen(engine: Engine) -> None:
+    """No EOM means no chat name, and the chat gate deliberately skips it. Such
+    a paste has never PROVEN it is ours, so it cannot reopen a finished session
+    - that would breach the chat-name precondition."""
+    _drive_to_done(engine)
+    assert engine.ingest(TRUNCATED_REPLY) == Noise("wrong-phase")
+    assert engine.status().phase is Phase.DONE
+
+
+def test_wrong_chat_paste_in_done_is_wrong_chat(engine: Engine) -> None:
+    _drive_to_done(engine)
+    assert engine.ingest(WRONG_CHAT_REPLY) == Noise("wrong-chat")
+    assert engine.status().phase is Phase.DONE
+
+
+def test_own_outbound_in_done_is_still_own_outbound(engine: Engine) -> None:
+    out = engine.start_task("t")
+    assert isinstance(engine.ingest(DONE_REPLY), NewTurn)
+    assert isinstance(engine.execute(), Done)
+    assert engine.status().phase is Phase.DONE
+    assert engine.ingest(out.chunks[0]) == Noise("own-outbound")
+    assert engine.status().phase is Phase.DONE
 
 
 def _done_reply(turn: int) -> str:

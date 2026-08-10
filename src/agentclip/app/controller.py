@@ -119,7 +119,7 @@ _ABORT_NOTE = "the user aborted the sub-agent run"
 
 # Noise reason -> toast. "{chat}" is filled with the session's chat name.
 _NOISE_TEXT = {
-    "duplicate": "duplicate reply ignored",
+    "own-outbound": "ignored AgentClip's own outbound text - copy the model's reply instead",
     "not-protocol": "clipboard text has no CLIP blocks - ignored",
     "wrong-phase": "reply ignored - not awaiting a reply right now",
     "missing-chat": "ignored a paste without this chat's name ({chat}) - not from this chat?",
@@ -187,6 +187,20 @@ class _SubagentAborted(Exception):
     Raised into whichever await the sub-run is parked on (the reply future, the
     ask_user future) so the run unwinds through ``_run_subagent``'s ``finally``
     like any other failure - one restore path, not two.
+    """
+
+
+class _TurnAborted(Exception):
+    """The user asked for a new chat while a turn was in flight.
+
+    ``_SubagentAborted``'s bigger sibling: that one ends a delegation and lets
+    the master's turn carry on, this one ends the TURN - and the session behind
+    it - because a fresh browser chat has just made every result the turn was
+    holding undeliverable. Raised into whichever park is live
+    (``_abort_turn``) or, for a flow caught between two parks, at the next
+    ``_check_turn_abort`` checkpoint, so the flow unwinds through the same
+    ``finally`` blocks any other failure would use. ``_wrap_flow`` swallows it:
+    the new-chat path owns what the user is told.
     """
 
 
@@ -260,6 +274,17 @@ class SessionController:
         # executing (nothing to resolve yet) still ends the run at the next park.
         self._sub_aborting = False
 
+        # -- the mid-turn new-chat abort --------------------------------------
+        # Latched by ``request_new_session`` while it tears a turn down, and the
+        # /abort latch's counterpart: it ends the whole TURN, not just a
+        # delegation. Every flow-spawning door reads it too, so nothing sneaks a
+        # new flow into the gap between the poisoned park and the reset.
+        self._turn_aborting = False
+        # Set exactly when no flow is running - what ``_abort_turn`` waits on to
+        # know the turn has finished unwinding and the reset may start.
+        self._flow_idle = asyncio.Event()
+        self._flow_idle.set()
+
         # state flags mirrored to the view via SessionView
         self._session_active = False
         self._busy = False
@@ -310,6 +335,12 @@ class SessionController:
         that is waiting on it.
         """
         if not self._session_active or self._engine is None:
+            return
+        if self._turn_aborting:
+            # A /new is tearing this session down right now, so this reply
+            # belongs to a conversation that is a second from not existing.
+            # Dropped silently: the fresh bootstrap supersedes it, and a toast
+            # about a paste nobody can act on would only compete with the reset.
             return
         name = peek_chat_name(text)
         sub = self._sub
@@ -374,7 +405,16 @@ class SessionController:
         self._send_follow_up(text)
 
     def _send_follow_up(self, text: str) -> None:
-        if self._session_active and not self._busy and self._can_follow_up():
+        # ``_turn_aborting`` rides along with ``_busy`` on every door that
+        # spawns a flow: between the poisoned park and the reset the flow slot
+        # is free for an instant, and anything that took it would leave
+        # ``_abort_then_reset`` with a busy controller and no reset to do.
+        if (
+            self._session_active
+            and not self._busy
+            and not self._turn_aborting
+            and self._can_follow_up()
+        ):
             self._view.reset_composer()
             self._spawn_flow(self._follow_up_flow(text))
             return
@@ -498,8 +538,17 @@ class SessionController:
         screen's *new session* reach ``_reset_session`` too, and none of them
         means "the chat in the browser is stale" (the first has none, the last
         has just been read by the user).
+
+        Not refused mid-turn any more: a turn in flight is ABORTED for it (see
+        ``request_new_session``), because a user who cannot start a new chat has
+        no way out of a conversation that has gone wrong. The one place typing
+        `/new` still does something else is the ask_user answer park, where the
+        composer's text IS the answer, verbatim - ``submit_message`` never gets
+        as far as command parsing there, and the sidebar's "New browser chat"
+        button is the escape hatch instead.
         """
-        if not self._new_session_allowed():
+        if not self._session_active:
+            self._view.notify("no active session to replace", severity="warning")
             return  # refused before the browser is touched, exactly like the button
         self._view.open_new_chat_now()
 
@@ -510,26 +559,50 @@ class SessionController:
         view: both the sidebar's "New browser chat" on the master tab and /new
         itself land here *after* the click has been attempted (tui.md sections
         1.3 and 3.3a), to reset the conversation to match the chat that replaced
-        it - or the one the user is about to open by hand. Returns whether the
-        reset started, and toasts the refusal when it did not.
-        """
-        if not self._new_session_allowed():
-            return False
-        self._spawn_flow(self._reset_session())
-        return True
+        it - or the one the user is about to open by hand. Returns whether a
+        fresh session is coming, and toasts the one refusal left when it is not.
 
-    def _new_session_allowed(self) -> bool:
-        """The two refusals a session reset can give, toasted where they happen."""
+        This is also the ONE door that knows how to end a turn in flight. A new
+        browser chat has already destroyed the conversation the turn belongs to,
+        so there is nothing left for it to deliver and no reason to make the
+        user finish it first: ``_abort_turn`` poisons whichever park it is
+        sitting on, ``_abort_then_reset`` waits for the flow to unwind and only
+        then resets. True is returned immediately in that case - the reset is
+        started, just not finished, which is what the caller's toast means by it.
+        """
         if not self._session_active:
             self._view.notify("no active session to replace", severity="warning")
             return False
         if self._busy:
-            self._view.notify(
-                "can't start a new session mid-turn - answer or finish the current step first",
-                severity="warning",
-            )
-            return False
+            if not self._turn_aborting:  # a second press is not a second abort
+                self._turn_aborting = True
+                self._view.notify(
+                    "aborting the current step - starting a fresh session", severity="warning"
+                )
+                self._view.spawn(self._abort_then_reset())
+            return True
+        self._spawn_flow(self._reset_session())
         return True
+
+    async def _abort_then_reset(self) -> None:
+        """End the turn in flight, then reset - the mid-turn half of /new.
+
+        Spawned bare rather than through ``_spawn_flow``: it is what waits for
+        the busy flow to end, so it cannot be one. The latch is dropped in a
+        ``finally`` and the reset spawned with no await in between, so nothing
+        else can claim the flow slot in the gap (every other flow door refuses
+        while ``_turn_aborting`` is up).
+
+        The re-check is not paranoia: the turn's own unwinding can end the
+        session on its way out (a summary, a crash into an inactive state), and
+        a reset spawned onto that would prompt for a task nobody asked for.
+        """
+        try:
+            await self._abort_turn()
+        finally:
+            self._turn_aborting = False
+        if self._session_active and not self._busy:
+            self._spawn_flow(self._reset_session())
 
     def _cmd_abort(self) -> None:
         """End the sub-agent run in flight (protocol.md's delegate failure path).
@@ -673,18 +746,23 @@ class SessionController:
             severity="warning",
         )
 
+    # The three key actions that spawn a flow. ``_turn_aborting`` guards each
+    # alongside ``_busy`` for the reason spelled out in ``_send_follow_up``:
+    # the flow slot falls free for an instant while a mid-turn /new unwinds,
+    # and it is spoken for.
+
     def undo(self) -> None:
-        if self._busy or not self._session_active:
+        if self._busy or self._turn_aborting or not self._session_active:
             return
         self._spawn_flow(self._undo_flow())
 
     def force_ingest(self) -> None:
-        if self._busy or not self._session_active:
+        if self._busy or self._turn_aborting or not self._session_active:
             return
         self._spawn_flow(self._force_ingest_flow())
 
     def end_session(self) -> None:
-        if self._busy or not self._session_active:
+        if self._busy or self._turn_aborting or not self._session_active:
             return
         self._spawn_flow(self._show_summary())
 
@@ -705,12 +783,19 @@ class SessionController:
 
     def _spawn_flow(self, coro: Coroutine[Any, Any, None]) -> None:
         self._busy = True
+        self._flow_idle.clear()
         self._push_state()
         self._view.spawn(self._wrap_flow(coro))
 
     async def _wrap_flow(self, coro: Coroutine[Any, Any, None]) -> None:
         try:
             await coro
+        except _TurnAborted:
+            # The turn was torn down so a fresh chat could take its place. No
+            # transcript line and no toast here: ``request_new_session`` said
+            # what is happening before the poison went in, and the reset it is
+            # waiting to start says the rest.
+            pass
         except (EngineStateError, BudgetExceeded) as exc:
             await self._view.add_error(str(exc))
             self._view.alert(str(exc), severity="error")
@@ -720,10 +805,74 @@ class SessionController:
             self._awaiting_answer = False
             self._view.stop_working()
             self._view.hide_gate()
+            # Last, and after the flags: an aborting /new resumes the instant
+            # this is set and reads them to decide it may reset now.
+            self._flow_idle.set()
         await self._refresh_status()
         queued, self._queued_capture = self._queued_capture, None
         if queued is not None and self._session_active and self._engine is not None:
             self._spawn_flow(self._ingest_flow(queued))
+
+    async def _abort_turn(self) -> None:
+        """Tear the turn in flight down, and wait until it has finished falling.
+
+        The user must always be able to start a new chat, and a turn cannot be
+        interrupted from outside: it is parked on one of three futures, or
+        inside ``execute()`` on a worker thread, or in the handful of lines
+        between two of those. So this poisons *every* park that could be live -
+        harmless when it is not - and then waits on ``_flow_idle`` for the flow
+        coroutine to actually unwind, because the reset that follows tears down
+        the very engine the turn is still holding.
+
+        Poisoning is safe precisely because each park cleans up in a ``finally``
+        (``_gate`` clears ``_pending_approval``, ``_ask`` clears
+        ``_awaiting_answer``, ``_run_subagent`` restores the master's context),
+        so an exception raised into one unwinds through the same path a failure
+        would. A sub-run is ended with ``_SubagentAborted`` rather than
+        ``_TurnAborted`` for the same reason /abort uses it: that is the
+        exception ``_run_subagent`` knows how to finish a run with, and the
+        master's own ``_TurnAborted`` arrives a moment later at its next
+        checkpoint.
+
+        The flow caught BETWEEN parks is ``_check_turn_abort``'s half: the
+        latch is already set when this returns to the event loop, so the next
+        checkpoint the flow reaches raises for it.
+
+        Not poisoned, and deliberately: the flows parked on a *modal*
+        (``confirm`` for undo, the summary screen, the paste prompt). Those hold
+        the screen, so neither `/new` nor the sidebar button can be reached
+        while one is up - there is no way to arrive here from them.
+        """
+        self._queued_capture = None  # nothing captured for the old chat survives
+        if self._sub is not None:
+            self._sub_aborting = True
+        reply = self._reply_future
+        if reply is not None and not reply.done():
+            reply.set_exception(_SubagentAborted(_ABORT_NOTE))
+        answer = self._answer_future
+        if answer is not None and not answer.done():
+            answer.set_exception(_TurnAborted())
+        gate = self._gate_future
+        if gate is not None and not gate.done():
+            gate.set_exception(_TurnAborted())
+        engine = self._engine
+        if self._executing and engine is not None:
+            # Thread-safe by design (it sets an Event), which is what lets it be
+            # called from the event loop while the worker thread is inside
+            # execute(). That turn ends normally; the checkpoint after it raises.
+            engine.request_cancel()
+        await self._flow_idle.wait()
+
+    def _check_turn_abort(self) -> None:
+        """Raise if a new-chat abort landed while this flow was between parks.
+
+        Called at every point a flow could be passing through when
+        ``_abort_turn`` fires with nothing to poison - including the top of
+        ``_handle_step``, which is what stops an aborted turn from copying its
+        ``Send`` outbound into the chat that no longer exists.
+        """
+        if self._turn_aborting:
+            raise _TurnAborted()
 
     async def _engine_call(self, fn: Callable[..., _T], /, *args: object, **kwargs: object) -> _T:
         """Serialize every engine call and run it off the event loop."""
@@ -738,6 +887,10 @@ class SessionController:
         The window this brackets is exactly the window in which cancelling means
         something (``_executing``): the engine is chewing through tool calls on
         the worker thread and the user is watching the spinner."""
+        # Race-free: there is no await between this check and ``_executing``
+        # going true, so an abort either raises here or finds the flag set and
+        # cancels the engine.
+        self._check_turn_abort()
         n = len(self._turn_glyphs)
         label = f"Working - running {n} tool call{'' if n == 1 else 's'}..." if n else "Working..."
         self._view.start_working(label)
@@ -880,6 +1033,7 @@ class SessionController:
         self._turn_glyphs = {c.id: ["•", c.tool] for c in reply.calls}
         done = 0
         while True:
+            self._check_turn_abort()
             pending = await self._engine_call(engine.pending)
             if not pending:
                 break
@@ -922,6 +1076,7 @@ class SessionController:
         )
 
     async def _gate(self, action: PendingAction, position: str) -> tuple[Decision, str | None]:
+        self._check_turn_abort()  # never put a panel up for a turn already gone
         self._pending_approval = True
         self._push_state()  # composer disabled while the gate is up
         self._view.show_gate(action, position, self._queue_strip())
@@ -942,11 +1097,16 @@ class SessionController:
     async def _handle_step(self, step: StepResult) -> None:
         engine = self._engine
         assert engine is not None
+        # Nothing this method does is safe for a turn the user has abandoned -
+        # least of all the Send branch, which would copy the old conversation's
+        # next payload onto the clipboard for a chat that no longer exists.
+        self._check_turn_abort()
         # Both parking steps resume the SAME turn, so they loop together: a
         # reply may ask a question, then delegate, then ask again. `engine` stays
         # valid across a delegation because _run_subagent restores this session's
         # context before it returns.
         while isinstance(step, (AskUser, Delegate)):
+            self._check_turn_abort()
             if isinstance(step, AskUser):
                 await self._view.add_note(f"? {step.question}")
                 answer = await self._ask(step.question)
@@ -987,6 +1147,7 @@ class SessionController:
         # stats are one keypress away (the e / end_session action).
 
     async def _ask(self, question: str) -> str:
+        self._check_turn_abort()  # never park the composer for a turn already gone
         self._awaiting_answer = True  # the view switches the composer into answer mode
         self._push_state()
         self._view.alert(
@@ -1013,12 +1174,16 @@ class SessionController:
     async def _run_subagent(self, req: Delegate) -> tuple[str, ResultStatus, str | None]:
         """Run one delegated sub-task to completion and return its result body.
 
-        Always returns - never raises - because the caller is mid-turn on the
-        master and every outcome, including a crash, has to reach the model as
-        the `delegate` call's result. The ``finally`` is what makes that safe:
-        whatever happened, the master's context is restored, the live browser
-        chat goes back to the master's window and the master's tab is refocused
-        before this returns.
+        Returns for every outcome including a crash - never raises - because the
+        caller is mid-turn on the master and whatever happened has to reach the
+        model as the `delegate` call's result. The ``finally`` is what makes that
+        safe: the master's context is restored, the live browser chat goes back
+        to the master's window and the master's tab is refocused before this
+        returns.
+
+        The single exception is ``_TurnAborted`` (a mid-turn `/new`), which is
+        re-raised: there is no master turn left to deliver a result to, and the
+        session itself is being replaced. The ``finally`` still runs.
         """
         if not self._view.delegation_available():
             body = _unavailable_body(self._view.delegation_missing())
@@ -1072,6 +1237,14 @@ class SessionController:
         except _SubagentAborted:
             await self._view.add_note("✗ sub-agent run aborted by the user")
             outcome = (_ABORTED_BODY, "error", "aborted")
+        except _TurnAborted:
+            # The one exception that must NOT become a delegate result: there is
+            # no master turn left to hand it to. It can only arrive from a gate
+            # or an engine step INSIDE the sub-run (a sub park raises
+            # _SubagentAborted instead), which is exactly what a mid-turn /new
+            # does. The ``finally`` below still restores the master's context on
+            # the way past - one teardown path, however the run ended.
+            raise
         except (EngineStateError, BudgetExceeded) as exc:
             await self._view.add_error(f"sub-agent run failed: {exc}")
             outcome = (f"the sub-agent run failed: {exc}\n{_DELEGATION_HINT}", "error", "failed")
@@ -1329,15 +1502,19 @@ class SessionController:
         self._session_active = False
         self._engine = None
         self._chat_name = None
-        # A sub-run cannot be live here (/new is refused mid-turn), but the
-        # numbering restarts with the session: the view clears the sub-agent
-        # window's transcript along with the master's.
+        # A sub-run has already been torn down before this runs - a mid-turn
+        # /new aborts it first (``_abort_turn``), every other road here is idle -
+        # but the numbering restarts with the session anyway: the view clears
+        # the sub-agent window's transcript along with the master's. The two
+        # abort latches are cleared for the same belt-and-braces reason; both
+        # are already false on every path that reaches here.
         self._active = None
         self._sub = None
         self._sub_index = 0
         self._subagent_service = ""  # the next session's spec chooses again
         self._reply_future = None
         self._sub_aborting = False
+        self._turn_aborting = False
         self._preset = None
         self._snap = None
         self._last_outbound = None

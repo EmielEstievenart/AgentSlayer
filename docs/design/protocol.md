@@ -377,18 +377,23 @@ Explicit ranged requests (`start`/`end`, `max`) are honored up to 4× budget —
 
 ## 6. Idempotency and safety
 
-1. **Duplicate ingestion:** blake2b-128 over the normalized reply (fences stripped, CRLF→LF, trailing-whitespace-stripped lines). Watcher keeps the last 20 hashes; a match ⇒ silently ignored + status-bar notice "duplicate reply ignored". Tool's own outbound payload hashes live in the same suppression set (self-write suppression — mandatory, since results payloads contain `===CLIP:` and would otherwise re-trigger the watcher).
-2. **Foreign / out-of-order pastes — the ingest gate.** `Engine.ingest` applies four checks, in this order, and the order is normative:
+1. **Eligibility — two preconditions, and no third.** A copy-paste is eligible for interpretation iff (a) **the clipboard changed** and (b) **the chat name matches**. (a) is the watcher's job and is enforced byte-wise on the raw clipboard text (`clip/watcher.py` keeps a `last_seen` (length, hash) pair); AgentClip's own writes advance that same baseline, so an identical model reply arriving *after* an outbound counts as changed and is forwarded. (b) is §6.2's chat gate.
+
+   Consequently there is **no duplicate suppression on replies**. Re-pasting a reply AgentClip already ran **re-runs it, by design**: the user deliberately re-copying an older message is an instruction to re-interpret it, and a model that sends the identical response twice means it twice. What *is* suppressed is AgentClip's **own outbound**: blake2b-128 over the normalized payload (fences stripped, CRLF→LF, trailing-whitespace-stripped lines), last 20 chunks, checked at ingest and registered with the watcher before every clipboard write. That suppression is mandatory — results payloads contain `===CLIP:` and would otherwise read as a reply.
+2. **Foreign / out-of-order pastes — the ingest gate.** `Engine.ingest` applies these checks, in this order, and the order is normative:
 
    | # | check | verdict |
    |---|---|---|
-   | 1 | phase is not AWAITING_REPLY | `Noise("wrong-phase")` |
+   | 1 | phase is neither AWAITING_REPLY nor DONE | `Noise("wrong-phase")` |
    | 2 | no sentinel lines at all | `Noise("not-protocol")` |
-   | 3 | normalized hash in the last 20 seen | `Noise("duplicate")` |
+   | 3 | normalized hash among the last 20 outbound chunks | `Noise("own-outbound")` |
    | 4 | chat name (below) | `Noise("missing-chat")` / `Noise("wrong-chat")` |
-   | 5 | a sentinel line carries glued-on `CLIP:` text (§1.4 #14) | `ProtocolError` — the paste is ours but is not a whole reply; nothing executes |
+   | 5 | phase is DONE and the paste is not a whole reply with a present EOM | `Noise("wrong-phase")` — otherwise the completed session **reopens** (DONE → AWAITING_REPLY, audited as a `reopened` event) and ingestion continues |
+   | 6 | a sentinel line carries glued-on `CLIP:` text (§1.4 #14) | `ProtocolError` — the paste is ours but is not a whole reply; nothing executes |
 
-   Dedup stays **ahead** of the chat check so that re-pasting a reply AgentClip already ran still reads as "duplicate reply ignored" — the accurate diagnosis — instead of being re-litigated on identity. Conversely a paste rejected at step 4 or 5 is *not* added to the seen-hash set: a foreign or mangled paste must report the same reason every time rather than decaying into "duplicate" on the second attempt. Step 5 comes last so a *flattened* paste from another chat is still reported as the foreign paste it is.
+   Step 3 sits ahead of the chat check because our own outbound now carries the chat name and would otherwise sail through step 4; the verdict means exactly one thing — "you copied AgentClip's own text back". A paste rejected at step 4 or 6 is *not* remembered anywhere: a foreign or mangled paste must report the same reason every time it is pasted. Step 6 comes last so a *flattened* paste from another chat is still reported as the foreign paste it is; a flattened paste in DONE reopens the session first, which is right — the resend the error asks for then lands normally.
+
+   Step 5 is what makes completion non-final for ingestion. `task_done` ends the session, but the eligibility rule above knows nothing about completion, so a valid reply arriving afterwards must run. Only a *whole* reply may reopen: a present EOM that survived step 4 is proof the paste belongs to this chat, whereas an ACK/NACK has nothing left to acknowledge and a truncated reply carries no chat name at all (it is deliberately un-gated, below) — reopening on either would run text never established as ours, breaching precondition (b).
 
    The chat check applies exactly where the model was told to write the name:
    - reply with an EOM line ⇒ `eom.chat` must equal the session chat name;
@@ -397,7 +402,6 @@ Explicit ranged requests (`start`/`end`, `max`) are honored up to 4× budget —
 
    Everything downstream is unchanged: a *different* protocol-bearing clipboard while a turn is mid-approval or mid-PART-handshake ⇒ TUI modal "Unexpected reply detected — Replace current turn / Ignore" (never auto-execute). Regenerated replies (new hash, same intent) land here too; the per-call approval gates are the final backstop.
 
-   Self-write suppression (1) also means AgentClip's own outbound — which now carries the chat name and would otherwise pass step 4 — is dropped at step 3 as before.
 3. **Id hygiene:** ids missing/duplicated/non-numeric are renumbered sequentially at ingestion; if anything changed, the results payload leads with an informational note: `note: you sent two calls with id=2; treated as id=2 and id=3 below.` Correlation is thus never ambiguous on either side.
 4. **Hallucinated tools/params:** closed-set validation ⇒ `unknown_tool` / `missing_param` / `bad_param` results with the valid alternatives in the hint. Execution of valid siblings proceeds.
 5. **Ordering within a reply:** strictly sequential by (renumbered) id; a failed call does not halt later calls *except* later calls naming the same path as a failed `write_file`/`edit_file`, which are auto-`skipped` with `hint: prior edit of this file failed; resend after fixing.` (Prevents compounding a failed edit.)
@@ -489,7 +493,7 @@ EOT
 
 **TUI designer must honor:**
 - Watcher pre-filter is the literal substring `===CLIP:`; all parsing happens off the UI thread; detection arrives as a posted message carrying `ParsedReply`.
-- Status bar fields fed by this protocol: watcher state, active preset + budget chars, PART progress ("paste part 2/3"), duplicate-ignored notices, NACK retry counter.
+- Status bar fields fed by this protocol: watcher state, active preset + budget chars, PART progress ("paste part 2/3"), ignored-paste notices (own-outbound, missing/wrong chat), NACK retry counter.
 - The chat name is surfaced once in the transcript at session start ("chat name: amber-falcon — the model echoes chat=amber-falcon on every reply; pastes without it are ignored"), and named again in the `missing-chat` / `wrong-chat` toasts so a rejection is self-explaining.
 - Approval flow returns exactly one of approve / deny / abort-rest-of-turn, mapping to `ok` / `denied` / `skipped`; "auto-accept edits this session" only affects `write_file`/`edit_file`/`delete_file`, never `run_command`.
 - `ask_user` blocks payload assembly until the user answers in the TUI (or explicitly cancels ⇒ `denied`).

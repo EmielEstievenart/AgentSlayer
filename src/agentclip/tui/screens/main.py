@@ -3479,13 +3479,12 @@ class MainScreen(Screen[None]):
         found, best_miss = await asyncio.to_thread(
             _lowest_match_scored, templates, scene, max_diff=TemplateKind.COPY.max_diff
         )
-        # The copy button's one and only appearance in the ELEMENTS column: it
-        # is not a per-tick detector, it is searched for exactly here, once per
-        # response, so this flow posts its own crop instead of the poller. Cut
-        # from THIS frame, which is why it happens before the hover scan - a
-        # hover-scan hit was verified against a frame taken with the pointer
-        # somewhere else, and cutting it out of the static one would draw
-        # whatever the icon was hiding.
+        # The ELEMENTS column's picture of the frame the click is being AIMED
+        # at, which the poller's own copy row cannot be: this frame is the one
+        # after the scroll and the settle. Cut from THIS frame, which is why it
+        # happens before the hover scan - a hover-scan hit was verified against
+        # a frame taken with the pointer somewhere else, and cutting it out of
+        # the static one would draw whatever the icon was hiding.
         self._show_copy_crop(scene, found)
         if found is None and self._live_preset().hover_scan:
             # Nothing in the static frame: this service is one of the chats that

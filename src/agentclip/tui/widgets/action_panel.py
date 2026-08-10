@@ -6,6 +6,10 @@ textual[syntax] extra; full highlighted content under a NEW FILE banner for
 brand-new files; the literal command line for run_command) inside a boldly
 bordered drawer with big Approve / Reject buttons, so the prompt is unmissable.
 
+The middle button is whichever "stop asking me" answer this session has: the
+edits-only auto-accept, or - under a permission ruleset - "Always: <pattern>",
+naming exactly what pressing it would remember (engine/approval.py).
+
 The buttons emit a single :class:`ActionPanel.Decision` message; the MainScreen
 owns all key handling and resolves the gate. ``ask_user`` answering lives on the
 persistent chat composer now, not here - this widget is approval-only.
@@ -28,10 +32,15 @@ from agentclip.engine.engine import PendingAction
 def preview_renderable(action: PendingAction) -> RenderableType:
     """The Rich renderable for one gated call's preview."""
     if action.kind == "command":
-        command = action.call.params.get("command", "")
+        command = action.call.params.get("command") or action.preview
         text = Text()
         text.append(f"$ {command}\n\n", style="bold")
-        text.append("not on the allowlist - approve to run once in the project root", style="dim")
+        text.append(
+            "no rule allows this - approve to run it once"
+            if action.always_pattern is not None
+            else "not on the allowlist - approve to run once in the project root",
+            style="dim",
+        )
         timeout = action.call.params.get("timeout")
         if timeout:
             text.append(f"\ntimeout: {timeout}s", style="dim")
@@ -97,11 +106,25 @@ class ActionPanel(Vertical):
         self.query_one("#action-title", Static).update(Text(title))
         self.query_one("#action-queue", Static).update(Text(queue))
         self.query_one("#action-content", Static).update(preview_renderable(action))
+        # The middle button is the "stop asking me about these" answer. Under a
+        # permission ruleset it is offered for every gated call and names the
+        # exact pattern it would remember - a button that says "always allow"
+        # without saying always allow WHAT is not something to press blind.
+        always = action.always_pattern
         is_edit = action.kind == "edit"
-        self.query_one("#approve-edits-btn", Button).display = is_edit
+        button = self.query_one("#approve-edits-btn", Button)
+        button.display = always is not None or is_edit
         hints = "press y to approve · n to reject"
-        if is_edit:
-            hints += " · a to approve + auto-accept edits this session"
+        if always is not None:
+            # A bare "*" is the whole permission key (all edits, all reads...);
+            # spelling it out beats a button labelled with one asterisk.
+            what = "calls like this one" if always == "*" else always
+            button.label = f"Always: {what}  (a)"
+            hints += f" · a to always allow {what} (until AgentClip restarts)"
+        else:
+            button.label = "Approve + auto-edits  (a)"
+            if is_edit:
+                hints += " · a to approve + auto-accept edits this session"
         self.query_one("#action-hints", Static).update(hints)
         self.query_one("#reject-reason").display = False
         self.display = True

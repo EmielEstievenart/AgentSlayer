@@ -727,6 +727,9 @@ class MainScreen(Screen[None]):
         self._watch_worker: Worker[None] | None = None
         self._snap: StatusSnapshot | None = None  # mirrors SessionView.snapshot (read by tests)
         self._gate_kind: str | None = None  # the in-flight gate's kind, for a/check_action
+        # The pattern `a` would remember at the in-flight gate, or None in legacy
+        # mode (where `a` is the edits-only auto-accept).
+        self._gate_always: str | None = None
         # Mirrors SessionView.session_role/title: whose session the chrome is
         # currently describing (see render_state).
         self._session_role = "master"
@@ -1135,7 +1138,8 @@ class MainScreen(Screen[None]):
         if action in ("approve", "reject"):
             return True if self.pending_approval else None
         if action == "auto_edits":
-            return True if (self.pending_approval and self._gate_kind == "edit") else None
+            offered = self._gate_always is not None or self._gate_kind == "edit"
+            return True if (self.pending_approval and offered) else None
         if action in ("undo", "end_session"):
             ok = (
                 self.session_active
@@ -1565,6 +1569,7 @@ class MainScreen(Screen[None]):
 
     def show_gate(self, action: PendingAction, position: str, queue: str) -> None:
         self._gate_kind = action.kind
+        self._gate_always = action.always_pattern
         if not self.is_mounted:
             return
         with suppress(NoMatches):
@@ -1582,6 +1587,7 @@ class MainScreen(Screen[None]):
 
     def hide_gate(self) -> None:
         self._gate_kind = None
+        self._gate_always = None
         if not self.is_mounted:
             return
         with suppress(NoMatches):
@@ -2174,7 +2180,12 @@ class MainScreen(Screen[None]):
         self._controller.submit_decision(Decision.APPROVE, None)
 
     def action_auto_edits(self) -> None:
-        if self._gate_kind == "edit":
+        """The gate's third answer: "stop asking me about these". Under a
+        permission ruleset it remembers a rule for calls like this one; in legacy
+        mode it is the edits-only auto-accept, offered at edit gates alone."""
+        if self._gate_always is not None:
+            self._controller.submit_decision(Decision.APPROVE_ALWAYS, None)
+        elif self._gate_kind == "edit":
             self._controller.submit_decision(Decision.APPROVE_ALL_EDITS, None)
 
     def action_reject(self) -> None:

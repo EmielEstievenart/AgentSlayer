@@ -1,8 +1,9 @@
 """Configuration: frozen dataclasses + TOML load/merge/validate.
 
-Stdlib-only leaf (plus platformdirs). Precedence, later wins, per-key shallow
-merge per table — lists REPLACE, never concatenate (so a project can tighten
-the allowlist):
+Stdlib-only leaf (plus platformdirs, tomli_w, and permissions.py - itself a
+stdlib-only leaf, shared with the approval policy). Precedence, later wins,
+per-key shallow merge per table — lists REPLACE, never concatenate (so a
+project can tighten the allowlist):
 
     built-in defaults
     -> <user_config_dir>/agentclip/config.toml
@@ -12,6 +13,7 @@ the allowlist):
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import tomllib
@@ -22,6 +24,8 @@ from pathlib import Path
 
 import platformdirs
 import tomli_w
+
+from agentclip.permissions import PermissionRule, default_rules, rules_from_config
 
 # Always excluded from file tools, not configurable: the LLM must never read
 # backups/transcripts or tamper with its own approval rules.
@@ -294,6 +298,16 @@ class ApprovalConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PermissionConfig:
+    """Where the OpenCode-style permission ruleset comes from, and whether it is
+    consulted at all. Off (or a missing file) leaves the legacy allowlist gate
+    in charge - see engine/approval.py."""
+
+    enabled: bool = True
+    opencode_config: str = ""  # blank = default_opencode_config_path()
+
+
+@dataclass(frozen=True, slots=True)
 class LimitsConfig:
     max_file_read_chars: int = 20_000
     max_command_output_chars: int = 8_000
@@ -321,6 +335,12 @@ class Config:
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
+    permission: PermissionConfig = field(default_factory=PermissionConfig)
+    # The effective ruleset (built-in defaults first, the user's opencode.json
+    # appended). EMPTY means "no ruleset": the legacy allowlist gate stays in
+    # charge, which is what every install without an opencode.json gets.
+    permission_rules: tuple[PermissionRule, ...] = ()
+    permission_source: str = ""  # the file the rules came from, "" when none did
     exclude: tuple[str, ...] = DEFAULT_EXCLUDES
     services: dict[str, ServicePreset] = field(default_factory=default_services)
     warnings: tuple[str, ...] = ()  # non-fatal validation complaints, for the TUI to surface
@@ -340,6 +360,16 @@ class Config:
 
 def default_global_config_path() -> Path:
     return Path(platformdirs.user_config_dir("agentclip")) / "config.toml"
+
+
+def default_opencode_config_path() -> Path:
+    """OpenCode's own config file. AgentClip reads the SAME file rather than
+    inventing a parallel permission format: a user who has already told OpenCode
+    which commands they trust has already told AgentClip.
+
+    Not under platformdirs: OpenCode uses ``~/.config/opencode`` on every
+    platform, Windows included, so that is where the file is."""
+    return Path.home() / ".config" / "opencode" / "opencode.json"
 
 
 def default_profile_dir() -> Path:
@@ -496,6 +526,47 @@ def _take_matcher(table: dict, default: str, ctx: str, warnings: list[str]) -> s
     return value
 
 
+def _load_permission_rules(
+    settings: PermissionConfig, warnings: list[str]
+) -> tuple[tuple[PermissionRule, ...], str]:
+    """Read opencode.json's top-level ``permission`` block into the effective
+    ruleset, defaults first.
+
+    Only that one key is read. OpenCode's ``agent``/``plugin`` blocks describe
+    OpenCode agents, which AgentClip has no equivalent of - guessing a mapping
+    would silently grant or refuse things the user never decided.
+
+    A missing file is not a problem (most machines have none): it returns an
+    empty ruleset, which is the signal for legacy mode. Only a file that EXISTS
+    and cannot be understood warns."""
+    if not settings.enabled:
+        return (), ""
+    path = (
+        Path(settings.opencode_config).expanduser()
+        if settings.opencode_config
+        else default_opencode_config_path()
+    )
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return (), ""
+    except OSError as exc:
+        warnings.append(f"config: could not read {path}: {exc}")
+        return (), ""
+    try:
+        data = json.loads(raw)
+    except ValueError as exc:
+        warnings.append(f"config: {path} is not valid JSON: {exc}")
+        return (), ""
+    if not isinstance(data, dict) or "permission" not in data:
+        return (), ""
+    rules, rule_warnings = rules_from_config(data["permission"])
+    warnings.extend(f"config: {path}: {w}" for w in rule_warnings)
+    if not rules:
+        return (), ""
+    return default_rules() + rules, str(path)
+
+
 def load_config(
     project_root: Path,
     *,
@@ -518,6 +589,7 @@ def load_config(
     notify_t = merged.get("notify", {})
     backup_t = merged.get("backup", {})
     paths_t = merged.get("paths", {})
+    permission_t = merged.get("permission", {})
 
     services = default_services()
     for key, table in merged.get("services", {}).items():
@@ -618,6 +690,12 @@ def load_config(
         warnings.append(f"config: unknown theme {theme!r}; using {DEFAULT_THEME!r}")
         theme = DEFAULT_THEME
 
+    permission = PermissionConfig(
+        enabled=_take_bool(permission_t, "enabled", True, "permission", warnings),
+        opencode_config=_take_str(permission_t, "opencode_config", "", "permission", warnings),
+    )
+    permission_rules, permission_source = _load_permission_rules(permission, warnings)
+
     return Config(
         general=GeneralConfig(
             service=service,
@@ -655,6 +733,9 @@ def load_config(
         backup=BackupConfig(
             keep_sessions=_take_int(backup_t, "keep_sessions", 5, 1, 1_000, "backup", warnings),
         ),
+        permission=permission,
+        permission_rules=permission_rules,
+        permission_source=permission_source,
         exclude=_take_str_list(paths_t, "exclude", DEFAULT_EXCLUDES, "paths", warnings),
         services=services,
         warnings=tuple(warnings),

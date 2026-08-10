@@ -24,6 +24,10 @@ class Decision(Enum):
     APPROVE = auto()
     REJECT = auto()  # optional reason rides as Engine.decide(..., note=...)
     APPROVE_ALL_EDITS = auto()  # sticky for the session; never applies to commands
+    # "Always allow calls like this one": remembers a permission rule for the
+    # session (ruleset mode - engine/approval.py). Falls back to
+    # APPROVE_ALL_EDITS's behaviour when no ruleset governs the session.
+    APPROVE_ALWAYS = auto()
 
 
 class EngineStateError(RuntimeError):

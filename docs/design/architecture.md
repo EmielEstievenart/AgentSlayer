@@ -34,6 +34,7 @@ src/agentclip/
 ├── __main__.py            # python -m agentclip → cli.main()
 ├── cli.py                 # argparse (--project, --service, --version); builds Config, wires Engine + TUI
 ├── config.py              # frozen dataclasses + TOML load/merge/validate (stdlib tomllib)
+├── permissions.py         # OpenCode's allow/ask/deny rule model: wildcard matcher, evaluate(), always_pattern()
 │
 ├── protocol/
 │   ├── types.py           # wire-level dataclasses (ToolCall, ParsedTurn, ParseIssue, Outbound)
@@ -44,7 +45,7 @@ src/agentclip/
 ├── engine/
 │   ├── engine.py          # Engine: the session state machine (the only orchestrator)
 │   ├── states.py          # Phase enum + legal-transition table
-│   ├── approval.py        # ApprovalPolicy: allowlist matching, session escalation flags
+│   ├── approval.py        # ApprovalPolicy: permission rules (or the legacy allowlist), session escalation flags
 │   └── results.py         # ToolResult + middle-truncation to configured size caps
 │
 ├── tools/
@@ -170,12 +171,15 @@ class Phase(Enum):
 
 class Decision(Enum):
     APPROVE = auto(); REJECT = auto(); APPROVE_ALL_EDITS = auto()  # escalation sticks for session
+    APPROVE_ALWAYS = auto()       # ruleset mode: remember a permission rule for the session
 
 @dataclass(frozen=True, slots=True)
 class PendingAction:
     call: ToolCall
-    kind: Literal["edit", "write", "command", "auto"]   # "auto" = no approval needed
-    preview: str                  # unified diff for edit/write; command line for command
+    kind: Literal["edit", "command", "auto"]            # "auto" = no approval needed
+    preview: str                  # unified diff for an edit; command line for a command
+    auto_reason: str | None       # why it needed no gate (transcript/audit text)
+    always_pattern: str | None    # ruleset mode: what APPROVE_ALWAYS would remember, e.g. "git commit *"
 
 class Engine:
     """Synchronous, single-threaded. Host (TUI) calls it from exactly one worker thread."""
@@ -254,7 +258,7 @@ class SessionRef:
 class ToolSpec:
     name: str
     handler: Callable[[Workspace, ToolCall, Limits], ToolResult]
-    approval_kind: Literal["auto", "edit", "write", "command"]
+    approval_kind: Literal["auto", "edit", "command"]
     catalog_doc: str             # the description embedded in the bootstrap prompt
 
 class ToolRegistry:
@@ -271,10 +275,26 @@ class Workspace:
 
 # engine/approval.py -----------------------------------------------------
 class ApprovalPolicy:
-    auto_accept_edits: bool = False          # flipped by Decision.APPROVE_ALL_EDITS
-    yolo: bool = False                       # auto-approve EVERYTHING; toggled live by /yolo
-    def verdict(self, spec: ToolSpec, call: ToolCall) -> Literal["auto", "needs_approval"]
-    def command_auto_allowed(self, command: str) -> bool   # glob allowlist + deny-token check
+    auto_accept_edits: bool = False          # legacy mode: flipped by Decision.APPROVE_ALL_EDITS
+    yolo: bool = False                       # auto-approve every ASK; toggled live by /yolo
+    session_rules: list[PermissionRule]      # "always allow" answers; evaluated last
+    ruleset_mode: bool                       # True once a permission ruleset is loaded
+    def verdict(self, spec: ToolSpec, call: ToolCall) -> Literal["auto", "needs_approval", "deny"]
+    def command_auto_allowed(self, command: str) -> str | None  # legacy: glob allowlist + deny tokens
+    def rule_for(self, spec: ToolSpec, call: ToolCall) -> PermissionRule
+    def always_rule(self, spec: ToolSpec, call: ToolCall) -> PermissionRule
+    def remember(self, rule: PermissionRule) -> None
+
+# permissions.py (stdlib leaf, shared by config.py and approval.py) -------
+@dataclass(frozen=True, slots=True)
+class PermissionRule:
+    permission: str; pattern: str; action: Literal["allow", "ask", "deny"]
+
+def wildcard_match(text: str, pattern: str) -> bool          # OpenCode's Wildcard.match
+def evaluate(permission, pattern, *rulesets) -> PermissionRule   # LAST match wins; no match = "ask"
+def rules_from_config(obj) -> tuple[rules, warnings]         # OpenCode's fromConfig
+def permission_target(tool, params, approval_kind) -> tuple[str, str]   # tool -> (key, resource)
+def always_pattern(key: str, resource: str) -> str           # "git commit *" / "*"
 
 # store/backups.py -------------------------------------------------------
 class BackupStore:
@@ -318,6 +338,34 @@ The TUI wraps the engine: clipboard watcher thread → `post_message(ClipboardCa
 
 **Allowlist matching: glob (`fnmatch.fnmatchcase`) against the full command string.** Rejected regex: users will write allowlists by hand; glob is auditable at a glance and can't catastrophically backtrack. Safety backstop: if a command contains any *deny token* (`;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`, newline), it **always requires approval** even when a glob matches — this prevents `pytest tests; rm -rf ~` from riding the `pytest *` pattern.
 
+### Permission rules: reading OpenCode's `opencode.json`
+
+AgentClip reads the **same** permission file OpenCode does — `~/.config/opencode/opencode.json` on every platform, Windows included (`[permission] opencode_config` overrides the path, `[permission] enabled = false` switches it off). Only the top-level `"permission"` key is read: OpenCode's `agent`/`plugin` blocks name OpenCode agents, which have no AgentClip equivalent, and guessing a mapping would grant or refuse things the user never decided. The model can't reach the file either way — it lives outside the workspace.
+
+A rule is `(permission key, resource pattern, action)` with `action ∈ {allow, ask, deny}`. `permissions.py` (a stdlib leaf, shared by `config.py` and `engine/approval.py`) ports OpenCode's semantics verbatim:
+
+- **Wildcard matching**, not glob and not regex: `*` crosses spaces *and* slashes, `?` is exactly one character, backslashes normalize to `/` on both sides, matching is whole-string anchored and case-insensitive on Windows. A pattern ending in `" *"` makes the arguments optional, so `ls *` matches a bare `ls`.
+- **Positional precedence**: the LAST matching rule wins — no specificity sorting. That is what lets a config say `"*": "ask"` and carve exceptions under it. No rule matching at all is an implicit `ask`.
+- **Effective ruleset** = built-in defaults (`{"*": "allow", "read": {"*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow"}}`) **then** the user's rules, appended — so anything they write outranks the defaults.
+
+Tools map onto permission keys: `read_file→read`, `write_file`/`edit_file`/`delete_file→edit`, `list_dir→list`, `glob→glob`, `grep→grep`, `run_command→bash`, `skill→skill`, `delegate→task`. The resource is the file path (workspace-relative, forward slashes), the pattern/name parameter, or the full command line. `ask_user`/`task_done` are AgentClip's own control flow and are never gated.
+
+**Two modes.** A non-empty ruleset REPLACES the legacy `command_allowlist` mechanism; an empty one (no file, or disabled) leaves today's behaviour untouched.
+
+| | legacy mode (no ruleset) | ruleset mode |
+|---|---|---|
+| read-only tools | always auto | whatever the rules say (`list_dir` gates if nothing allows `list`) |
+| edits | gate until `auto_accept_edits` | whatever the rules say |
+| commands | glob allowlist + deny tokens | rules + deny-token backstop |
+| `/yolo` | auto-approves everything | auto-approves every *ask*; a `deny` still denies |
+| third gate button | Approve + auto-edits (edits only) | **Always: `<pattern>`** (every gated call), `Decision.APPROVE_ALWAYS` |
+
+A `deny` verdict never opens a gate: the call is pre-resolved as a `denied` result carrying OpenCode's `DeniedError` text (protocol.md §4) and the turn *continues* — only an interactive rejection aborts the rest of it. The decision is audited with source `rule`, as are rule-allowed calls (`allowed by rule bash["git status*"]`).
+
+**"Always allow"** appends `Rule(key, always_pattern, "allow")` to an in-memory session list evaluated *last*, so it outranks the file (OpenCode's `approved` array works the same way) and is forgotten on restart. `always_pattern` keeps the first N words of a command per a small arity table (`git commit -m "wip"` → `git commit *`, `npm run build` → `npm run build *`) and is `*` for every other key — remembering an edit means remembering all edits, which is exactly what `APPROVE_ALL_EDITS` already meant. Answering it re-evaluates the other pending calls in the turn and auto-approves the ones the new rule covers.
+
+**Deviation from OpenCode: the deny-token backstop.** OpenCode splits a shell script with tree-sitter and judges every command node separately, so `git status && rm -rf /` is also judged as `rm -rf /`. AgentClip has no shell parser, so instead a command containing any configured deny token (`;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`, newline) can never *silently* auto-run: `allow` is downgraded to a gate, and YOLO does not answer that one for you. A `deny` still wins outright. This is why `command_deny_tokens` stays in `[approval]` even in ruleset mode.
+
 **Full default config** (this exact content ships as the built-in default and as a commented `config.toml` written on first run):
 
 ```toml
@@ -344,6 +392,10 @@ command_allowlist = [
   "ls*", "dir*",
 ]
 command_deny_tokens = [";", "&&", "||", "|", "`", "$(", ">", "<"]
+
+[permission]
+enabled = true                 # read OpenCode's rules (see above); false = legacy allowlist only
+opencode_config = ""           # "" = ~/.config/opencode/opencode.json
 
 [limits]
 max_file_read_chars = 20000    # read_file hard cap per call (LLM asks for ranges beyond this)
@@ -526,7 +578,7 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
                     └── files/src/utils.py        # mirrored relative paths, pre-change bytes
 ```
 
-**Transcript JSONL** — one event per line, `{"t": <type>, "ts": <iso8601>, ...}` with types: `task`, `outbound` (kind, turn, total_chars, chunk count), `inbound` (raw text), `parsed` (call ids/tools, issues), `decision` (call_id, verdict, source: user|allowlist|auto_edits), `result` (call_id, ok, truncated, chars), `undo`, `error`. Raw inbound is stored verbatim — it is the audit trail for "what did the LLM actually say".
+**Transcript JSONL** — one event per line, `{"t": <type>, "ts": <iso8601>, ...}` with types: `task`, `outbound` (kind, turn, total_chars, chunk count), `inbound` (raw text), `parsed` (call ids/tools, issues), `decision` (call_id, verdict, source: user|allowlist|auto_edits|yolo|rule), `result` (call_id, ok, truncated, chars), `undo`, `error`. Raw inbound is stored verbatim — it is the audit trail for "what did the LLM actually say".
 
 **Resume after restart: NOT supported in MVP.** Decision: a half-finished conversation lives in the chat UI's context, which AgentClip cannot reconstruct reliably; faking resume invites state divergence. On restart you start a new session/task. What *is* supported after restart: backups remain on disk for manual recovery, and M3's `undo` can target the latest session's turns by reading manifests from disk (no in-memory state needed). Transcript is audit-only.
 
@@ -673,7 +725,7 @@ tests/
 │   ├── test_state_machine.py        # legal/illegal phase transitions, decide/execute ordering
 │   ├── test_roundtrip.py            # full headless loop: start_task → ScriptedLLM reply → approve →
 │   │                                #   execute → results payload → ... → task_done; asserts files on disk
-│   └── test_approval.py             # glob allowlist, deny-token override, APPROVE_ALL_EDITS stickiness
+│   └── test_approval.py             # both modes: glob allowlist + deny tokens, and rule verdicts/deny/always
 ├── tools/
 │   ├── test_sandbox.py              # ../escape, absolute POSIX + C:\ + UNC, drive letter, NUL,
 │   │                                #   symlink-out-of-root (skipif Windows without symlink privilege),

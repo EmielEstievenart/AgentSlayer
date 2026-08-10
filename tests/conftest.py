@@ -136,6 +136,22 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
 
 
 @pytest.fixture(autouse=True)
+def _no_real_opencode_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reads the developer's real ``~/.config/opencode/opencode.json``.
+
+    A permission ruleset REPLACES the legacy allowlist gate (engine/approval.py),
+    so a machine that happens to have OpenCode installed would run this suite
+    under that user's private rules - green here, red on the next machine, and
+    the failure would look like an approval bug rather than a leak. Tests that
+    want a ruleset point ``[permission] opencode_config`` at a file they wrote.
+    """
+    missing = tmp_path / "no-such-opencode.json"
+    monkeypatch.setattr(
+        "agentclip.config.default_opencode_config_path", lambda: missing
+    )
+
+
+@pytest.fixture(autouse=True)
 def _half_block_terminal() -> Any:
     """Every test starts on the renderer that needs nothing from a terminal.
 

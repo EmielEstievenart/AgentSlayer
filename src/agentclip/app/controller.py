@@ -900,11 +900,13 @@ class SessionController:
                 )
             else:
                 self._set_glyph(action.call.id, "✓")
-                label = (
-                    "approved (auto-accept edits ON)"
-                    if decision is Decision.APPROVE_ALL_EDITS
-                    else "approved"
-                )
+                if decision is Decision.APPROVE_ALL_EDITS:
+                    label = "approved (auto-accept edits ON)"
+                elif decision is Decision.APPROVE_ALWAYS:
+                    pattern = action.always_pattern or "*"
+                    label = f"approved (always allowing {pattern} this session)"
+                else:
+                    label = "approved"
                 await self._view.add_note(f"✓ {label} {action.call.tool} {target}".rstrip())
         self._view.hide_gate()
         await self._refresh_status()  # EXECUTING (status segment driven by busy)

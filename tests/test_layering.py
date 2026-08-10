@@ -5,6 +5,7 @@
             │  └──► store
             └──► protocol (leaf)
     config (leaf) ◄── imported by everyone
+     └──► permissions (leaf: the rule model, also used by engine/approval)
 
 Only module-level imports count: lazy third-party imports inside functions
 (e.g. copykitten in the clip providers) are allowed.
@@ -23,7 +24,10 @@ STDLIB = frozenset(sys.stdlib_module_names)
 # imported module name exactly or as a package prefix, EXCEPT the bare
 # "agentclip" entry which matches only the root package itself (__version__).
 RULES: list[tuple[str, frozenset[str]]] = [
-    ("agentclip.config", frozenset({"platformdirs", "tomli_w"})),
+    # permissions: a stdlib-only leaf below config, so the same rule model can be
+    # loaded by config.py and applied by engine/approval.py.
+    ("agentclip.permissions", frozenset()),
+    ("agentclip.config", frozenset({"platformdirs", "tomli_w", "agentclip.permissions"})),
     ("agentclip.protocol", frozenset({"agentclip.config", "agentclip.protocol"})),
     (
         "agentclip.tools",
@@ -39,6 +43,7 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip",
                 "agentclip.config",
                 "agentclip.engine",
+                "agentclip.permissions",
                 "agentclip.protocol",
                 "agentclip.store",
                 "agentclip.tools",

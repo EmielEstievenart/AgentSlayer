@@ -51,7 +51,7 @@ MainScreen
 │   │   │   ├── VerticalScroll       id=action-body       # diff / question / chunk wizard; focused on show
 │   │   │   │   └── Static                                # Rich renderable
 │   │   │   └── Horizontal           id=action-footer
-│   │   │       ├── Static           id=action-hints      # "[y] approve  [n] reject  [a] auto-accept edits"
+│   │   │       ├── Static           id=action-hints      # "[y] approve  [n] reject  [a] auto-accept edits / always allow <pattern>"
 │   │   │       └── Input            id=reject-reason     # hidden until 'n'
 │   │   ├── RunningBar(Static)       id=running           # spinner + "(ctrl+x to cancel)" while a turn executes
 │   │   ├── CommandPopup(Static)     id=cmd-popup         # display:none unless a /command is being typed (§3.3a)
@@ -393,11 +393,11 @@ IDLE ──copy bootstrap──▶ ARMED ──reply parsed──▶ EXECUTING �
 
 | Tool | Behavior |
 |---|---|
-| `read_file`, `list_dir`, `glob`, `grep` | auto-run, never gated |
-| `run_command` | auto-run if allowlist matches (transcript shows matched rule: `auto: matched "pytest *"`); else **gated** |
+| `read_file`, `list_dir`, `glob`, `grep` | auto-run, never gated — unless a permission ruleset says otherwise (architecture §2), where every tool answers to its rules |
+| `run_command` | auto-run if the allowlist matches (transcript shows the matched rule: `auto: matched "pytest *"`) — or, in ruleset mode, if a rule allows it (`allowed by rule bash["git status*"]`); a rule that DENIES it skips the gate entirely and returns a denied result; else **gated** |
 | `write_file`, `edit_file` | **gated**, unless session auto-accept-edits is ON |
 | `ask_user` | pauses for typed answer (not an approval; §9) |
-| `delegate` | auto-runs (master only, and only when the sub-agent chat is calibrated): parks the turn and runs a sub-agent in the second window — §3.4c. Never gated, because opening a sub-agent chat is loudly visible and every call the sub-agent makes is gated normally |
+| `delegate` | auto-runs (master only, and only when the sub-agent chat is calibrated): parks the turn and runs a sub-agent in the second window — §3.4c. Never gated in legacy mode, because opening a sub-agent chat is loudly visible and every call the sub-agent makes is gated normally; under a permission ruleset it answers to the `task` key like any other tool |
 | `task_done` | auto-runs; ends the turn and marks the session complete (the user may still follow up to reopen it) |
 
 YOLO mode (§2.6) overrides the whole table for the gated rows: when ON, `run_command`, `write_file`, and `edit_file` all auto-run regardless of allowlist/deny tokens.
@@ -868,7 +868,7 @@ Only keys that are actually bound are listed. Chunk-walk mode (§6) has none yet
 |---|---|---|
 | `y` | approve pending call | pending_approval |
 | `n` | reject pending call (opens reason Input) | pending_approval |
-| `a` | approve + auto-accept edits for the session | pending_approval and the gate is an `edit` |
+| `a` | approve + auto-accept edits for the session — or, under a permission ruleset (architecture §2), approve + always allow calls matching this one's pattern | pending_approval and either the gate is an `edit` or the gate carries an `always_pattern` |
 | `u` | undo last turn (ConfirmScreen) | session active, not busy, AWAITING_REPLY/DONE |
 | `c` | re-copy current outbound / current part | has_outbound |
 | `i` | force-ingest clipboard now | session active, not busy, AWAITING_REPLY |

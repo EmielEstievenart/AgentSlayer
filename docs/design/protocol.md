@@ -299,11 +299,12 @@ R2
 ===CLIP:EOM turn=4 chat=amber-falcon===
 ```
 
-- **status:** `ok` | `error` (with `code=`) | `denied` (user rejected at approval gate) | `skipped` (user aborted the rest of the turn; bootstrap: "skipped calls did not run — resend them if still wanted").
+- **status:** `ok` | `error` (with `code=`) | `denied` (user rejected at approval gate, or a permission rule refused the call) | `skipped` (user aborted the rest of the turn; bootstrap: "skipped calls did not run — resend them if still wanted").
 - **Error codes (closed set):** `parse_error, unknown_tool, missing_param, bad_param, file_not_found, binary_file, path_outside_workspace, match_not_found, multiple_matches, exec_timeout, cancelled, too_large, unterminated_heredoc, reply_truncated, unknown_skill`. Every error body ends with a `hint:` line containing the recommended next action. `cancelled` is the user pressing stop mid-batch: the running call was killed, every call after it never ran (same code, body says so), and the turn's results are sent as usual.
 - **Truncation annotations** are in-band, first or last line of the body: `[truncated: showing last 120 of 2341 lines - rerun with a filter, or read_file specific ranges]`.
 - **Parse errors** that prevent a call from executing become a RESULT with the id the parser assigned (or `id=0` if no header was recoverable), `code=parse_error`, body quoting ≤10 lines around the offending region plus a one-line grammar reminder. Well-formed sibling calls in the same reply still execute — one bad block never wastes the whole round trip.
 - Hallucinated tool ⇒ `code=unknown_tool`, body lists the 10 valid names.
+- **Denied by a permission rule** (a ruleset is loaded — architecture §2): the call never gates and never runs; its result is `status=denied` with the body `The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules <json array of the rules whose permission key matches>` (OpenCode's wording, so a model that has seen it there reads it the same way here). Unlike an interactive rejection it does NOT abort the turn: the later calls still run.
 - Result bodies are always heredoc-framed with tool-chosen collision-free tags, so a result that *contains* `===CLIP:` lines (grepping AgentClip's own source!) cannot confuse the LLM's reading of the envelope.
 
 ---

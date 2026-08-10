@@ -10,6 +10,9 @@ Semantics implemented here (protocol.md sections 4-6 + plan synthesis):
 - ingest: dedup over the last 20 normalized hashes, the chat-name gate, tool
   name validation (unknown tool -> pre-resolved unknown_tool result), fatal
   per-call parse issues -> pre-resolved error results;
+- plan: one approval verdict per call (engine/approval.py); a call a permission
+  rule DENIES is pre-resolved as a denied result and the turn carries on -
+  only an interactive rejection aborts the rest of it;
 - execute: strict id order, denied results with user_note, the same-path skip
   rule after a failed/denied mutation, rejection-aborts-turn, the per-turn
   backup bracket (begin_turn at first mutation, finish_turn at turn end),
@@ -30,6 +33,7 @@ from agentclip.config import Config
 from agentclip.engine.approval import ApprovalPolicy
 from agentclip.engine.results import fit_results
 from agentclip.engine.states import Decision, EngineStateError, Phase, can_transition
+from agentclip.permissions import PermissionRule
 from agentclip.protocol.composer import BudgetExceeded, Composer
 from agentclip.protocol.names import normalize_chat_name
 from agentclip.protocol.parser import normalized_hash, parse_reply
@@ -70,6 +74,10 @@ class PendingAction:
     kind: Literal["edit", "command", "auto"]
     preview: str  # unified diff / command line / "" for auto
     auto_reason: str | None  # e.g. 'matched "pytest*"' or "read-only tool"
+    # Ruleset mode only: the resource pattern an "always allow" answer would
+    # remember (e.g. "git commit *"). None means legacy mode, where the gate's
+    # third button is the edits-only APPROVE_ALL_EDITS instead.
+    always_pattern: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,7 +203,7 @@ class Engine:
         self._session = session
         self._backups = backups
         self._composer = composer
-        self._policy = ApprovalPolicy(config.approval)
+        self._policy = ApprovalPolicy(config.approval, config.permission_rules)
         # Set by request_cancel() from the UI thread while the plan runs on the
         # engine's worker thread; cleared at the start of every plan run.
         self._cancel = threading.Event()
@@ -348,7 +356,12 @@ class Engine:
             return
         planned.decision = Decision.APPROVE
         self._log_decision(call_id, "approved", "user", note)
-        if decision is Decision.APPROVE_ALL_EDITS:
+        if decision not in (Decision.APPROVE_ALL_EDITS, Decision.APPROVE_ALWAYS):
+            return
+        if not self._policy.ruleset_mode:
+            # Legacy: one sticky flag, edits only. APPROVE_ALWAYS lands here too
+            # (a UI in ruleset mode talking to a legacy session) and means the
+            # same thing.
             self._policy.auto_accept_edits = True
             for other in self._plan:
                 if (
@@ -359,6 +372,26 @@ class Engine:
                 ):
                     other.decision = Decision.APPROVE
                     self._log_decision(other.call.id, "approved", "auto_edits", None)
+            return
+        # Ruleset mode: remember a rule instead of flipping a flag, then let it
+        # cascade - every other still-pending call the new rule now allows is
+        # approved without asking again (a turn full of edits takes one answer).
+        assert planned.spec is not None
+        self._policy.remember(
+            PermissionRule("edit", "*", "allow")
+            if decision is Decision.APPROVE_ALL_EDITS
+            else self._policy.always_rule(planned.spec, planned.call)
+        )
+        for other in self._plan:
+            if (
+                other.needs_decision
+                and other.decision is None
+                and not other.aborted
+                and other.spec is not None
+                and self._policy.verdict(other.spec, other.call) == "auto"
+            ):
+                other.decision = Decision.APPROVE
+                self._log_decision(other.call.id, "approved", "rule", None)
 
     def all_decided(self) -> bool:
         return not any(
@@ -483,8 +516,10 @@ class Engine:
         )
 
     def set_yolo(self, enabled: bool) -> bool:
-        """Toggle YOLO mode: auto-approve EVERY tool call (edits and commands),
-        bypassing the allowlist and the deny tokens. Session-scoped and legal in
+        """Toggle YOLO mode: auto-approve every tool call that would otherwise
+        ask - in legacy mode that is all of them (allowlist and deny tokens
+        included), in ruleset mode everything a rule does not explicitly DENY,
+        which stays refused. Session-scoped and legal in
         any phase - it only flips the policy flag, so it never races the state
         machine. It does not revisit decisions already made this turn; it governs
         every plan built afterwards. Returns the new state."""
@@ -519,13 +554,32 @@ class Engine:
                     )
                 )
                 continue
-            if call.tool in ("ask_user", "task_done", "delegate"):
-                # Intercepted by name during execution; never pending, never gated.
+            # Intercepted by name during execution; never pending, never gated.
+            # `delegate` joins them only in legacy mode: with a ruleset loaded it
+            # answers to the `task` permission like any other tool.
+            if call.tool in ("ask_user", "task_done") or (
+                call.tool == "delegate" and not self._policy.ruleset_mode
+            ):
                 plan.append(
                     _Planned(call, spec, PendingAction(call, "auto", "", "handled by AgentClip"))
                 )
                 continue
-            if self._policy.verdict(spec, call) == "auto":
+            verdict = self._policy.verdict(spec, call)
+            if verdict == "deny":
+                # A rule said no. Pre-resolved, not gated: there is nothing to
+                # ask. The rest of the turn still runs - only an interactive
+                # rejection aborts it.
+                plan.append(
+                    _Planned(
+                        call,
+                        spec,
+                        PendingAction(call, "auto", "", "denied by rule"),
+                        pre_result=self._denied_by_rule_result(spec, call),
+                    )
+                )
+                self._log_decision(call.id, "denied", "rule", None)
+                continue
+            if verdict == "auto":
                 reason, source = self._auto_reason(spec, call)
                 plan.append(_Planned(call, spec, PendingAction(call, "auto", "", reason)))
                 self._log_decision(call.id, "auto", source, None)
@@ -536,17 +590,54 @@ class Engine:
                 if spec.preview is not None
                 else call.params.get("command", "")
             )
+            if not preview:
+                # A read-only tool can gate too once a ruleset governs the
+                # session, and it has no diff and no command line to show.
+                _, resource = self._policy.target(spec, call)
+                preview = f"{call.tool} {resource}".rstrip()
             plan.append(
                 _Planned(
                     call,
                     spec,
-                    PendingAction(call, kind, preview, None),
+                    PendingAction(
+                        call,
+                        kind,
+                        preview,
+                        None,
+                        always_pattern=(
+                            self._policy.always_rule(spec, call).pattern
+                            if self._policy.ruleset_mode
+                            else None
+                        ),
+                    ),
                     needs_decision=True,
                 )
             )
         return plan
 
+    def _denied_by_rule_result(self, spec: ToolSpec, call: ToolCall) -> ToolResult:
+        """OpenCode's DeniedError payload, verbatim: the model is told a rule
+        forbade this call and shown the rules that could apply, so it can pick a
+        different route instead of retrying the same one."""
+        return ToolResult(
+            call_id=call.id,
+            status="denied",
+            body=(
+                "The user has specified a rule which prevents you from using this"
+                " specific tool call. Here are some of the relevant rules "
+                + self._policy.denied_rules_json(spec, call)
+            ),
+            tool=call.tool,
+        )
+
     def _auto_reason(self, spec: ToolSpec, call: ToolCall) -> tuple[str, str]:
+        if self._policy.ruleset_mode:
+            # Which rule let it through is the audit trail's whole point here:
+            # "allowed" without the pattern is unreviewable.
+            rule = self._policy.rule_for(spec, call)
+            if rule.action == "allow":
+                return f'allowed by rule {rule.permission}["{rule.pattern}"]', "rule"
+            return "YOLO mode (auto-approve all)", "yolo"
         if spec.approval_kind == "auto":
             return "read-only tool", "auto"
         # Edits and commands only reach here when something auto-approved them.

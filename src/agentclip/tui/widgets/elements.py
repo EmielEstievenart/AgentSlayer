@@ -9,19 +9,33 @@ the CLOSE-UPS: whenever a template search verifies a match, the matched
 rectangle is cut out of that very frame and drawn here at readable size, beside
 how well it matched.
 
-One row per appearance with something to say at runtime - the send button, the
-busy icon, the idle icon, the copy button - which is deliberately the same four
-kinds the sidebar's DETECTION block gives a verdict line to (the two chat boxes
-and the new-chat button are found on demand and report by toast). The panel is
-the *picture* of that block and the block is the *words*, so the two describe
-the same thing and the same window.
+**One row per appearance the tool can recognise - all seven of them.** The send
+button, the busy icon, the idle icon, the copy button, both chat-box layouts and
+the new-chat button. The last three used to be missing, on the argument that
+they are found on demand by the click that uses them and so have nothing to say
+on a timer; that reasoning is dead. It made the column a picture of what the
+automation happens to consume rather than of what the tool can SEE, and a
+chat-box capture that had stopped matching stayed invisible until a paste landed
+in the wrong place. The detector now searches every calibrated kind on every
+frame (screen/detector.py) and this column shows every one of them. The
+sidebar's DETECTION block still gives verdict LINES to the four the loop turns
+on - it is the words about the decisions, this is the pictures of the evidence,
+and the extra rows here are evidence nobody was deciding anything from.
+
+**The two chat boxes will usually disagree**, and that is right: only one layout
+is on screen at a time, so the fresh-chat row and the ongoing-chat row are
+expected to read "found" and "not on screen" respectively (or the reverse). Two
+rows rather than one, because they are two captures and either of them can rot.
 
 **A third column, not more sidebar.** The sidebar is narrow static chrome that
-already overflows most terminals (tui.md 1.3), and hanging four pictures off
+already overflows most terminals (tui.md 1.3), and hanging seven pictures off
 the bottom of it would push the verdict lines it exists for below the fold. So
 this is a sibling of it in ``#body``, with its own toggle (``F7``, mirroring
 ``F3``) - a whole-column show/hide rather than per-row collapsibles, because
-the thing a user wants back is the horizontal room, not one row of it.
+the thing a user wants back is the horizontal room, not one row of it. Seven
+rows of label-plus-picture is taller than a terminal, so the column scrolls
+(``ElementsPanel`` is ``overflow-y: auto`` in ``tui.app``, exactly as the
+sidebar is) rather than dropping rows to fit.
 
 **It describes the LIVE window**, like DETECTION and for the same reason - the
 automation drives one window while the user may be reading the other's
@@ -51,6 +65,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from agentclip.screen.capture import RegionImage
+from agentclip.screen.detector import RUNTIME_KINDS
 from agentclip.screen.profile import TemplateKind
 from agentclip.tui.graphics import (
     TerminalGraphics,
@@ -68,22 +83,27 @@ if TYPE_CHECKING:  # the sixel widget is imported lazily - see tui.graphics
 ELEMENTS_TITLE = "ELEMENTS"
 ELEMENTS_HINT = "F7 hides this column"
 
-# The four appearances the detector searches for on every tick it is calibrated
-# for them, in the order they matter in the loop: the send button holds the
-# gate, the busy and idle icons decide when generating stopped, the copy button
-# harvests. Same set as the sidebar's DETECTOR_LABEL, and deliberately so - one
-# block says what was decided, this one shows what it was decided from.
-ELEMENT_ORDER: tuple[TemplateKind, ...] = (
-    TemplateKind.SEND_READY,
-    TemplateKind.BUSY,
-    TemplateKind.IDLE,
-    TemplateKind.COPY,
-)
+# EVERY appearance a service profile can hold, in the order they matter in the
+# loop: the send button holds the gate, the busy and idle icons decide when
+# generating stopped, the copy button harvests - then the three the automation
+# clicks on demand, which are searched on the timer anyway so their rows are as
+# live as the rest. Deliberately identical to ``screen.detector.RUNTIME_KINDS``:
+# the detector reports in this order and the column lists it in that order, so a
+# row is never a picture of some other row's search.
+ELEMENT_ORDER: tuple[TemplateKind, ...] = RUNTIME_KINDS
+
+# Short enough for the 16 usable cells of the column, and the same words
+# ``TemplateKind.label`` uses wherever the user is asked to capture one - a row
+# labelled differently from the button that filled it is a row about something
+# else.
 ELEMENT_LABEL: dict[TemplateKind, str] = {
     TemplateKind.SEND_READY: "send button",
     TemplateKind.BUSY: "busy icon",
     TemplateKind.IDLE: "idle icon",
     TemplateKind.COPY: "copy button",
+    TemplateKind.CHATBOX_INITIAL: "start chat box",
+    TemplateKind.CHATBOX_ONGOING: "ongoing chat box",
+    TemplateKind.NEW_CHAT: "new-chat button",
 }
 
 # The cell budget one crop is drawn in. The column is 20 wide, 17 of content,
@@ -150,7 +170,7 @@ def element_crop_id(kind: TemplateKind) -> str:
 
 def element_line(kind: TemplateKind, text: str) -> str:
     """``copy button`` over ``found · 1.2%`` - named as it is painted, because
-    four unlabelled pictures stacked on each other are not a readout.
+    seven unlabelled pictures stacked on each other are not a readout.
 
     Two LINES rather than one, and a fixed two cells tall, because the column
     is 17 cells of content: the name and the verdict do not fit side by side,
@@ -283,6 +303,9 @@ class ElementsPanel(Vertical):
         the BGRX->Pillow->sixel fit.
         """
         for kind, crop in crops.items():
+            # Every TemplateKind has a row now, so this never fires - it is the
+            # floor under a kind added to the enum and not to ELEMENT_LABEL,
+            # which would otherwise crash a poll message rather than lose a row.
             if kind not in ELEMENT_LABEL:
                 continue
             label = self.query_one(f"#{element_label_id(kind)}", Static)

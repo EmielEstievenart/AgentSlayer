@@ -48,12 +48,14 @@ column. What is left is:
   send gate holding finish detection back until the user presses Enter, the
   busy and idle probes (``update_template``), the staleness verdict
   (``update_stale``), and what the auto-copy flow's last click attempt did.
-  Only these four ``TemplateKind`` values have anything to say at runtime; the
-  two chat boxes and the new-chat button are found on demand and report through
-  toasts, so they have no line here. These are the WORDS; the pictures behind
-  them - the actual matched pixels, one crop per kind - are the
-  ``ElementsPanel`` column next door (F7, tui.md 1.7), which is written by the
-  same machinery under the same rule.
+  Only these four ``TemplateKind`` values are ever DECIDED from; the two chat
+  boxes and the new-chat button are searched on every tick like everything else
+  (screen/detector.py) but no verdict here is drawn from them, and the clicks
+  that use them report through toasts - so they have no line here. These are the
+  WORDS; the pictures behind them - the actual matched pixels, one crop for
+  every kind, including the three with no line here - are the ``ElementsPanel``
+  column next door (F7, tui.md 1.7), which is written by the same machinery
+  under the same rule.
   Unlike everything above it this block
   describes the **live** window rather than the selected tab - it is what the
   detectors are doing right now, and mid-delegation that is the sub-agent's
@@ -560,9 +562,10 @@ class Sidebar(Vertical):
         Display only, and deliberately text rather than data: the busy/idle
         detectors report every poll here, the auto-copy flow reports every
         click attempt and the send gate reports which phase it is in, and only
-        MainScreen knows how to word them. Kinds with no
-        runtime status (the two chat boxes, the new-chat button) have no line
-        and are silently ignored - they are found on demand and report by toast.
+        MainScreen knows how to word them. Kinds nothing here DECIDES from (the
+        two chat boxes, the new-chat button) have no line and are silently
+        ignored: the clicks that use them report by toast, and the pictures of
+        every kind - those three included - are the ELEMENTS column's job.
         """
         if kind not in DETECTOR_LABEL:
             return

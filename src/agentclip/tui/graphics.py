@@ -57,6 +57,15 @@ CROP_MAX_ROWS = 8
 UPSCALE_BELOW_PX = 20
 MAX_UPSCALE = 2
 
+# The thinnest a shrunk crop may end up on either axis. An appearance can be
+# extremely lopsided - a captured chat input box is ~848x5 once it is a strip of
+# border - and fitting that to sixteen columns lands its height on a fraction of
+# a pixel, i.e. a one-pixel hairline that reads as an empty row. Two pixels is
+# the fewest that reads as a *line the tool drew*, and at these aspect ratios
+# the distortion it costs is imperceptible. Never applied above the source's own
+# size or the box's, so a genuinely 1px-tall capture is still drawn 1px tall.
+MIN_DRAW_PX = 2
+
 
 @dataclass(frozen=True, slots=True)
 class TerminalGraphics:
@@ -225,6 +234,11 @@ def fit_pixels(width: int, height: int, box_width: int, box_height: int) -> tupl
       reserved 56px is unreadably small. Never more than 2x: past that it stops
       looking like a picture of a screen and starts looking like a bug.
 
+    A shrink never takes an axis below :data:`MIN_DRAW_PX` (or the source's own
+    size, whichever is smaller): the chat-box appearances are hundreds of pixels
+    wide and a handful tall, and rounding one of those down to a single pixel
+    draws a hairline nobody can tell from a row that found nothing.
+
     ``(0, 0)`` for anything degenerate, which is the caller's cue to draw the
     resting line instead - the same contract ``pixels.fit_cells`` has.
     """
@@ -239,7 +253,20 @@ def fit_pixels(width: int, height: int, box_width: int, box_height: int) -> tupl
             return (width * MAX_UPSCALE, height * MAX_UPSCALE)
         return (width, height)
     scale = min(box_width / width, box_height / height)
-    return (max(1, int(width * scale)), max(1, int(height * scale)))
+    return (
+        _at_least_visible(int(width * scale), width, box_width),
+        _at_least_visible(int(height * scale), height, box_height),
+    )
+
+
+def _at_least_visible(size: int, source: int, box: int) -> int:
+    """``size``, floored at :data:`MIN_DRAW_PX` without inventing pixels.
+
+    The floor is capped by the source and the box, so it can only ever rescue a
+    rounding loss: a 1px-tall capture stays 1px tall, and a box with one pixel
+    to spare on an axis is not overflowed to satisfy it.
+    """
+    return max(size, min(MIN_DRAW_PX, source, box))
 
 
 def region_to_pil(image: RegionImage) -> PILImage.Image | None:

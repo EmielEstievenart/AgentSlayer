@@ -253,12 +253,14 @@ class AgentClipApp(App[None]):
         overflow-y: auto;
         scrollbar-size-vertical: 1;
     }
-    /* The ELEMENTS column: four crops of what the detectors recognised, beside
-       the sidebar's words about them (§1.7). Deliberately the narrowest column
-       on the screen - an icon is a couple of dozen pixels, so 20 cells (17 of
-       content) draws it life-size-ish, and the chat column keeps the room that
-       diffs and command output need. Scrollable like the sidebar, and hidden by
-       F7 exactly as F3 hides its neighbour. */
+    /* The ELEMENTS column: one crop per appearance the detector recognises -
+       all seven of them (§1.7) - beside the sidebar's words about the four the
+       loop decides from. Deliberately the narrowest column on the screen - an
+       icon is a couple of dozen pixels, so 20 cells (17 of content) draws it
+       life-size-ish, and the chat column keeps the room that diffs and command
+       output need. Seven rows of label-plus-picture outgrow most terminals, so
+       it scrolls like the sidebar; F7 hides it exactly as F3 hides its
+       neighbour. */
     ElementsPanel {
         width: 20;
         height: 1fr;
@@ -490,7 +492,9 @@ class AgentClipApp(App[None]):
     }
     /* Two rows, not one: a half-block preview needs a second cell to be a
        picture rather than a stripe, and two is all seven kinds can afford
-       before the modal runs off a 45-row terminal. */
+       before the modal runs off a 45-row terminal. Both this and the preview's
+       own height are overridden inline on a sixel terminal
+       (ServiceEditorScreen._appearance_row), where the budget is in pixels. */
     #svc-appearance-col .svc-appearance-row {
         height: 2;
     }
@@ -515,6 +519,24 @@ class AgentClipApp(App[None]):
         color: $warning;
         height: auto;
         margin-top: 1;
+    }
+    /* MATCHING. The RadioSet loses its border: two options in a 32-wide column
+       do not need framing, and the two rows it costs are two rows the modal
+       does not have to grow by. The warning wraps (height: auto) for the same
+       reason the signal warning does - a clipped explanation of a silent
+       fallback explains nothing. */
+    #svc-matcher-set {
+        border: none;
+        width: 1fr;
+        height: auto;
+        padding: 0;
+    }
+    #svc-matcher-warning {
+        color: $warning;
+        height: auto;
+    }
+    #svc-tolerance {
+        width: 1fr;
     }
     #svc-error {
         color: $error;

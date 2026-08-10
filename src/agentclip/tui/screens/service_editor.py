@@ -61,8 +61,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+import sys
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from rich.text import Text
 from textual import on
@@ -70,7 +72,8 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Checkbox, Input, Select, Static
+from textual.widget import Widget
+from textual.widgets import Button, Checkbox, Input, RadioButton, RadioSet, Select, Static
 
 from agentclip.config import (
     BUILTIN_SERVICE_KEYS,
@@ -78,12 +81,18 @@ from agentclip.config import (
     DELIVERY_PASTE,
     DELIVERY_STREAM,
     FINISH_SIGNALS,
+    MATCHER_ANCHORS,
+    MATCHER_OPENCV,
+    MATCHERS,
+    TOLERANCE_MAX,
+    TOLERANCE_MIN,
     Config,
     ServicePreset,
     default_services,
     normalize_finish_signals,
 )
-from agentclip.screen.capture import CaptureError, capture_region
+from agentclip.screen.capture import CaptureError, RegionImage, capture_region
+from agentclip.screen.matchers import opencv_available
 from agentclip.screen.picker import ScreenPickError, pick_region
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.profile_store import (
@@ -93,8 +102,19 @@ from agentclip.screen.profile_store import (
     load_profile,
     save_template,
 )
+from agentclip.tui.graphics import (
+    TerminalGraphics,
+    crop_picture,
+    crop_rows,
+    sixel_image_class,
+    terminal_graphics,
+)
 from agentclip.tui.pixels import half_block_text, thumbnail
 from agentclip.tui.screens.confirm import ConfirmScreen
+from agentclip.tui.widgets.slider import Slider
+
+if TYPE_CHECKING:  # the sixel widget is imported lazily - see tui.graphics
+    from textual_image.widget.sixel import Image as SixelImage
 
 _NEW_SENTINEL = "+add-new+"  # not a legal slug (contains '+'), so it can't collide with a key
 # What "+ Add new" is going to create for every field the form does not ask
@@ -152,6 +172,57 @@ STREAM_DELIVERY_LABEL = "paste in chunks (big messages)"
 # said here, next to the tick that caused it.
 SIGNAL_UNCAPTURED = "ticked but not captured — it will be skipped"
 
+# The MATCHING block. Two settings that between them decide whether a captured
+# appearance is FOUND, which is a different question from what a service looks
+# like (APPEARANCE) or from what counts as finished (DETECTION) - so it is its
+# own block rather than more ticks under either.
+#
+# The backend labels name the trade rather than the library: a user choosing
+# between these has a button that is not being found, and "built-in" vs
+# "exhaustive" is the sentence that tells them which to try.
+MATCHER_LABELS: dict[str, str] = {
+    MATCHER_ANCHORS: "Anchors (built-in)",
+    MATCHER_OPENCV: "OpenCV (exhaustive)",
+}
+_MATCHER_RADIO_PREFIX = "svc-matcher-"
+TOLERANCE_LABEL = "Pixel tolerance"
+# Said next to the radio button rather than only in the docs, because this is
+# the one failure the user cannot see: the setting persists, the search runs,
+# and it is simply not the search they asked for.
+#
+# Two messages, because the two audiences can do two different things about it.
+# From source, OpenCV is one `pip install` away and naming the extra is the
+# whole fix. Inside the frozen exe it is not installable at all - there is no
+# environment to install into - so the pip line is worse than useless: it sends
+# somebody to a command that cannot help them and reads as if they had made a
+# mistake. The shipped build bundles it (architecture.md 6), so a frozen build
+# that lands here was built without the extra, and the only honest thing to say
+# is that this is a property of the binary rather than of their machine.
+OPENCV_MISSING_SOURCE = (
+    "OpenCV is not installed — anchors will be used. Install it with "
+    "pip install agentclip[cv]"
+)
+OPENCV_MISSING_FROZEN = (
+    "This build does not include OpenCV — anchors will be used. "
+    "Nothing to install: it has to be built in."
+)
+
+
+def opencv_missing_note(*, frozen: bool | None = None) -> str:
+    """Which "you will not get OpenCV" line this build should show.
+
+    ``frozen`` is the injection seam for tests; left None it asks the
+    interpreter, which is the only thing that actually knows - PyInstaller sets
+    ``sys.frozen`` on the bootloaded interpreter and nothing else does.
+    """
+    if frozen is None:
+        frozen = bool(getattr(sys, "frozen", False))
+    return OPENCV_MISSING_FROZEN if frozen else OPENCV_MISSING_SOURCE
+
+
+def matcher_radio_id(matcher: str) -> str:
+    return f"{_MATCHER_RADIO_PREFIX}{matcher}"
+
 
 def capture_button_id(kind: TemplateKind) -> str:
     return f"{_CAPTURE_PREFIX}{kind}{_BUTTON_SUFFIX}"
@@ -164,12 +235,31 @@ def clear_button_id(kind: TemplateKind) -> str:
 # The picture beside each appearance's status line. "40×40 · captured" says a
 # capture happened; it cannot say WHAT was captured, and a drag that caught the
 # background beside the stop button reads exactly the same. So the first image
-# of each kind is drawn here in half-blocks (tui.pixels), at the only size the
-# 34-cell column can spare: 12 cells by 2 rows, which is 12x4 pixels. That is
-# far too coarse to read a glyph and quite enough to tell an orange icon from a
-# slab of white page - which is the mistake this catches.
+# of each kind is drawn here, in the 12 cells of width the 34-cell column can
+# spare.
+#
+# The ROW budget is the HALF-BLOCK one: two cells, i.e. 12x4 pixels, far too
+# coarse to read a glyph and quite enough to tell an orange icon from a slab of
+# white page - which is the mistake this catches. Sixel does not use it, for the
+# same reason the ELEMENTS column does not (tui.md 1.7): a sixel row is a pixel
+# budget divided by the terminal's real cell height, and squeezing a real bitmap
+# into two rows of somebody's 16px font would throw away the only thing sixel
+# was added for. See :func:`preview_rows`.
 TEMPLATE_PREVIEW_COLS = 12
 TEMPLATE_PREVIEW_ROWS = 2
+
+
+def preview_rows(graphics: TerminalGraphics) -> int:
+    """How many cell rows one appearance thumbnail occupies, in this terminal.
+
+    Fixed for the life of the screen either way, so the column's rows are a
+    constant height and a capture landing cannot make the block below it jump.
+    Half blocks keep their two rows exactly (the fallback is unchanged in every
+    respect); sixel takes ``graphics.crop_rows``, the same ~56px budget the
+    ELEMENTS column reserves, because the picture is a real bitmap there and two
+    rows of a small font is not enough of one to answer the question.
+    """
+    return crop_rows(graphics.cell_height) if graphics.sixel else TEMPLATE_PREVIEW_ROWS
 
 
 def template_status_id(kind: TemplateKind) -> str:
@@ -223,17 +313,29 @@ def template_status(profile: ServiceProfile | None, kind: TemplateKind) -> str:
     return f"{first.width}×{first.height} · {len(templates)} images"
 
 
-def template_preview(profile: ServiceProfile | None, kind: TemplateKind) -> Text:
-    """The first captured image of ``kind``, drawn small - or empty text.
+def template_capture(profile: ServiceProfile | None, kind: TemplateKind) -> RegionImage | None:
+    """The captured pixels this kind's thumbnail is a picture of, or None.
 
     The FIRST of the stack, not all of them: a kind's variants are pictures of
     the same control (a send button greyed out and not), the column has room
-    for one, and the count is already on the status line beside it.
+    for one, and the count is already on the status line beside it. Full
+    resolution, because what happens to it next depends on the renderer - and
+    sixel wants every pixel that was captured.
     """
     templates = () if profile is None else profile.variants(kind)
-    if not templates:
+    return None if not templates else templates[0].image
+
+
+def template_preview(profile: ServiceProfile | None, kind: TemplateKind) -> Text:
+    """The first captured image of ``kind`` as half blocks - or empty text.
+
+    The fallback renderer, and unchanged: averaged down to the exact 12x2 cell
+    grid it will draw (tui.pixels) and handed over as ``rich`` text.
+    """
+    image = template_capture(profile, kind)
+    if image is None:
         return Text("")
-    small = thumbnail(templates[0].image, TEMPLATE_PREVIEW_COLS, TEMPLATE_PREVIEW_ROWS)
+    small = thumbnail(image, TEMPLATE_PREVIEW_COLS, TEMPLATE_PREVIEW_ROWS)
     return Text("") if small is None else half_block_text(small)
 
 
@@ -293,6 +395,21 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         self, config: Config, profile_root: Path, initial_key: str | None = None
     ) -> None:
         super().__init__()
+        # Read ONCE, like the ELEMENTS panel does: the verdict cannot change
+        # while the process runs (tui.graphics), and a screen that composed
+        # half-block Statics must keep painting half blocks into them.
+        self._graphics = terminal_graphics()
+        self._preview_rows = preview_rows(self._graphics)
+        # Probed ONCE, like the graphics verdict above and for the same two
+        # reasons: it cannot change while the process runs, and asking costs a
+        # real import of a 60MB wheel that has no business happening on every
+        # keystroke in the form.
+        self._opencv = opencv_available()
+        # Resolved beside the probe, and for the same reason: whether this is a
+        # frozen build cannot change while it runs, and what to tell a user who
+        # cannot have OpenCV depends entirely on which kind of install they are
+        # holding.
+        self._opencv_note = opencv_missing_note()
         self._profile_root = profile_root
         self._services: dict[str, ServicePreset] = dict(config.services)
         self._initial_services: dict[str, ServicePreset] = dict(config.services)
@@ -345,6 +462,22 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                     yield Checkbox(
                         STREAM_DELIVERY_LABEL, id="svc-stream-delivery", compact=True
                     )
+                    yield Static(Text("MATCHING · how it is found"), classes="side-title")
+                    yield RadioSet(
+                        *[
+                            RadioButton(MATCHER_LABELS[name], id=matcher_radio_id(name))
+                            for name in MATCHERS
+                        ],
+                        id="svc-matcher-set",
+                    )
+                    yield Static("", id="svc-matcher-warning")
+                    yield Static(Text(TOLERANCE_LABEL), classes="side-title")
+                    yield Slider(
+                        minimum=TOLERANCE_MIN,
+                        maximum=TOLERANCE_MAX,
+                        big_step=8,
+                        id="svc-tolerance",
+                    )
                 with Vertical(id="svc-form-col"):
                     yield Static(Text("Key"), classes="side-title")
                     yield Input(id="svc-key", placeholder="lowercase-with-hyphens")
@@ -373,16 +506,14 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                         # The preview and Clear both ride on the status line
                         # rather than beside the capture button: the column is
                         # 34 wide and the longest capture label already fills
-                        # it. The row is two cells tall - the fewest that draw
-                        # a picture at all in half-blocks - and that is the
+                        # it. In half blocks the row is two cells tall - the
+                        # fewest that draw a picture at all - and that is the
                         # whole of the height budget: a third row, times seven
-                        # kinds, pushes the modal off a 45-row terminal.
-                        with Horizontal(classes="svc-appearance-row"):
-                            yield Static(
-                                Text(""),
-                                id=template_preview_id(kind),
-                                classes="svc-tpl-preview",
-                            )
+                        # kinds, pushes the modal off a 45-row terminal. A sixel
+                        # row is taller (preview_rows) and pays for it out of
+                        # the column's scrollbar, which the block already has.
+                        with self._appearance_row():
+                            yield self._preview_widget(kind)
                             yield Static(
                                 Text(TEMPLATE_UNSET),
                                 id=template_status_id(kind),
@@ -400,6 +531,64 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                 "escape closes (applies valid edits) · built-ins: edit or reset, never delete",
                 classes="hint",
             )
+
+    def _appearance_row(self) -> Horizontal:
+        """One kind's picture/status/Clear row, tall enough for its renderer.
+
+        The height is on the ROW as well as on the picture inside it: the class
+        rule pins two cells (the half-block budget), and a sixel thumbnail that
+        is three or four rows tall inside a two-row container is simply cropped.
+        """
+        row = Horizontal(classes="svc-appearance-row")
+        if self._graphics.sixel:
+            row.styles.height = self._preview_rows
+        return row
+
+    def _preview_widget(self, kind: TemplateKind) -> Widget:
+        """The widget one thumbnail is drawn in: a sixel image, or half blocks.
+
+        Chosen at COMPOSE time from the startup probe and never revisited, the
+        same rule (and the same reason) as ``ElementsPanel._crop_widget``: the
+        half-block ``Static`` is the renderer for every terminal without sixel,
+        which includes every headless test run, so both branches are live code.
+        """
+        if self._graphics.sixel:
+            sixel_image = sixel_image_class()
+            if sixel_image is not None:
+                widget = cast(
+                    Widget,
+                    sixel_image(id=template_preview_id(kind), classes="svc-tpl-preview"),
+                )
+                # Inline, because the height is this terminal's while the class
+                # rule is the fallback's - and both dimensions are pinned rather
+                # than left to auto, since textual-image scales the image to
+                # whatever cell box it is given and crop_picture has already
+                # padded it to exactly this one.
+                widget.styles.width = TEMPLATE_PREVIEW_COLS
+                widget.styles.height = self._preview_rows
+                return widget
+        return Static(Text(""), id=template_preview_id(kind), classes="svc-tpl-preview")
+
+    def _paint_preview(self, profile: ServiceProfile | None, kind: TemplateKind) -> None:
+        """Draw (or blank) one kind's thumbnail, in whichever mode composed.
+
+        Half blocks take the averaged cell grid; sixel takes the captured pixels
+        fitted to the same cell box the widget was pinned to (``crop_picture``
+        pads to it, which is what stops textual-image resizing it a second time
+        and stretching it off its aspect ratio).
+        """
+        widget = self.query_one(f"#{template_preview_id(kind)}", Widget)
+        if isinstance(widget, Static):
+            widget.update(template_preview(profile, kind))
+            return
+        image = template_capture(profile, kind)
+        cast("SixelImage", widget).image = (
+            None
+            if image is None
+            else crop_picture(
+                image, TEMPLATE_PREVIEW_COLS, self._preview_rows, self._graphics
+            )
+        )
 
     def on_mount(self) -> None:
         self._load_service(self._selected_key)
@@ -460,8 +649,30 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             box.value = signal in signals
         self.query_one("#svc-hover-scan", Checkbox).value = hover
         self.query_one("#svc-stream-delivery", Checkbox).value = shown.delivery == DELIVERY_STREAM
+        # The MATCHING block follows the selection exactly as the ticks above
+        # do. Pressing the right radio unpresses whichever was pressed, so only
+        # the target is written; the slider is filled in WITHOUT notifying,
+        # because a Changed here is Textual echoing our own write back at us and
+        # not the user moving anything.
+        self.query_one(f"#{matcher_radio_id(shown.matcher)}", RadioButton).value = True
+        self.query_one("#svc-tolerance", Slider).set_value(shown.tolerance, notify=False)
+        self._paint_matcher_warning(shown.matcher)
         self._show_appearance(self._profile(key))
         self._revalidate()
+
+    def _paint_matcher_warning(self, matcher: str) -> None:
+        """The "you picked a backend this machine does not have" line, or "".
+
+        Tied to what is SELECTED rather than to what is installed: a user on a
+        machine without cv2 who never touches the block has nothing to be
+        warned about, and the moment they press the OpenCV radio the line
+        appears under their hand. The setting is still saved - they may be
+        configuring a machine they are about to install it on - which is
+        precisely why the fallback has to be visible.
+        """
+        self.query_one("#svc-matcher-warning", Static).update(
+            Text(self._opencv_note if matcher == MATCHER_OPENCV and not self._opencv else "")
+        )
 
     def _show_appearance(self, profile: ServiceProfile | None) -> None:
         """Repaint everything derived from what this service looks like.
@@ -472,9 +683,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         appearance to run against.
         """
         for kind in TemplateKind:
-            self.query_one(f"#{template_preview_id(kind)}", Static).update(
-                template_preview(profile, kind)
-            )
+            self._paint_preview(profile, kind)
             self.query_one(f"#{template_status_id(kind)}", Static).update(
                 Text(template_status(profile, kind))
             )
@@ -518,6 +727,10 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             )
         for box in self.query(Checkbox):
             box.disabled = is_new
+        # Same rule for the MATCHING block: nothing to file a search setting
+        # under until "Add service" has created the key.
+        self.query_one("#svc-matcher-set", RadioSet).disabled = is_new
+        self.query_one("#svc-tolerance", Slider).disabled = is_new
 
     # -- live validation --------------------------------------------------------
 
@@ -647,6 +860,51 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             delivery=DELIVERY_STREAM if streaming else DELIVERY_PASTE,
         )
         self._paint_signal_warning(self._profile(key))
+
+    # -- how this service is searched for ----------------------------------------
+
+    @on(RadioSet.Changed, "#svc-matcher-set")
+    def _on_matcher_changed(self, event: RadioSet.Changed) -> None:
+        """Write the chosen backend into the working copy, live.
+
+        Same echo-immunity as the checkbox handler, by the same route: the id of
+        whatever is pressed is read back and stored, so ``_load_service``
+        pressing the radio for the service it just loaded writes that service's
+        own value onto itself. ``_selected_key`` is set before any of that
+        happens, so the echo can never land the OLD service's backend on the NEW
+        one - the bug the delivery tick's "follows the selected service" test
+        exists to catch.
+        """
+        event.stop()
+        radio_id = event.pressed.id
+        key = self._selected_key
+        if radio_id is None:
+            return
+        matcher = radio_id.removeprefix(_MATCHER_RADIO_PREFIX)
+        if matcher not in MATCHERS:
+            return
+        # Painted even for "+ Add new", where there is no preset to write to:
+        # the block still SHOWS a backend, so it must still say when that
+        # backend is not installed.
+        self._paint_matcher_warning(matcher)
+        if key is None or key not in self._services:
+            return
+        self._services[key] = replace(self._services[key], matcher=matcher)
+
+    @on(Slider.Changed, "#svc-tolerance")
+    def _on_tolerance_changed(self, event: Slider.Changed) -> None:
+        """Write the per-channel tolerance into the working copy, live.
+
+        No validation gate (unlike the Input fields): the slider cannot express
+        a value outside its own range, which is the range config.py validates
+        against - so anything it can produce is by construction acceptable, and
+        there is no invalid state to withhold.
+        """
+        event.stop()
+        key = self._selected_key
+        if key is None or key not in self._services:
+            return
+        self._services[key] = replace(self._services[key], tolerance=event.value)
 
     # -- capturing what a service LOOKS like -------------------------------------
 

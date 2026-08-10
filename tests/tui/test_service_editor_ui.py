@@ -16,6 +16,7 @@ close-and-persist path as the size fields.
 
 from __future__ import annotations
 
+import sys
 import time
 import tomllib
 from collections.abc import Callable
@@ -25,14 +26,18 @@ from pathlib import Path
 import pytest
 from textual.message import Message
 from textual.pilot import Pilot
-from textual.widgets import Button, Checkbox, Input, Select, Static
+from textual.widget import Widget
+from textual.widgets import Button, Checkbox, Input, RadioButton, RadioSet, Select, Static
 
 import agentclip.tui.screens.main as main_mod
+import agentclip.tui.screens.service_editor as service_editor_mod
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import (
     DEFAULT_DELIVERY,
     DEFAULT_FINISH_SIGNALS,
+    DEFAULT_MATCHER,
+    DEFAULT_TOLERANCE,
     FINISH_SIGNALS,
     Config,
     load_config,
@@ -43,20 +48,27 @@ from agentclip.screen.profile_store import load_profile, profile_dir, save_templ
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
+from agentclip.tui.graphics import TerminalGraphics, set_terminal_graphics
 from agentclip.tui.pixels import HALF_BLOCK
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.main import SUBAGENT_WINDOW
 from agentclip.tui.screens.service_editor import (
+    OPENCV_MISSING_FROZEN,
+    OPENCV_MISSING_SOURCE,
     SIGNAL_UNCAPTURED,
     TEMPLATE_PREVIEW_COLS,
     TEMPLATE_PREVIEW_ROWS,
     TEMPLATES_NONE,
     ServiceEditorScreen,
     capture_button_id,
+    matcher_radio_id,
+    opencv_missing_note,
+    preview_rows,
     signal_checkbox_id,
     template_preview_id,
 )
 from agentclip.tui.widgets.sidebar import Sidebar
+from agentclip.tui.widgets.slider import Slider
 
 
 async def _wait_for(
@@ -552,6 +564,168 @@ async def test_forgetting_an_appearance_clears_its_picture(
         assert _preview(editor, TemplateKind.COPY) == ""
 
 
+# -- which renderer draws the thumbnails --------------------------------------
+#
+# Same declared-verdict trick the ELEMENTS column's tests use (and the same
+# reason): a pytest run has no terminal to draw sixels on, so the verdict is
+# declared through the documented setter and reset for every test by the autouse
+# fixture in tests/conftest.py. What it buys is that the widget really is
+# textual-image's sixel widget, really renders inside a running Textual, and the
+# escape sequence it writes can be read off its strips.
+
+SIXEL_TERMINAL = TerminalGraphics(sixel=True, cell_width=10, cell_height=20)
+
+
+def _raster(cols: int, rows: int) -> str:
+    """The sixel raster attributes a ``cols x rows`` cell box comes out as.
+
+    Read back from the widget module's OWN binding of ``get_cell_size`` rather
+    than from the declared verdict, because that is what the widget scales the
+    image with - the same number in production (the probe caches what it
+    returned), but not necessarily in a test process, where the first test to
+    import ``textual_image.widget.sixel`` decides what that name is bound to for
+    the rest of the run. Same reasoning, and the same helper, as the ELEMENTS
+    column's sixel tests.
+    """
+    from textual_image.widget.sixel import get_cell_size
+
+    cell = get_cell_size()
+    return f'"1;1;{cols * cell.width};{rows * cell.height}'
+
+
+def _preview_strips(editor: ServiceEditorScreen, kind: TemplateKind) -> str:
+    """Everything one thumbnail would write to the terminal this frame."""
+    widget = editor.query_one(f"#{template_preview_id(kind)}")
+    text = ""
+    for child in widget.children:
+        for strip in child.render_lines(child.region.reset_offset):
+            text += "".join(segment.text for segment in strip)
+    return text
+
+
+async def test_a_sixel_terminal_draws_the_captures_as_bitmaps(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The editor's thumbnails are the same question the ELEMENTS column asks -
+    *did my drag catch the button or the page beside it?* - so they get the same
+    answer where the terminal can give it. Twelve cells of half-blocks can tell
+    an orange icon from a white slab and nothing finer; the bitmap can be read.
+    """
+    from textual_image.widget.sixel import Image as SixelImage
+
+    save_template(profile_root, "claude", TemplateKind.COPY, _image())
+    set_terminal_graphics(SIXEL_TERMINAL)
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        await pilot.pause()
+
+        widget = editor.query_one(f"#{template_preview_id(TemplateKind.COPY)}")
+        assert isinstance(widget, SixelImage)
+        drawn = _preview_strips(editor, TemplateKind.COPY)
+        assert "\x1bP" in drawn  # DCS: the sixel introducer
+        # The raster attributes are the padded cell box - TEMPLATE_PREVIEW_COLS
+        # by preview_rows, in pixels - which is what stops textual-image
+        # resizing the crop a second time and stretching it off its aspect ratio.
+        assert _raster(TEMPLATE_PREVIEW_COLS, preview_rows(SIXEL_TERMINAL)) in drawn
+        assert HALF_BLOCK not in drawn
+
+
+async def test_a_sixel_row_is_tall_enough_to_hold_its_picture(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Two cell rows is the HALF-BLOCK budget. A sixel thumbnail is sized from
+    the terminal's real cell height (the same ~56px budget the ELEMENTS column
+    reserves), so the row it sits in has to grow with it - inside a two-row
+    container the bitmap is simply cropped."""
+    set_terminal_graphics(SIXEL_TERMINAL)
+    assert preview_rows(SIXEL_TERMINAL) > TEMPLATE_PREVIEW_ROWS
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        await pilot.pause()
+
+        expected = preview_rows(SIXEL_TERMINAL)
+        widget = editor.query_one(f"#{template_preview_id(TemplateKind.COPY)}")
+        assert widget.region.height == expected
+        row = widget.parent
+        assert isinstance(row, Widget)
+        assert row.region.height == expected
+
+
+async def test_a_kind_with_nothing_captured_draws_no_sixel(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """"Nothing captured" has to clear the picture in both renderers, or the row
+    keeps a thumbnail of a PNG that is no longer on disk."""
+    save_template(profile_root, "claude", TemplateKind.COPY, _image())
+    set_terminal_graphics(SIXEL_TERMINAL)
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        await pilot.pause()
+        assert "\x1bP" in _preview_strips(editor, TemplateKind.COPY)
+        # A kind this service has no picture of draws nothing at all.
+        assert "\x1bP" not in _preview_strips(editor, TemplateKind.BUSY)
+
+        # ...and switching to a service with nothing captured clears the row it
+        # was drawn in, exactly as the half-block path blanks its Static.
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        await pilot.pause()
+        assert "\x1bP" not in _preview_strips(editor, TemplateKind.COPY)
+
+
+async def test_a_terminal_without_sixel_still_gets_half_blocks(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The fallback is not a stub: it is the renderer for every terminal that
+    cannot do sixel, which includes every headless test run - so the Static and
+    its two-row budget stay exactly as they were."""
+    save_template(profile_root, "claude", TemplateKind.COPY, _image())
+
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+
+        widget = editor.query_one(f"#{template_preview_id(TemplateKind.COPY)}")
+        assert isinstance(widget, Static)
+        assert widget.region.height == TEMPLATE_PREVIEW_ROWS
+        assert HALF_BLOCK in _preview(editor, TemplateKind.COPY)
+
+
 async def test_forgetting_an_appearance_leaves_the_preset_alone(
     tmp_path: Path, profile_root: Path
 ) -> None:
@@ -820,6 +994,198 @@ async def test_the_checkboxes_follow_the_selected_service(
         await pilot.pause()
         assert not editor.query_one(f"#{signal_checkbox_id('idle')}", Checkbox).value
         assert editor._services["gemini"] == before_gemini
+
+
+# -- MATCHING: which backend hunts for the appearances, and how strictly -------
+
+
+async def test_the_matcher_choice_round_trips_into_the_saved_services(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Per-service policy like the rest of this column, on the same
+    close-and-persist path, written to disk as the backend name."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        assert editor.query_one(f"#{matcher_radio_id(DEFAULT_MATCHER)}", RadioButton).value
+
+        editor.query_one(f"#{matcher_radio_id('opencv')}", RadioButton).value = True
+        await pilot.pause()
+        assert editor._services["gemini"].matcher == "opencv"
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["gemini"].matcher == "opencv"
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["gemini"]["matcher"] == "opencv"
+
+
+async def test_the_tolerance_slider_round_trips_into_the_saved_services(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The one setting that is a feel rather than a fact, and the only reason
+    this app owns a slider at all. It applies live like the ticks - there is no
+    validation gate, because the control cannot express an invalid value."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        slider = editor.query_one("#svc-tolerance", Slider)
+        assert slider.value == DEFAULT_TOLERANCE
+
+        slider.focus()
+        await pilot.press("right", "right", "right")
+        assert slider.value == DEFAULT_TOLERANCE + 3
+        assert editor._services["gemini"].tolerance == DEFAULT_TOLERANCE + 3
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["gemini"].tolerance == DEFAULT_TOLERANCE + 3
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["gemini"]["tolerance"] == DEFAULT_TOLERANCE + 3
+
+
+async def test_the_matching_block_follows_the_selected_service(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The same echo the delivery tick's guard exists for, now with two more
+    controls on it: loading a service writes both of them, and neither write
+    may land the previous service's answer on the new one."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+        before_claude = editor._services["claude"]
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        editor.query_one(f"#{matcher_radio_id('opencv')}", RadioButton).value = True
+        editor.query_one("#svc-tolerance", Slider).value = 48
+        await pilot.pause()
+        assert editor._services["gemini"].matcher == "opencv"
+        assert editor._services["gemini"].tolerance == 48
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        assert editor.query_one(f"#{matcher_radio_id('anchors')}", RadioButton).value
+        assert editor.query_one("#svc-tolerance", Slider).value == DEFAULT_TOLERANCE
+        assert editor._services["claude"] == before_claude
+        assert editor._services["gemini"].matcher == "opencv"
+        assert editor._services["gemini"].tolerance == 48
+
+
+async def test_picking_opencv_without_it_installed_warns_that_anchors_will_run(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The fallback is silent everywhere else - the setting persists, a search
+    runs, and it is simply not the one that was asked for. This line is the
+    only place a user can find out."""
+    monkeypatch.setattr(service_editor_mod, "opencv_available", lambda: False)
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        warning = editor.query_one("#svc-matcher-warning", Static)
+        assert str(warning.render()) == ""  # anchors: nothing to warn about
+
+        editor.query_one(f"#{matcher_radio_id('opencv')}", RadioButton).value = True
+        await pilot.pause()
+        assert str(warning.render()) == OPENCV_MISSING_SOURCE
+        # Still saved: the user may be configuring a machine they are about to
+        # install it on, which is exactly why the fallback has to be visible.
+        assert editor._services["gemini"].matcher == "opencv"
+
+        editor.query_one(f"#{matcher_radio_id('anchors')}", RadioButton).value = True
+        await pilot.pause()
+        assert str(warning.render()) == ""
+
+
+async def test_a_frozen_build_does_not_tell_the_user_to_pip_install(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exe has no environment to install into, so the pip line is worse
+    than useless there - it sends somebody to a command that cannot help them
+    and reads as if they had got something wrong. The shipped exe bundles
+    OpenCV, so this is what a build made WITHOUT the cv extra has to admit."""
+    monkeypatch.setattr(service_editor_mod, "opencv_available", lambda: False)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        editor.query_one(f"#{matcher_radio_id('opencv')}", RadioButton).value = True
+        await pilot.pause()
+        shown = str(editor.query_one("#svc-matcher-warning", Static).render())
+        assert shown == OPENCV_MISSING_FROZEN
+        assert "pip" not in shown
+
+
+def test_the_missing_opencv_note_is_chosen_by_how_agentclip_was_installed() -> None:
+    """The two audiences, and the two different things they can do about it."""
+    assert "pip install agentclip[cv]" in opencv_missing_note(frozen=False)
+    assert "pip" not in opencv_missing_note(frozen=True)
+    # Both still say the thing that actually matters: the search will run, and
+    # it will not be the one that was asked for.
+    for note in (OPENCV_MISSING_SOURCE, OPENCV_MISSING_FROZEN):
+        assert "anchors will be used" in note
+
+
+async def test_the_matching_block_is_inert_until_the_service_exists(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Nothing to file a search setting under until "Add service" has created
+    the key - the same rule the captures and the checklist follow."""
+    app, _global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "+add-new+"
+        await pilot.pause()
+        assert editor.query_one("#svc-matcher-set", RadioSet).disabled
+        assert editor.query_one("#svc-tolerance", Slider).disabled
+        # And it shows what pressing "Add service" is going to create.
+        assert editor.query_one(f"#{matcher_radio_id(DEFAULT_MATCHER)}", RadioButton).value
+        assert editor.query_one("#svc-tolerance", Slider).value == DEFAULT_TOLERANCE
 
 
 async def test_a_ticked_signal_with_nothing_captured_warns_until_it_is_captured(

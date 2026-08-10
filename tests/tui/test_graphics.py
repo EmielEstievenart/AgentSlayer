@@ -224,9 +224,23 @@ def test_a_degenerate_crop_is_nothing_to_draw() -> None:
     assert fit_pixels(10, 10, 160, 0) == (0, 0)
 
 
-def test_a_fitted_crop_never_collapses_to_nothing() -> None:
-    """An extreme aspect ratio rounds toward one pixel, not zero."""
-    assert fit_pixels(4000, 10, 160, 60) == (160, 1)
+def test_a_fitted_crop_never_collapses_to_a_hairline() -> None:
+    """An extreme aspect ratio rounds toward a line you can see, not toward one.
+
+    The chat-box appearances are the reason: a capture is ~848x5, and fitting
+    that to sixteen columns puts its height under a pixel. Rounded to one, the
+    row draws a hairline nobody can tell from a row that found nothing - so the
+    floor is two, which at these ratios costs no visible distortion.
+    """
+    assert fit_pixels(4000, 10, 160, 60) == (160, 2)
+    assert fit_pixels(848, 5, 160, 60) == (160, 2)
+
+
+def test_the_floor_never_invents_pixels_that_were_not_captured() -> None:
+    """It can only rescue a rounding loss: a genuinely one-pixel-tall capture is
+    still drawn one pixel tall rather than stretched to meet the floor."""
+    assert fit_pixels(200, 1, 160, 60) == (160, 1)
+    assert fit_pixels(200, 40, 160, 1) == (5, 1)
 
 
 # -- the channel swap ---------------------------------------------------------

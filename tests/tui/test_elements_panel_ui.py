@@ -9,9 +9,13 @@ wiring and the ownership rules:
 * a tick's crops reach the rows they belong to, and a row nobody searched this
   tick is left alone rather than blanked,
 * every CALIBRATED appearance reaches the column on every tick - including the
-  send button with no gate open and the copy button with no flow running, which
-  is the whole point of the detector being independent of the state machine
+  send button with no gate open, the copy button with no flow running, and the
+  chat boxes and new-chat button nothing on the timer consumes at all, which is
+  the whole point of the detector being independent of the state machine
   (screen/detector.py),
+* every TemplateKind has a row, because a column that shows four of the seven
+  things the tool can recognise is a picture of the automation rather than of
+  what the tool can see,
 * crops from a poller run that is no longer live do NOT land (the generation
   stamp, exactly as for the four probes),
 * a detector rebuild clears the column, because its heading may have just been
@@ -44,18 +48,25 @@ from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.capture import RegionImage
+from agentclip.screen.detector import RUNTIME_KINDS
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot
 from agentclip.screen.template import RegionMatch
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.graphics import NO_SIXEL, TerminalGraphics, set_terminal_graphics
+from agentclip.tui.graphics import (
+    NO_SIXEL,
+    TerminalGraphics,
+    crop_rows,
+    set_terminal_graphics,
+)
 from agentclip.tui.messages import ElementCrop, ElementsMatched
 from agentclip.tui.pixels import HALF_BLOCK, thumbnail
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.tui.widgets.elements import (
     ELEMENT_CROP_COLS,
     ELEMENT_CROP_ROWS,
+    ELEMENT_LABEL,
     ELEMENT_MISSING,
     ELEMENT_ORDER,
     ELEMENT_RESTING,
@@ -204,10 +215,25 @@ async def _polling(app: AgentClipApp, pilot: Pilot) -> MainScreen:
 # -- what the column shows ----------------------------------------------------
 
 
+def test_the_column_has_a_row_for_every_appearance_the_tool_can_recognise() -> None:
+    """"Everything it recognises" is the contract, so the list is the enum.
+
+    Pinned against ``TemplateKind`` rather than against a copy of it, and
+    against the detector's own report order, because the two lists are one
+    thing: the detector searches in this order and the column draws it, so a
+    row can never be a picture of some other row's search.
+    """
+    assert ELEMENT_ORDER == RUNTIME_KINDS
+    assert set(ELEMENT_ORDER) == set(TemplateKind)
+    assert all(kind in ELEMENT_LABEL for kind in ELEMENT_ORDER)
+    # The column is 20 cells, 16 of them usable once the scrollbar shows.
+    assert all(len(label) <= ELEMENT_CROP_COLS for label in ELEMENT_LABEL.values())
+
+
 async def test_every_row_rests_on_a_line_saying_what_it_is(
     tmp_path: Path, profile_root: Path
 ) -> None:
-    """Four blank picture-shaped holes are not a readout: before anything has
+    """Seven blank picture-shaped holes are not a readout: before anything has
     matched, each row still names its element and says nothing has."""
     app = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
@@ -217,12 +243,7 @@ async def test_every_row_rests_on_a_line_saying_what_it_is(
         # tab's the moment a delegation makes the two differ.
         assert _title(app).startswith(ELEMENTS_TITLE)
         assert "MASTER" in _title(app)
-        for kind in (
-            TemplateKind.SEND_READY,
-            TemplateKind.BUSY,
-            TemplateKind.IDLE,
-            TemplateKind.COPY,
-        ):
+        for kind in ELEMENT_ORDER:
             assert ELEMENT_RESTING in _label(app, kind)
             assert _picture(app, kind) == ""
 
@@ -556,6 +577,60 @@ async def test_the_send_and_copy_rows_are_alive_with_nothing_going_on(
         assert "found" in _label(app, TemplateKind.COPY)
 
 
+async def test_the_chat_box_and_new_chat_rows_are_alive_too(
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The three the loop never consumes are on the timer like everything else.
+
+    Nothing in the automation reads a chat box or the new-chat button from a
+    poll tick - both are re-searched by the click that is about to use them -
+    and that is exactly why their rows used to be dead. "Every UI element it
+    recognises should be shown": the panel is a readout of what the tool can
+    see, not of what the state machine happens to want. The wide, short chat-box
+    capture also proves a lopsided appearance survives the crop path instead of
+    scaling to an invisible hairline.
+    """
+    app = _make_app(tmp_path, profile_root)
+    service = sorted(app.app_config.services)[0]
+    if app.app_config.general.service in app.app_config.services:
+        service = app.app_config.general.service
+    seed_templates(service, TemplateKind.CHATBOX_ONGOING, size=(120, 6))
+    seed_templates(service, TemplateKind.NEW_CHAT, size=(36, 36))
+
+    scene = bytearray(_frame(REGION).pixels)
+    for image, left, top in (
+        (template_image(120, 6), 40, 420),
+        (template_image(36, 36), 300, 40),
+    ):
+        for row in range(image.height):
+            start = ((top + row) * REGION.width + left) * 4
+            width = image.width * 4
+            scene[start : start + width] = image.pixels[row * width : (row + 1) * width]
+    frame = RegionImage(REGION.width, REGION.height, bytes(scene))
+
+    monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
+    monkeypatch.setattr(main_mod, "capture_region", lambda region: frame)
+    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+
+    async with app.run_test(size=SIZE) as pilot:
+        await _polling(app, pilot)
+
+        await _wait_for(
+            pilot,
+            lambda: _drawn(app, TemplateKind.CHATBOX_ONGOING)
+            and _drawn(app, TemplateKind.NEW_CHAT),
+            "the chat-box and new-chat crops reach the column",
+        )
+        assert "found" in _label(app, TemplateKind.CHATBOX_ONGOING)
+        assert "found" in _label(app, TemplateKind.NEW_CHAT)
+        # The other layout is calibrated for nothing, so it is never claimed
+        # about - the two chat boxes are mutually exclusive on screen anyway.
+        assert ELEMENT_RESTING in _label(app, TemplateKind.CHATBOX_INITIAL)
+
+
 async def test_an_uncaptured_appearance_is_the_row_that_stays_resting(
     tmp_path: Path,
     profile_root: Path,
@@ -667,11 +742,27 @@ async def test_a_copy_button_that_is_not_there_clears_its_row(
 # before - auto-detection picked half cells and nothing said so.
 #
 # The declared cell size is the one textual_image's own get_cell_size() falls
-# back to off a terminal (10x20). It has to be, because the widget scales the
-# image with that function rather than with our verdict - in production the two
-# are the same number because the probe caches what it returned.
+# back to off a terminal (10x20), because the widget scales the image with that
+# function rather than with our verdict - in production the two are the same
+# number because the probe caches what it returned. In a TEST process they can
+# come apart, and which cell size the widget uses is not this suite's to decide:
+# ``textual_image.widget.sixel`` binds ``get_cell_size`` by name at import time,
+# so whichever test first pulls that module in decides what it is bound to for
+# the rest of the run (tests/tui/test_graphics.py imports it while its own
+# monkeypatched cell size is installed, and running this file after it used to
+# fail a hard-coded raster assertion). So the raster attributes below are read
+# back from the same binding the widget reads them from - the pixel geometry is
+# still pinned, just not against a bet on test order.
 
 SIXEL_TERMINAL = TerminalGraphics(sixel=True, cell_width=10, cell_height=20)
+
+
+def _raster(cols: int, rows: int) -> str:
+    """The sixel raster attributes a ``cols x rows`` cell box comes out as."""
+    from textual_image.widget.sixel import get_cell_size
+
+    cell = get_cell_size()
+    return f'"1;1;{cols * cell.width};{rows * cell.height}'
 
 
 def _sixel_strips(app: AgentClipApp, kind: TemplateKind) -> str:
@@ -714,7 +805,7 @@ async def test_a_posted_crop_reaches_the_terminal_as_sixel_data(
 ) -> None:
     """The end of the road: a match posted by the poller comes back out of the
     widget as a sixel escape sequence, sized to the cell box the panel reserved
-    (the raster attributes say 160x60 = 16 cols x 10px by 3 rows x 20px)."""
+    (the raster attributes are ELEMENT_CROP_COLS by crop_rows(20), in pixels)."""
     set_terminal_graphics(SIXEL_TERMINAL)
     _patch_picker(monkeypatch)
     _freeze_detector(monkeypatch)
@@ -729,7 +820,8 @@ async def test_a_posted_crop_reaches_the_terminal_as_sixel_data(
 
         drawn = _sixel_strips(app, TemplateKind.BUSY)
         assert "\x1bP" in drawn  # DCS: the sixel introducer
-        assert '"1;1;160;60' in drawn  # raster attributes: the padded box
+        # Raster attributes: the padded box, in pixels.
+        assert _raster(ELEMENT_CROP_COLS, crop_rows(SIXEL_TERMINAL.cell_height)) in drawn
         assert HALF_BLOCK not in drawn
         assert "1.2%" in _label(app, TemplateKind.BUSY)
 

@@ -179,6 +179,7 @@ from agentclip.screen.focus import (
 from agentclip.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
 from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.identify import IdentifiedElement, identify_elements, summarise
+from agentclip.screen.matchers import select_matcher
 from agentclip.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
 from agentclip.screen.presence import PresenceTracker
 from agentclip.screen.profile import ServiceProfile, TemplateKind
@@ -193,6 +194,8 @@ from agentclip.screen.slot import (
 )
 from agentclip.screen.stale import StaleProbe, StaleState, StaleTracker
 from agentclip.screen.template import (
+    DEFAULT_TOLERANCE,
+    CandidateSource,
     RegionMatch,
     Template,
     find_all_in_region,
@@ -452,7 +455,12 @@ def _distinct_rects(
 
 
 def _lowest_match(
-    templates: Sequence[Template], scene: RegionImage, *, max_diff: float
+    templates: Sequence[Template],
+    scene: RegionImage,
+    *,
+    max_diff: float,
+    tolerance: int = DEFAULT_TOLERANCE,
+    matcher: CandidateSource | None = None,
 ) -> tuple[Template, RegionMatch] | None:
     """The bottom-most match of ANY of a kind's images, and the image that made it.
 
@@ -461,11 +469,18 @@ def _lowest_match(
     lowest, and which of the service's captured pictures of it matched changes
     nothing about that - only the size of the rectangle to click.
     """
-    return _lowest_match_scored(templates, scene, max_diff=max_diff)[0]
+    return _lowest_match_scored(
+        templates, scene, max_diff=max_diff, tolerance=tolerance, matcher=matcher
+    )[0]
 
 
 def _lowest_match_scored(
-    templates: Sequence[Template], scene: RegionImage, *, max_diff: float
+    templates: Sequence[Template],
+    scene: RegionImage,
+    *,
+    max_diff: float,
+    tolerance: int = DEFAULT_TOLERANCE,
+    matcher: CandidateSource | None = None,
 ) -> tuple[tuple[Template, RegionMatch] | None, float | None]:
     """:func:`_lowest_match`, plus the closest the whole stack came to a hit.
 
@@ -480,7 +495,9 @@ def _lowest_match_scored(
     best: tuple[Template, RegionMatch] | None = None
     best_miss: float | None = None
     for template in templates:
-        match, miss = find_lowest_with_best_miss(template, scene, max_diff=max_diff)
+        match, miss = find_lowest_with_best_miss(
+            template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher
+        )
         if miss is not None and (best_miss is None or miss < best_miss):
             best_miss = miss
         if match is None:
@@ -1760,10 +1777,17 @@ class MainScreen(Screen[None]):
         # means the control is. Sorted back into reading order across the union
         # before the fold, so which image happened to be searched first cannot
         # change which rectangle survives as a duplicate's representative.
+        tolerance, matcher = self._live_search()
         found: list[tuple[Template, RegionMatch]] = []
         for template in templates:
             matches = await asyncio.to_thread(
-                find_all_in_region, template, scene, max_diff=kind.max_diff, limit=_MAX_MATCHES
+                find_all_in_region,
+                template,
+                scene,
+                tolerance=tolerance,
+                max_diff=kind.max_diff,
+                limit=_MAX_MATCHES,
+                matcher=matcher,
             )
             found.extend((template, match) for match in matches)
         found.sort(key=lambda pair: (pair[1].y, pair[1].x))
@@ -2177,6 +2201,20 @@ class MainScreen(Screen[None]):
         """What the window the automation is driving looks like."""
         return self._profile_for(self._live)
 
+    def _live_search(self) -> tuple[int, CandidateSource]:
+        """How the live window's service wants its appearances hunted for.
+
+        Every search this screen runs OUTSIDE the poller - the auto-copy
+        harvest, the manual harvest, the chat-box click, the /identify overlay -
+        has to use the same two settings the poller was built with, or the
+        ELEMENTS column and the thing about to click would be answering with
+        different rulers. The detector gets them via ``build_detector``; this is
+        the same pair for everybody else, read from the LIVE window's preset
+        because that is the window all of those touch.
+        """
+        preset = self._live_preset()
+        return preset.tolerance, select_matcher(preset.matcher).origins
+
     def _selected_service(self) -> str:
         """The selected tab's service - what the sidebar's picker shows."""
         return self._service_for(self._calibrating)
@@ -2446,8 +2484,14 @@ class MainScreen(Screen[None]):
             except CaptureError as exc:
                 self.notify(f"could not capture the chat window: {exc}", severity="error")
                 return
+            tolerance, matcher = self._live_search()
             elements: list[IdentifiedElement] = await asyncio.to_thread(
-                identify_elements, region, self._live_profile(), scene
+                identify_elements,
+                region,
+                self._live_profile(),
+                scene,
+                tolerance=tolerance,
+                matcher=matcher,
             )
             self.suspend_detectors()
             try:
@@ -2577,6 +2621,8 @@ class MainScreen(Screen[None]):
             self._live_profile(),
             signals=preset.finish_signals,
             required_ticks=ticks,
+            tolerance=preset.tolerance,
+            matcher=preset.matcher,
         )
         self._detector = detector
         # The trackers stay reachable under their own names: the flow, the paste
@@ -3396,7 +3442,12 @@ class MainScreen(Screen[None]):
             self.sidebar.update_template(TemplateKind.COPY, f"{size}{text}")
 
     def _hover_scan_for_copy(
-        self, region: ScreenRegion, templates: Sequence[Template]
+        self,
+        region: ScreenRegion,
+        templates: Sequence[Template],
+        *,
+        tolerance: int = DEFAULT_TOLERANCE,
+        matcher: CandidateSource | None = None,
     ) -> tuple[Template, RegionMatch] | None:
         """Walk the real cursor up ``region`` and stop at the FIRST frame the
         copy icon appears in, or None if it never does.
@@ -3421,7 +3472,13 @@ class MainScreen(Screen[None]):
                 scene = capture_region(region)
             except CaptureError:
                 return None
-            found = _lowest_match(templates, scene, max_diff=TemplateKind.COPY.max_diff)
+            found = _lowest_match(
+                templates,
+                scene,
+                max_diff=TemplateKind.COPY.max_diff,
+                tolerance=tolerance,
+                matcher=matcher,
+            )
             if found is not None:
                 return found
         return None
@@ -3517,8 +3574,14 @@ class MainScreen(Screen[None]):
                 LoopState.MANUAL_COPY, "the chat region could not be captured to search in"
             )
             return
+        tolerance, matcher = self._live_search()
         found, best_miss = await asyncio.to_thread(
-            _lowest_match_scored, templates, scene, max_diff=TemplateKind.COPY.max_diff
+            _lowest_match_scored,
+            templates,
+            scene,
+            max_diff=TemplateKind.COPY.max_diff,
+            tolerance=tolerance,
+            matcher=matcher,
         )
         # The ELEMENTS column's picture of the frame the click is being AIMED
         # at, which the poller's own copy row cannot be: this frame is the one
@@ -3535,7 +3598,13 @@ class MainScreen(Screen[None]):
             # is the only way to find the icon, gratuitous everywhere else, where
             # a static miss simply means the icon is not there.
             self._copy_status("hover-scanning")
-            found = await asyncio.to_thread(self._hover_scan_for_copy, region, templates)
+            found = await asyncio.to_thread(
+                self._hover_scan_for_copy,
+                region,
+                templates,
+                tolerance=tolerance,
+                matcher=matcher,
+            )
         if found is None:
             self.notify("copy button not found on screen", severity="warning")
             self._copy_status("not found")
@@ -3672,9 +3741,12 @@ class MainScreen(Screen[None]):
 
     # -- the browser's new-chat button ------------------------------------------
     #
-    # No sidebar status line: the new-chat button is found on demand rather than
-    # polled, so there is no verdict to keep on screen between presses, and
-    # every outcome below already says what happened as a toast.
+    # No sidebar status line: nothing here is DECIDED from the new-chat button -
+    # it is clicked, and every outcome below already says what happened as a
+    # toast. Its live picture is in the ELEMENTS column with every other kind
+    # (the poller searches for it on every tick, §1.7); this click still
+    # re-searches a fresh capture, because a polled corner is up to half an
+    # interval old and this one moves the mouse.
 
     @on(Button.Pressed, "#newchat-btn")
     def _on_newchat(self, event: Button.Pressed) -> None:

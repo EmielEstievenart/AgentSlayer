@@ -129,10 +129,10 @@ class ElementsMatched(Message):
     * a kind ABSENT - not searched at all this tick, so its row keeps whatever
       it last said. That means one thing only: the live window's service is not
       CALIBRATED for it (no capture, or - for busy/idle - a checklist that does
-      not tick it). A fully calibrated service carries all four entries on every
-      tick, because the detector searches for everything it can see regardless
-      of what the state machine is doing (screen/detector.py). A tick whose
-      capture failed carries nothing at all.
+      not tick it). A fully calibrated service carries an entry for all SEVEN
+      appearances on every tick, because the detector searches for everything it
+      can see regardless of what the state machine is doing
+      (screen/detector.py). A tick whose capture failed carries nothing at all.
 
     Like ``SendReadyProbed`` it closes no tick and folds into no verdict - these
     are pictures, and their only job is letting the user see that the detectors

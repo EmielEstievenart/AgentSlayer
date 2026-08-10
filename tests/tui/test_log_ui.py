@@ -1,4 +1,4 @@
-"""Pilot tests for the harness decision log and `/log` (tui.md §3.3b).
+"""Pilot tests for the harness decision log and its pane (tui.md §3.3b).
 
 The sidebar's STATE rail says WHERE the browser-automation loop is; this log
 says how it got there, and that is the question a stuck user actually has. The
@@ -9,9 +9,14 @@ those four read differently afterwards.
 
 So these tests drive REAL scenarios (a paste with nowhere to paste, a driven
 finish, each way the send gate can end, a disarmed harvest) and then read the
-rendered screen for the reason that decision should have written. Asserting on
+rendered pane for the reason that decision should have written. Asserting on
 the text rather than on ``_harness_log`` is deliberate: an entry the user cannot
 read is not a log entry, and the reasons are the feature.
+
+The first block tests the pane itself - the full-width strip above the status
+bar that `/log` and `F8` flip - and what it owes the reader: a live tail while
+it is open, a frozen one while they are scrolled up in it, and everything they
+missed the moment it is revealed.
 
 ``BusyProbed`` / ``SendReadyProbed`` are the documented injectable path for the
 poller (tui/messages.py, and test_finish_signal_ui.py drives them at length);
@@ -27,7 +32,6 @@ from pathlib import Path
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Static
 
 import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
@@ -41,7 +45,6 @@ from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.harness_log import EMPTY_LOG_LINE, HARNESS_LOG_MAX
 from agentclip.tui.messages import BusyProbed, ClipboardCaptured, SendReadyProbed
-from agentclip.tui.screens.log import LogScreen
 from agentclip.tui.screens.main import MainScreen
 
 from .conftest import send_composer
@@ -107,13 +110,36 @@ async def _start_session(app: AgentClipApp, pilot: Pilot, task: str = "Say hello
     return main
 
 
-async def _read_log(app: AgentClipApp, pilot: Pilot) -> str:
-    """Type `/log`, read what the screen actually renders, dismiss it."""
+def _pane_text(main: MainScreen) -> str:
+    """What the pane is actually painting, read back off its strips.
+
+    The RichLog's own lines, not the deque - an entry that never made it into
+    the widget is an entry the user cannot read, which is the whole thing these
+    tests are checking. Strips are padded out to the render width, so callers
+    match with ``in`` rather than by equality.
+    """
+    return "\n".join(strip.text for strip in main.harness_log_pane.lines)
+
+
+async def _open_log(app: AgentClipApp, pilot: Pilot) -> MainScreen:
+    """Type `/log` and wait until the pane has painted."""
+    main = app.main_screen
+    assert main is not None
     await send_composer(app, pilot, "/log")
-    await _wait_for(pilot, lambda: isinstance(app.screen, LogScreen), "the log screen")
-    text = str(app.screen.query_one("#log-entries", Static).render())
-    await pilot.press("escape")
-    await _wait_for(pilot, lambda: not isinstance(app.screen, LogScreen), "the log dismissed")
+    await _wait_for(pilot, lambda: main.harness_log_pane.display, "the log pane shown")
+    # The first write into a RichLog whose width is not known yet is deferred
+    # until the resize that follows it, so "displayed" is one beat ahead of
+    # "painted" - and the painting is what is being read.
+    await _wait_for(pilot, lambda: bool(main.harness_log_pane.lines), "the log pane painted")
+    return main
+
+
+async def _read_log(app: AgentClipApp, pilot: Pilot) -> str:
+    """Type `/log`, read what the pane actually renders, put it away again."""
+    main = await _open_log(app, pilot)
+    text = _pane_text(main)
+    await send_composer(app, pilot, "/log")
+    await _wait_for(pilot, lambda: not main.harness_log_pane.display, "the log pane hidden")
     return text
 
 
@@ -154,7 +180,7 @@ def _seed_and_reload(
     main.update_config(main._config)
 
 
-# -- the screen itself --------------------------------------------------------
+# -- the pane itself ----------------------------------------------------------
 
 
 async def test_the_log_opens_with_no_session_at_all_and_says_it_is_empty(
@@ -162,7 +188,7 @@ async def test_the_log_opens_with_no_session_at_all_and_says_it_is_empty(
 ) -> None:
     """`/identify`'s rule: no session gate, because the log is most wanted when
     a run has wedged or ended. At the task prompt there is nothing in it yet,
-    and the screen says so rather than showing a blank box the user has to
+    and the pane says so rather than showing a blank strip the user has to
     interpret - and the prompt is still waiting afterwards."""
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
@@ -173,21 +199,120 @@ async def test_the_log_opens_with_no_session_at_all_and_says_it_is_empty(
         assert not main.session_active  # ...and no session was started
 
 
-async def test_the_log_screen_scrolls_instead_of_clipping_its_tail(tmp_path: Path) -> None:
-    """The reason the body is a VerticalScroll: ``.modal-box`` caps its height
-    and sets no overflow rule, so a long log in a bare Vertical would lose its
-    newest entries silently - which are the ones the user opened it for."""
+async def test_the_pane_starts_hidden_and_log_flips_it_both_ways(tmp_path: Path) -> None:
+    """It is a pane, not a modal: the same command that shows it puts it away,
+    and it is always mounted so nothing has to be rebuilt in between."""
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _at_the_task_prompt(app, pilot)
-        for index in range(120):
-            main._log_harness("state", f"filler entry {index}")
+        assert not main.harness_log_pane.display  # nothing asked for it yet
+
+        await _open_log(app, pilot)
 
         await send_composer(app, pilot, "/log")
-        await _wait_for(pilot, lambda: isinstance(app.screen, LogScreen), "the log screen")
-        body = app.screen.query_one("#log-body")
-        assert body.max_scroll_y > 0  # there is more log than box
-        assert body.scroll_offset.y == body.max_scroll_y  # ...and it opened at the end
+        await _wait_for(pilot, lambda: not main.harness_log_pane.display, "the pane put away")
+        assert main.harness_log_pane.is_mounted  # ...hidden, never unmounted
+        assert main.awaiting_new_session  # and neither /log resolved the prompt
+
+
+async def test_f8_flips_the_same_pane_while_the_composer_holds_focus(tmp_path: Path) -> None:
+    """The whole reason for a key: the pane is flicked open mid-run to watch a
+    decision land, which is not a thing anyone types five characters for. It is
+    a priority binding because the composer is a focused TextArea that would
+    otherwise eat the key - so this test types into the box first."""
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _at_the_task_prompt(app, pilot)
+        main.composer.load_text("a task I am halfway through typing")
+        main.composer.focus()
+        await pilot.pause()
+
+        await pilot.press("f8")
+        await _wait_for(pilot, lambda: main.harness_log_pane.display, "f8 showed the pane")
+        await pilot.press("f8")
+        await _wait_for(pilot, lambda: not main.harness_log_pane.display, "f8 hid the pane")
+
+        # ...and the half-typed task is untouched by either press.
+        assert main.composer.text == "a task I am halfway through typing"
+
+
+async def test_a_decision_taken_while_the_pane_is_open_appears_in_it_at_once(
+    tmp_path: Path,
+) -> None:
+    """The reason the modal died. A snapshot answers "why did it do that?" only
+    for decisions already taken, and the moment a user reaches for this is the
+    moment something is happening in front of them."""
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _open_log(app, pilot)
+        assert EMPTY_LOG_LINE in _pane_text(main)  # nothing yet...
+
+        main._log_harness("state", "a decision taken with the pane up")
+        await pilot.pause()
+
+        text = _pane_text(main)
+        assert "a decision taken with the pane up" in text
+        # ...and the placeholder was replaced rather than being left above it.
+        assert EMPTY_LOG_LINE not in text
+
+
+async def test_a_hidden_pane_shows_everything_it_missed_when_it_is_revealed(
+    tmp_path: Path,
+) -> None:
+    """Hidden, the pane paints nothing at all - and a pane that came back
+    showing where it left off would be lying about a log whose whole job is to
+    say what just happened. So it refills from the deque on the way in."""
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _at_the_task_prompt(app, pilot)
+        main._log_harness("state", "logged while nobody was looking")
+        await pilot.pause()
+        assert main.harness_log_pane.lines == []  # painted nothing while hidden
+
+        await _open_log(app, pilot)
+        assert "logged while nobody was looking" in _pane_text(main)
+
+        # ...and again, for entries that landed while it was put away.
+        await send_composer(app, pilot, "/log")
+        await _wait_for(pilot, lambda: not main.harness_log_pane.display, "the pane put away")
+        main._log_harness("state", "logged after it was put away")
+        await pilot.pause()
+        await _open_log(app, pilot)
+        text = _pane_text(main)
+        assert "logged while nobody was looking" in text
+        assert "logged after it was put away" in text
+
+
+async def test_scrolling_up_freezes_the_tail_and_going_back_down_resumes_it(
+    tmp_path: Path,
+) -> None:
+    """The hazard the modal's snapshot was answering, answered directly: a pane
+    that reflowed under a reader mid-sentence would be unreadable exactly when
+    it is being read hardest. Following is a property of where the view IS, not
+    a mode - so the way out is the way in, scrolled back to the bottom."""
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _open_log(app, pilot)
+        pane = main.harness_log_pane
+        for index in range(120):
+            main._log_harness("state", f"filler entry {index}")
+        await _wait_for(pilot, lambda: pane.following, "the pane pinned to the newest entry")
+        assert pane.max_scroll_y > 0  # there is more log than pane
+
+        pane.scroll_to(y=0, animate=False, immediate=True)
+        await pilot.pause()
+        assert not pane.following  # the reader is up in the history
+
+        main._log_harness("state", "landed while the reader was parked")
+        await pilot.pause()
+        assert pane.scroll_offset.y == 0  # the line being read did not move...
+        assert "landed while the reader was parked" in _pane_text(main)  # ...and it is there
+
+        pane.scroll_end(animate=False, immediate=True)
+        await pilot.pause()
+        assert pane.following
+        main._log_harness("state", "landed while the reader was at the tail")
+        await _wait_for(pilot, lambda: pane.following, "the pane following again")
 
 
 async def test_the_log_is_bounded_and_keeps_the_newest_entries(tmp_path: Path) -> None:
@@ -203,7 +328,10 @@ async def test_the_log_is_bounded_and_keeps_the_newest_entries(tmp_path: Path) -
         assert len(main._harness_log) == HARNESS_LOG_MAX
         text = await _read_log(app, pilot)
         assert f"entry {HARNESS_LOG_MAX + 19}" in text
-        assert "entry 0 " not in text and "entry 5\n" not in text
+        # The pane's own bound is the same number, so the two prune in lockstep
+        # and what fell off the deque is not still on screen. (Strips are padded
+        # to the render width, hence the trailing space rather than a newline.)
+        assert "entry 0 " not in text and "entry 5 " not in text
 
 
 # -- the reasons, from real scenarios -----------------------------------------

@@ -580,7 +580,8 @@ class SessionController:
         self._view.show_identify_overlay()
 
     def _cmd_log(self) -> None:
-        """Show the harness decision log - every loop move, with its reason.
+        """Show (or put away) the harness decision log - every loop move, with
+        its reason.
 
         `/identify` answers "what can you see?"; this answers "why did you do
         that?", and the two share a rationale for having NO session gate: the
@@ -592,9 +593,10 @@ class SessionController:
         And, like `/identify`, the controller has nothing to add: every decision
         in it was taken on the view's side of the port - the paste attempt, the
         send gate, the finish detectors, the auto-copy flow - so it says "show
-        it" and stops.
+        it" and stops. It is a toggle on the far side (a pane, not a modal), so
+        typing it twice puts it away; the controller does not track which.
         """
-        self._view.show_harness_log()
+        self._view.toggle_harness_log()
 
     def _cmd_armed(self, arg: str) -> None:
         """Arm or disarm the whole OS-acting half of the tool (bare = toggle).

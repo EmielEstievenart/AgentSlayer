@@ -224,7 +224,6 @@ from agentclip.tui.messages import (
 )
 from agentclip.tui.pixels import crop
 from agentclip.tui.screens.confirm import ConfirmScreen
-from agentclip.tui.screens.log import LogScreen
 from agentclip.tui.screens.summary import SummaryScreen
 from agentclip.tui.screens.text_entry import TextEntryScreen
 from agentclip.tui.widgets.action_panel import ActionPanel
@@ -234,6 +233,7 @@ from agentclip.tui.widgets.elements import (
     ElementsPanel,
     element_crop_image,
 )
+from agentclip.tui.widgets.log_pane import HarnessLogPane
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
     COPY_RESTING,
@@ -610,6 +610,12 @@ class MainScreen(Screen[None]):
         # one-key answers, and the two columns name each other's keys in their
         # own hint lines.
         Binding("f7", "toggle_elements", "elements", priority=True, show=False),
+        # The harness log pane (§3.3b), the same trade one row down: f1-f7 are
+        # all spoken for, so f8. Priority for the third time and the same
+        # reason - the composer is a focused TextArea - and show=False because
+        # `/log` is how it is discovered (the popup lists it, the help screen
+        # names the key) and the footer is already full.
+        Binding("f8", "toggle_harness_log", "log", priority=True, show=False),
         # Browse the transcript tabs by keyboard. f4/f2/f1 are the app's, f3 is
         # the sidebar's, so f6 it is. Priority for the same reason as f3 (the
         # composer is a TextArea and would otherwise eat it), and show=False
@@ -927,6 +933,11 @@ class MainScreen(Screen[None]):
             # column of their own rather than at the bottom of one that already
             # overflows (tui.md 1.3/1.7). F7 hides it, F3 hides its neighbour.
             yield ElementsPanel(id="elements")
+        # Full width, under all three columns and above the status bar: an entry
+        # is a whole sentence of reason, and nothing narrower than the terminal
+        # can hold one. Mounted for good and hidden by CSS; F8 and `/log` show
+        # it, and the columns above give up ~30% of their height while it is up.
+        yield HarnessLogPane(id="log-pane")
         yield StatusBar(id="statusbar")
         yield Footer()
 
@@ -979,6 +990,11 @@ class MainScreen(Screen[None]):
     def elements_panel(self) -> ElementsPanel:
         """The ELEMENTS column - the LIVE window's recognised crops (§1.7)."""
         return self.query_one(ElementsPanel)
+
+    @property
+    def harness_log_pane(self) -> HarnessLogPane:
+        """The full-width live tail of the decision log (`/log`, F8; §3.3b)."""
+        return self.query_one(HarnessLogPane)
 
     def update_config(self, config: Config) -> None:
         """Adopt a freshly-edited Config (service editor save) for everything
@@ -1396,10 +1412,16 @@ class MainScreen(Screen[None]):
         The single append site, so the bound and the timestamp are decided once.
         Called from the UI event loop only - workers reach the screen through
         ``post_message`` and the async flows log after their awaits return - so
-        the deque needs no lock. Deliberately no repaint: nothing on the main
-        screen draws the log, and LogScreen reads a snapshot when it opens.
+        the deque needs no lock. The deque is the log; the pane is a view of it,
+        mirrored one entry at a time so an open pane shows a decision as it is
+        taken (§3.3b). A hidden pane paints nothing and refills itself from here
+        when it is next revealed, and before the screen is mounted there is no
+        pane at all - which is why the query is suppressed.
         """
-        self._harness_log.append(HarnessEntry(kind, text))
+        entry = HarnessEntry(kind, text)
+        self._harness_log.append(entry)
+        with suppress(NoMatches):
+            self.harness_log_pane.append(entry)
 
     def _paint_state_rail(self) -> None:
         """Repaint the sidebar's STATE rail. Called on every loop-state change
@@ -2240,6 +2262,16 @@ class MainScreen(Screen[None]):
             panel = self.elements_panel
             panel.display = not panel.display
 
+    def action_toggle_harness_log(self) -> None:
+        """F8: the same show/hide as `/log`, one keystroke instead of five.
+
+        Deliberately the same call and not a parallel one: two ways to ask for
+        one thing, one implementation of it - and the key exists because the
+        pane is a thing you flick open mid-run to watch a decision land, which
+        is not a thing you type a command for.
+        """
+        self.toggle_harness_log()
+
     @property
     def picker_open(self) -> bool:
         """Is a fullscreen draw-a-box overlay up right now?
@@ -2344,19 +2376,28 @@ class MainScreen(Screen[None]):
 
     # == ChatView: /log ========================================================
 
-    def show_harness_log(self) -> None:
-        """`/log`: show why the harness moved through its recent states.
+    def toggle_harness_log(self) -> None:
+        """`/log` (and F8): show/hide why the harness moved through its states.
 
         The rail says WHERE the loop is; this says how it got there, and it is
         the only place the reasons survive - a toast is gone in eight seconds
         and half these decisions never raise one at all.
 
-        A snapshot is handed to the screen rather than the deque itself, so
-        entries appended while the user reads cannot move the text under them.
+        A pane rather than a modal, and LIVE: the moment a user asks this is the
+        moment something is going wrong in front of them, and a snapshot they
+        have to close and re-open to see the next entry is the wrong instrument
+        for watching a loop. The pane is handed the deque itself and follows the
+        tail only while the reader is already at it (widgets/log_pane.py).
+
         No session gate, for `/identify`'s reason: the log is most wanted
         exactly when a run has gone sideways or ended.
         """
-        self.app.push_screen(LogScreen(list(self._harness_log)))
+        with suppress(NoMatches):
+            pane = self.harness_log_pane
+            if pane.display:
+                pane.display = False
+            else:
+                pane.reveal(self._harness_log)
 
     # == ChatView: /identify ===================================================
 

@@ -322,6 +322,27 @@ class AgentClipApp(App[None]):
         margin-top: 1;
     }
 
+    /* The harness log pane (tui.md 3.3b): full width, between the three columns
+       and the status bar, hidden until F8 or /log asks for it.
+
+       A share of the terminal rather than a fixed slab, because what it costs
+       is the transcript above it - but capped, because past a dozen rows it has
+       stopped being a tail and started being the screen. The cap bites on any
+       terminal over ~47 rows; the floor keeps it readable (a border row, a
+       horizontal scrollbar and three entries) on a short one. The border is one
+       edge, like the two columns' - it is what carries the title. */
+    HarnessLogPane {
+        display: none;
+        height: 30%;
+        min-height: 6;
+        max-height: 14;
+        background: $panel;
+        border-top: solid $primary;
+        padding: 0 1;
+        scrollbar-size-horizontal: 1;
+        scrollbar-size-vertical: 1;
+    }
+
     StatusBar {
         height: 1;
         background: $panel;
@@ -381,7 +402,7 @@ class AgentClipApp(App[None]):
     }
 
     ConfirmScreen, SummaryScreen, HelpScreen, TextEntryScreen, ServiceEditorScreen,
-    SettingsScreen, LogScreen {
+    SettingsScreen {
         align: center middle;
     }
     .modal-box {
@@ -407,17 +428,6 @@ class AgentClipApp(App[None]):
     }
     .modal-box Select {
         margin-top: 1;
-    }
-
-    /* The harness log is the one modal whose body must SCROLL: it is hundreds of
-       rows deep and the shared box has no overflow rule, so an auto-height
-       Vertical would silently cut the tail off. A fixed box height gives the
-       VerticalScroll inside it something to be 1fr of. */
-    #log-box {
-        height: 85%;
-    }
-    #log-body {
-        height: 1fr;
     }
 
     #service-editor-box {

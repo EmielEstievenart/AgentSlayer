@@ -66,7 +66,7 @@ class FakeChatView:
         self.cleared = 0
         self.new_chats_opened = 0  # /new asking for a fresh BROWSER chat, now
         self.identify_overlays = 0  # /identify asking for the debug boxes
-        self.harness_logs = 0  # /log asking for the decision log screen
+        self.harness_log_toggles = 0  # /log flipping the decision-log pane
         # Every /armed target as the controller sent it (None = "toggle"), plus
         # the state a real view would be in after them - the port is fire-and-
         # forget, so the fake resolves the toggles the way MainScreen does.
@@ -189,10 +189,10 @@ class FakeChatView:
         # /identify is one call and no answer - the whole feature is the view's.
         self.identify_overlays += 1
 
-    def show_harness_log(self) -> None:
+    def toggle_harness_log(self) -> None:
         # /log, the same shape again: the decisions it lists were all taken on
-        # this side of the port, so the controller only asks for the screen.
-        self.harness_logs += 1
+        # this side of the port, so the controller only asks for the pane.
+        self.harness_log_toggles += 1
 
     def set_os_armed(self, target: bool | None) -> None:
         # Same shape as show_identify_overlay: one call, no answer, no session.

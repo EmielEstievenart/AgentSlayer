@@ -106,9 +106,13 @@ def test_log_dispatches_to_the_view_with_no_session_of_any_kind(
     exactly when it is wanted, and the controller has nothing to add - every
     decision in the log was taken on the view's side of the port."""
     controller.submit_message("/log")
-    assert view.harness_logs == 1
+    assert view.harness_log_toggles == 1
     assert view.toasts() == []  # no refusal, no "start a session first"
     assert view.events == []  # and nothing lands in the transcript
+    # ...and it is a toggle on the far side, so the second one puts it away
+    # rather than stacking a second view of the same log.
+    controller.submit_message("/log")
+    assert view.harness_log_toggles == 2
 
 
 def test_armed_dispatches_to_the_view_with_no_session_of_any_kind(

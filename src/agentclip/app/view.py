@@ -128,9 +128,10 @@ class ChatView(Protocol):
     # controller can say "show the user why you did what you did", and the
     # decisions themselves are all the view's - the paste attempt, the send
     # gate, the finish detectors and the auto-copy flow live on the far side of
-    # this port, so the log they write does too. Never blocking: it pushes a
-    # modal the user dismisses.
-    def show_harness_log(self) -> None: ...
+    # this port, so the log they write does too. Never blocking: it flips a pane
+    # along the bottom of the screen, which is also why it TOGGLES - the same
+    # command puts it away, and F8 is the same call.
+    def toggle_harness_log(self) -> None: ...
 
     # The global ARMED switch (`/armed`, F5). DISARMED means the tool stops
     # ACTING on the world - no clicks, no synthetic paste, no cursor moves, no

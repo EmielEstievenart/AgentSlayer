@@ -45,6 +45,9 @@ class FakeSshHost(FakeHost):
         self.os_name = "Linux (ssh)"
         return self.os_name
 
+    def home_dir(self) -> Path:
+        return Path("/home/dev")
+
     def close(self) -> None:
         self.closed = True
 
@@ -88,6 +91,12 @@ def test_the_remote_root_becomes_the_project_root(args, host: FakeSshHost) -> No
     assert launch.project_root.as_posix() == REMOTE_ROOT
     assert launch.host is host
     assert host.connected
+
+
+def test_the_global_skill_folders_are_the_remote_users(args, host: FakeSshHost) -> None:
+    launch = cli.remote_launch(args)
+    assert not isinstance(launch, int)
+    assert launch.home == Path("/home/dev")  # not this operator's ~
 
 
 def test_the_bootstrap_os_is_the_remote_one(args, host: FakeSshHost) -> None:
@@ -192,6 +201,8 @@ def test_every_part_of_a_session_gets_the_same_host(tmp_path: Path) -> None:
     host = FakeSshHost()
     host.add_file(f"{REMOTE_ROOT}/README.md", "hi\n")
     host.add_file(f"{REMOTE_ROOT}/.claude/skills/deploy/SKILL.md", "---\nname: deploy\n---\ngo")
+    # A global skill folder under the REMOTE user's home, not the operator's.
+    host.add_file("/home/dev/.claude/skills/release/SKILL.md", "---\nname: release\n---\nship")
 
     def get_config() -> Config:
         return load_config(
@@ -204,12 +215,14 @@ def test_every_part_of_a_session_gets_the_same_host(tmp_path: Path) -> None:
         host=host,
         os_name="Linux (ssh)",
         data_root=tmp_path / "state",
+        home=host.home_dir(),
     )
     engine = build(EngineRequest(service="claude"))
 
     payload = engine.start_task("do it").chunks[0]
     assert "on Linux (ssh)" in payload  # the bootstrap tells the truth
     assert "deploy" in payload  # ...and the skills came off the remote machine
+    assert "release" in payload  # ...including the remote user's own
     # The session tree is on THIS PC, next to nothing the remote host holds.
     assert (tmp_path / "state" / ".agentclip" / "sessions").is_dir()
     assert host.stat(Path(f"{REMOTE_ROOT}/.agentclip")) is None

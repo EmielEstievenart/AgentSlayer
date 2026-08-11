@@ -61,6 +61,13 @@ def test_probe_reports_the_remote_kernel(host: SshHost) -> None:
     assert host.os_name.endswith("(ssh)")
 
 
+def test_home_dir_is_the_remote_users(host: SshHost) -> None:
+    """Where a remote session looks for the global skill folders."""
+    code, out = host.run_blocking("echo $HOME", timeout=30)
+    assert code == 0
+    assert host.home_dir().as_posix() == out.strip().splitlines()[-1].strip()
+
+
 def test_a_command_runs_in_the_workspace_root(host: SshHost, workdir: Path) -> None:
     result = host.spawn("pwd", workdir).wait(30)
     assert result is not None and result.exit_code == 0

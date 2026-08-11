@@ -449,6 +449,19 @@ class SshHost:
         self.os_name = f"{kernel} (ssh)"
         return self.os_name
 
+    def home_dir(self) -> Path:
+        """The remote user's home directory - where their skill folders live.
+
+        SFTP starts in it, so normalizing "." is the question. Falls back to the
+        POSIX convention rather than raising: a home that cannot be resolved
+        means no global skills, not a failed launch.
+        """
+        try:
+            with self._sftp(".") as sftp:
+                return Path(sftp.normalize("."))
+        except OSError:
+            return Path(f"/home/{self._resolved_user}") if self._resolved_user else Path("/root")
+
     def run_blocking(self, command: str, *, timeout: float = 60.0) -> tuple[int, str]:
         """Run one command to completion. For launch-time probes, not for tools."""
         handle = self.spawn(command, Path("."))

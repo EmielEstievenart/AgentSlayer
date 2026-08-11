@@ -37,6 +37,7 @@ def make_engine_factory(
     host: Host | None = None,
     os_name: str | None = None,
     data_root: Path | None = None,
+    home: Path | None = None,
 ) -> Callable[[EngineRequest | str], Engine]:
     """Build one fresh Engine (and session directory) per started session.
 
@@ -63,10 +64,11 @@ def make_engine_factory(
     is chosen: every session this factory builds hands the same Host to the
     workspace jail, the tool context, the backup store and the engine, so a
     session cannot end up half local and half remote. ``os_name`` is what the
-    bootstrap's "on {os}" slot says (the REMOTE kernel in a remote session), and
+    bootstrap's "on {os}" slot says (the REMOTE kernel in a remote session);
     ``data_root`` is where the .agentclip session tree goes when the project
-    root is not on this PC. All three default to "this machine", which is what
-    every local run passes.
+    root is not on this PC; ``home`` is whose home directory holds the global
+    skill folders. All of them default to "this machine", which is what every
+    local run passes.
     """
     # Skills are discovered once per process from the same folders Claude Code
     # and OpenCode use. The registry is rebuilt per session so the skill listing
@@ -75,10 +77,11 @@ def make_engine_factory(
     # The rest of the bootstrap is ~9k (spec text plus the built-in catalog), so
     # the listing gets a sixth of the budget, not a quarter: at the 12k presets a
     # quarter leaves no headroom and a full skills library tips it over.
-    # Skills describe the project, so in a remote session they are discovered on
-    # the remote machine's skill folders (design 6), through the same host.
+    # Skills describe the project, so in a remote session they are discovered in
+    # the remote machine's skill folders (design 6): the project-local ones AND
+    # the ones under the REMOTE user's home, all through the same host.
     session_host: Host = host if host is not None else LocalHost()
-    skills = discover_skills(project_root, host=session_host)
+    skills = discover_skills(project_root, home=home, host=session_host)
 
     def build(request: EngineRequest | str) -> Engine:
         req = EngineRequest(service=request) if isinstance(request, str) else request
@@ -212,7 +215,8 @@ class Launch:
     Assembled before the TUI starts, by :func:`local_launch` or
     :func:`remote_launch`, and never mixed: one session is one machine (design
     decision 4). ``data_root`` is where the ``.agentclip`` tree goes - beside
-    the project locally, on this PC for a remote one.
+    the project locally, on this PC for a remote one - and ``home`` is whose
+    home directory holds the global skill folders.
     """
 
     project_root: Path
@@ -220,6 +224,7 @@ class Launch:
     host: Host
     os_name: str
     data_root: Path
+    home: Path
 
 
 def local_launch(args: argparse.Namespace) -> Launch | int:
@@ -238,6 +243,7 @@ def local_launch(args: argparse.Namespace) -> Launch | int:
         host=LocalHost(),
         os_name=platform.system() or "unknown OS",
         data_root=project_root,
+        home=Path.home(),
     )
 
 
@@ -331,6 +337,7 @@ def remote_launch(args: argparse.Namespace) -> Launch | int:
         host=host,
         os_name=os_name,
         data_root=default_remote_state_dir(host.target, remote_root.as_posix()),
+        home=host.home_dir(),
     )
 
 
@@ -375,6 +382,7 @@ def main(argv: list[str] | None = None) -> int:
             host=launch.host,
             os_name=launch.os_name,
             data_root=launch.data_root if launch.data_root != launch.project_root else None,
+            home=launch.home,
         ),
         project_root=launch.project_root,
     )

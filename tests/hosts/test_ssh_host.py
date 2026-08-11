@@ -461,3 +461,15 @@ def test_a_rejected_host_key_stops_the_connection(tmp_path: Path) -> None:
 
 def test_the_transport_gets_a_keepalive(host: SshHost) -> None:
     assert FakeSSHClient.instances[0].get_transport().keepalive == 30
+
+
+def test_home_dir_is_where_sftp_starts(host: SshHost) -> None:
+    """The remote user's skill folders hang off this, not the operator's ~."""
+    FakeSSHClient.fs.add_dir("/home/dev")
+    FakeSSHClient.fs.links["."] = "/home/dev"
+    assert host.home_dir().as_posix() == "/home/dev"
+
+
+def test_home_dir_falls_back_instead_of_failing_the_launch(host: SshHost) -> None:
+    FakeSSHClient.instances[0].broken = True
+    assert host.home_dir().as_posix() == "/home/dev"

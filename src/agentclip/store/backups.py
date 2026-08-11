@@ -29,10 +29,12 @@ Honest limitation (surfaced in the TUI, not here): only file-tool changes are
 backed up; ``run_command`` side effects are outside the manifest.
 
 The backups themselves always live on the local disk (they are AgentClip's own
-state), but the project files they mirror are read through the Host, so a
-session working on a remote machine still gets a local, restorable copy of
-every byte it overwrote. Undo still writes locally - restoring onto a remote
-host needs directory primitives the seam does not carry yet (phase 2).
+state), but the project files they mirror are read AND restored through the
+Host, so a session working on a remote machine gets a local, restorable copy of
+every byte it overwrote and can put it back. Restoring needs the two directory
+primitives the seam carries for exactly this (``mkdir``/``rmdir``): a restored
+file may need its directory back, and an undone creation may leave one empty.
+Metadata (mtime/mode) is NOT restored - the seam moves bytes, not stat blocks.
 """
 
 from __future__ import annotations
@@ -41,7 +43,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -172,7 +173,9 @@ class BackupStore:
         manifest = {
             "schema": _SCHEMA,
             "turn": self._turn,
-            "root": str(self._root),
+            # Forward slashes: the root may be a POSIX path on a remote machine,
+            # and str() of one on Windows would spell it with backslashes.
+            "root": self._root.as_posix() if self._root is not None else None,
             "entries": [asdict(e) for e in self._entries],
         }
         tmp = turn_dir / (_MANIFEST + ".tmp")
@@ -226,10 +229,11 @@ class BackupStore:
             rel: str = entry["path"]
             action: str = entry["action"]
             target = root.joinpath(*rel.split("/"))
-            if target.exists() and not target.is_file():
+            st = self._host.stat(target)
+            if st is not None and not st.is_file:
                 warnings.append(f"{rel}: not a regular file anymore; skipped")
                 continue
-            current_sha = _sha256(target) if target.is_file() else None
+            current_sha = self._host_sha256(target) if st is not None else None
             sha_after = entry.get("sha256_after")
 
             if action in ("modified", "deleted"):
@@ -252,8 +256,8 @@ class BackupStore:
                         f"{rel}: exists again (changed since turn {turn}); "
                         "overwriting with backup"
                     )
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(backup, target)
+                self._host.mkdir(target.parent)
+                self._host.write_bytes(target, backup.read_bytes())
                 (restored if action == "modified" else recreated).append(rel)
             elif action == "created":
                 if current_sha is None:
@@ -264,7 +268,7 @@ class BackupStore:
                     warnings.append(
                         f"{rel}: changed since turn {turn} (sha mismatch); deleting anyway"
                     )
-                target.unlink()
+                self._host.delete(target)
                 deleted.append(rel)
                 self._remove_empty_parents(target, root)
             else:
@@ -286,14 +290,17 @@ class BackupStore:
     def _turn_dir(self, turn: int) -> Path:
         return self.backups_dir / f"turn-{turn:04d}"
 
-    @staticmethod
-    def _remove_empty_parents(target: Path, root: Path) -> None:
+    def _host_sha256(self, path: Path) -> str:
+        """Hash a PROJECT file - on whichever machine the project lives on."""
+        return hashlib.sha256(self._host.read_bytes(path)).hexdigest()
+
+    def _remove_empty_parents(self, target: Path, root: Path) -> None:
         """Remove now-empty parent directories of an undone created file, walking
         up but never past (or including) the workspace root."""
         cur = target.parent
         while cur != root and root in cur.parents:
             try:
-                cur.rmdir()  # fails on non-empty: that is the stop condition
+                self._host.rmdir(cur)  # fails on non-empty: that is the stop condition
             except OSError:
                 return
             cur = cur.parent

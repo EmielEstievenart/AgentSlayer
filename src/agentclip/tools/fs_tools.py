@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
-import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -512,9 +511,11 @@ def list_dir(ctx: ToolContext, call: ToolCall) -> str:
 # characters is an error, and each component is fnmatch against one name -
 # case-insensitively on Windows, as pathlib is. The parity test in
 # tests/tools/test_fs_tools.py pins that agreement to Path.glob itself.
-
-# pathlib matches names case-insensitively on Windows and sensitively elsewhere.
-_GLOB_RE_FLAGS = re.IGNORECASE if os.name == "nt" else 0
+#
+# Which of those two rules applies is a fact about the machine the FILES are on
+# (ctx.host.case_sensitive), not about the one AgentClip runs on: a Windows
+# operator globbing a Linux box must get Linux's answer, and Path.glob's local
+# rule would tell them `*.PY` matches `main.py`.
 
 
 def _glob_parts(norm: str) -> tuple[list[str], bool]:
@@ -542,7 +543,8 @@ def _glob_select(ctx: ToolContext, base: Path, parts: list[str], dir_only: bool)
     """Every path under base matching the parsed pattern, excluded subtrees unvisited."""
     # One compiled matcher per component, built once rather than per directory
     # entry. fnmatch.translate anchors its output, so .match is a full match.
-    matchers = [re.compile(fnmatch.translate(part), _GLOB_RE_FLAGS).match for part in parts]
+    flags = 0 if ctx.host.case_sensitive else re.IGNORECASE
+    matchers = [re.compile(fnmatch.translate(part), flags).match for part in parts]
     found: list[Path] = []
 
     def starting_points(directory: Path) -> list[Path]:

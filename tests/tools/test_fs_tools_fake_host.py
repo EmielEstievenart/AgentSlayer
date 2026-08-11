@@ -149,3 +149,30 @@ def test_a_symlink_inside_the_root_is_allowed(ctx: ToolContext, host: FakeHost) 
     host.add_symlink("/project/alias", "/project/real")
     res = fs_tools.read_file(ctx, make_call("read_file", path="alias/a.txt"))
     assert res.status == "ok" and "content" in res.body
+
+
+# -- case sensitivity belongs to the host, not to the operator's PC ------------
+
+
+def _glob_body(ctx: ToolContext, pattern: str) -> str:
+    res = fs_tools.glob(ctx, make_call("glob", pattern=pattern))
+    assert res.status == "ok"
+    return res.body
+
+
+def test_glob_is_case_sensitive_on_a_case_sensitive_host(ctx: ToolContext, host: FakeHost) -> None:
+    host.add_file("/project/src/main.py", "x")
+    assert _glob_body(ctx, "src/*.PY") == "0 matches"
+    assert _glob_body(ctx, "src/*.py") == "src/main.py\n1 matches"
+
+
+def test_glob_folds_case_on_a_case_insensitive_host() -> None:
+    host = FakeHost("/project", case_sensitive=False)
+    ctx = ToolContext(
+        workspace=Workspace(host.root, Config().excluded_names(), host=host),
+        limits=LimitsConfig(),
+        caps=caps_for_budget(12_000),
+        host=host,
+    )
+    host.add_file("/project/src/main.py", "x")
+    assert _glob_body(ctx, "src/*.PY") == "src/main.py\n1 matches"

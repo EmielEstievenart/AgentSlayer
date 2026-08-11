@@ -101,6 +101,11 @@ class Host(Protocol):
     """The OS primitives a session's tools may use. See the module docstring."""
 
     name: str  # for diagnostics / the bootstrap's "on {os}" slot
+    # Do path NAMES compare case-sensitively here? A property of the machine the
+    # files are on, never of the one AgentClip runs on: glob's matching and the
+    # skill-folder ordering ask this, and a Windows operator driving a Linux box
+    # must get Linux's answer.
+    case_sensitive: bool
 
     # -- process execution -----------------------------------------------
 
@@ -120,6 +125,20 @@ class Host(Protocol):
 
     def delete(self, path: Path) -> None:
         """Delete one file (not a directory)."""
+        ...
+
+    # -- directories -------------------------------------------------------
+    #
+    # Only undo needs these (restoring a file whose directory the turn created,
+    # then pruning what it emptied), which is why the seam carries no general
+    # directory API: no tool may create or remove directories of its own.
+
+    def mkdir(self, path: Path) -> None:
+        """Create a directory and its missing parents; an existing one is fine."""
+        ...
+
+    def rmdir(self, path: Path) -> None:
+        """Remove one EMPTY directory. Raises OSError when it is not empty."""
         ...
 
     # -- metadata ----------------------------------------------------------

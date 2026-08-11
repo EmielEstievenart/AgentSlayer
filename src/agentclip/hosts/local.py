@@ -74,6 +74,8 @@ class LocalHost:
     """The Host implementation for the machine AgentClip itself runs on."""
 
     name = "local"
+    # As pathlib itself compares names: case-insensitively on Windows only.
+    case_sensitive = os.name != "nt"
 
     def spawn(self, command: str, cwd: Path) -> LocalExec:
         popen_kwargs: dict = {}
@@ -104,6 +106,14 @@ class LocalHost:
 
     def delete(self, path: Path) -> None:
         Path(path).unlink()
+
+    # -- directories ---------------------------------------------------------
+
+    def mkdir(self, path: Path) -> None:
+        Path(path).mkdir(parents=True, exist_ok=True)
+
+    def rmdir(self, path: Path) -> None:
+        Path(path).rmdir()  # raises OSError when not empty: undo's stop condition
 
     # -- metadata ------------------------------------------------------------
 

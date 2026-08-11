@@ -27,7 +27,6 @@ and drives any commands through the normal gated tools.
 
 from __future__ import annotations
 
-import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,8 +94,11 @@ def _load_root(root: Path, host: Host) -> list[Skill]:
     except OSError:
         return []  # root absent or unreadable: no skills here
     skills: list[Skill] = []
-    # normcase is the key pathlib itself sorts Paths by (case-folded on Windows).
-    for name in sorted((e.name for e in entries if e.is_dir), key=os.path.normcase):
+    # Case-folded where the SKILL FOLDERS live is case-insensitive (the key
+    # pathlib sorts Paths by on Windows), verbatim where it is not - a remote
+    # Linux box orders its own folders, whatever the operator's PC does.
+    key = str if host.case_sensitive else str.lower
+    for name in sorted((e.name for e in entries if e.is_dir), key=key):
         path = root / name / "SKILL.md"
         try:
             text = host.read_bytes(path).decode("utf-8")

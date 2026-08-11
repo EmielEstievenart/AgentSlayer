@@ -224,6 +224,20 @@ def test_discovery_on_a_host_with_nothing_is_empty(tmp_path: Path) -> None:
     assert discover_skills(host.root, home=Path("/home/user"), host=host) == []
 
 
+@pytest.mark.parametrize(("case_sensitive", "first"), [(True, "Zebra"), (False, "apple")])
+def test_folder_scan_order_follows_the_hosts_case_rule(case_sensitive: bool, first: str) -> None:
+    """Which skill wins a name clash inside one root is decided by scan order,
+    and that order is the FILES' machine's - ASCII where names compare
+    verbatim, case-folded where they do not - never the operator's PC's."""
+    from agentclip.tools.skills import _load_root
+
+    host = FakeHost("/project", case_sensitive=case_sensitive)
+    root = Path("/project/.claude/skills")
+    host.add_file("/project/.claude/skills/Zebra/SKILL.md", "---\nname: z\n---\nzebra")
+    host.add_file("/project/.claude/skills/apple/SKILL.md", "---\nname: a\n---\napple")
+    assert [s.source.parent.name for s in _load_root(root, host)][0] == first
+
+
 # -- the skill tool -----------------------------------------------------------
 
 

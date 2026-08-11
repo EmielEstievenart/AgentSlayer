@@ -74,7 +74,11 @@ class FakeHost:
 
     name = "fake"
 
-    def __init__(self, root: Path | str = "/project") -> None:
+    def __init__(self, root: Path | str = "/project", *, case_sensitive: bool = True) -> None:
+        # A parameter rather than a constant: the case-sensitivity of the machine
+        # the files are on changes what glob matches, and both answers need a
+        # host to be tested against.
+        self.case_sensitive = case_sensitive
         self.root = Path(_key(root))
         self._files: dict[str, bytes] = {}
         self._dirs: set[str] = set()
@@ -147,6 +151,22 @@ class FakeHost:
         if key not in self._files:
             raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(path))
         del self._files[key]
+
+    # -- Host: directories ---------------------------------------------------
+
+    def mkdir(self, path: Path) -> None:
+        key = self._resolve(_key(path))
+        if key in self._files:
+            raise FileExistsError(errno.EEXIST, "File exists", str(path))
+        self.add_dir(key)
+
+    def rmdir(self, path: Path) -> None:
+        key = self._resolve(_key(path))
+        if key not in self._dirs:
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", str(path))
+        if any(_parent(child) == key for child in (*self._files, *self._dirs, *self._links)):
+            raise OSError(errno.ENOTEMPTY, "Directory not empty", str(path))
+        self._dirs.discard(key)
 
     # -- Host: metadata ------------------------------------------------------
 

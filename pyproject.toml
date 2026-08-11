@@ -17,6 +17,10 @@ dependencies = [
     "tomli-w>=1.2.0",
     "pillow>=11,<12",
     "textual-image>=0.8,<1",
+    # The SSH host (hosts/ssh.py): one persistent connection, exec channels and
+    # SFTP in one synchronous library. Imported lazily, so a local session never
+    # pays for it (docs/design/remote-ssh.md decision 7).
+    "paramiko>=3.4,<4",
 ]
 
 [project.optional-dependencies]
@@ -55,6 +59,7 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
     "real_os: exercises real OS input/clipboard/screen APIs; opt in with AGENTCLIP_OS_TESTS=1",
+    "real_ssh: talks to a real remote machine; opt in with AGENTCLIP_SSH_TESTS=1 + AGENTCLIP_SSH_TARGET",
 ]
 
 [tool.ruff]
@@ -78,6 +83,13 @@ mypy_path = "src"
 # real floor of 3.11. Skipping them costs nothing here - both packages are
 # imported inside functions in exactly one module (screen.matchers), which
 # guards every use with its own try/except.
+# Paramiko ships no type information (no py.typed, no stubs), so its names are
+# Any here. Only hosts/ssh.py imports it, and that module's own signatures are
+# annotated - what is untyped is the library surface, not our use of it.
+[[tool.mypy.overrides]]
+module = ["paramiko", "paramiko.*"]
+ignore_missing_imports = true
+
 [[tool.mypy.overrides]]
 module = ["cv2", "cv2.*", "numpy", "numpy.*"]
 follow_imports = "skip"

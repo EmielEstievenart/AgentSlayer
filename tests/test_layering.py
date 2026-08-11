@@ -29,10 +29,12 @@ RULES: list[tuple[str, frozenset[str]]] = [
     # permissions: a stdlib-only leaf below config, so the same rule model can be
     # loaded by config.py and applied by engine/approval.py.
     ("agentclip.permissions", frozenset()),
-    # hosts: the OS seam (local subprocess/fs today, SSH later). A stdlib-only
+    # hosts: the OS seam (this PC's subprocess/fs, or a machine over SSH). A
     # leaf like permissions, so tools/store/engine can all resolve their file
-    # and command access through the same object.
-    ("agentclip.hosts", frozenset({"agentclip.hosts"})),
+    # and command access through the same object. Stdlib-only except for the
+    # one third-party client the remote implementation IS - and that one is
+    # confined to hosts/ssh.py (see test_paramiko_only_in_the_ssh_host).
+    ("agentclip.hosts", frozenset({"agentclip.hosts", "paramiko"})),
     ("agentclip.config", frozenset({"platformdirs", "tomli_w", "agentclip.permissions"})),
     ("agentclip.protocol", frozenset({"agentclip.config", "agentclip.protocol"})),
     (
@@ -166,6 +168,23 @@ def test_only_tui_and_cli_import_clip_screen_or_textual() -> None:
             ):
                 violations.append(f"{mod} imports {imported}")
     assert not violations, "clip/screen/textual leaked outside tui/cli:\n" + "\n".join(violations)
+
+
+def test_paramiko_only_in_the_ssh_host() -> None:
+    """The SSH client is one module's business.
+
+    hosts/ssh.py IS paramiko wearing the Host interface, so it imports it; every
+    other module - including hosts/base.py, which everything above the seam
+    imports - must stay clear, so a local session never loads a crypto stack it
+    has no use for.
+    """
+    allowed = SRC / "hosts" / "ssh.py"
+    for path in all_modules():
+        if path == allowed:
+            continue
+        assert not any(
+            imported.split(".")[0] == "paramiko" for imported in module_level_imports(path)
+        ), f"{module_name(path)} imports paramiko"
 
 
 def test_engine_never_imports_ui_or_clipboard() -> None:

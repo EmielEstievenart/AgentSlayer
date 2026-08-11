@@ -1,7 +1,11 @@
-"""Host: the OS seam every tool runs against (local today, SSH tomorrow).
+"""Host: the OS seam every tool runs against (this PC, or a machine over SSH).
 
-See :mod:`agentclip.hosts.base` for the contract. A stdlib-only leaf: it imports
-nothing else from agentclip, so any layer may depend on it.
+See :mod:`agentclip.hosts.base` for the contract. A leaf: it imports nothing
+else from agentclip, so any layer may depend on it.
+
+:mod:`agentclip.hosts.ssh` is deliberately NOT re-exported here - importing it
+pulls in paramiko and its crypto stack, which a local session has no use for.
+Remote sessions import it by name (cli.py, once, at launch).
 """
 
 from agentclip.hosts.base import DirEntry, ExecHandle, ExecResult, FileStat, Host

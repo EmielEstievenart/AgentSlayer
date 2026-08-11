@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agentclip.config import BudgetCaps, Config, LimitsConfig, caps_for_budget
+from agentclip.hosts import FakeHost, Host, LocalHost
 from agentclip.protocol.types import ToolCall
 from agentclip.tools import shell
 from agentclip.tools.registry import ToolContext
@@ -28,11 +29,13 @@ def make_ctx(
     limits: LimitsConfig | None = None,
     caps: BudgetCaps | None = None,
     cancel_event: threading.Event | None = None,
+    host: Host | None = None,
 ) -> ToolContext:
     return ToolContext(
         workspace=Workspace(root, Config().excluded_names()),
         limits=limits or LimitsConfig(),
         caps=caps or caps_for_budget(12_000),
+        host=host or LocalHost(),
         cancel_event=cancel_event,
     )
 
@@ -197,3 +200,46 @@ def test_preview_shows_command_and_cwd(ctx: ToolContext, tmp_path: Path) -> None
     text = shell.preview_run_command(ctx, make_call(command="pytest -q"))
     assert text.split("\n")[0] == "pytest -q"
     assert text.split("\n")[1] == f"cwd: {ctx.workspace.root}"
+
+
+# -- through the host seam (scripted, no real processes) -----------------------
+
+
+def test_the_command_reaches_the_host_with_the_workspace_root_as_cwd(tmp_path: Path) -> None:
+    host = FakeHost()
+    ctx = make_ctx(tmp_path, host=host)
+    shell.run_command(ctx, make_call(command="pytest -q"))
+    assert host.commands == [("pytest -q", ctx.workspace.root)]
+
+
+def test_exit_code_and_output_are_the_hosts_answer(tmp_path: Path) -> None:
+    host = FakeHost()
+    host.script("pytest -q", exit_code=2, output="1 failed, 3 passed")
+    res = shell.run_command(make_ctx(tmp_path, host=host), make_call(command="pytest -q"))
+    assert res.status == "ok"
+    assert res.body == "exit 2 (0.0s)\n1 failed, 3 passed"
+
+
+def test_timeout_kills_the_handle_and_keeps_the_drained_tail(tmp_path: Path) -> None:
+    host = FakeHost()
+    host.script("slow", hangs=True, output="halfway there")
+    res = shell.run_command(
+        make_ctx(tmp_path, host=host), make_call(command="slow", timeout="1")
+    )
+    assert res.status == "error" and res.code == "exec_timeout"
+    assert "halfway there" in res.body
+    assert host.handles[0].killed and host.handles[0].drained
+
+
+def test_cancel_kills_the_handle_and_reports_cancelled(tmp_path: Path) -> None:
+    event = threading.Event()
+    event.set()
+    host = FakeHost()
+    host.script("slow", hangs=True, output="halfway there")
+    res = shell.run_command(
+        make_ctx(tmp_path, host=host, cancel_event=event),
+        make_call(command="slow", timeout="30"),
+    )
+    assert res.status == "error" and res.code == "cancelled"
+    assert "halfway there" in res.body
+    assert host.handles[0].killed

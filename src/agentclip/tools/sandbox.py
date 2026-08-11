@@ -17,6 +17,11 @@ four-step check, in order:
 
 Violations raise SandboxViolation; tool handlers translate it into a
 path_outside_workspace error result so the LLM can self-correct.
+
+Steps 2's filesystem questions - realpath, does this exist, is this a symlink -
+go through the Host, so the jail is drawn around the machine the project
+actually lives on rather than around the one AgentClip runs on. Steps 1, 3 and
+4 are pure string/path work and need no host at all.
 """
 
 from __future__ import annotations
@@ -24,6 +29,9 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath, PureWindowsPath
+
+from agentclip.hosts.base import Host
+from agentclip.hosts.local import LocalHost
 
 _DRIVE_RE = re.compile(r"^[A-Za-z]:")
 
@@ -39,10 +47,11 @@ class SandboxViolation(Exception):
 class Workspace:
     """Project-root jail. The root is resolved strictly once at construction."""
 
-    __slots__ = ("root", "excludes")
+    __slots__ = ("root", "excludes", "host")
 
-    def __init__(self, root: Path, exclude: Iterable[str]) -> None:
-        self.root: Path = Path(root).resolve(strict=True)
+    def __init__(self, root: Path, exclude: Iterable[str], *, host: Host | None = None) -> None:
+        self.host: Host = host if host is not None else LocalHost()
+        self.root: Path = self.host.realpath(Path(root), strict=True)
         self.excludes: frozenset[str] = frozenset(exclude)
 
     # -- public API --------------------------------------------------------
@@ -50,7 +59,7 @@ class Workspace:
     def resolve_read(self, rel: str) -> Path:
         """Resolve a path for reading. The result may not exist (callers check)."""
         parts = self._shape_check(rel)
-        candidate = self.root.joinpath(*parts).resolve()
+        candidate = self.host.realpath(self.root.joinpath(*parts))
         self._check_contained(candidate, rel)
         self._check_excluded(candidate, rel)
         return candidate
@@ -61,21 +70,22 @@ class Workspace:
         if not parts:
             raise SandboxViolation(f"path {rel!r} resolves to the project root, not a file")
 
-        # Walk down the EXISTING portion lexically; .exists() follows symlinks,
-        # so a broken symlink terminates the walk and is rejected explicitly.
+        # Walk down the EXISTING portion lexically; stat() follows symlinks, so
+        # a broken symlink terminates the walk and is rejected explicitly.
         cur = self.root
         i = 0
         while i < len(parts):
             nxt = cur / parts[i]
-            if nxt.exists():
+            if self.host.stat(nxt) is not None:
                 cur = nxt
                 i += 1
                 continue
-            if nxt.is_symlink():
+            link = self.host.lstat(nxt)
+            if link is not None and link.is_symlink:
                 raise SandboxViolation(f"broken symlink in path: {parts[i]!r}")
             break
 
-        ancestor = cur.resolve(strict=True)
+        ancestor = self.host.realpath(cur, strict=True)
         tail = parts[i:]
         for part in tail:
             if part == "..":

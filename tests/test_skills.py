@@ -10,6 +10,7 @@ import pytest
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import Engine, NewTurn, Send
 from agentclip.engine.states import Phase
+from agentclip.hosts import FakeHost
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.types import ToolCall
 from agentclip.store.backups import BackupStore
@@ -206,6 +207,21 @@ def test_missing_roots_and_folders_without_skill_md_are_skipped(tmp_path: Path) 
 
 def test_discovery_never_raises_on_missing_everything(tmp_path: Path) -> None:
     assert discover_skills(tmp_path / "does-not-exist", home=tmp_path / "nope") == []
+
+
+def test_discovery_reads_through_the_host(tmp_path: Path) -> None:
+    """Skills describe the project, so they come off the project's machine."""
+    host = FakeHost("/project")
+    host.add_file("/project/.claude/skills/greet/SKILL.md", GREET_SKILL)
+    host.add_file("/home/user/.agents/skills/deploy/SKILL.md", "---\nname: deploy\n---\nship it")
+    skills = discover_skills(host.root, home=Path("/home/user"), host=host)
+    assert [s.name for s in skills] == ["deploy", "greet"]
+    assert skills[1].body.startswith("# Greeting skill")
+
+
+def test_discovery_on_a_host_with_nothing_is_empty(tmp_path: Path) -> None:
+    host = FakeHost("/project")
+    assert discover_skills(host.root, home=Path("/home/user"), host=host) == []
 
 
 # -- the skill tool -----------------------------------------------------------

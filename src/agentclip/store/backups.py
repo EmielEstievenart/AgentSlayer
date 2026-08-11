@@ -27,6 +27,12 @@ backed-up bytes stay on disk for the audit trail.
 
 Honest limitation (surfaced in the TUI, not here): only file-tool changes are
 backed up; ``run_command`` side effects are outside the manifest.
+
+The backups themselves always live on the local disk (they are AgentClip's own
+state), but the project files they mirror are read through the Host, so a
+session working on a remote machine still gets a local, restorable copy of
+every byte it overwrote. Undo still writes locally - restoring onto a remote
+host needs directory primitives the seam does not carry yet (phase 2).
 """
 
 from __future__ import annotations
@@ -38,6 +44,9 @@ import re
 import shutil
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from agentclip.hosts.base import Host
+from agentclip.hosts.local import LocalHost
 
 _SCHEMA = 1
 _MANIFEST = "manifest.json"
@@ -64,6 +73,7 @@ class _Entry:
 
 
 def _sha256(path: Path) -> str:
+    """Hash a LOCAL file (a backup copy, or a file being undone)."""
     with open(path, "rb") as f:
         return hashlib.file_digest(f, "sha256").hexdigest()
 
@@ -88,9 +98,11 @@ class BackupStore:
     session_dir: Path
     backups_dir: Path
 
-    def __init__(self, session_dir: Path) -> None:
+    def __init__(self, session_dir: Path, *, host: Host | None = None) -> None:
         self.session_dir = Path(session_dir)
         self.backups_dir = self.session_dir / "backups"
+        # Where the PROJECT files live; the backups always land locally.
+        self._host: Host = host if host is not None else LocalHost()
         self._turn: int | None = None
         self._root: Path | None = None
         self._entries: list[_Entry] = []
@@ -123,11 +135,12 @@ class BackupStore:
             # abs_path == root / key, so the workspace root is this many parents up.
             self._root = abs_path.parents[key.count("/")]
 
-        if abs_path.is_file():
+        st = self._host.stat(abs_path)
+        if st is not None and st.is_file:
             backup_rel = "files/" + key
             dest = self._turn_dir(self._turn) / backup_rel
             dest.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(abs_path, dest)
+            dest.write_bytes(self._host.read_bytes(abs_path))
             entry = _Entry(
                 path=key,
                 action="deleted" if deleting else "modified",
@@ -148,7 +161,12 @@ class BackupStore:
             return
         for entry in self._entries:
             abs_path = self._abs[entry.path]
-            entry.sha256_after = _sha256(abs_path) if abs_path.is_file() else None
+            st = self._host.stat(abs_path)
+            entry.sha256_after = (
+                hashlib.sha256(self._host.read_bytes(abs_path)).hexdigest()
+                if st is not None and st.is_file
+                else None
+            )
         turn_dir = self._turn_dir(self._turn)
         turn_dir.mkdir(parents=True, exist_ok=True)
         manifest = {

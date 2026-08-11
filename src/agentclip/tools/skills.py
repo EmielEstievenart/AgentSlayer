@@ -27,10 +27,13 @@ and drives any commands through the normal gated tools.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentclip.hosts.base import Host
+from agentclip.hosts.local import LocalHost
 from agentclip.protocol.types import ToolCall
 from agentclip.tools.registry import ToolContext, ToolError, ToolSpec, require, tool_handler
 
@@ -65,34 +68,41 @@ def skill_search_roots(project_root: Path, home: Path | None = None) -> tuple[Pa
     )
 
 
-def discover_skills(project_root: Path, *, home: Path | None = None) -> list[Skill]:
+def discover_skills(
+    project_root: Path, *, home: Path | None = None, host: Host | None = None
+) -> list[Skill]:
     """Load every `<root>/<name>/SKILL.md` across the search roots.
 
     De-duplicated by name (case-insensitive); the first occurrence wins, so a
     project skill shadows a same-named global one. Never raises - unreadable
     roots/files and skills without a SKILL.md are simply skipped. Returned
     sorted by name for a stable bootstrap listing.
+
+    Reads go through the Host: skills describe the project, so a remote session
+    picks up the remote machine's skill folders, not the operator's.
     """
+    reader = host if host is not None else LocalHost()
     seen: dict[str, Skill] = {}
     for root in skill_search_roots(project_root, home):
-        for skill in _load_root(root):
+        for skill in _load_root(root, reader):
             seen.setdefault(skill.name.casefold(), skill)
     return sorted(seen.values(), key=lambda s: s.name.casefold())
 
 
-def _load_root(root: Path) -> list[Skill]:
+def _load_root(root: Path, host: Host) -> list[Skill]:
     try:
-        folders = sorted(p for p in root.iterdir() if p.is_dir())
+        entries = host.listdir(root)
     except OSError:
         return []  # root absent or unreadable: no skills here
     skills: list[Skill] = []
-    for folder in folders:
-        path = folder / "SKILL.md"
+    # normcase is the key pathlib itself sorts Paths by (case-folded on Windows).
+    for name in sorted((e.name for e in entries if e.is_dir), key=os.path.normcase):
+        path = root / name / "SKILL.md"
         try:
-            text = path.read_text(encoding="utf-8")
+            text = host.read_bytes(path).decode("utf-8")
         except OSError:
             continue  # no SKILL.md (or unreadable): not a skill folder
-        skills.append(_parse_skill(folder.name, text, path))
+        skills.append(_parse_skill(name, text, path))
     return skills
 
 

@@ -37,3 +37,13 @@ $env:AGENTCLIP_OS_TESTS = '1'; uv run pytest
 ```
 
 That disarms the gate for the whole run — do it only when nothing else is on screen. `tests/test_os_gate.py` tests the gate itself in both directions.
+
+### Running the SSH tests
+
+Same rule, different resource: `@pytest.mark.real_ssh` (tests/hosts/test_ssh_real.py) talks to somebody's actual machine, so it is skipped unless you opt in — and you only opt in with the user's explicit go-ahead:
+
+```powershell
+$env:AGENTCLIP_SSH_TESTS = '1'; $env:AGENTCLIP_SSH_TARGET = 'user@host'; uv run pytest tests/hosts/test_ssh_real.py
+```
+
+The target must authenticate without a prompt and already be in `known_hosts`. Everything else about `SshHost` is covered by `tests/hosts/test_ssh_host.py`, which never opens a socket.

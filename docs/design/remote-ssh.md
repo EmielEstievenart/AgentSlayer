@@ -91,9 +91,71 @@ local.
 
 ## Phasing
 
-- **Phase 1 (pure refactor, no behavior change):** introduce `Host`, `LocalHost`,
+- **Phase 1 (pure refactor, no behavior change) — done:** introduce `Host`, `LocalHost`,
   `FakeHost`; move `shell.py` and `fs_tools.py` onto the seam; `Workspace` resolution
   via Host; full suite green, ruff + mypy clean.
-- **Phase 2:** `SshHost` (Paramiko), `[remote]` config + CLI flags, launch/auth flow,
-  reconnect, remote bootstrap facts, remote skills/project-config reads, gated
+- **Phase 2 — done:** `SshHost` (Paramiko), `[remote]` config + CLI flags, launch/auth
+  flow, reconnect, remote bootstrap facts, remote skills/project-config reads, gated
   integration tests.
+
+## As built (phase 2)
+
+Decisions taken while implementing that the interview did not settle. Where one
+deviates from the text above, it says so.
+
+**Configuration.** Saved targets are `[remote.<name>]` tables (`host`, `user`,
+`port`, `root`); a target whose table has no `host` is named for its host. The
+session's target comes only from `--ssh`, which takes a saved name, an
+`~/.ssh/config` alias, or `[user@]host[:port]`; `--remote-root` overrides a saved
+`root` and is required when nothing else supplies one. Nothing in the config file
+selects a target: a session goes remote because the command line said so.
+
+**Remote paths.** The `Host` protocol keeps `pathlib.Path`. `SshHost` normalizes
+every incoming path to a POSIX string on the way to the wire and builds every
+outgoing one from a POSIX string, so a Windows `Path` carrying `/home/dev/app`
+survives (`joinpath`/`relative_to`/`parts`/`as_posix` are lexical and correct on
+it). Two accepted consequences, documented in the module: a remote file name
+containing a literal backslash would be split into components, and Windows path
+comparison is case-insensitive, so two remote paths differing only in case
+compare equal above the seam. A parallel `RemotePath` type through every tool was
+rejected as far more invasive than the failure modes are worth.
+
+**Case sensitivity is the host's.** `Host.case_sensitive` was added: glob's
+matching rules and the skill-folder scan order come from the machine the files
+are on, not from `os.name`.
+
+**Undo across the seam.** `Host` gained exactly two directory primitives,
+`mkdir` and `rmdir`, because restoring a backup may need a directory back and an
+undone creation may leave one empty. No general directory API: no tool may create
+or remove directories. Undo no longer preserves mtime/mode (the seam moves bytes).
+
+**Where a remote session's own state lives.** Sessions, transcripts and backups
+are AgentClip's state, so they stay local — but the project root they normally
+sit beside is on another machine. A remote session therefore keeps its
+`.agentclip` tree under `<user_data_dir>/agentclip/remote/<target>-<root>-<hash>/`
+(`config.default_remote_state_dir`); `SessionStore` takes a `data_root` for this,
+and records the remote root in `meta.json` unresolved.
+
+**Reconnect, in practice.** A dropped link becomes a dead host; the next
+operation re-dials. The re-dial reuses the credentials that already worked
+(agent/keys, or the password from launch, held in memory) and does **not**
+prompt: by then the terminal that could ask is underneath the TUI. The prompt
+callbacks are the caller's, so a future UI can supply ones that work mid-session.
+A command in flight when the link dies returns exit code 255 with
+`connection lost to <target>; command outcome unknown (it may have completed or
+still be running)`.
+
+**Kill-tree, in practice.** The wrapper is `bash -lc`, run under `setsid --wait`
+when the box has it (both are probed by running them, since busybox has neither),
+recording its PID to `/tmp/.agentclip-<uuid>.pid`; `kill()` reads that file over
+SFTP and sends `kill -9 -- -<pgid>` on a separate channel. The command is not
+`exec`'d — a compound command is not a simple command, and `exec` would run only
+its head.
+
+**Auth, in practice.** `~/.ssh/config` is parsed first (aliases, user, port,
+IdentityFile), then agent + default keys, then up to three password attempts
+through the caller's callback. Keyboard-interactive 2FA is whatever paramiko's
+own fallback does; a dedicated prompt path for it was not built and is untested.
+`known_hosts` is honored and an unknown key is offered with its SHA256
+fingerprint — never auto-added, and never trusted when there is no callback to
+ask.

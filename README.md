@@ -37,6 +37,27 @@ uv run agentclip            # in the project you want the agent to work on
 
 Linux clipboard: the bundled backend works on X11 and Wayland-with-XWayland out of the box. On a pure-Wayland system install `wl-clipboard` (and `xclip` for X11 fallback).
 
+### Working on a remote machine
+
+AgentClip keeps running on your PC (it needs the clipboard and the screen), while every file it reads and every command it runs happens over SSH:
+
+```sh
+uv run agentclip --ssh dev@buildbox --remote-root /srv/app
+uv run agentclip --ssh pi           # a saved target, or an ~/.ssh/config alias
+```
+
+Save targets in your config to avoid repeating them:
+
+```toml
+[remote.pi]
+host = "raspberrypi.local"
+user = "emiel"
+port = 22
+root = "/home/emiel/code/thing"
+```
+
+It connects, authenticates (agent, keys, then a password prompt) and probes the machine *before* the TUI starts, so a bad target fails in the terminal rather than inside the app. Your permission rules stay local; the project's `.agentclip.toml` and its skills come off the remote machine. Backups and transcripts are kept on your PC. See `docs/design/remote-ssh.md`.
+
 ### Standalone executable (Windows)
 
 To use `agentclip` from any directory without the checkout, freeze it into a single self-contained exe:

@@ -19,13 +19,13 @@ engine  ──►  tools  ──►  sandbox (Workspace)
  ▼
 protocol (parser, composer)   ──►  (nothing but stdlib)
  ▲
-config (leaf, stdlib-only)  ◄── imported by everyone
-hosts (leaf, stdlib-only)   ◄── tools, store, engine: the OS seam
+config (leaf)  ◄── imported by everyone;  ──► hosts (reads the project's .agentclip.toml)
+hosts (leaf)   ◄── config, tools, store, engine: the OS seam
 ```
 
 `clip` and `screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `tui` and `cli`. `protocol`, `config` and `hosts` are leaves. `tools` never imports `engine`. Anything violating this is a bug.
 
-`hosts` is the **OS seam**: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`stat`/`lstat`/`listdir`/`realpath`), carried on `ToolContext`. `LocalHost` is this PC; a remote machine over SSH plugs in the same way (docs/design/remote-ssh.md). Rule for new tools: write against Host primitives and it works everywhere.
+`hosts` is the **OS seam**: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`mkdir`/`rmdir`/`stat`/`lstat`/`listdir`/`realpath`, plus the `case_sensitive` fact), carried on `ToolContext`. `LocalHost` is this PC; `SshHost` is a machine over SSH (docs/design/remote-ssh.md), chosen once at launch in `cli.py` and shared by the workspace jail, the tool context, the backup store and the engine — one session is one machine. Rule for new tools: write against Host primitives and it works everywhere.
 
 ---
 
@@ -35,13 +35,15 @@ hosts (leaf, stdlib-only)   ◄── tools, store, engine: the OS seam
 src/agentclip/
 ├── __init__.py            # __version__ only
 ├── __main__.py            # python -m agentclip → cli.main()
-├── cli.py                 # argparse (--project, --service, --version); builds Config, wires Engine + TUI
+├── cli.py                 # argparse (--project, --service, --ssh, --remote-root, --version); connects
+│                          #   the host, builds Config, wires Engine + TUI
 ├── config.py              # frozen dataclasses + TOML load/merge/validate (stdlib tomllib)
 ├── permissions.py         # OpenCode's allow/ask/deny rule model: wildcard matcher, evaluate(), always_pattern()
 │
 ├── hosts/                 # the OS seam: every file byte and every command goes through a Host
 │   ├── base.py            # Host + ExecHandle Protocols, FileStat/DirEntry/ExecResult value types
 │   ├── local.py           # LocalHost: subprocess/os/pathlib, kill-tree per platform
+│   ├── ssh.py             # SshHost: one Paramiko connection, exec channels + SFTP, lazy reconnect
 │   └── fake.py            # FakeHost: in-memory filesystem + scripted commands, for tests
 │
 ├── protocol/
@@ -717,7 +719,10 @@ tests/
 │                                    #   imports inside engine/protocol/tools/store) — enforces §0
 ├── hosts/
 │   ├── test_local_host.py           # real files + real subprocesses: stat/listdir/realpath, kill+drain
-│   └── test_fake_host.py            # the in-memory twin behaves like a filesystem (symlinks included)
+│   ├── test_fake_host.py            # the in-memory twin behaves like a filesystem (symlinks included)
+│   ├── fake_paramiko.py             # an SSH server that is a dict: client/transport/channel/sftp
+│   ├── test_ssh_host.py             # posix paths, reconnect, unknown-outcome, auth ladder, sftp
+│   └── test_ssh_real.py             # @real_ssh: AGENTCLIP_SSH_TESTS=1 + AGENTCLIP_SSH_TARGET only
 ├── protocol/
 │   ├── golden/                      # pairs: NNN-name.input.txt + NNN-name.expected.json
 │   │   ├── 001-two-calls.input.txt

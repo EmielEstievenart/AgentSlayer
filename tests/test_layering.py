@@ -6,6 +6,8 @@
             └──► protocol (leaf)
     config (leaf) ◄── imported by everyone
      └──► permissions (leaf: the rule model, also used by engine/approval)
+    hosts (leaf: the OS seam - tools/store/engine touch files and run commands
+           only through it, so a remote host can take the local one's place)
 
 Only module-level imports count: lazy third-party imports inside functions
 (e.g. copykitten in the clip providers) are allowed.
@@ -27,13 +29,27 @@ RULES: list[tuple[str, frozenset[str]]] = [
     # permissions: a stdlib-only leaf below config, so the same rule model can be
     # loaded by config.py and applied by engine/approval.py.
     ("agentclip.permissions", frozenset()),
+    # hosts: the OS seam (local subprocess/fs today, SSH later). A stdlib-only
+    # leaf like permissions, so tools/store/engine can all resolve their file
+    # and command access through the same object.
+    ("agentclip.hosts", frozenset({"agentclip.hosts"})),
     ("agentclip.config", frozenset({"platformdirs", "tomli_w", "agentclip.permissions"})),
     ("agentclip.protocol", frozenset({"agentclip.config", "agentclip.protocol"})),
     (
         "agentclip.tools",
-        frozenset({"agentclip.config", "agentclip.protocol.types", "agentclip.tools"}),
+        frozenset(
+            {
+                "agentclip.config",
+                "agentclip.hosts",
+                "agentclip.protocol.types",
+                "agentclip.tools",
+            }
+        ),
     ),
-    ("agentclip.store", frozenset({"agentclip", "agentclip.config", "agentclip.store"})),
+    (
+        "agentclip.store",
+        frozenset({"agentclip", "agentclip.config", "agentclip.hosts", "agentclip.store"}),
+    ),
     ("agentclip.clip", frozenset({"agentclip", "agentclip.clip"})),
     ("agentclip.screen", frozenset({"agentclip", "agentclip.screen"})),
     (
@@ -43,6 +59,7 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip",
                 "agentclip.config",
                 "agentclip.engine",
+                "agentclip.hosts",
                 "agentclip.permissions",
                 "agentclip.protocol",
                 "agentclip.store",

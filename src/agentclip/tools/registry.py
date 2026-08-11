@@ -14,11 +14,13 @@ from __future__ import annotations
 import functools
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from agentclip.config import BudgetCaps, LimitsConfig
+from agentclip.hosts.base import Host
+from agentclip.hosts.local import LocalHost
 from agentclip.protocol.types import ToolCall, ToolResult
 from agentclip.tools.sandbox import SandboxViolation, Workspace
 
@@ -29,6 +31,10 @@ if TYPE_CHECKING:
 @dataclass(slots=True)
 class ToolContext:
     """Everything a handler may touch. The engine builds one per session.
+
+    host is the machine the project lives on - the ONLY way a handler may touch
+    the filesystem or run a command. Local by default; a remote session swaps in
+    a different implementation and every tool follows (docs/design/remote-ssh.md).
 
     backup_hook(rel_path, abs_path, action) with action in {"write", "delete"}:
     the engine wires this to the BackupStore; mutating handlers MUST call it
@@ -44,6 +50,7 @@ class ToolContext:
     workspace: Workspace
     limits: LimitsConfig
     caps: BudgetCaps
+    host: Host = field(default_factory=LocalHost)
     backup_hook: Callable[[str, Path, str], None] | None = None
     cancel_event: threading.Event | None = None
 

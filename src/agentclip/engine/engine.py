@@ -34,6 +34,8 @@ from agentclip.config import Config
 from agentclip.engine.approval import ApprovalPolicy
 from agentclip.engine.results import fit_results
 from agentclip.engine.states import Decision, EngineStateError, Phase, can_transition
+from agentclip.hosts.base import Host
+from agentclip.hosts.local import LocalHost
 from agentclip.permissions import PermissionRule
 from agentclip.protocol.composer import BudgetExceeded, Composer
 from agentclip.protocol.names import normalize_chat_name
@@ -197,9 +199,13 @@ class Engine:
         composer: Composer,
         chat_name: str,
         role: Literal["master", "subagent"] = "master",
+        host: Host | None = None,
     ) -> None:
         self._config = config
         self._role = role
+        # The machine the project lives on. Every tool's filesystem and command
+        # access goes through it; local unless a session was pointed elsewhere.
+        self._host = host if host is not None else LocalHost()
         self._registry = registry
         self._workspace = workspace
         self._session = session
@@ -213,6 +219,7 @@ class Engine:
             workspace=workspace,
             limits=config.limits,
             caps=config.caps(),
+            host=self._host,
             backup_hook=self._backup_hook,
             cancel_event=self._cancel,
         )

@@ -4,6 +4,11 @@ Semantics are normative per docs/design/protocol.md section 3. Mutating
 handlers call ctx.backup_hook(rel, abs_path, action) BEFORE first touching the
 file. Preview functions share the same compute paths as the handlers
 (_apply_edit, _planned_write) so a preview can never diverge from execution.
+
+Every byte read, byte written and directory listed goes through ctx.host - the
+tools themselves know nothing about which machine they run on. What stays here
+is the part that is the same everywhere: decoding, the caps, the diff, the edit
+matcher, glob's pruning walk and grep's regex scan (docs/design/remote-ssh.md).
 """
 
 from __future__ import annotations
@@ -15,6 +20,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from agentclip.hosts.base import DirEntry
 from agentclip.protocol.types import ToolCall
 from agentclip.tools.registry import (
     ToolContext,
@@ -32,40 +38,38 @@ _BINARY_SNIFF_BYTES = 8192
 # -- small shared helpers ------------------------------------------------------
 
 
-def _is_binary(path: Path) -> bool:
-    with open(path, "rb") as f:
-        return b"\x00" in f.read(_BINARY_SNIFF_BYTES)
+def _is_binary(ctx: ToolContext, path: Path) -> bool:
+    return b"\x00" in ctx.host.read_bytes(path, max_bytes=_BINARY_SNIFF_BYTES)
 
 
-def _read_norm(path: Path) -> tuple[str, str]:
+def _read_norm(ctx: ToolContext, path: Path) -> tuple[str, str]:
     """Read text normalized to LF; return (text, original newline style)."""
-    with open(path, encoding="utf-8", errors="replace", newline="") as f:
-        raw = f.read()
+    raw = ctx.host.read_bytes(path).decode("utf-8", errors="replace")
     newline = "\r\n" if "\r\n" in raw else "\n"
     return raw.replace("\r\n", "\n"), newline
 
 
-def _write_norm(path: Path, text: str, newline: str) -> None:
+def _write_norm(ctx: ToolContext, path: Path, text: str, newline: str) -> None:
     if newline == "\r\n":
         text = text.replace("\n", "\r\n")
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write(text)
+    ctx.host.write_bytes(path, text.encode("utf-8"))
 
 
-def _require_text_file(path: Path, disp: str) -> None:
-    if not path.exists():
+def _require_text_file(ctx: ToolContext, path: Path, disp: str) -> None:
+    st = ctx.host.stat(path)
+    if st is None:
         raise ToolError(
             "file_not_found",
             f"file not found: {disp}",
             "check the path with list_dir or glob, then resend.",
         )
-    if path.is_dir():
+    if st.is_dir:
         raise ToolError(
             "bad_param",
             f"{disp} is a directory, not a file",
             "use list_dir for directories.",
         )
-    if _is_binary(path):
+    if _is_binary(ctx, path):
         raise ToolError(
             "binary_file",
             f"{disp} is a binary file",
@@ -88,6 +92,14 @@ def _human_size(n: int) -> str:
     return f"{int(n)} B"  # unreachable
 
 
+def _scan(ctx: ToolContext, directory: Path) -> list[DirEntry]:
+    """Children of a directory, or none if it cannot be read (pathlib skips those too)."""
+    try:
+        return ctx.host.listdir(directory)
+    except OSError:
+        return []
+
+
 def _unified_diff(old: str, new: str, rel: str) -> str:
     lines = difflib.unified_diff(
         old.split("\n"), new.split("\n"), fromfile=f"a/{rel}", tofile=f"b/{rel}", n=3, lineterm=""
@@ -102,9 +114,9 @@ def _unified_diff(old: str, new: str, rel: str) -> str:
 def read_file(ctx: ToolContext, call: ToolCall) -> str:
     (path_param,) = require(call, "path")
     abs_path = ctx.workspace.resolve_read(path_param)
-    _require_text_file(abs_path, path_param)
+    _require_text_file(ctx, abs_path, path_param)
 
-    text, _ = _read_norm(abs_path)
+    text, _ = _read_norm(ctx, abs_path)
     lines = text.splitlines()
     total = len(lines)
     if total == 0:
@@ -176,13 +188,14 @@ def _planned_write(ctx: ToolContext, call: ToolCall) -> _PlannedWrite:
             "resend with a valid mode (omit it for overwrite).",
         )
     abs_path = ctx.workspace.resolve_write(path_param)
-    if abs_path.is_dir():
+    st = ctx.host.stat(abs_path)
+    if st is not None and st.is_dir:
         raise ToolError(
             "bad_param",
             f"{path_param} is a directory",
             "write_file targets files; pick a file path.",
         )
-    existed = abs_path.exists()
+    existed = st is not None
     if mode == "create" and existed:
         raise ToolError(
             "bad_param",
@@ -197,10 +210,10 @@ def write_file(ctx: ToolContext, call: ToolCall) -> str:
     plan = _planned_write(ctx, call)
     if ctx.backup_hook is not None:
         ctx.backup_hook(plan.rel, plan.abs_path, "write")
-    plan.abs_path.parent.mkdir(parents=True, exist_ok=True)
-    open_mode = "a" if plan.mode == "append" else "w"
-    with open(plan.abs_path, open_mode, encoding="utf-8", newline="") as f:
-        f.write(plan.content)
+    # write_bytes creates the missing parent directories.
+    ctx.host.write_bytes(
+        plan.abs_path, plan.content.encode("utf-8"), append=plan.mode == "append"
+    )
     word = "appended" if plan.mode == "append" else ("overwritten" if plan.existed else "created")
     n_lines = len(plan.content.splitlines())
     return f"wrote {n_lines} lines ({len(plan.content)} chars) to {plan.rel} ({word})"
@@ -212,9 +225,9 @@ def preview_write_file(ctx: ToolContext, call: ToolCall) -> str:
         if not plan.existed:
             n_lines = len(plan.content.splitlines())
             return f"NEW FILE {plan.rel} ({n_lines} lines)\n{plan.content}"
-        if _is_binary(plan.abs_path):
+        if _is_binary(ctx, plan.abs_path):
             return f"(cannot preview: {plan.rel} is binary and would be {plan.mode}d)"
-        old, _ = _read_norm(plan.abs_path)
+        old, _ = _read_norm(ctx, plan.abs_path)
         new = old + plan.content if plan.mode == "append" else plan.content
         return _unified_diff(old, new, plan.rel)
     except (ToolError, SandboxViolation) as exc:
@@ -353,13 +366,13 @@ def _apply_edit(text: str, call: ToolCall, disp: str) -> _EditOutcome:
 def edit_file(ctx: ToolContext, call: ToolCall) -> str:
     (path_param,) = require(call, "path")
     abs_path = ctx.workspace.resolve_write(path_param)
-    _require_text_file(abs_path, path_param)
-    text, newline = _read_norm(abs_path)
+    _require_text_file(ctx, abs_path, path_param)
+    text, newline = _read_norm(ctx, abs_path)
     outcome = _apply_edit(text, call, path_param)
     rel = _rel_display(ctx, abs_path)
     if ctx.backup_hook is not None:
         ctx.backup_hook(rel, abs_path, "write")
-    _write_norm(abs_path, outcome.new_text, newline)
+    _write_norm(ctx, abs_path, outcome.new_text, newline)
     return outcome.summary
 
 
@@ -367,8 +380,8 @@ def preview_edit_file(ctx: ToolContext, call: ToolCall) -> str:
     try:
         (path_param,) = require(call, "path")
         abs_path = ctx.workspace.resolve_write(path_param)
-        _require_text_file(abs_path, path_param)
-        text, _ = _read_norm(abs_path)
+        _require_text_file(ctx, abs_path, path_param)
+        text, _ = _read_norm(ctx, abs_path)
         outcome = _apply_edit(text, call, path_param)
         return _unified_diff(text, outcome.new_text, _rel_display(ctx, abs_path))
     except ToolError as exc:
@@ -386,13 +399,14 @@ def preview_edit_file(ctx: ToolContext, call: ToolCall) -> str:
 def delete_file(ctx: ToolContext, call: ToolCall) -> str:
     (path_param,) = require(call, "path")
     abs_path = ctx.workspace.resolve_write(path_param)
-    if not abs_path.exists():
+    st = ctx.host.stat(abs_path)
+    if st is None:
         raise ToolError(
             "file_not_found",
             f"file not found: {path_param}",
             "check the path with list_dir or glob; it may already be gone.",
         )
-    if abs_path.is_dir():
+    if st.is_dir:
         raise ToolError(
             "bad_param",
             f"{path_param} is a directory",
@@ -401,7 +415,7 @@ def delete_file(ctx: ToolContext, call: ToolCall) -> str:
     rel = _rel_display(ctx, abs_path)
     if ctx.backup_hook is not None:
         ctx.backup_hook(rel, abs_path, "delete")
-    abs_path.unlink()
+    ctx.host.delete(abs_path)
     return f"deleted {rel} (backed up)"
 
 
@@ -409,12 +423,13 @@ def preview_delete_file(ctx: ToolContext, call: ToolCall) -> str:
     try:
         (path_param,) = require(call, "path")
         abs_path = ctx.workspace.resolve_write(path_param)
-        if not abs_path.is_file():
+        st = ctx.host.stat(abs_path)
+        if st is None or not st.is_file:
             return f"(delete will fail: file not found: {path_param})"
         rel = _rel_display(ctx, abs_path)
-        if _is_binary(abs_path):
-            return f"DELETE {rel} (binary, {_human_size(abs_path.stat().st_size)})"
-        text, _ = _read_norm(abs_path)
+        if _is_binary(ctx, abs_path):
+            return f"DELETE {rel} (binary, {_human_size(st.size)})"
+        text, _ = _read_norm(ctx, abs_path)
         return f"DELETE {rel} ({len(text.splitlines())} lines)"
     except (ToolError, SandboxViolation, OSError) as exc:
         return f"(delete will fail: {exc})"
@@ -429,13 +444,14 @@ def list_dir(ctx: ToolContext, call: ToolCall) -> str:
     depth = int_param(call, "depth", 1)
     clamped_depth = min(max(depth, 1), 3)
     base = ctx.workspace.resolve_read(path_param)
-    if not base.exists():
+    base_stat = ctx.host.stat(base)
+    if base_stat is None:
         raise ToolError(
             "file_not_found",
             f"directory not found: {path_param}",
             "check the path with glob or a shallower list_dir.",
         )
-    if not base.is_dir():
+    if not base_stat.is_dir:
         raise ToolError(
             "bad_param",
             f"{path_param} is a file, not a directory",
@@ -448,30 +464,24 @@ def list_dir(ctx: ToolContext, call: ToolCall) -> str:
 
     def walk(directory: Path, level: int) -> None:
         nonlocal truncated
-        try:
-            children = sorted(directory.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
-        except OSError:
-            return
-        for child in children:
+        children = sorted(_scan(ctx, directory), key=lambda e: (not e.is_dir, e.name.lower()))
+        for entry in children:
             if len(lines) >= cap:
                 truncated = True
                 return
             indent = "  " * level
-            if child.is_dir():
+            child = directory / entry.name
+            if entry.is_dir:
                 if ctx.workspace.is_excluded(child):
-                    lines.append(f"{indent}{child.name}/ (excluded, not listed)")
+                    lines.append(f"{indent}{entry.name}/ (excluded, not listed)")
                     continue
-                lines.append(f"{indent}{child.name}/")
+                lines.append(f"{indent}{entry.name}/")
                 if level + 1 < clamped_depth:
                     walk(child, level + 1)
             else:
                 if ctx.workspace.is_excluded(child):
                     continue
-                try:
-                    size = child.stat().st_size
-                except OSError:
-                    size = 0
-                lines.append(f"{indent}{child.name} ({_human_size(size)})")
+                lines.append(f"{indent}{entry.name} ({_human_size(entry.size)})")
 
     walk(base, 0)
     if not lines:
@@ -528,15 +538,6 @@ def _glob_parts(norm: str) -> tuple[list[str], bool]:
     return collapsed, dir_only
 
 
-def _scan(directory: Path) -> list[os.DirEntry[str]]:
-    """Children of a directory, or none if it cannot be read (pathlib skips those too)."""
-    try:
-        with os.scandir(directory) as it:
-            return list(it)
-    except OSError:
-        return []
-
-
 def _glob_select(ctx: ToolContext, base: Path, parts: list[str], dir_only: bool) -> list[Path]:
     """Every path under base matching the parsed pattern, excluded subtrees unvisited."""
     # One compiled matcher per component, built once rather than per directory
@@ -547,13 +548,10 @@ def _glob_select(ctx: ToolContext, base: Path, parts: list[str], dir_only: bool)
     def starting_points(directory: Path) -> list[Path]:
         """The directory itself plus every included directory beneath it - the span of '**'."""
         points = [directory]
-        for entry in _scan(directory):
+        for entry in _scan(ctx, directory):
             # '**' recursion does not follow symlinked directories, as pathlib's
             # does not: a link back up the tree would never terminate.
-            try:
-                if not entry.is_dir(follow_symlinks=False):
-                    continue
-            except OSError:
+            if not entry.is_dir or entry.is_symlink:
                 continue
             child = directory / entry.name
             if ctx.workspace.is_excluded(child):
@@ -572,7 +570,7 @@ def _glob_select(ctx: ToolContext, base: Path, parts: list[str], dir_only: bool)
                     select(start, index + 1)
             return
         match = matchers[index]
-        for entry in _scan(directory):
+        for entry in _scan(ctx, directory):
             if not match(entry.name):
                 continue
             child = directory / entry.name
@@ -580,12 +578,9 @@ def _glob_select(ctx: ToolContext, base: Path, parts: list[str], dir_only: bool)
             # entry named in the exclusion list is invisible whatever it is.
             if ctx.workspace.is_excluded(child):
                 continue
-            try:
-                # Non-recursive components do follow symlinks, so src/*.py works
-                # through a symlinked src.
-                is_dir = entry.is_dir()
-            except OSError:
-                is_dir = False
+            # Non-recursive components do follow symlinks, so src/*.py works
+            # through a symlinked src.
+            is_dir = entry.is_dir
             if last:
                 if is_dir or not dir_only:
                     found.append(child)
@@ -603,9 +598,10 @@ def glob(ctx: ToolContext, call: ToolCall) -> str:
     (pattern,) = require(call, "pattern")
     root_param = call.params.get("root", ".")
     base = ctx.workspace.resolve_read(root_param)
-    if not base.is_dir():
+    base_stat = ctx.host.stat(base)
+    if base_stat is None or not base_stat.is_dir:
         raise ToolError(
-            "file_not_found" if not base.exists() else "bad_param",
+            "file_not_found" if base_stat is None else "bad_param",
             f"glob root is not a directory: {root_param}",
             "pass a directory (or omit root for the project root).",
         )
@@ -638,15 +634,18 @@ def glob(ctx: ToolContext, call: ToolCall) -> str:
     found.sort(key=lambda p: p.as_posix())
     cap = ctx.caps.listing_max_entries
     shown = found[:cap]
-    lines = [
-        _rel_display(ctx, p) + ("/" if p.is_dir() else "") for p in shown
-    ]
+    lines = [_rel_display(ctx, p) + _dir_suffix(ctx, p) for p in shown]
     if len(found) > cap:
         lines.append(
             f"[truncated: showing first {cap} of {len(found)} matches - narrow the pattern]"
         )
     lines.append(f"{len(found)} matches")
     return "\n".join(lines)
+
+
+def _dir_suffix(ctx: ToolContext, path: Path) -> str:
+    st = ctx.host.stat(path)
+    return "/" if st is not None and st.is_dir else ""
 
 
 # -- grep ------------------------------------------------------------------------
@@ -657,18 +656,32 @@ def _truthy(value: str | None) -> bool:
 
 
 def _grep_files(ctx: ToolContext, target: Path, name_glob: str | None) -> list[Path]:
-    if target.is_file():
+    """Every file to scan, in os.walk's order: a directory's own files (sorted)
+    before its subdirectories (sorted), excluded subtrees never entered."""
+    target_stat = ctx.host.stat(target)
+    if target_stat is not None and target_stat.is_file:
         return [target]
     files: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(target):
-        here = Path(dirpath)
-        dirnames[:] = sorted(d for d in dirnames if not ctx.workspace.is_excluded(here / d))
-        for name in sorted(filenames):
-            if ctx.workspace.is_excluded(here / name):
+
+    def walk(directory: Path) -> None:
+        subdirs: list[Path] = []
+        for entry in sorted(_scan(ctx, directory), key=lambda e: e.name):
+            child = directory / entry.name
+            if ctx.workspace.is_excluded(child):
                 continue
-            if name_glob and not fnmatch.fnmatch(name, name_glob):
+            if entry.is_dir:
+                # A symlinked directory is listed but not descended into, as
+                # os.walk(followlinks=False) has it: no loops back up the tree.
+                if not entry.is_symlink:
+                    subdirs.append(child)
                 continue
-            files.append(here / name)
+            if name_glob and not fnmatch.fnmatch(entry.name, name_glob):
+                continue
+            files.append(child)
+        for subdir in subdirs:
+            walk(subdir)
+
+    walk(target)
     return files
 
 
@@ -695,7 +708,7 @@ def grep(ctx: ToolContext, call: ToolCall) -> str:
 
     path_param = call.params.get("path", ".")
     target = ctx.workspace.resolve_read(path_param)
-    if not target.exists():
+    if ctx.host.stat(target) is None:
         raise ToolError(
             "file_not_found",
             f"path not found: {path_param}",
@@ -707,9 +720,9 @@ def grep(ctx: ToolContext, call: ToolCall) -> str:
     truncated = False
     for fp in _grep_files(ctx, target, call.params.get("glob")):
         try:
-            if _is_binary(fp):
+            if _is_binary(ctx, fp):
                 continue
-            text, _ = _read_norm(fp)
+            text, _ = _read_norm(ctx, fp)
         except OSError:
             continue
         lines = text.splitlines()

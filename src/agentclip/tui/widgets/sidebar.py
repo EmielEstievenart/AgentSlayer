@@ -256,7 +256,9 @@ def _short_root(project_root: Path) -> str:
     try:
         return str(Path("~") / project_root.relative_to(Path.home()))
     except ValueError:
-        return str(project_root)
+        # A root with no drive letter on Windows is a REMOTE, POSIX one: str()
+        # would spell /home/dev/app with backslashes, which is not its name.
+        return str(project_root) if project_root.drive else project_root.as_posix()
 
 
 def _budget(chars: int) -> str:

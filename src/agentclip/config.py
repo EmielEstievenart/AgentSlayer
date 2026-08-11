@@ -1,30 +1,40 @@
 """Configuration: frozen dataclasses + TOML load/merge/validate.
 
-Stdlib-only leaf (plus platformdirs, tomli_w, and permissions.py - itself a
-stdlib-only leaf, shared with the approval policy). Precedence, later wins,
-per-key shallow merge per table — lists REPLACE, never concatenate (so a
-project can tighten the allowlist):
+A leaf (platformdirs, tomli_w, and the two other leaves: permissions.py, shared
+with the approval policy, and the Host seam, which is how the project file is
+read). Precedence, later wins, per-key shallow merge per table — lists REPLACE,
+never concatenate (so a project can tighten the allowlist):
 
     built-in defaults
     -> <user_config_dir>/agentclip/config.toml
     -> <project root>/.agentclip.toml
     -> CLI flags
+
+The global file is always LOCAL; the project file belongs to the project, so in
+a remote session it is read from the remote machine through the Host (hence the
+``host`` parameter on :func:`load_config`). Permissions are the deliberate
+exception: opencode.json is read from this PC whatever the session is, because
+the user's policy must not weaken because of a remote file
+(docs/design/remote-ssh.md decision 6).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import tempfile
 import tomllib
 from collections.abc import Iterable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import platformdirs
 import tomli_w
 
+from agentclip.hosts.base import Host
 from agentclip.permissions import PermissionRule, default_rules, rules_from_config
 
 # Always excluded from file tools, not configurable: the LLM must never read
@@ -308,6 +318,63 @@ class PermissionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class RemoteTarget:
+    """One machine a session can be pointed at (a ``[remote.<name>]`` table).
+
+    ``port``/``root`` may be blank: the port then falls back to ~/.ssh/config
+    (and 22), and the root has to arrive on the command line. ``host`` may be an
+    ssh_config alias - that is the point of parsing ssh_config at all.
+    """
+
+    name: str = ""
+    host: str = ""
+    user: str = ""
+    port: int = 0  # 0 = whatever ~/.ssh/config says, else 22
+    root: str = ""  # the project root ON the remote machine (POSIX)
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteConfig:
+    """Where this session runs, and the saved targets it could have run on.
+
+    ``target``/``root`` come from ``--ssh``/``--remote-root``; the saved
+    ``targets`` come from the LOCAL config files only. A remote session is one
+    with a target: everything else here describes what a target could mean.
+    One session is one machine (design decision 4) - there is no switching.
+    """
+
+    target: str = ""  # "" = a local session
+    root: str = ""  # --remote-root, overriding the saved target's
+    targets: dict[str, RemoteTarget] = field(default_factory=dict)
+
+    def is_remote(self) -> bool:
+        return bool(self.target)
+
+    def selected(self) -> RemoteTarget | None:
+        """The target this session runs on, or None for a local session.
+
+        A ``--ssh`` value naming a saved target IS that target (with
+        ``--remote-root`` overriding its root); anything else is read as
+        ``[user@]host[:port]``, which covers both a bare ssh_config alias and a
+        fully spelled-out destination.
+        """
+        if not self.target:
+            return None
+        saved = self.targets.get(self.target)
+        if saved is not None:
+            return replace(saved, root=self.root or saved.root)
+        user, _, rest = self.target.rpartition("@")
+        host, colon, port = rest.partition(":")
+        return RemoteTarget(
+            name=self.target,
+            host=host,
+            user=user,
+            port=int(port) if colon and port.isdigit() else 0,
+            root=self.root,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class LimitsConfig:
     max_file_read_chars: int = 20_000
     max_command_output_chars: int = 8_000
@@ -336,6 +403,7 @@ class Config:
     notify: NotifyConfig = field(default_factory=NotifyConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
+    remote: RemoteConfig = field(default_factory=RemoteConfig)
     # The effective ruleset (built-in defaults first, the user's opencode.json
     # appended). EMPTY means "no ruleset": the legacy allowlist gate stays in
     # charge, which is what every install without an opencode.json gets.
@@ -372,6 +440,20 @@ def default_opencode_config_path() -> Path:
     return Path.home() / ".config" / "opencode" / "opencode.json"
 
 
+def default_remote_state_dir(target: str, root: str) -> Path:
+    """Where a REMOTE session's ``.agentclip`` tree lives - on this PC.
+
+    Sessions, transcripts and backups are AgentClip's own state, so they stay
+    local (docs/design/remote-ssh.md: "backups keep storing locally"); but the
+    project root they would normally sit beside is on another machine. One
+    directory per (target, root) pair, named for both so a human can find it,
+    with a short digest to keep two similar-looking roots apart.
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", f"{target}-{root}").strip("-")[:60]
+    digest = hashlib.sha256(f"{target}\n{root}".encode()).hexdigest()[:8]
+    return Path(platformdirs.user_data_dir("agentclip")) / "remote" / f"{slug or 'target'}-{digest}"
+
+
 def default_profile_dir() -> Path:
     """Where per-service appearance profiles live (screen.profile_store).
 
@@ -392,13 +474,18 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
-def _read_toml(path: Path, warnings: list[str]) -> dict:
+def _read_toml(path: Path, warnings: list[str], host: Host | None = None) -> dict:
+    """Parse one TOML file, from this PC or from ``host`` when one is given."""
     try:
-        with open(path, "rb") as f:
-            return tomllib.load(f)
+        raw = host.read_bytes(path) if host is not None else path.read_bytes()
     except FileNotFoundError:
         return {}
-    except (tomllib.TOMLDecodeError, OSError) as exc:
+    except OSError as exc:
+        warnings.append(f"config: could not read {path}: {exc}")
+        return {}
+    try:
+        return tomllib.loads(raw.decode("utf-8"))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as exc:
         warnings.append(f"config: could not read {path}: {exc}")
         return {}
 
@@ -567,20 +654,55 @@ def _load_permission_rules(
     return default_rules() + rules, str(path)
 
 
+def _load_remote(
+    table: dict, target: str, root: str, warnings: list[str]
+) -> RemoteConfig:
+    """Read the ``[remote.<name>]`` saved targets and the session's selection."""
+    targets: dict[str, RemoteTarget] = {}
+    for key, entry in table.items():
+        ctx = f"remote.{key}"
+        if not isinstance(entry, dict):
+            warnings.append(f"config: [{ctx}] must be a table; ignored")
+            continue
+        host = _take_str(entry, "host", key, ctx, warnings)
+        targets[key] = RemoteTarget(
+            name=key,
+            host=host or key,  # a target named for its host need not repeat it
+            user=_take_str(entry, "user", "", ctx, warnings),
+            port=_take_int(entry, "port", 0, 0, 65_535, ctx, warnings),
+            root=_take_str(entry, "root", "", ctx, warnings),
+        )
+    if target and target not in targets and "@" not in target and ":" not in target:
+        # Not a saved name and not a spelled-out destination: it can still be an
+        # ~/.ssh/config alias, which is legitimate - say so rather than fail.
+        warnings.append(
+            f"config: --ssh {target!r} names no [remote.{target}] target; "
+            "treating it as a host name or ~/.ssh/config alias"
+        )
+    return RemoteConfig(target=target, root=root, targets=targets)
+
+
 def load_config(
     project_root: Path,
     *,
     service_override: str | None = None,
     global_config_path: Path | None = None,
+    remote_target: str | None = None,
+    remote_root: str | None = None,
+    host: Host | None = None,
 ) -> Config:
     """Load, merge, and validate configuration. Never raises on bad user config;
-    problems become Config.warnings and defaults win."""
+    problems become Config.warnings and defaults win.
+
+    ``host`` is the machine the PROJECT is on: its ``.agentclip.toml`` is read
+    through it, so a remote session honors the remote project's settings. The
+    global file is read from this PC either way.
+    """
     warnings: list[str] = []
     global_path = global_config_path if global_config_path is not None else default_global_config_path()
 
-    merged: dict = {}
-    for path in (global_path, project_root / ".agentclip.toml"):
-        merged = _deep_merge(merged, _read_toml(path, warnings))
+    merged: dict = _read_toml(global_path, warnings)
+    merged = _deep_merge(merged, _read_toml(project_root / ".agentclip.toml", warnings, host))
 
     general_t = merged.get("general", {})
     clipboard_t = merged.get("clipboard", {})
@@ -590,6 +712,7 @@ def load_config(
     backup_t = merged.get("backup", {})
     paths_t = merged.get("paths", {})
     permission_t = merged.get("permission", {})
+    remote_t = merged.get("remote", {})
 
     services = default_services()
     for key, table in merged.get("services", {}).items():
@@ -736,6 +859,12 @@ def load_config(
         permission=permission,
         permission_rules=permission_rules,
         permission_source=permission_source,
+        remote=_load_remote(
+            remote_t if isinstance(remote_t, dict) else {},
+            remote_target or "",
+            remote_root or "",
+            warnings,
+        ),
         exclude=_take_str_list(paths_t, "exclude", DEFAULT_EXCLUDES, "paths", warnings),
         services=services,
         warnings=tuple(warnings),

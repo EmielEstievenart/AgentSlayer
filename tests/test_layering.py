@@ -5,9 +5,11 @@
             │  └──► store
             └──► protocol (leaf)
     config (leaf) ◄── imported by everyone
-     └──► permissions (leaf: the rule model, also used by engine/approval)
-    hosts (leaf: the OS seam - tools/store/engine touch files and run commands
-           only through it, so a remote host can take the local one's place)
+     ├──► permissions (leaf: the rule model, also used by engine/approval)
+     └──► hosts (to read the project's .agentclip.toml off the project's machine)
+    hosts (leaf: the OS seam - config/tools/store/engine touch files and run
+           commands only through it, so a remote host can take the local one's
+           place; paramiko lives in hosts/ssh.py and nowhere else)
 
 Only module-level imports count: lazy third-party imports inside functions
 (e.g. copykitten in the clip providers) are allowed.
@@ -35,7 +37,12 @@ RULES: list[tuple[str, frozenset[str]]] = [
     # one third-party client the remote implementation IS - and that one is
     # confined to hosts/ssh.py (see test_paramiko_only_in_the_ssh_host).
     ("agentclip.hosts", frozenset({"agentclip.hosts", "paramiko"})),
-    ("agentclip.config", frozenset({"platformdirs", "tomli_w", "agentclip.permissions"})),
+    # config: reads the project's .agentclip.toml, which in a remote session is
+    # on the remote machine - hence the Host seam, one leaf below it.
+    (
+        "agentclip.config",
+        frozenset({"platformdirs", "tomli_w", "agentclip.hosts", "agentclip.permissions"}),
+    ),
     ("agentclip.protocol", frozenset({"agentclip.config", "agentclip.protocol"})),
     (
         "agentclip.tools",

@@ -14,6 +14,11 @@ Layout::
 
 No session resume in MVP: the transcript is audit-only; backups remain undoable
 from disk after a restart (see store.backups).
+
+The tree always lives on the LOCAL disk - it is AgentClip's own state, not the
+project's. In a remote session ``<project root>`` is on the far machine, so the
+caller passes a ``data_root`` on this PC to hold it instead (cli.py), and the
+project root survives only as the ``root`` recorded in meta.json.
 """
 
 from __future__ import annotations
@@ -54,10 +59,17 @@ class SessionStore:
     session_dir: Path
 
     def __init__(
-        self, project_root: Path, *, service: str, session_id: str | None = None
+        self,
+        project_root: Path,
+        *,
+        service: str,
+        session_id: str | None = None,
+        data_root: Path | None = None,
     ) -> None:
         self.project_root = Path(project_root)
-        data_dir = self.project_root / ".agentclip"
+        # Where the .agentclip tree goes: beside the project, unless the project
+        # is on another machine and the caller named a local home for it.
+        data_dir = (Path(data_root) if data_root is not None else self.project_root) / ".agentclip"
         sessions_dir = data_dir / "sessions"
         sessions_dir.mkdir(parents=True, exist_ok=True)
 
@@ -75,7 +87,10 @@ class SessionStore:
             "started": _now_iso(),
             "service": service,
             "agentclip_version": __version__,
-            "root": str(self.project_root.resolve()),
+            # Resolving is a question for THIS filesystem; a remote root has
+            # already been resolved on its own machine and must be left alone
+            # (resolve() would graft this PC's drive onto it).
+            "root": str(self.project_root if data_root is not None else self.project_root.resolve()),
         }
         _write_text(
             self.session_dir / "meta.json",
@@ -119,14 +134,17 @@ def _create_session_dir(sessions_dir: Path) -> tuple[str, Path]:
     raise RuntimeError(f"could not create a unique session directory under {sessions_dir}")
 
 
-def prune_sessions(project_root: Path, keep: int) -> tuple[str, ...]:
+def prune_sessions(data_root: Path, keep: int) -> tuple[str, ...]:
     """Delete the oldest session directories beyond ``keep``; return deleted ids.
+
+    ``data_root`` is where the ``.agentclip`` tree lives - the project root for
+    a local session, the local mirror for a remote one (see the module docstring).
 
     Session ids start with a local timestamp, so lexicographic order is
     chronological. Sessions that cannot be removed (e.g. a file held open on
     Windows) are skipped and not reported as deleted.
     """
-    sessions_dir = Path(project_root) / ".agentclip" / "sessions"
+    sessions_dir = Path(data_root) / ".agentclip" / "sessions"
     if not sessions_dir.is_dir():
         return ()
     ids = sorted(p.name for p in sessions_dir.iterdir() if p.is_dir())

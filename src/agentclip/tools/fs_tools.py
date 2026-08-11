@@ -593,6 +593,12 @@ def _glob_select(ctx: ToolContext, base: Path, parts: list[str], dir_only: bool)
     return list(dict.fromkeys(found))
 
 
+def _dir_suffix(ctx: ToolContext, path: Path) -> str:
+    """The trailing '/' a directory is listed with."""
+    st = ctx.host.stat(path)
+    return "/" if st is not None and st.is_dir else ""
+
+
 @tool_handler
 def glob(ctx: ToolContext, call: ToolCall) -> str:
     (pattern,) = require(call, "pattern")
@@ -641,11 +647,6 @@ def glob(ctx: ToolContext, call: ToolCall) -> str:
         )
     lines.append(f"{len(found)} matches")
     return "\n".join(lines)
-
-
-def _dir_suffix(ctx: ToolContext, path: Path) -> str:
-    st = ctx.host.stat(path)
-    return "/" if st is not None and st.is_dir else ""
 
 
 # -- grep ------------------------------------------------------------------------

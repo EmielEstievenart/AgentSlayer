@@ -20,9 +20,12 @@ engine  ──►  tools  ──►  sandbox (Workspace)
 protocol (parser, composer)   ──►  (nothing but stdlib)
  ▲
 config (leaf, stdlib-only)  ◄── imported by everyone
+hosts (leaf, stdlib-only)   ◄── tools, store, engine: the OS seam
 ```
 
-`clip` and `screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `tui` and `cli`. `protocol` and `config` are leaves. `tools` never imports `engine`. Anything violating this is a bug.
+`clip` and `screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `tui` and `cli`. `protocol`, `config` and `hosts` are leaves. `tools` never imports `engine`. Anything violating this is a bug.
+
+`hosts` is the **OS seam**: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`stat`/`lstat`/`listdir`/`realpath`), carried on `ToolContext`. `LocalHost` is this PC; a remote machine over SSH plugs in the same way (docs/design/remote-ssh.md). Rule for new tools: write against Host primitives and it works everywhere.
 
 ---
 
@@ -35,6 +38,11 @@ src/agentclip/
 ├── cli.py                 # argparse (--project, --service, --version); builds Config, wires Engine + TUI
 ├── config.py              # frozen dataclasses + TOML load/merge/validate (stdlib tomllib)
 ├── permissions.py         # OpenCode's allow/ask/deny rule model: wildcard matcher, evaluate(), always_pattern()
+│
+├── hosts/                 # the OS seam: every file byte and every command goes through a Host
+│   ├── base.py            # Host + ExecHandle Protocols, FileStat/DirEntry/ExecResult value types
+│   ├── local.py           # LocalHost: subprocess/os/pathlib, kill-tree per platform
+│   └── fake.py            # FakeHost: in-memory filesystem + scripted commands, for tests
 │
 ├── protocol/
 │   ├── types.py           # wire-level dataclasses (ToolCall, ParsedTurn, ParseIssue, Outbound)
@@ -50,9 +58,9 @@ src/agentclip/
 │
 ├── tools/
 │   ├── registry.py        # ToolRegistry: name → ToolSpec; render_catalog() for the bootstrap prompt
-│   ├── sandbox.py         # Workspace: project-root jail, path resolution, exclusion rules
+│   ├── sandbox.py         # Workspace: project-root jail, host-resolved paths, exclusion rules
 │   ├── fs_tools.py        # read_file, write_file, edit_file, list_dir, glob, grep (pure-Python re scan)
-│   ├── shell.py           # run_command: subprocess.run, timeout, combined-output capture
+│   ├── shell.py           # run_command: host.spawn + poll slices, timeout/cancel kill, combined output
 │   └── meta.py            # ask_user, task_done (no side effects; engine interprets)
 │
 ├── store/
@@ -707,6 +715,9 @@ tests/
 ├── conftest.py                      # tmp workspace fixture, default Config fixture, ScriptedLLM helper
 ├── test_layering.py                 # imports each module, asserts dependency direction (no tui/clip
 │                                    #   imports inside engine/protocol/tools/store) — enforces §0
+├── hosts/
+│   ├── test_local_host.py           # real files + real subprocesses: stat/listdir/realpath, kill+drain
+│   └── test_fake_host.py            # the in-memory twin behaves like a filesystem (symlinks included)
 ├── protocol/
 │   ├── golden/                      # pairs: NNN-name.input.txt + NNN-name.expected.json
 │   │   ├── 001-two-calls.input.txt
@@ -731,7 +742,8 @@ tests/
 │   │                                #   symlink-out-of-root (skipif Windows without symlink privilege),
 │   │                                #   write-through-symlink-dir, excluded dirs (.git, .agentclip)
 │   ├── test_fs_tools.py             # edit_file uniqueness/no-match errors, read ranges, truncation caps
-│   └── test_shell.py                # timeout kill, output cap, cwd=root
+│   ├── test_fs_tools_fake_host.py   # the same tools + jail over FakeHost: proof nothing bypasses the seam
+│   └── test_shell.py                # timeout kill, output cap, cwd=root; scripted-host cancel/timeout
 ├── store/
 │   └── test_backups.py              # copy-on-first-touch idempotence, undo created/modified, prune,
 │                                    #   undo-from-disk-after-new-BackupStore (restart scenario)

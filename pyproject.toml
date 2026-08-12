@@ -34,6 +34,9 @@ cv = [
     "opencv-python-headless>=4.10",
     "numpy>=2",
 ]
+mcp = [
+    "mcp>=2,<3",
+]
 
 [project.scripts]
 agentclip = "agentclip.cli:main"
@@ -46,6 +49,7 @@ dev = [
     "textual-dev",
     "ruff",
     "mypy",
+    "mcp>=2,<3",
 ]
 build = [
     "pyinstaller>=6.11",

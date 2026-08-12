@@ -4,6 +4,12 @@
 to the MainScreen is equivalent to the watcher thread capturing protocol text
 from the OS clipboard.
 
+``CallStarted``/``CallFinished``/``CallOutput`` are the same idiom for the OTHER
+background thread - the one the engine executes a turn's tool calls on. The
+controller's ChatView port promises those three calls are thread-safe (see
+app/view.py), and this is how MainScreen keeps that promise: the hook posts,
+the UI thread handles, and the run panel is only ever touched from the loop.
+
 ``BusyProbed``, ``IdleProbed`` and ``StaleProbed`` are the three finish
 detectors' poll results, posted in a FIXED order within each poller tick:
 busy first, then idle, then stale.
@@ -71,6 +77,40 @@ class ClipboardCaptured(Message):
 
     def __init__(self, text: str) -> None:
         self.text = text
+        super().__init__()
+
+
+class CallStarted(Message):
+    """The engine entered one call's handler (posted from the worker thread)."""
+
+    def __init__(self, call_id: int, tool: str, detail: str) -> None:
+        self.call_id = call_id
+        self.tool = tool
+        self.detail = detail
+        super().__init__()
+
+
+class CallFinished(Message):
+    """One call resolved; ``glyph`` is ✓ / ✗ / − (posted from the worker thread)."""
+
+    def __init__(self, call_id: int, glyph: str) -> None:
+        self.call_id = call_id
+        self.glyph = glyph
+        super().__init__()
+
+
+class CallOutput(Message):
+    """New characters from a running command - the delta, never the whole buffer.
+
+    The third of the run-panel messages and the only high-frequency one: a
+    chatty command posts one of these per poll slice (5/s), which is why the
+    handler's only job is to append to the screen's per-call deque and repaint
+    a pane that is usually not even displayed.
+    """
+
+    def __init__(self, call_id: int, chunk: str) -> None:
+        self.call_id = call_id
+        self.chunk = chunk
         super().__init__()
 
 

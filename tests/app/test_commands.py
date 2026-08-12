@@ -9,6 +9,8 @@ agrees with the dispatcher about what counts as a command in progress.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from agentclip.app.commands import (
     COMMANDS,
     ChatCommand,
@@ -18,8 +20,17 @@ from agentclip.app.commands import (
     match_prefix,
 )
 from agentclip.app.controller import SessionController
+from agentclip.app.types import SessionSpec
 
-from .conftest import FakeChatView
+from .conftest import (
+    MASTER_CHAT,
+    FakeChatView,
+    edit_reply,
+    read_file_reply,
+    settle,
+    start_session,
+    wait_for,
+)
 
 
 def test_the_registry_is_the_documented_commands() -> None:
@@ -32,9 +43,11 @@ def test_the_registry_is_the_documented_commands() -> None:
         "identify",
         "log",
         "armed",
+        "mode",
         "yolo",
     ]
     assert lookup("yolo") is not None and lookup("yolo").arg == "[on|off]"  # type: ignore[union-attr]
+    assert lookup("mode") is not None and lookup("mode").arg == "[plan|ask|unattended]"  # type: ignore[union-attr]
     assert all(command.summary for command in COMMANDS)
 
 
@@ -81,7 +94,7 @@ def test_unknown_command_hint_lists_every_command() -> None:
     for command in COMMANDS:
         assert command.slash in hint
     # An English list, not a dump.
-    assert hint == "/help, /new, /abort, /identify, /log, /armed, or /yolo"
+    assert hint == "/help, /new, /abort, /identify, /log, /armed, /mode, or /yolo"
 
 
 def test_identify_dispatches_to_the_view_with_no_session_of_any_kind(
@@ -171,9 +184,210 @@ def test_the_engine_never_hears_about_the_armed_switch(
     assert view.events == []  # no transcript note, no audit trail
 
 
+# -- /mode ---------------------------------------------------------------------
+# The permission mode is engine state (audited into the session log, dead when
+# the session ends), so unlike `/armed` every one of these goes through a live
+# session - and the mirror the controller keeps has to agree with it afterwards,
+# because a bare `/mode` and the status bar both read the mirror.
+
+
+async def test_mode_switches_the_session_and_says_what_changed(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    await start_session(controller, view)
+
+    controller.submit_message("/mode plan")
+    await settle(view)
+
+    assert controller.permission_mode == "plan"
+    assert controller._snap is not None and controller._snap.mode == "plan"
+    assert any("exploration only" in note for note in view.notes())
+    assert any("mode: PLAN" in message for message, _ in view.alerts)
+
+
+async def test_mode_reads_the_word_the_user_typed(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    await start_session(controller, view)
+
+    controller.submit_message("/mode UNATTENDED")
+    await settle(view)
+
+    assert controller.permission_mode == "unattended"
+    assert any("nothing will ask you" in note for note in view.notes())
+
+
+async def test_switching_to_unattended_under_yolo_says_which_one_wins(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """The two settings pull opposite ways - YOLO still auto-APPROVES the calls
+    unattended would have denied - and a user who is walking away has to know."""
+    await start_session(controller, view)
+    controller.submit_message("/yolo on")
+    await settle(view)
+
+    controller.submit_message("/mode unattended")
+    await settle(view)
+
+    assert any("CAUTION: YOLO is ON" in note for note in view.notes())
+
+
+async def test_bare_mode_reports_rather_than_cycles(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """Three states, so "the next one" is not a thing a user can aim at blind."""
+    await start_session(controller, view)
+    controller.submit_message("/mode plan")
+    await settle(view)
+    before = len(view.notes())
+
+    controller.submit_message("/mode")
+    await settle(view)
+
+    assert controller.permission_mode == "plan"  # unchanged
+    assert len(view.notes()) == before  # nothing announced, nothing audited
+    assert any("permission mode: plan" in message for message in view.toasts())
+
+
+async def test_cycle_walks_ask_plan_unattended_and_back(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """What the TUI's mode key calls. The order is the registry's, so the two
+    front-ends cannot disagree about what "next" means."""
+    await start_session(controller, view)
+    seen = [controller.permission_mode]
+    for _ in range(3):
+        controller.cycle_permission_mode()
+        await settle(view)
+        seen.append(controller.permission_mode)
+
+    assert seen == ["ask", "plan", "unattended", "ask"]
+
+
+async def test_an_unparseable_mode_changes_nothing_and_says_so(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    await start_session(controller, view)
+
+    controller.submit_message("/mode planning")
+    await settle(view)
+
+    assert controller.permission_mode == "ask"
+    assert any("usage: /mode [ask|plan|unattended]" in message for message in view.toasts())
+
+
+# -- the mode before, between and across sessions --------------------------------
+# The dial is the user's, not a session's. "Only explore, do not change anything"
+# is a decision made about the task one is ABOUT to describe, so it has to be
+# reachable at the start prompt - and it has to still be true after /new, or the
+# next session's first edit lands on somebody who thought they had turned changes
+# off.
+
+
+async def test_the_mode_can_be_set_before_any_session_exists(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """No engine to tell, so only the engine half is skipped: the mirror moves,
+    the transcript says why, and the status bar is repainted (its MODE segment
+    falls back to ``permission_mode`` when there is no snapshot)."""
+    pushes = len(view.states)
+
+    controller.set_permission_mode("plan")
+    await settle(view)
+
+    assert controller.permission_mode == "plan"
+    assert controller._engine is None
+    assert any("exploration only" in note for note in view.notes())
+    assert len(view.states) > pushes  # repainted, so the segment can follow
+    assert view.states[-1].snapshot is None  # ...with no session behind it
+
+
+async def test_cycling_works_before_any_session_exists(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """What shift+tab at the start prompt does. Not a no-op: the cycle is how a
+    user arms plan mode for the session they are about to describe."""
+    seen = [controller.permission_mode]
+    for _ in range(3):
+        controller.cycle_permission_mode()
+        await settle(view)
+        seen.append(controller.permission_mode)
+
+    assert seen == ["ask", "plan", "unattended", "ask"]
+
+
+async def test_mode_command_works_before_any_session_exists(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    controller.submit_message("/mode unattended")
+    await settle(view)
+
+    assert controller.permission_mode == "unattended"
+    assert not any("start a session" in message for message in view.toasts())
+
+
+async def test_a_mode_chosen_before_the_session_governs_its_first_turn(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """The point of the whole pre-session half: the engine is armed with the
+    dialled-in mode BEFORE the bootstrap goes out, so the very first edit of the
+    very first turn is refused rather than gated."""
+    controller.set_permission_mode("plan")
+    await settle(view)
+
+    await start_session(controller, view)
+    assert controller._snap is not None and controller._snap.mode == "plan"
+
+    before = (project / "src" / "utils.py").read_text(encoding="utf-8")
+    controller.submit_clipboard(
+        edit_reply("src/utils.py", "return 1", "return 2", chat=MASTER_CHAT)
+    )
+    await settle(view)
+
+    assert view.gates == []  # plan denies; it does not ask
+    assert (project / "src" / "utils.py").read_text(encoding="utf-8") == before
+    assert "plan mode is active" in view.copied[-1]
+
+
+async def test_a_pre_session_mode_is_never_announced_as_a_change(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """There was no conversation to change it under. The mode is in force from
+    turn one and every denial body says so, so a "the mode is now plan" note in
+    the first results payload would be announcing something that never happened."""
+    controller.set_permission_mode("plan")
+    await settle(view)
+    await start_session(controller, view)
+
+    controller.submit_clipboard(read_file_reply("README.md", chat=MASTER_CHAT))
+    await settle(view)
+
+    assert all("permission mode is now" not in copied for copied in view.copied)
+
+
+async def test_the_mode_survives_a_new_session(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """/new replaces the conversation, not the user. Unlike YOLO (which goes back
+    to its configured default) the mode is carried over, and the next session's
+    engine is armed with it before its first payload."""
+    await start_session(controller, view)
+    controller.submit_message("/mode plan")
+    await settle(view)
+    view.specs.append(SessionSpec(task="A second task.", service="claude"))
+
+    assert controller.request_new_session() is True
+    await wait_for(lambda: view.cleared > 0, "the session was reset")
+    await settle(view)
+
+    assert controller.permission_mode == "plan"
+    assert controller._snap is not None and controller._snap.mode == "plan"
+
+
 def test_match_prefix_narrows_as_the_user_types() -> None:
     assert match_prefix("/") == COMMANDS  # a bare slash offers everything
     assert [c.name for c in match_prefix("/y")] == ["yolo"]
+    assert [c.name for c in match_prefix("/m")] == ["mode"]
     assert [c.name for c in match_prefix("/i")] == ["identify"]
     assert [c.name for c in match_prefix("/n")] == ["new"]
     assert [c.name for c in match_prefix("/yolo")] == ["yolo"]

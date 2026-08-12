@@ -35,7 +35,13 @@ import platformdirs
 import tomli_w
 
 from agentclip.hosts.base import Host
-from agentclip.permissions import PermissionRule, default_rules, rules_from_config
+from agentclip.permissions import (
+    PERMISSION_MODES,
+    PermissionRule,
+    default_rules,
+    normalize_mode,
+    rules_from_config,
+)
 
 # Always excluded from file tools, not configurable: the LLM must never read
 # backups/transcripts or tamper with its own approval rules.
@@ -303,6 +309,12 @@ class ApprovalConfig:
     # allowlist and the deny tokens entirely. Off by default; the /yolo chat command
     # toggles it live for the session. Setting it true here arms a session in YOLO.
     yolo: bool = False
+    # The permission mode a session STARTS in: "ask" (today's gates), "plan"
+    # (exploration only) or "unattended" (nothing gates; ungated calls are
+    # auto-denied). Typed str rather than PermissionMode: this is what a config
+    # FILE said, and load_config only warns about a value it cannot read - the
+    # narrowing to the alias happens once, in ApprovalPolicy. See approval.py.
+    mode: str = "ask"
     command_allowlist: tuple[str, ...] = DEFAULT_ALLOWLIST
     command_deny_tokens: tuple[str, ...] = DEFAULT_DENY_TOKENS
 
@@ -813,6 +825,14 @@ def load_config(
         warnings.append(f"config: unknown theme {theme!r}; using {DEFAULT_THEME!r}")
         theme = DEFAULT_THEME
 
+    # A misspelt permission mode must not silently arm a session that never asks:
+    # anything unreadable falls back to "ask" and says so.
+    mode = _take_str(approval_t, "mode", "ask", "approval", warnings)
+    if normalize_mode(mode) is None:
+        modes = ", ".join(PERMISSION_MODES)
+        warnings.append(f"config: unknown approval mode {mode!r}; using 'ask' (one of: {modes})")
+        mode = "ask"
+
     permission = PermissionConfig(
         enabled=_take_bool(permission_t, "enabled", True, "permission", warnings),
         opencode_config=_take_str(permission_t, "opencode_config", "", "permission", warnings),
@@ -833,6 +853,7 @@ def load_config(
         approval=ApprovalConfig(
             auto_accept_edits=_take_bool(approval_t, "auto_accept_edits", False, "approval", warnings),
             yolo=_take_bool(approval_t, "yolo", False, "approval", warnings),
+            mode=mode,
             command_allowlist=_take_str_list(
                 approval_t, "command_allowlist", DEFAULT_ALLOWLIST, "approval", warnings
             ),

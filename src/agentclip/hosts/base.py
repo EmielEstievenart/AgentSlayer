@@ -84,6 +84,14 @@ class ExecHandle(Protocol):
         finished, or None if it is still running after ``timeout`` seconds.
         Calling it repeatedly is safe: output buffered during earlier slices
         survives into the final result.
+      - ``peek()`` is the merged output SO FAR, as a snapshot: non-blocking,
+        safe to call as often as the polling loop likes, and only ever growing
+        (what it returned once stays a prefix of what it returns next). This is
+        what makes a long command watchable while it runs - run_command diffs
+        successive peeks and streams the new characters to the UI
+        (``ToolContext.on_output``). A host whose transport cannot hand over
+        partial output answers "" until the command finishes, and everything
+        above simply shows nothing live: the final result is unaffected.
       - ``kill()`` kills the command AND its children (a shell command's real
         work is a grandchild), best effort, never raising.
       - ``drain(timeout)`` is for after ``kill()``: whatever merged output the
@@ -91,6 +99,8 @@ class ExecHandle(Protocol):
     """
 
     def wait(self, timeout: float) -> ExecResult | None: ...
+
+    def peek(self) -> str: ...
 
     def kill(self) -> None: ...
 

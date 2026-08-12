@@ -152,6 +152,14 @@ SFTP and sends `kill -9 -- -<pgid>` on a separate channel. The command is not
 `exec`'d — a compound command is not a simple command, and `exec` would run only
 its head.
 
+**Live output, in practice.** `ExecHandle.peek()` — the merged output so far,
+which run_command diffs each poll slice to feed the TUI's run panel (tui.md §8a)
+— is answered from the buffer the channel is already pumped into by `wait()`.
+No transport call of its own, deliberately: the polling loop calls `wait()` five
+times a second anyway, and a second place that can discover a dead link would be
+a second place to get the two-state machine wrong. A remote command therefore
+streams at exactly the local one's resolution.
+
 **Auth, in practice.** `~/.ssh/config` is parsed first (aliases, user, port,
 IdentityFile), then agent + default keys, then up to three password attempts
 through the caller's callback. Keyboard-interactive 2FA is whatever paramiko's

@@ -8,7 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from agentclip.hosts import ExecResult, LocalHost
+from agentclip.hosts import ExecResult, LocalExec, LocalHost
+from agentclip.hosts.local import _StreamDecoder
 
 PY = "python -c"
 
@@ -145,3 +146,99 @@ def test_wait_is_none_while_running_and_kill_drains_the_tree(
     assert handle.wait(0.2) is None  # still running
     handle.kill()
     assert "started" in handle.drain(5.0)  # the partial output survives the kill
+
+
+# -- peek: the live tail (the reader thread) -----------------------------------
+
+
+def _peek_until(handle: LocalExec, needle: str, seconds: float = 20.0) -> str:
+    """Poll peek() the way run_command's loop does, until ``needle`` shows up."""
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        seen = handle.peek()
+        if needle in seen:
+            return seen
+        handle.wait(0.05)
+    raise AssertionError(f"{needle!r} never appeared; saw {handle.peek()!r}")
+
+
+def test_peek_shows_output_while_the_command_is_still_running(
+    host: LocalHost, tmp_path: Path
+) -> None:
+    """The whole point: a long command is watchable long before it exits."""
+    code = "import sys, time; print('halfway'); sys.stdout.flush(); time.sleep(20)"
+    handle = host.spawn(f'{PY} "{code}"', tmp_path)
+    try:
+        assert "halfway" in _peek_until(handle, "halfway")
+        assert handle.wait(0.0) is None  # ...and it really has not finished
+    finally:
+        handle.kill()
+
+
+def test_peek_only_ever_grows_and_matches_the_final_result(
+    host: LocalHost, tmp_path: Path
+) -> None:
+    code = "import sys; [print('line' + str(i), flush=True) for i in range(200)]"
+    handle = host.spawn(f'{PY} "{code}"', tmp_path)
+    seen = ""
+    while True:
+        result = handle.wait(0.05)
+        snapshot = handle.peek()
+        assert snapshot.startswith(seen)  # a snapshot never rewrites the past
+        seen = snapshot
+        if result is not None:
+            break
+    assert result.output == handle.peek()
+    assert result.output.count("line") == 200
+
+
+def test_peek_is_empty_before_anything_is_printed(host: LocalHost, tmp_path: Path) -> None:
+    handle = host.spawn(f'{PY} "import time; time.sleep(20)"', tmp_path)
+    try:
+        assert handle.peek() == ""
+    finally:
+        handle.kill()
+
+
+def test_output_newlines_are_translated_the_way_text_mode_did(
+    host: LocalHost, tmp_path: Path
+) -> None:
+    """CRLF and a lone CR both arrive as \\n - universal newlines, as before.
+
+    Written through ``stdout.buffer`` so the child's own text layer does not
+    translate anything first: these are the exact bytes on the pipe.
+    """
+    code = r"import sys; sys.stdout.buffer.write(b'a\r\nb\rc\n')"
+    result = _run(host, f'{PY} "{code}"', tmp_path)
+    assert result.output == "a\nb\nc\n"
+
+
+def test_a_crlf_split_across_two_reads_is_still_one_newline() -> None:
+    """The chunk boundary a pipe reader hits sooner or later, in isolation."""
+    decoder = _StreamDecoder()
+    assert decoder.feed(b"one\r") == "one"  # the CR is held back: it may be a CRLF
+    assert decoder.feed(b"\ntwo") == "\ntwo"
+    assert decoder.flush() == ""
+
+
+def test_a_lone_cr_at_a_chunk_boundary_becomes_a_newline() -> None:
+    decoder = _StreamDecoder()
+    assert decoder.feed(b"one\r") == "one"
+    assert decoder.feed(b"two") == "\ntwo"
+
+
+def test_a_multibyte_character_split_across_two_reads_survives() -> None:
+    decoder = _StreamDecoder()
+    assert decoder.feed("é".encode()[:1]) == ""
+    assert decoder.feed("é".encode()[1:]) == "é"
+
+
+def test_repeated_wait_after_the_command_finished_answers_the_same(
+    host: LocalHost, tmp_path: Path
+) -> None:
+    handle = host.spawn(f"{PY} \"print('once')\"", tmp_path)
+    first = None
+    while first is None:
+        first = handle.wait(0.2)
+    assert handle.wait(0.2) == first  # the answer stands, output and all
+    assert "once" in first.output

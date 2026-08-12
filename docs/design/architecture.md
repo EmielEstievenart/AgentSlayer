@@ -25,7 +25,7 @@ hosts (leaf)   ◄── config, tools, store, engine: the OS seam
 
 `clip` and `screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `tui` and `cli`. `protocol`, `config` and `hosts` are leaves. `tools` never imports `engine`. Anything violating this is a bug.
 
-`hosts` is the **OS seam**: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`mkdir`/`rmdir`/`stat`/`lstat`/`listdir`/`realpath`, plus the `case_sensitive` fact), carried on `ToolContext`. `LocalHost` is this PC; `SshHost` is a machine over SSH (docs/design/remote-ssh.md), chosen once at launch in `cli.py` and shared by the workspace jail, the tool context, the backup store and the engine — one session is one machine. Rule for new tools: write against Host primitives and it works everywhere.
+`hosts` is the **OS seam**: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`mkdir`/`rmdir`/`stat`/`lstat`/`listdir`/`realpath`, plus the `case_sensitive` fact), carried on `ToolContext`. `LocalHost` is this PC; `SshHost` is a machine over SSH (docs/design/remote-ssh.md), chosen once at launch in `cli.py` and shared by the workspace jail, the tool context, the backup store and the engine — one session is one machine. Rule for new tools: write against Host primitives and it works everywhere. Process execution is `spawn` + an `ExecHandle` the caller polls (`wait`/`peek`/`kill`/`drain`), because cancellation, timeouts and the live output tail are policy above the seam, not OS access.
 
 ---
 
@@ -41,8 +41,8 @@ src/agentclip/
 ├── permissions.py         # OpenCode's allow/ask/deny rule model: wildcard matcher, evaluate(), always_pattern()
 │
 ├── hosts/                 # the OS seam: every file byte and every command goes through a Host
-│   ├── base.py            # Host + ExecHandle Protocols, FileStat/DirEntry/ExecResult value types
-│   ├── local.py           # LocalHost: subprocess/os/pathlib, kill-tree per platform
+│   ├── base.py            # Host + ExecHandle Protocols (wait/peek/kill/drain), FileStat/DirEntry/ExecResult
+│   ├── local.py           # LocalHost: subprocess/os/pathlib, kill-tree per platform, reader thread → peek()
 │   ├── ssh.py             # SshHost: one Paramiko connection, exec channels + SFTP, lazy reconnect
 │   └── fake.py            # FakeHost: in-memory filesystem + scripted commands, for tests
 │
@@ -62,7 +62,8 @@ src/agentclip/
 │   ├── registry.py        # ToolRegistry: name → ToolSpec; render_catalog() for the bootstrap prompt
 │   ├── sandbox.py         # Workspace: project-root jail, host-resolved paths, exclusion rules
 │   ├── fs_tools.py        # read_file, write_file, edit_file, list_dir, glob, grep (pure-Python re scan)
-│   ├── shell.py           # run_command: host.spawn + poll slices, timeout/cancel kill, combined output
+│   ├── shell.py           # run_command: host.spawn + poll slices, timeout/cancel kill, combined output,
+│                          # per-slice peek() diff → ctx.on_output (the TUI's live tail)
 │   └── meta.py            # ask_user, task_done (no side effects; engine interprets)
 │
 ├── store/
@@ -80,7 +81,7 @@ src/agentclip/
 ├── app/                   # UI-agnostic orchestration: drives the engine, never imports tui/clip/screen
 │   ├── controller.py      # SessionController: flows, gate/ask futures, delegation (nested sessions)
 │   ├── commands.py        # the chat slash-command registry: dispatch, /help and the popup read one tuple
-│   ├── view.py            # ChatView Protocol (the one UI seam) + SessionView state snapshot
+│   ├── view.py            # ChatView Protocol (the one UI seam) + SessionView snapshot + RunCall rows
 │   └── types.py           # SessionSpec, SessionRef, EngineRequest, SessionStats
 │
 ├── screen/                # OS screen layer (like clip: imported ONLY by tui/cli; stdlib-only
@@ -105,7 +106,8 @@ src/agentclip/
 │
 └── tui/
     ├── app.py             # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
-    ├── messages.py        # ClipboardCaptured + the generation-stamped BusyProbed/IdleProbed/StaleProbed
+    ├── messages.py        # ClipboardCaptured, CallStarted/CallFinished/CallOutput (the engine worker
+    │                      # thread's bridge to the run panel), and the generation-stamped *Probed
     ├── graphics.py        # can this terminal draw sixels? probed ONCE from cli.main, before Textual (tui.md §1.7)
     ├── pixels.py          # the half-block renderer: pure functions over RegionImage, the no-sixel fallback
     ├── screens/
@@ -122,7 +124,9 @@ src/agentclip/
         ├── composer.py    # the docked chat box: Enter sends, and it drives the popup below
         ├── command_popup.py # the slash-command list above the composer (tui.md §3.3a)
         ├── action_panel.py  # the approval gate: title, diff/command body, buttons, reject input
-        ├── running_bar.py   # the "Working... ctrl+x cancels" line while tool calls run
+        ├── run_panel.py    # the RUN PANEL: one row per call while a turn executes + the running
+        │                    # command's live output, ctrl+o (tui.md §8a)
+        ├── running_bar.py   # the "Working... ctrl+x cancels" spinner line, the run panel's header
         ├── sidebar.py     # the settings column: service, chat window, DETECTION (tui.md §1.3)
         ├── elements.py    # the ELEMENTS column: the crops the detectors matched (tui.md §1.7)
         ├── log_pane.py    # the full-width live harness decision log, /log + F8 (tui.md §3.3b)
@@ -132,6 +136,22 @@ src/agentclip/
 ### Key signatures
 
 ```python
+# hosts/base.py ----------------------------------------------------------
+class ExecHandle(Protocol):
+    """One running command, driven by run_command's polling loop above the seam."""
+    def wait(self, timeout: float) -> ExecResult | None   # None = still running
+    def peek(self) -> str        # merged output SO FAR: non-blocking, only ever grows
+    def kill(self) -> None       # the process AND its children; never raises
+    def drain(self, timeout: float) -> str                # after kill(): what it managed to emit
+
+# peek() is what makes a long command watchable. LocalExec drains the pipe on a
+# reader thread from the moment it spawns (bytes + an incremental UTF-8 /
+# universal-newline decoder), so wait() only polls the process and BOTH the
+# final result and the post-kill drain read out of that one buffer. SshExec
+# answers with whatever its poll loop has pumped off the channel. A transport
+# that cannot expose partial output may answer "" forever: nothing above breaks,
+# the live tail is simply empty until the result lands.
+
 # protocol/types.py ------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class ToolCall:
@@ -206,11 +226,36 @@ class Engine:
     def deliver_delegate_result(self, text: str, *, status: ResultStatus = "ok",
                                 code: str | None = None) -> StepResult   # AWAITING_SUBAGENT → resume the turn
     def request_cancel(self) -> None                             # THREAD-SAFE (sets an Event); no-op when idle
+    # Watching a turn execute (the TUI's run panel, tui.md §8a). Wired once by
+    # whoever owns the engine, exactly like the backup hook; both fire FROM THE
+    # WORKER THREAD that is inside execute(), so an implementation must not
+    # block and must be thread-safe. Both are courtesies - a hook that raises is
+    # dropped, hook and all, and the turn carries on.
+    def set_progress_hook(self, hook: Callable[[CallProgress], None] | None) -> None
+    def set_output_hook(self, hook: Callable[[int, str], None] | None) -> None   # (call_id, delta)
     def next_chunk(self) -> Outbound | None                      # M3: chunk ACK advance
     def undo_last_turn(self) -> UndoReport                       # M3 (backups written from M1)
     def status(self) -> StatusSnapshot                           # phase, turn, budget use — for status bar
+    def set_yolo(self, enabled: bool) -> bool                    # live, any phase; audited
+    def set_permission_mode(self, mode: PermissionMode) -> PermissionMode  # live, any phase; audited
     role: Literal["master", "subagent"]                          # immutable; picks the bootstrap variant
     chat_name: str                                               # immutable; stamped on every outbound
+
+@dataclass(frozen=True, slots=True)
+class CallProgress:
+    """One step of a turn's execution, reported AS IT HAPPENS (set_progress_hook)."""
+    call_id: int
+    tool: str
+    phase: Literal["running", "done"]   # "running" = about to enter the handler
+    status: str = ""                    # the ToolResult status once phase is "done"
+
+# Every call resolves exactly once, including the ones that never run (denied by
+# a rule or the mode, skipped after a rejection or a cancel, pre-resolved parse
+# errors) - so a row on screen can never be left pending. Only calls that
+# actually enter a handler emit "running" first.
+
+# StatusSnapshot: phase, turn, service_key, budget_chars, auto_accept_edits, yolo,
+# mode (PermissionMode), session_dir, last_outbound_chars.
 
 # IngestResult is a union: NewTurn(parsed) | ChunkAck | Noise | ProtocolError(issues)
 # StepResult is a union: Send(outbound) | AskUser(question) | Delegate(task, context) | Done(summary, outbound, result)
@@ -275,6 +320,22 @@ class ToolRegistry:
     def get(self, name: str) -> ToolSpec | None
     def render_catalog(self) -> str          # consumed by Composer (data passed, no import)
 
+@dataclass(slots=True)
+class ToolContext:
+    """Everything a handler may touch; the engine builds one per session."""
+    workspace: Workspace; limits: LimitsConfig; caps: BudgetCaps
+    host: Host                                          # the ONLY route to files/commands
+    backup_hook: Callable[[str, Path, str], None] | None    # (rel, abs, "write"|"delete")
+    cancel_event: threading.Event | None                # set from another thread; ctx.cancelled()
+    on_output: Callable[[int, str], None] | None        # (call_id, NEW chars) - the live tail
+    def emit_output(self, call_id: int, chunk: str) -> None  # defensive: a broken listener is dropped
+
+# on_output is cancel_event's mirror image. That one is written by the UI thread
+# and read here; this one is called FROM here, on the engine's worker thread,
+# and read by the UI. It is a courtesy channel only: the model's copy of a
+# command's output is still the tail-capped ToolResult, so a None hook, a
+# non-streaming host and a listener that raises all cost the model nothing.
+
 # tools/sandbox.py -------------------------------------------------------
 class Workspace:
     root: Path                               # Path(root).resolve(strict=True) at startup
@@ -287,18 +348,29 @@ class Workspace:
 class ApprovalPolicy:
     auto_accept_edits: bool = False          # legacy mode: flipped by Decision.APPROVE_ALL_EDITS
     yolo: bool = False                       # auto-approve every ASK; toggled live by /yolo
+    mode: PermissionMode = "ask"             # ask | plan | unattended; set live by /mode
     session_rules: list[PermissionRule]      # "always allow" answers; evaluated last
     ruleset_mode: bool                       # True once a permission ruleset is loaded
-    def verdict(self, spec: ToolSpec, call: ToolCall) -> Literal["auto", "needs_approval", "deny"]
+    def verdict(self, spec: ToolSpec, call: ToolCall) -> Verdict
     def command_auto_allowed(self, command: str) -> str | None  # legacy: glob allowlist + deny tokens
     def rule_for(self, spec: ToolSpec, call: ToolCall) -> PermissionRule
     def always_rule(self, spec: ToolSpec, call: ToolCall) -> PermissionRule
     def remember(self, rule: PermissionRule) -> None
 
+Verdict = Literal["auto", "needs_approval", "deny", "deny_plan", "deny_unattended"]
+DENY_VERDICTS = frozenset({"deny", "deny_plan", "deny_unattended"})   # "was this refused?"
+# PermissionMode / PERMISSION_MODES / normalize_mode are re-exported here: they are
+# DEFINED in permissions.py (config.py reads them and cannot import this module), and
+# app/ + tui/ take them from here rather than reaching into the rule model.
+
 # permissions.py (stdlib leaf, shared by config.py and approval.py) -------
 @dataclass(frozen=True, slots=True)
 class PermissionRule:
     permission: str; pattern: str; action: Literal["allow", "ask", "deny"]
+
+PermissionMode = Literal["plan", "ask", "unattended"]
+PERMISSION_MODES = ("ask", "plan", "unattended")             # also the /mode cycle order
+def normalize_mode(value: object) -> PermissionMode | None   # None = not a mode
 
 def wildcard_match(text: str, pattern: str) -> bool          # OpenCode's Wildcard.match
 def evaluate(permission, pattern, *rulesets) -> PermissionRule   # LAST match wins; no match = "ask"
@@ -372,6 +444,31 @@ Tools map onto permission keys: `read_file→read`, `write_file`/`edit_file`/`de
 
 A `deny` verdict never opens a gate: the call is pre-resolved as a `denied` result carrying OpenCode's `DeniedError` text (protocol.md §4) and the turn *continues* — only an interactive rejection aborts the rest of it. The decision is audited with source `rule`, as are rule-allowed calls (`allowed by rule bash["git status*"]`).
 
+### Permission modes: the dial above both
+
+`ApprovalPolicy.mode` is session-scoped and says **what the user is doing right now**, above whatever the rules say about a given call. It can only ever refuse more, never allow more. `PermissionMode = Literal["plan", "ask", "unattended"]` lives in `permissions.py` (the leaf `config.py` reads and `approval.py` applies) and is re-exported from `engine/approval.py`, which is where `app`/`tui` import it from.
+
+| mode | what changes |
+|---|---|
+| `ask` (default) | nothing — the table above, exactly, in both modes |
+| `plan` | every call whose `ToolSpec.approval_kind` is `edit` or `command` is auto-denied. Read-only tools are untouched, rules included (a `read` the rules ask about still asks — plan never *loosens*) |
+| `unattended` | anything that would have opened a gate is auto-denied instead: there is nobody there to answer it. Allow rules still auto-run, deny rules still deny |
+
+Verdict order, one list for both approval modes: **① explicit `deny` rule** → `deny` (still beats everything, mode included) → **② `plan` + edit/command** → `deny_plan` (before the YOLO check: a mode is what the user wants *now*, a flag is what they set earlier) → **③ allow** → `auto` (ruleset rule, or legacy allowlist/`auto_accept_edits`) → **④ the rest**: YOLO → `auto`; else `unattended` → `deny_unattended`; else `needs_approval`.
+
+- **YOLO vs `unattended`** is decided in ④: YOLO wins, because it is the user's explicit "approve everything for me" and outranks "I stepped away". The one thing YOLO still does not answer is the **deny-token backstop**, so a chained command riding an allow rule is `deny_unattended` under this mode rather than a gate nobody is at.
+- The three refusals are **distinct verdicts**, not one: `deny_plan` and `deny_unattended` get their own model-facing bodies (protocol.md §4) and their own audit source (`plan` / `unattended`), while a rule `deny` keeps OpenCode's wording byte-for-byte. A model can only pick a different route if it is told which door was shut.
+- **Not retroactive**, exactly like `set_yolo`: a gate already pending stays pending, and the new mode governs every verdict computed after it.
+- Set live by `/mode [plan|ask|unattended]` (bare `/mode` reports) and by `SessionController.cycle_permission_mode()` (`ask → plan → unattended → ask`, what `shift+tab` calls); the first value comes from `[approval] mode`, which falls back to `ask` with a config warning if it is not one of the three. Audited as a `permission_mode` session event.
+- **The dial is the user's, not a session's**, and this is where it parts company with YOLO — the two look alike in `ApprovalPolicy` and are scoped oppositely on purpose. YOLO answers a question about **one conversation** ("approve everything here"), so it is per-engine, dies with the session and reverts to its configured default on a reset. The mode is a statement about **the user** ("I am only exploring", "I am not at my desk"), so `SessionController` owns it and every engine in the app run obeys it:
+  - it works with **no session at all** — `set_permission_mode`/`cycle_permission_mode` at the start prompt skip only the engine call; the mirror, the transcript note and the status repaint all happen;
+  - it **survives `/new`** and every other `_reset_session`, because "I am only exploring today" is still true after a new chat and a mode that silently reverted would hand the next session's first edit to a user who thought they had turned changes off;
+  - it **reaches sub-agents**. `delegate` is never gated (it is AgentClip's own control flow), so a mode stopping at the master would let a model in plan mode make every change it liked by delegating it, and would park an absent `unattended` user on a sub-agent's gate — the mode's own denial bodies promise neither can happen.
+  It can never become hidden state: the status segment shows all three modes and never hides.
+- **Every engine is armed before it can compute a verdict.** `_session_flow` (master) and `_sub_run` (sub-agent) both call `Engine.set_permission_mode(self._mode)` on the engine they just built, **before `start_task`** — so the first verdict of the first turn already obeys it, and the audit line is at the top of that session's log. Chosen over threading the mode through `EngineRequest`/`ApprovalConfig` because it keeps one carrier for "the mode is now X" instead of two, and the audit event falls out of it.
+- **Across a delegation swap.** Only one engine is reachable at a time (`_apply_mode` writes to whatever `self._engine` currently is), so a cycle made while a sub-agent runs lands on the *sub-agent's* policy — right, since that is the conversation running and the one the user is watching. The mode is therefore the one field `_SessionContext` does **not** restore: `_adopt_ctx` leaves the mirror alone and `_restore_ctx` reconciles towards it, never towards the snapshot. `_SessionContext.engine_mode` records only what the master's *policy* was left at, so `_rearm_master_mode` can give the master a change it slept through — and say nothing when the mode never moved, since re-sending it would arm a spurious note.
+- The model is told at the **next results payload** via the notes channel (protocol.md §4), never in the bootstrap — §2's budget headroom has no room for prose about a mode that may never be used, and each denial body explains itself anyway. `set_permission_mode` arms that note **only when the engine is past `IDLE`**: before `start_task` there is no conversation to interrupt, so a pre-session choice is simply the mode the session started in, and announcing it as a change in the first results payload would be describing something that never happened.
+
 **"Always allow"** appends `Rule(key, always_pattern, "allow")` to an in-memory session list evaluated *last*, so it outranks the file (OpenCode's `approved` array works the same way) and is forgotten on restart. `always_pattern` keeps the first N words of a command per a small arity table (`git commit -m "wip"` → `git commit *`, `npm run build` → `npm run build *`) and is `*` for every other key — remembering an edit means remembering all edits, which is exactly what `APPROVE_ALL_EDITS` already meant. Answering it re-evaluates the other pending calls in the turn and auto-approves the ones the new rule covers.
 
 **Deviation from OpenCode: the deny-token backstop.** OpenCode splits a shell script with tree-sitter and judges every command node separately, so `git status && rm -rf /` is also judged as `rm -rf /`. AgentClip has no shell parser, so instead a command containing any configured deny token (`;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`, newline) can never *silently* auto-run: `allow` is downgraded to a gate, and YOLO does not answer that one for you. A `deny` still wins outright. This is why `command_deny_tokens` stays in `[approval]` even in ruleset mode.
@@ -393,6 +490,7 @@ poll_interval_ms = 300         # 200–500 sensible range
 [approval]
 auto_accept_edits = false      # session escalation always starts off
 yolo = false                   # auto-approve EVERYTHING (edits + commands); /yolo toggles live
+mode = "ask"                   # ask | plan (no changes) | unattended (gates become denials); /mode sets it live
 command_allowlist = [
   "pytest*", "python -m pytest*", "python -m unittest*",
   "ruff check*", "ruff format --check*", "mypy*",
@@ -588,7 +686,7 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
                     └── files/src/utils.py        # mirrored relative paths, pre-change bytes
 ```
 
-**Transcript JSONL** — one event per line, `{"t": <type>, "ts": <iso8601>, ...}` with types: `task`, `outbound` (kind, turn, total_chars, chunk count), `inbound` (raw text), `parsed` (call ids/tools, issues), `decision` (call_id, verdict, source: user|allowlist|auto_edits|yolo|rule), `result` (call_id, ok, truncated, chars), `undo`, `error`. Raw inbound is stored verbatim — it is the audit trail for "what did the LLM actually say".
+**Transcript JSONL** — one event per line, `{"t": <type>, "ts": <iso8601>, ...}` with types: `task`, `outbound` (kind, turn, total_chars, chunk count), `inbound` (raw text), `parsed` (call ids/tools, issues), `decision` (call_id, verdict, source: user|allowlist|auto_edits|yolo|rule|plan|unattended), `permission_mode` (mode), `result` (call_id, ok, truncated, chars), `undo`, `error`. Raw inbound is stored verbatim — it is the audit trail for "what did the LLM actually say".
 
 **Resume after restart: NOT supported in MVP.** Decision: a half-finished conversation lives in the chat UI's context, which AgentClip cannot reconstruct reliably; faking resume invites state divergence. On restart you start a new session/task. What *is* supported after restart: backups remain on disk for manual recovery, and M3's `undo` can target the latest session's turns by reading manifests from disk (no in-memory state needed). Transcript is audit-only.
 

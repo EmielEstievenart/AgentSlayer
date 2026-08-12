@@ -1,10 +1,16 @@
-"""RunningBar: a one-line animated "working" indicator (tui.md section 8).
+"""RunningBar: a one-line animated "working" indicator (tui.md section 8a).
 
 Shown precisely while the engine is executing a turn's tool calls - the moment
 ``engine.execute()`` (or ``answer_user()``) is in flight on the worker thread -
 so the user can see that a build/command is actually running rather than staring
 at a frozen-looking screen. The braille spinner glyphs are all in the BMP
 (U+28xx), honoring the Windows-only-BMP brief.
+
+It is the HEADER of the run panel (widgets/run_panel.py), which grew the rest of
+the region under it - one row per call, and the running command's live output.
+This still owns the animation, the label and the cancel hint, and nothing else:
+that split is what keeps "is anything happening?" (one line, always) apart from
+"what exactly is happening?" (the rows, and the tail behind ctrl+o).
 """
 
 from __future__ import annotations

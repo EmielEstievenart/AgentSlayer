@@ -66,6 +66,15 @@ Approval (the bordered box above the chat)
   y  approve      n  reject (optional reason)      a  approve + auto-accept edits
   ...or click the Approve / Reject buttons. (a / auto-accept never runs commands.)
 
+Permission mode (bottom-left of the status bar, e.g. MODE:ask)
+  shift+tab cycles it: ask -> plan -> unattended -> ask (/mode names one directly).
+  ask         approvals as usual - you are asked about every edit and command.
+  plan        every edit and command is REFUSED, so the model can only read and
+              propose. Switch back to ask when you want the plan carried out.
+  unattended  anything that would have asked you is refused instead - for when
+              you walk away. Allowed things still run; nothing waits on you.
+  The key works while you are typing and while a turn is running.
+
 Session  (press Esc first if the chat box has focus)
   u  undo last turn (confirm; copies a revert notice for the model)
   c  re-copy the last outbound payload    i  force-ingest the clipboard now
@@ -73,9 +82,13 @@ Session  (press Esc first if the chat box has focus)
   e  end session / show the summary       x  expand the last collapsed output
   l  export the full chat log to a file (raw blocks + payloads, for debugging)
   F6 select the next window tab (see above)
-  ctrl+x  cancel the tool calls running now (the "Working..." bar). The running
+  ctrl+x  cancel the tool calls running now (the run panel). The running
           command is killed, later calls are skipped, and the model is told -
           the results are copied out as usual, so the turn ends cleanly.
+  ctrl+o  show/hide what the running command is printing, live, under the list
+          of this turn's calls (clicking the panel does the same). The list
+          itself is always there while a turn runs: one row per call, the
+          running one marked, the rest queued behind it.
 
 App
   F1 or ?  this help

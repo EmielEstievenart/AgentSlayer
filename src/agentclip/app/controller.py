@@ -3,8 +3,8 @@
 This is the engine's host - the state machine that drives a whole AgentClip
 session, lifted out of the Textual ``MainScreen`` so the UI can be swapped. It
 owns the Engine, the async flow state machine, the approval gate / ask_user
-futures, session stats, the per-turn glyph strip, and the depth-1 mid-turn reply
-queue. It talks to the UI ONLY through the :class:`~agentclip.app.view.ChatView`
+futures, session stats, the per-turn glyph strip, the per-turn run-panel rows,
+and the depth-1 mid-turn reply queue. It talks to the UI ONLY through the :class:`~agentclip.app.view.ChatView`
 port and therefore imports no Textual and no ``clip`` (clipboard I/O is a view
 concern - see ``ChatView.copy_outbound`` / ``read_clipboard``).
 
@@ -17,6 +17,11 @@ Threading model (unchanged from the old MainScreen, now expressed through the po
   time (the ``busy`` flag). A reply arriving mid-turn is queued depth-1, newest wins.
 - The approval gate is an ``asyncio.Future`` resolved by ``submit_decision``;
   ask_user uses a second future resolved by ``submit_message``.
+- Traffic goes the OTHER way across that thread boundary too, and it is the one
+  exception to everything above: while ``execute()`` runs, the engine calls
+  ``_on_call_progress`` / ``_on_call_output`` from the worker thread so the run
+  panel can show what is happening (tui.md §8a). Those two touch nothing but the
+  row map and the view's three thread-safe port methods.
 
 Delegation (the ``delegate`` tool) is a *nested session*, not a second one
 running alongside: when the master engine parks in ``AWAITING_SUBAGENT`` the
@@ -41,10 +46,12 @@ from typing import Any, TypeVar
 
 from agentclip.app.commands import command_list, help_text, lookup
 from agentclip.app.types import EngineRequest, SessionRef, SessionStats
-from agentclip.app.view import ChatView, SessionView
+from agentclip.app.view import ChatView, RunCall, SessionView, Severity
 from agentclip.config import Config, ServicePreset
+from agentclip.engine.approval import PERMISSION_MODES, normalize_mode
 from agentclip.engine.engine import (
     AskUser,
+    CallProgress,
     ChunkAck,
     Decision,
     Delegate,
@@ -54,6 +61,7 @@ from agentclip.engine.engine import (
     NewTurn,
     Noise,
     PendingAction,
+    PermissionMode,
     Phase,
     ProtocolError,
     Send,
@@ -62,7 +70,7 @@ from agentclip.engine.engine import (
 )
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.parser import peek_chat_name
-from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus
+from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus, ToolCall
 
 _T = TypeVar("_T")
 
@@ -127,8 +135,73 @@ _NOISE_TEXT = {
 }
 
 
+# What the USER is told when the permission mode changes. The MODEL gets its own
+# one-liner on the next results payload (engine._MODE_NOTES) - these two say the
+# same thing to two different readers, so neither borrows the other's wording.
+_MODE_NOTE_TEXT: dict[str, str] = {
+    "ask": (
+        "permission mode: ASK - the normal gates are back. Edits and commands that no "
+        "rule covers ask you before they run."
+    ),
+    "plan": (
+        "permission mode: PLAN - exploration only. Every edit and command call is "
+        "auto-denied (YOLO does not override this); reads, greps and listings run as "
+        "usual, so the model can research and hand you a plan."
+    ),
+    "unattended": (
+        "permission mode: UNATTENDED - nothing will ask you. Calls an allow rule covers "
+        "run; everything that would have opened a gate is auto-denied instead, and deny "
+        "rules still deny."
+    ),
+}
+
+# Said on top of the UNATTENDED note when YOLO is on: the two settings pull in
+# opposite directions and the user has to know which one wins.
+_MODE_YOLO_CAUTION = (
+    " CAUTION: YOLO is ON, and it still auto-APPROVES every call that would have asked "
+    "- so those run instead of being denied. /yolo off to make unattended mean what it "
+    "says."
+)
+
+_MODE_ALERT_TEXT: dict[str, str] = {
+    "ask": "mode: ASK - approvals restored",
+    "plan": "mode: PLAN - edits and commands are denied",
+    "unattended": "mode: UNATTENDED - nothing will ask you",
+}
+
+
 def _fmt_k(chars: int) -> str:
     return f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
+
+
+# What a finished call's status looks like in one cell. Same alphabet the glyph
+# strip already uses at the gate, so a row does not change language halfway
+# through the turn.
+_RESULT_GLYPHS = {"ok": "✓", "error": "✗", "denied": "✗", "skipped": "−"}
+
+# The params worth reading next to a tool name, most specific first: a row says
+# "run_command  pytest -q", never "run_command" alone.
+_DETAIL_PARAMS = ("command", "path", "pattern", "task", "question", "name", "summary")
+_DETAIL_CHARS = 64
+
+
+def _call_detail(call: ToolCall) -> str:
+    """The one line the run panel shows about a call, flattened and clipped.
+
+    Clipped HERE rather than in the view because it is a decision about what
+    matters (the head of a command line, not its tail), and the port carries
+    data the view only renders.
+    """
+    raw = next((call.params[p] for p in _DETAIL_PARAMS if call.params.get(p)), "")
+    line = " ".join(raw.split())
+    if len(line) > _DETAIL_CHARS:
+        line = line[: _DETAIL_CHARS - 1].rstrip() + "…"
+    return line
+
+
+def _next_mode(current: PermissionMode) -> PermissionMode:
+    """The mode one step around the cycle (ask -> plan -> unattended -> ask)."""
+    return PERMISSION_MODES[(PERMISSION_MODES.index(current) + 1) % len(PERMISSION_MODES)]
 
 
 def _parse_onoff(arg: str, *, current: bool) -> bool | None:
@@ -223,9 +296,17 @@ class _SessionContext:
     snap: StatusSnapshot | None
     stats: SessionStats
     turn_glyphs: dict[int, list[str]]
+    turn_rows: dict[int, RunCall]
     last_outbound: str | None
     has_outbound: bool
     yolo: bool
+    # NOT a value to restore into the mirror - the permission mode is app-wide
+    # and outlives every swap (see _restore_ctx). This records what the SAVED
+    # ENGINE's policy was left at, which is the only thing a delegation can make
+    # stale: a mode cycled while the sub-agent held the engine slot reached the
+    # sub-agent's policy and never the master's. Comparing the two on the way
+    # back is how the master gets re-armed, and only when it actually moved.
+    engine_mode: PermissionMode
 
 
 class SessionController:
@@ -255,6 +336,10 @@ class SessionController:
         self._last_outbound: str | None = None
         self._stats = SessionStats()
         self._turn_glyphs: dict[int, list[str]] = {}  # call id -> [glyph, tool]
+        # The same turn's calls as the run panel lists them, in id order: what
+        # each one is ABOUT (the command line, the path), which of them can
+        # stream output, and - through _turn_glyphs - how far each has got.
+        self._turn_rows: dict[int, RunCall] = {}
 
         # -- delegation ------------------------------------------------------
         # ``_active`` is whose session the fields above currently describe: the
@@ -295,6 +380,10 @@ class SessionController:
         self._awaiting_answer = False
         self._has_outbound = False
         self._yolo = config.approval.yolo  # auto-approve everything; /yolo toggles it
+        # The session's permission mode, mirrored from the engine the way _yolo
+        # is: read by the status bar and by the bare `/mode`, which toggles
+        # against it. The engine's policy is the truth; this follows it.
+        self._mode: PermissionMode = normalize_mode(config.approval.mode) or "ask"
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -445,6 +534,7 @@ class SessionController:
         """
         return {
             "yolo": self._cmd_yolo,
+            "mode": self._cmd_mode,
             "new": lambda _arg: self._cmd_new(),
             "abort": lambda _arg: self._cmd_abort(),
             "help": lambda _arg: self._cmd_help(),
@@ -521,6 +611,91 @@ class SessionController:
             )
             self._view.alert("YOLO mode OFF", severity="information")
             self._view.notify("YOLO mode OFF - approvals restored", severity="information")
+
+    # -- the permission mode ---------------------------------------------------
+    # Three public methods rather than one, because two different front-ends ask
+    # for two different things: a chat command names the mode it wants, a key
+    # binding only knows "the next one". Both land on ``_apply_mode``, which is
+    # ``_apply_yolo``'s shape - engine call off-loop, then status, then the note.
+
+    @property
+    def permission_mode(self) -> PermissionMode:
+        """The permission mode, as the controller last saw it. Meaningful with or
+        without a live session: between sessions it is the mode the next one will
+        start in, which is what the status bar paints when there is no snapshot."""
+        return self._mode
+
+    def set_permission_mode(self, mode: PermissionMode) -> None:
+        """Switch to ``mode`` - with or without a live session.
+
+        Deliberately NOT gated on a session. "Only explore, do not change
+        anything" is a decision a user makes about the task they are ABOUT to
+        describe, and a dial that could only be turned after the bootstrap had
+        already gone out would be missing at the one moment it is easiest to
+        mean. Pre-session only the engine half is skipped (there is no engine
+        yet); the mirror, the transcript note and the repaint all happen, and
+        ``_session_flow`` hands the mode to the engine it builds, before the
+        first payload."""
+        self._view.spawn(self._apply_mode(mode))
+
+    def cycle_permission_mode(self) -> None:
+        """The next mode round the cycle: ask -> plan -> unattended -> ask."""
+        self.set_permission_mode(_next_mode(self._mode))
+
+    def _cmd_mode(self, arg: str) -> None:
+        """`/mode [plan|ask|unattended]`. Bare `/mode` REPORTS rather than cycles:
+        a command that names three states must not require the user to remember
+        which one they are in to reach the one they want."""
+        if not arg:
+            self._view.notify(
+                f"permission mode: {self._mode} - /mode [{'|'.join(PERMISSION_MODES)}] to change",
+                severity="information",
+            )
+            return
+        wanted = normalize_mode(arg)
+        if wanted is None:
+            self._view.notify(
+                f"usage: /mode [{'|'.join(PERMISSION_MODES)}] - bare /mode reports the current one",
+                severity="warning",
+            )
+            return
+        self.set_permission_mode(wanted)
+
+    async def _apply_mode(self, target: PermissionMode) -> None:
+        # _apply_yolo's error handling, for its reason: set_permission_mode flips
+        # the policy field THEN writes the audit line, so a failed write leaves
+        # the engine ahead of the mirror - resync from the engine's own state
+        # rather than guessing.
+        #
+        # No engine means no session yet, and that is not an error: everything
+        # below still runs, and the mirror it leaves behind is what _session_flow
+        # arms the next engine with, before that engine's first payload.
+        #
+        # During a DELEGATION ``self._engine`` is the sub-agent's, so a shift+tab
+        # pressed while one runs reaches the conversation actually running - the
+        # one the user is watching - and takes effect on its next verdict. The
+        # master picks the change up when the slot comes back
+        # (``_rearm_master_mode``).
+        engine = self._engine
+        if engine is not None:
+            try:
+                await self._engine_call(engine.set_permission_mode, target)
+            except Exception as exc:
+                await self._refresh_status()
+                if self._snap is not None:
+                    self._mode = self._snap.mode
+                await self._view.add_error(f"could not record the mode change: {exc}")
+                self._view.alert("mode change failed - see transcript", severity="error")
+                return
+        self._mode = target
+        await self._refresh_status()  # repaint the status bar (mode segment)
+        note = _MODE_NOTE_TEXT[target]
+        if target == "unattended" and self._yolo:
+            note += _MODE_YOLO_CAUTION
+        await self._view.add_note(note)
+        severity: Severity = "information" if target == "ask" else "warning"
+        self._view.alert(_MODE_ALERT_TEXT[target], severity=severity)
+        self._view.notify(_MODE_ALERT_TEXT[target], severity=severity)
 
     def _cmd_new(self) -> None:
         """Open a fresh BROWSER chat now, and start a fresh session behind it.
@@ -893,7 +1068,7 @@ class SessionController:
         self._check_turn_abort()
         n = len(self._turn_glyphs)
         label = f"Working - running {n} tool call{'' if n == 1 else 's'}..." if n else "Working..."
-        self._view.start_working(label)
+        self._view.start_working(label, self._run_rows())
         self._executing = True
         try:
             return await self._engine_call(fn, *args, **kwargs)
@@ -918,6 +1093,15 @@ class SessionController:
                 self._engine_factory,
                 EngineRequest(service=spec.service, allow_delegate=delegation),
             )
+            self._watch_engine(engine)
+            # The permission mode the user dialled in BEFORE this session existed
+            # (shift+tab or /mode at the start prompt, or the one carried over
+            # from the session before it) is the mode this one starts in. Applied
+            # here, ahead of start_task, so the very first verdict of the very
+            # first turn already obeys it - and while the engine is still IDLE,
+            # which is how it knows this is a starting mode and not a change to
+            # announce to a conversation that has not begun.
+            await self._engine_call(engine.set_permission_mode, self._mode)
             try:
                 out = await self._engine_call(engine.start_task, spec.task)
             except BudgetExceeded as exc:
@@ -1031,6 +1215,15 @@ class SessionController:
         await self._refresh_status()  # REVIEW
 
         self._turn_glyphs = {c.id: ["•", c.tool] for c in reply.calls}
+        self._turn_rows = {
+            c.id: RunCall(
+                call_id=c.id,
+                tool=c.tool,
+                detail=_call_detail(c),
+                streams=c.tool == "run_command",
+            )
+            for c in reply.calls
+        }
         done = 0
         while True:
             self._check_turn_abort()
@@ -1074,6 +1267,51 @@ class SessionController:
         return "  ".join(
             f"{glyph}{cid} {tool}" for cid, (glyph, tool) in sorted(self._turn_glyphs.items())
         )
+
+    def _run_rows(self) -> list[RunCall]:
+        """This turn's calls for the run panel, each carrying its glyph so far.
+
+        Deliberately NOT read off ``_turn_glyphs``, which looks like the same
+        information and is not: there a ✓ means "the user approved this", here
+        it means "this ran and it worked", and every call in the plan is
+        approved before the first one runs. Same alphabet, two questions.
+
+        The glyph matters when a PARKED turn resumes (an ask_user answered
+        mid-plan re-enters execute), where the earlier calls really are done
+        and a panel that redrew them as pending would undo what the user just
+        watched happen.
+        """
+        return [row for _, row in sorted(self._turn_rows.items())]
+
+    # -- watching the engine execute (WORKER-THREAD callbacks) ----------------
+    #
+    # Both are called by the engine from the thread ``_engine_call`` offloaded
+    # it to, so they may not await, may not touch the flow state machine, and
+    # may not assume the event loop is anywhere near them. All they do is stamp
+    # the row map - a dict write per call, which the GIL makes atomic and which
+    # nothing on the loop side reads mid-execute - and hand the fact straight to
+    # the view, whose implementation is required to be thread-safe for exactly
+    # these three methods (see ChatView).
+
+    def _on_call_progress(self, progress: CallProgress) -> None:
+        glyph = "▶" if progress.phase == "running" else _RESULT_GLYPHS.get(progress.status, "✓")
+        row = self._turn_rows.get(progress.call_id)
+        if row is not None:
+            self._turn_rows[progress.call_id] = replace(row, glyph=glyph)
+        if progress.phase == "running":
+            self._view.call_started(
+                progress.call_id, progress.tool, row.detail if row is not None else ""
+            )
+            return
+        self._view.call_finished(progress.call_id, glyph)
+
+    def _on_call_output(self, call_id: int, chunk: str) -> None:
+        self._view.call_output(call_id, chunk)
+
+    def _watch_engine(self, engine: Engine) -> None:
+        """Point a freshly built engine's two live-progress hooks at this view."""
+        engine.set_progress_hook(self._on_call_progress)
+        engine.set_output_hook(self._on_call_output)
 
     async def _gate(self, action: PendingAction, position: str) -> tuple[Decision, str | None]:
         self._check_turn_abort()  # never put a panel up for a turn already gone
@@ -1263,9 +1501,39 @@ class SessionController:
                     handed_back,
                 )
             self._restore_ctx(master)
+            await self._rearm_master_mode(master)
             self._view.focus_session_view(master.ref.id)
             await self._refresh_status()
         return outcome
+
+    async def _rearm_master_mode(self, master: _SessionContext) -> None:
+        """Hand the master's engine any mode change it slept through.
+
+        Only one engine is reachable at a time (``_apply_mode`` writes to
+        whatever ``self._engine`` currently is), so a shift+tab pressed during a
+        delegation lands on the SUB-AGENT's policy - which is right, that is the
+        conversation running - and leaves the master's saying what it said when
+        the run began. The mirror is the authority, so the master is the stale
+        one and gets told on the way back.
+
+        Silent when nothing moved: re-sending the same mode would arm a "the mode
+        is now ask" note on a conversation whose mode never changed. When it DID
+        move the note is exactly right - the master really was re-dialled while
+        it was parked, and its next results payload should say so.
+
+        Never raises: this runs in ``_run_subagent``'s ``finally``, where an
+        exception would replace the delegation's own outcome (or a _TurnAborted
+        on its way out) with a bookkeeping failure.
+        """
+        engine = self._engine
+        if engine is None or master.engine_mode == self._mode:
+            return
+        try:
+            await self._engine_call(engine.set_permission_mode, self._mode)
+        except Exception as exc:
+            await self._view.add_error(
+                f"could not re-arm the permission mode after the sub-agent run: {exc}"
+            )
 
     async def _sub_run(
         self, req: Delegate, ref: SessionRef, master: _SessionContext
@@ -1297,10 +1565,16 @@ class SessionController:
                 parent_chat_name=master.ref.chat_name,
             ),
         )
+        self._watch_engine(engine)  # a sub-agent's calls are watched like the master's
         ref = replace(ref, chat_name=engine.chat_name)
         await self._view.open_session_view(ref)
         self._sub = ref
         self._adopt_ctx(ref, engine)
+        # The dial governs every engine in the app run, sub-agents included:
+        # armed here, while this engine is still IDLE and before its bootstrap,
+        # so the sub-agent's very first verdict already obeys plan/unattended and
+        # nothing is announced to a conversation that has not started.
+        await self._engine_call(engine.set_permission_mode, self._mode)
         task_text = _compose_sub_task(req)
         await self._view.add_note(
             f"sub-agent chat: {engine.chat_name} - a fresh chat with its own context; "
@@ -1430,9 +1704,11 @@ class SessionController:
             snap=self._snap,
             stats=self._stats,
             turn_glyphs=self._turn_glyphs,
+            turn_rows=self._turn_rows,
             last_outbound=self._last_outbound,
             has_outbound=self._has_outbound,
             yolo=self._yolo,
+            engine_mode=self._mode,
         )
 
     def _adopt_ctx(self, ref: SessionRef, engine: Engine) -> None:
@@ -1442,6 +1718,16 @@ class SessionController:
         conversation, and this is a different one. YOLO deliberately does NOT
         inherit: ``ApprovalPolicy`` is per-engine, so a sub-agent starts from the
         configured default and the user re-arms it per session if they mean it.
+
+        The permission mode does the OPPOSITE, and the divergence is the point.
+        YOLO is an answer to a question ("approve everything in THIS
+        conversation"); the mode is a statement about the user ("I am only
+        exploring", "I am not at my desk"), and both stay true of a sub-agent -
+        a delegation that could still edit files while plan mode is on, or open
+        a gate for an absent user while unattended is, would break the promise
+        the mode's own denial bodies make. So the mirror is left alone here and
+        ``_sub_run`` arms the sub-agent's engine with it before its first
+        payload, exactly as ``_session_flow`` does for the master.
         """
         self._active = ref
         self._engine = engine
@@ -1449,6 +1735,7 @@ class SessionController:
         self._snap = None
         self._stats = SessionStats(service=self._stats.service)
         self._turn_glyphs = {}
+        self._turn_rows = {}
         self._last_outbound = None
         self._has_outbound = False
         self._yolo = self._config.approval.yolo
@@ -1462,9 +1749,15 @@ class SessionController:
         self._snap = ctx.snap
         self._stats = ctx.stats
         self._turn_glyphs = ctx.turn_glyphs
+        self._turn_rows = ctx.turn_rows
         self._last_outbound = ctx.last_outbound
         self._has_outbound = ctx.has_outbound
         self._yolo = ctx.yolo
+        # ``self._mode`` is deliberately NOT restored: the dial is the user's and
+        # app-wide, so a cycle made while the sub-agent held the engine slot is
+        # still what the user wants now. The saved ``engine_mode`` is only what
+        # the master's POLICY was left at - ``_rearm_master_mode`` reconciles the
+        # engine to the mirror, never the mirror to the snapshot.
         self._push_state()
 
     # -- summary / reset ------------------------------------------------------
@@ -1521,7 +1814,18 @@ class SessionController:
         self._has_outbound = False
         self._queued_capture = None
         self._yolo = self._config.approval.yolo  # back to the configured default
+        # ...but NOT the permission mode, which survives every reset for the life
+        # of the app run. It is a dial the user holds, not a property of one
+        # conversation: like the service picker, "I am only exploring today" or
+        # "I have stepped away" is still true of the person after /new, and a
+        # mode that silently reverted to `ask` on a reset would hand the next
+        # session's first edit to a user who thought they had turned changes off.
+        # The status segment keeps showing it the whole time, so it can never be
+        # a surprise; a session that really should start fresh is `[approval]
+        # mode` plus a restart, or one more shift+tab.
         self._stats = SessionStats()
+        self._turn_glyphs = {}
+        self._turn_rows = {}
         await self._view.clear_transcript()
         self._push_state()  # phase -> IDLE (snap is None)
         await self._session_flow()

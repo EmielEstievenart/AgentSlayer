@@ -47,6 +47,7 @@ EOT
 ===CLIP:END===
 ===CLIP:CALL id=3 tool=run_command===
 command: python -c "print(601)"
+reason: check the new code prints 601
 ===CLIP:END===
 ===CLIP:EOM calls=3 chat=amber-falcon===
 ~~~~

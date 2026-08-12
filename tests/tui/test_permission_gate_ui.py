@@ -32,6 +32,7 @@ REPLY_ECHO_ONE = """Let me check.
 ~~~~
 ===CLIP:CALL id=1 tool=run_command===
 command: echo one
+reason: say one
 ===CLIP:END===
 ===CLIP:EOM calls=1 chat=amber-falcon===
 ~~~~
@@ -42,6 +43,7 @@ REPLY_ECHO_TWO = """And again.
 ~~~~
 ===CLIP:CALL id=1 tool=run_command===
 command: echo two
+reason: say two
 ===CLIP:END===
 ===CLIP:EOM calls=1 chat=amber-falcon===
 ~~~~

@@ -26,12 +26,13 @@ from __future__ import annotations
 
 import threading
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from agentclip.config import Config
-from agentclip.engine.approval import ApprovalPolicy
+from agentclip.engine.approval import DENY_VERDICTS, ApprovalPolicy, PermissionMode
 from agentclip.engine.results import fit_results
 from agentclip.engine.states import Decision, EngineStateError, Phase, can_transition
 from agentclip.hosts.base import Host
@@ -67,6 +68,20 @@ _NOTE_WARNINGS = frozenset({"renumbered", "duplicate_id", "missing_end", "unknow
 # Chunks of one outbound are joined with this separator in outbound/turn-NNNN.txt.
 _CHUNK_SEPARATOR = "\n␞\n"
 
+# What the model is told when the user changes the permission mode mid-session.
+# It rides the NEXT results payload's note channel rather than a payload of its
+# own: the bootstrap has ~200 chars of slack (protocol.md section 2, "Budget
+# headroom"), so a mode is never explained there, and the denial bodies say
+# everything a model needs even if this note never gets a payload to ride.
+_MODE_NOTES: dict[str, str] = {
+    "plan": "permission mode is now plan: exploration only; edit/command calls will be denied.",
+    "unattended": (
+        "permission mode is now unattended: only calls covered by allow rules will run;"
+        " everything else is auto-denied."
+    ),
+    "ask": "permission mode is now ask: normal approvals resumed.",
+}
+
 
 # -- value types returned to the TUI ------------------------------------------
 
@@ -84,6 +99,34 @@ class PendingAction:
 
 
 @dataclass(frozen=True, slots=True)
+class CallProgress:
+    """One step of a turn's execution, reported AS IT HAPPENS.
+
+    Everything else the engine says about a turn is said when the turn is over
+    (the StepResult and its results payload), which is exactly wrong for the
+    minutes a build spends running: the user is watching, and "N tool calls" is
+    all the screen has to say about which one. So each call announces itself
+    twice - ``phase="running"`` just before its handler is entered, and
+    ``phase="done"`` with the result's status once it has resolved - and calls
+    that never run at all (denied by a rule, skipped after a rejection or a
+    cancel, pre-resolved parse errors) announce only the second, so a queued row
+    on screen always resolves visibly rather than sitting there pending forever.
+
+    ``status`` is the ToolResult status ("ok" | "error" | "denied" | "skipped")
+    and is empty while phase is "running".
+    """
+
+    call_id: int
+    tool: str
+    phase: Literal["running", "done"]
+    status: str = ""
+
+
+# See Engine.set_progress_hook: called ON THE WORKER THREAD, mid-plan.
+ProgressHook = Callable[[CallProgress], None]
+
+
+@dataclass(frozen=True, slots=True)
 class StatusSnapshot:
     phase: Phase
     turn: int
@@ -91,6 +134,7 @@ class StatusSnapshot:
     budget_chars: int
     auto_accept_edits: bool
     yolo: bool  # auto-approve everything (edits + commands) - bypasses every gate
+    mode: PermissionMode  # ask | plan (no changes) | unattended (nothing gates)
     session_dir: Path
     last_outbound_chars: int
 
@@ -237,6 +281,50 @@ class Engine:
         self._plan: list[_Planned] = []
         self._exec: _ExecState | None = None
         self._last_outbound_chars = 0
+        # A one-line "the mode changed" note waiting for a payload to ride out
+        # on. At most one: a user who cycles three times before the next turn
+        # meant the mode they landed on, not the trip.
+        self._mode_note: str | None = None
+        # Watchers of the plan as it executes; see set_progress_hook.
+        self._progress_hook: ProgressHook | None = None
+
+    # -- watching a turn execute ---------------------------------------------
+
+    def set_progress_hook(self, hook: ProgressHook | None) -> None:
+        """Be told which call is running, as it runs (see :class:`CallProgress`).
+
+        Wired once, like backup_hook, by whoever owns the engine - and called
+        FROM THE WORKER THREAD that is inside ``execute()``, in the middle of the
+        plan. A hook that blocks blocks the turn, so a UI hook must do nothing
+        but hand the fact to its own thread (the TUI posts a message). One that
+        raises is dropped, hook and all: the progress report is a courtesy, and
+        a turn must not fail because nobody was left to watch it.
+        """
+        self._progress_hook = hook
+
+    def set_output_hook(self, hook: Callable[[int, str], None] | None) -> None:
+        """Be handed a running command's output as it appears (call_id, delta).
+
+        The same thread contract as set_progress_hook, and the same wiring
+        moment; it lands on the ToolContext, where ``run_command`` picks it up
+        (see :attr:`agentclip.tools.registry.ToolContext.on_output`).
+        """
+        self._ctx.on_output = hook
+
+    def _progress(
+        self,
+        call_id: int,
+        tool: str,
+        phase: Literal["running", "done"],
+        status: str = "",
+    ) -> None:
+        hook = self._progress_hook
+        if hook is None:
+            return
+        try:
+            hook(CallProgress(call_id=call_id, tool=tool, phase=phase, status=status))
+        except Exception:  # noqa: BLE001 - see set_progress_hook: a watcher is not the turn
+            self._progress_hook = None
 
     # -- task lifecycle ------------------------------------------------------
 
@@ -557,6 +645,7 @@ class Engine:
             budget_chars=self._config.preset().max_paste_chars,
             auto_accept_edits=self._policy.auto_accept_edits,
             yolo=self._policy.yolo,
+            mode=self._policy.mode,
             session_dir=self._session.session_dir,
             last_outbound_chars=self._last_outbound_chars,
         )
@@ -572,6 +661,30 @@ class Engine:
         self._policy.yolo = enabled
         self._session.append_event("yolo", enabled=enabled)
         return enabled
+
+    def set_permission_mode(self, mode: PermissionMode) -> PermissionMode:
+        """Set the session's permission mode: "ask" (today's gates), "plan"
+        (exploration only - every edit/command is denied) or "unattended" (the
+        user is away - allow rules still run, anything that would gate is denied).
+
+        set_yolo's shape exactly, and for its reasons: legal in any phase because
+        it only writes a policy field, and NOT retroactive - a gate already
+        pending stays pending, and the new mode governs every verdict computed
+        after it. The model is told at the next results payload (see
+        _take_mode_note); it is not told at all if the session ends first, which
+        is fine because each denial body explains itself. Returns the new mode.
+
+        IDLE is the one phase that arms no note. Before start_task there is no
+        conversation to interrupt: whatever mode is set then is simply the mode
+        this session STARTED in (the user dialled it in at the start prompt, or
+        [approval] mode did), it is in force from the first verdict of the first
+        turn, and a "the mode is now X" note in the very first results payload
+        would be announcing a change that never happened."""
+        self._policy.mode = mode
+        self._session.append_event("permission_mode", mode=mode)
+        if self._phase is not Phase.IDLE:
+            self._mode_note = _MODE_NOTES[mode]
+        return mode
 
     # -- planning ----------------------------------------------------------------
 
@@ -611,19 +724,20 @@ class Engine:
                 )
                 continue
             verdict = self._policy.verdict(spec, call)
-            if verdict == "deny":
-                # A rule said no. Pre-resolved, not gated: there is nothing to
-                # ask. The rest of the turn still runs - only an interactive
-                # rejection aborts it.
+            if verdict in DENY_VERDICTS:
+                # A rule said no, or the permission mode did. Pre-resolved, not
+                # gated: there is nothing to ask. The rest of the turn still runs
+                # - only an interactive rejection aborts it.
+                reason, source, pre_result = self._denial(verdict, spec, call)
                 plan.append(
                     _Planned(
                         call,
                         spec,
-                        PendingAction(call, "auto", "", "denied by rule"),
-                        pre_result=self._denied_by_rule_result(spec, call),
+                        PendingAction(call, "auto", "", reason),
+                        pre_result=pre_result,
                     )
                 )
-                self._log_decision(call.id, "denied", "rule", None)
+                self._log_decision(call.id, "denied", source, None)
                 continue
             if verdict == "auto":
                 reason, source = self._auto_reason(spec, call)
@@ -660,6 +774,61 @@ class Engine:
                 )
             )
         return plan
+
+    def _denial(
+        self, verdict: str, spec: ToolSpec, call: ToolCall
+    ) -> tuple[str, str, ToolResult]:
+        """The (transcript reason, audit source, model-facing result) for one
+        refusal. Three causes, three answers: the model can only choose a
+        different route if it is told which door was shut."""
+        if verdict == "deny_plan":
+            return ("denied by plan mode", "plan", self._denied_by_plan_result(call))
+        if verdict == "deny_unattended":
+            return (
+                "auto-denied (unattended mode)",
+                "unattended",
+                self._denied_unattended_result(spec, call),
+            )
+        return ("denied by rule", "rule", self._denied_by_rule_result(spec, call))
+
+    def _denied_by_plan_result(self, call: ToolCall) -> ToolResult:
+        """Plan mode's refusal. It names the mode rather than a rule, because
+        nothing is wrong with the call - the user simply is not ready to run it -
+        and it points at the reads that DO work, so the turn stays productive."""
+        return ToolResult(
+            call_id=call.id,
+            status="denied",
+            body=(
+                "plan mode is active: the user is only exploring and no changes may be"
+                " made.\nhint: explore with read_file/list_dir/glob/grep and present your"
+                " plan via task_done or ask_user; the user can switch modes to enable"
+                " execution."
+            ),
+            tool=call.tool,
+        )
+
+    def _denied_unattended_result(self, spec: ToolSpec, call: ToolCall) -> ToolResult:
+        """Unattended mode's refusal: the gate this call would have opened had
+        nobody to answer it. The relevant rules ride along when a ruleset is
+        loaded (the rule-deny path's payload), because "which rules would have
+        let this through" is exactly what the model needs to keep working."""
+        rules = (
+            f"\nHere are some of the relevant rules {self._policy.denied_rules_json(spec, call)}"
+            if self._policy.ruleset_mode
+            else ""
+        )
+        return ToolResult(
+            call_id=call.id,
+            status="denied",
+            body=(
+                "auto-denied: the user is away (unattended mode) and this call is not"
+                " covered by an allow rule."
+                + rules
+                + "\nhint: do not retry unchanged; continue with calls that allow rules"
+                " cover, or finish with task_done and list what was blocked."
+            ),
+            tool=call.tool,
+        )
 
     def _denied_by_rule_result(self, spec: ToolSpec, call: ToolCall) -> ToolResult:
         """OpenCode's DeniedError payload, verbatim: the model is told a rule
@@ -844,8 +1013,13 @@ class Engine:
             if call.tool == "task_done":
                 exec_.done_summary = call.params.get("summary", "")
                 exec_.done_result = call.params.get("result", "")
+                # It produces no ToolResult (there is nobody left to tell), so
+                # its progress "done" is emitted by hand or its row never
+                # resolves on screen.
+                self._progress(call.id, call.tool, "done", "ok")
                 continue
             assert p.spec is not None
+            self._progress(call.id, call.tool, "running")
             result = p.spec.handler(self._ctx, call)
             if result.status == "error" and call.tool in _MUTATING_TOOLS:
                 exec_.failed_paths.add(_norm_path(call.params.get("path", "")))
@@ -877,12 +1051,27 @@ class Engine:
             self._session.append_event(
                 "task_done", summary=exec_.done_summary, result_chars=len(exec_.done_result)
             )
-            outbound = self._compose_results(results, notes) if results else None
+            # No results means no payload, so a pending mode note is NOT taken:
+            # it keeps waiting for one that actually goes out (a follow-up after
+            # task_done reopens the session - protocol.md section 8).
+            outbound = (
+                self._compose_results(results, notes + self._take_mode_note())
+                if results
+                else None
+            )
             self._set_phase(Phase.DONE)
             return Done(exec_.done_summary, outbound, exec_.done_result)
-        outbound = self._compose_results(results, notes)
+        outbound = self._compose_results(results, notes + self._take_mode_note())
         self._set_phase(Phase.AWAITING_REPLY)
         return Send(outbound)
+
+    def _take_mode_note(self) -> list[str]:
+        """The pending permission-mode note, once - consumed as it is handed to a
+        payload, so the model is told a mode change exactly one time."""
+        if self._mode_note is None:
+            return []
+        note, self._mode_note = self._mode_note, None
+        return [f"note: {note}"]
 
     def _compose_results(self, results: list[ToolResult], notes: list[str]) -> Outbound:
         capped = fit_results(results, self._config.limits.max_result_chars)
@@ -917,6 +1106,10 @@ class Engine:
     def _record(self, result: ToolResult) -> None:
         assert self._exec is not None
         self._exec.results.append(result)
+        # Every resolution of every call passes through here - the executed
+        # ones, the denied ones, the skipped ones - which is exactly the set a
+        # watcher needs to see resolve.
+        self._progress(result.call_id, result.tool, "done", result.status)
         self._session.append_event(
             "result",
             call_id=result.call_id,
@@ -1077,6 +1270,7 @@ __all__ = [
     "NewTurn",
     "Noise",
     "PendingAction",
+    "PermissionMode",  # re-exported: the TUI reads it off StatusSnapshot.mode
     "Phase",
     "ProtocolError",
     "Send",

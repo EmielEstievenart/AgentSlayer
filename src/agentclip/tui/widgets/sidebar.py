@@ -14,7 +14,10 @@ The widget is dumb on purpose: it holds no session state, exposes ``service``
 ``hide_paste_flash`` pair; MainScreen owns every bit of routing. The paste
 flash is the one animated thing here - a deliberately obnoxious blinking banner
 that nags the user to Ctrl+V the outbound payload into the chat; the blink timer
-is pure presentation, so the dumb widget may own it. Its structural sibling the
+is pure presentation, so the dumb widget may own it. Under it sits the one
+button that is not configuration, "Retry insert" (``#retry-insert-btn``, shown
+by ``show_paste_flash(retry=True)``): the answer to that nag, which re-runs the
+click-and-paste MainScreen could not land. Its structural sibling the
 DISARMED banner (``show_armed_state``) deliberately does NOT blink: see
 ``DISARMED_BANNER_TEXT``.
 
@@ -146,6 +149,14 @@ STREAM_FLASH_TEXT = ">>> STREAMING <<<\nchunk {index}/{total} - don't type"
 
 def stream_flash_text(index: int, total: int) -> str:
     return STREAM_FLASH_TEXT.format(index=index, total=total)
+
+
+# The flash's companion button (MainScreen.retry_insert): "the click and the
+# Ctrl+V did not land - do them again". It rides with the banner rather than
+# living down in the CHAT WINDOW block because it is an answer to what the
+# banner is asking for, and a control the user only ever wants in the seconds
+# they are reading that banner.
+RETRY_INSERT_LABEL = "Retry insert"
 
 
 _FLASH_BLINK_S = 0.4
@@ -341,6 +352,12 @@ class Sidebar(Vertical):
                 classes="side-state-row",
             )
         yield Static(Text(PASTE_FLASH_TEXT), id="side-paste-flash")
+        # The flash's one action, directly under it: the payload is on the
+        # clipboard and the automation could not get it into the chat box, so
+        # this re-runs the click-settle-paste(-submit) sequence rather than
+        # leaving the user to alt-tab and Ctrl+V. Hidden until there is such a
+        # failure to undo - see ``show_paste_flash``.
+        yield Button(RETRY_INSERT_LABEL, id="retry-insert-btn", variant="warning")
         # Directly under the STATE rail and above everything else: the rail is
         # the first thing read on this column, and "the loop you are reading is
         # not allowed to move on its own" belongs against it rather than at the
@@ -591,14 +608,23 @@ class Sidebar(Vertical):
 
     # -- the paste flash --------------------------------------------------------
 
-    def show_paste_flash(self, text: str = PASTE_FLASH_TEXT) -> None:
+    def show_paste_flash(self, text: str = PASTE_FLASH_TEXT, *, retry: bool = False) -> None:
         """Turn on the blinking banner: either the outbound payload still needs
         a manual Ctrl+V (``PASTE_FLASH_TEXT``), or AgentClip already pasted it
         and only Enter is left (``ENTER_FLASH_TEXT``). Obnoxious by design -
-        the user is staring at the browser, not at us."""
+        the user is staring at the browser, not at us.
+
+        ``retry`` offers the "Retry insert" button under the banner: the insert
+        did not land, and re-running it is a one-press alternative to the Ctrl+V
+        the banner is asking for. It is a parameter rather than something this
+        widget infers from ``text`` because the widget is dumb on purpose -
+        whether there is an insert worth retrying is MainScreen's fact, not a
+        property of the words on the banner.
+        """
         flash = self.query_one("#side-paste-flash", Static)
         flash.update(Text(text))
         flash.display = True
+        self.query_one("#retry-insert-btn", Button).display = retry
         if self._flash_timer is None:
             self._flash_timer = self.set_interval(_FLASH_BLINK_S, self._blink_paste_flash)
         else:
@@ -606,10 +632,16 @@ class Sidebar(Vertical):
 
     def hide_paste_flash(self) -> None:
         """The paste happened (busy region went MATCH) or the moment passed
-        (new capture, session reset) - stop nagging."""
+        (new capture, session reset) - stop nagging.
+
+        The retry button goes with it, unconditionally: every caller here is
+        saying the outbound has moved on, and a button that would click into the
+        chat and paste it a second time has become the wrong offer.
+        """
         flash = self.query_one("#side-paste-flash", Static)
         flash.display = False
         flash.remove_class("flash-alt")
+        self.query_one("#retry-insert-btn", Button).display = False
         if self._flash_timer is not None:
             self._flash_timer.pause()
 

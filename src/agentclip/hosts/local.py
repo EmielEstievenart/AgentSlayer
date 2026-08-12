@@ -1,52 +1,124 @@
 """LocalHost: the Host seam over this PC's subprocess/os/pathlib.
 
-Nothing here is new behavior - every method is the exact call the tool layer
-used to make inline, moved down one level so the same tool code can run against
-a remote machine later. The two platform quirks that used to live in shell.py
-travel with it: POSIX children get their own session (so killpg reaps the whole
-tree) and Windows kills through ``taskkill /F /T``.
+Almost nothing here is new behavior - every method is the exact call the tool
+layer used to make inline, moved down one level so the same tool code can run
+against a remote machine later. The two platform quirks that used to live in
+shell.py travel with it: POSIX children get their own session (so killpg reaps
+the whole tree) and Windows kills through ``taskkill /F /T``.
+
+The one thing that is genuinely different is HOW the output is collected.
+``LocalExec`` used to wait in ``communicate(timeout=slice)`` calls, which hand
+back nothing until the command exits (a timed-out slice only exposes its
+half-read buffer through the exception, and only on POSIX). That made a
+five-minute build a five-minute silence. Instead a **reader thread** drains the
+pipe continuously into a lock-guarded buffer from the moment the process
+starts: ``wait()`` just polls the process, ``peek()`` hands out a snapshot of
+the buffer (the live tail the UI streams), and both the finished result and the
+post-kill ``drain()`` are read out of the same buffer - so there is exactly one
+place the output ever lives, and a killed command's partial tail survives for
+free instead of via a special case.
+
+Bytes, not text, come off the pipe: partial UTF-8 sequences and split ``\\r\\n``
+pairs are the normal state of affairs when reading a pipe in chunks, so
+:class:`_StreamDecoder` does incrementally what ``text=True`` would have done in
+one go - decode with replacement, and translate newlines universal-style.
 """
 
 from __future__ import annotations
 
+import codecs
+import io
 import os
 import signal
 import stat as stat_module
 import subprocess
 import sys
+import threading
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
+from typing import cast
 
 from agentclip.hosts.base import DirEntry, ExecResult, FileStat
 
+# How much the reader thread asks for per read. It returns as soon as ANY bytes
+# are there (``read1``), so this is a ceiling, not a latency floor.
+_READ_CHUNK = 65536
+# How long ``wait()`` gives the reader thread to notice EOF after the process
+# has exited, so the last line makes it into the result. Bounded rather than
+# unbounded (which is what communicate() was): a grandchild holding the pipe
+# open must not park the engine's worker thread forever.
+_READER_JOIN_S = 5.0
 
-def _coerce_output(raw: str | bytes | None) -> str:
-    if raw is None:
-        return ""
-    if isinstance(raw, bytes):
-        return raw.decode("utf-8", errors="replace")
-    return raw
+
+class _StreamDecoder:
+    """Incremental UTF-8 + universal-newline translation over chunked reads.
+
+    Two states have to survive a chunk boundary and both are famous for
+    corrupting exactly one character when they do not: a multi-byte sequence cut
+    in half (the incremental codec's job) and a ``\\r`` that may or may not turn
+    out to be the front of a ``\\r\\n`` (held back until the next chunk says).
+    Lone ``\\r`` becomes ``\\n``, as ``text=True`` had it - so a progress bar
+    that only ever rewrites one line still reads as lines here.
+    """
+
+    __slots__ = ("_decoder", "_pending_cr")
+
+    def __init__(self) -> None:
+        self._decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        self._pending_cr = False
+
+    def feed(self, data: bytes, *, final: bool = False) -> str:
+        text = self._decoder.decode(data, final)
+        if self._pending_cr:
+            # The previous chunk ended on a CR: one \n now means it was a CRLF.
+            text = text[1:] if text.startswith("\n") else text
+            text = "\n" + text
+            self._pending_cr = False
+        if not final and text.endswith("\r"):
+            text = text[:-1]
+            self._pending_cr = True
+        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    def flush(self) -> str:
+        """Whatever the two held-back states still owe, at EOF."""
+        return self.feed(b"", final=True)
 
 
 class LocalExec:
     """A local :class:`subprocess.Popen` behind the ExecHandle contract."""
 
-    __slots__ = ("_proc", "_partial")
+    __slots__ = ("_proc", "_chunks", "_lock", "_reader", "_result")
 
-    def __init__(self, proc: subprocess.Popen[str]) -> None:
+    def __init__(self, proc: subprocess.Popen[bytes]) -> None:
         self._proc = proc
-        # Whatever communicate() had buffered when it last timed out: the
-        # fallback if the post-kill drain cannot collect anything.
-        self._partial = ""
+        # The one buffer. Appended to by the reader thread, read by everybody
+        # else - hence the lock, which is held only around list mutations.
+        self._chunks: list[str] = []
+        self._lock = threading.Lock()
+        self._result: ExecResult | None = None
+        self._reader = threading.Thread(
+            target=self._pump, name="agentclip-exec-reader", daemon=True
+        )
+        self._reader.start()
 
     def wait(self, timeout: float) -> ExecResult | None:
+        if self._result is not None:
+            return self._result  # finished earlier: the answer stands
         try:
-            out, _ = self._proc.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            self._partial = _coerce_output(exc.output)
+            code = self._proc.wait(timeout=max(0.0, timeout))
+        except subprocess.TimeoutExpired:
             return None
-        code = self._proc.returncode  # always set once communicate() has returned
-        return ExecResult(exit_code=code if code is not None else 0, output=_coerce_output(out))
+        # The process is gone; give the reader a moment to see EOF so the last
+        # line is in the buffer before the result is frozen around it.
+        self._reader.join(_READER_JOIN_S)
+        self._result = ExecResult(exit_code=code if code is not None else 0, output=self.peek())
+        return self._result
+
+    def peek(self) -> str:
+        """The merged output so far - a snapshot, never blocking."""
+        with self._lock:
+            return "".join(self._chunks)
 
     def kill(self) -> None:
         """Kill the shell AND its children (shell=True makes the real work a grandchild)."""
@@ -63,11 +135,39 @@ class LocalExec:
                 self._proc.kill()
 
     def drain(self, timeout: float) -> str:
-        try:  # collect whatever was buffered before the kill
-            out, _ = self._proc.communicate(timeout=timeout)
-        except (subprocess.TimeoutExpired, OSError, ValueError):
-            return self._partial
-        return _coerce_output(out)
+        """After kill(): what the command managed to emit before it died."""
+        self._reader.join(max(0.0, timeout))
+        return self.peek()
+
+    # -- the reader thread ---------------------------------------------------
+
+    def _pump(self) -> None:
+        """Move the pipe into the buffer until EOF. Never raises out of here."""
+        # A buffered pipe by construction (spawn asks for stdout=PIPE in binary
+        # mode), which is what makes read1 - "give me whatever has arrived" -
+        # available; the Popen stubs only promise the IO[bytes] base.
+        stream = cast(io.BufferedReader, self._proc.stdout)
+        if stream is None:
+            return
+        decoder = _StreamDecoder()
+        try:
+            while True:
+                data = stream.read1(_READ_CHUNK)  # blocks until SOMETHING is there
+                if not data:
+                    break
+                self._append(decoder.feed(data))
+        except (OSError, ValueError):
+            pass  # the pipe was closed under us (kill): whatever arrived stands
+        finally:
+            self._append(decoder.flush())
+            with suppress(OSError, ValueError):
+                stream.close()
+
+    def _append(self, text: str) -> None:
+        if not text:
+            return
+        with self._lock:
+            self._chunks.append(text)
 
 
 class LocalHost:
@@ -81,14 +181,15 @@ class LocalHost:
         popen_kwargs: dict = {}
         if sys.platform != "win32":
             popen_kwargs["start_new_session"] = True  # own process group, so killpg reaps children
+        # Binary, deliberately: the reader thread decodes (see _StreamDecoder),
+        # because a TextIOWrapper only hands over whole lines and this pipe has
+        # to be readable the instant a byte lands on it.
         proc = subprocess.Popen(
             command,
             shell=True,
             cwd=str(cwd),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True,
-            errors="replace",
             **popen_kwargs,
         )
         return LocalExec(proc)

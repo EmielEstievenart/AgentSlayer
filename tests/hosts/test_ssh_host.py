@@ -240,6 +240,23 @@ def test_wait_answers_none_while_the_command_runs(host: SshHost) -> None:
     assert "working" in handle.drain(0.05)
 
 
+def test_peek_hands_over_what_the_poll_loop_has_already_pumped(host: SshHost) -> None:
+    """A remote command is watchable too - at the polling loop's resolution."""
+    FakeSSHClient.scripts = [FakeCommandScript(hangs=True, output="halfway\n")]
+    handle = host.spawn("make", Path(ROOT))
+    assert handle.peek() == ""  # nothing has been pumped yet
+    handle.wait(0.05)
+    assert handle.peek() == "halfway\n"
+    assert handle.peek() == "halfway\n"  # a snapshot, and repeatable
+
+
+def test_peek_matches_the_finished_result(host: SshHost) -> None:
+    FakeSSHClient.scripts = [FakeCommandScript(exit_code=0, output="all of it\n")]
+    handle = host.spawn("make", Path(ROOT))
+    result = handle.wait(1.0)
+    assert result is not None and handle.peek() == result.output
+
+
 def test_kill_sends_a_kill_to_the_whole_process_group(host: SshHost) -> None:
     FakeSSHClient.scripts = [FakeCommandScript(hangs=True)]
     handle = host.spawn("sleep 60", Path(ROOT))

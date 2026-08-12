@@ -196,12 +196,35 @@ class AgentClipApp(App[None]):
         width: 1fr;
     }
 
+    /* The RUN PANEL (§8a): spinner line, one row per call, and - when ctrl+o
+       asks for it - the running command's live output. `display: none` while
+       idle is the widget's own doing, so the region costs nothing between
+       turns; everything here is sized `auto` so a one-call turn stays one row
+       tall and never pushes the composer around. */
     #running {
+        height: auto;
+        max-height: 22;
+        padding: 0 1;
+        margin: 0 1;
+    }
+    #run-status {
         height: 1;
         color: $warning;
         text-style: bold;
+    }
+    #run-rows {
+        height: auto;
+        color: $text;
+    }
+    /* Capped and scrollable: a build prints more than a screenful and the
+       panel must not eat the transcript to show it. */
+    #run-tail {
+        height: auto;
+        max-height: 12;
+        overflow-y: auto;
+        border: round $panel;
+        color: $text-muted;
         padding: 0 1;
-        margin: 0 1;
     }
     /* The slash-command list: sits directly on top of the composer and shares
        its margin, so the two read as one control. Height is the match count
@@ -211,7 +234,7 @@ class AgentClipApp(App[None]):
         /* The whole registry plus its border - a bare `/` offers everything, and
            a cap below that would hide the last command rather than shorten the
            list. Grows with app.commands.COMMANDS (a test pins the two). */
-        max-height: 9;
+        max-height: 10;
         background: $surface;
         color: $text;
         border: round $accent;
@@ -307,6 +330,11 @@ class AgentClipApp(App[None]):
         background: yellow;
         border: heavy red;
     }
+    /* The flash's action button, hidden with it and shown only for the flash
+       that is asking the user to paste by hand (Sidebar.show_paste_flash). */
+    Sidebar #retry-insert-btn {
+        display: none;
+    }
     /* The paste flash's standing sibling: as loud, but it never blinks (it is a
        fact, not a request), so it has no .flash-alt half. */
     Sidebar #side-armed-banner {
@@ -394,6 +422,22 @@ class AgentClipApp(App[None]):
     #seg-armed {
         color: white;
         background: red;
+        text-style: bold;
+    }
+    /* The permission-mode segment (§2.6a), leftmost cell. `ask` is the baseline
+       and wears .st-dim so it cannot become furniture; the two modes that CHANGE
+       what happens to a tool call are the ones that are meant to catch the eye.
+       Blue for `plan` (a mode that only ever refuses more - it is safe, not
+       alarming, so it borrows the accent the app already uses for borders), and
+       the warning colour for `unattended`, which is the "nobody is watching"
+       mode. Neither is red: red is spoken for by the two badges that mean
+       approvals are OFF (⚡ YOLO) and the OS switch is out (⛔ DISARMED). */
+    .st-plan {
+        color: $accent;
+        text-style: bold;
+    }
+    .st-unattended {
+        color: $warning;
         text-style: bold;
     }
     /* A delegated sub-agent run owns the watcher segment while it lasts; magenta

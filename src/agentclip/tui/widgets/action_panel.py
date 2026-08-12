@@ -3,7 +3,8 @@
 Hidden when idle. At a gate it renders the precomputed ``PendingAction.preview``
 (unified diff via rich.syntax.Syntax with the pygments ``diff`` lexer - no
 textual[syntax] extra; full highlighted content under a NEW FILE banner for
-brand-new files; the literal command line for run_command) inside a boldly
+brand-new files; the literal command line plus the model's stated reason for
+run_command) inside a boldly
 bordered drawer with big Approve / Reject buttons, so the prompt is unmissable.
 
 The middle button is whichever "stop asking me" answer this session has: the
@@ -27,6 +28,7 @@ from textual.message import Message
 from textual.widgets import Button, Input, Static
 
 from agentclip.engine.engine import PendingAction
+from agentclip.tools.shell import reason_line
 
 
 def preview_renderable(action: PendingAction) -> RenderableType:
@@ -34,7 +36,13 @@ def preview_renderable(action: PendingAction) -> RenderableType:
     if action.kind == "command":
         command = action.call.params.get("command") or action.preview
         text = Text()
-        text.append(f"$ {command}\n\n", style="bold")
+        text.append(f"$ {command}\n", style="bold")
+        # The model's own one-line justification, right under the command it
+        # justifies: approving is a judgement about intent, not just syntax.
+        reason = reason_line(action.call)
+        if reason:
+            text.append(f"{reason}\n", style="italic")
+        text.append("\n")
         text.append(
             "no rule allows this - approve to run it once"
             if action.always_pattern is not None

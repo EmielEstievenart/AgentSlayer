@@ -209,6 +209,7 @@ EOT
 ===CLIP:END===
 ===CLIP:CALL id=2 tool=run_command===
 command: echo yolo-ran
+reason: prove the command ran
 ===CLIP:END===
 ===CLIP:EOM calls=2 chat=amber-falcon===
 """
@@ -275,7 +276,7 @@ def ruleset(json_text: str = RULESET_JSON) -> tuple[PermissionRule, ...]:
     return default_rules() + rules
 
 
-def ruled_policy(json_text: str = RULESET_JSON, **kwargs: bool) -> ApprovalPolicy:
+def ruled_policy(json_text: str = RULESET_JSON, **kwargs: bool | str) -> ApprovalPolicy:
     return ApprovalPolicy(ApprovalConfig(**kwargs), ruleset(json_text))
 
 

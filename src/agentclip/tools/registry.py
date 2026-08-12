@@ -45,6 +45,16 @@ class ToolContext:
     ``ctx.cancelled()`` and bail out with a code=cancelled error carrying
     whatever partial output they have; fast handlers can ignore it (the engine
     checks it between calls anyway).
+
+    on_output(call_id, chunk): the live tail. A handler that produces output
+    over time (run_command, and only run_command today) hands over the NEW
+    characters since it last called - never the whole buffer - so the UI can
+    show a build scrolling instead of a frozen spinner. Read by the UI thread's
+    side of the fence and therefore the mirror image of cancel_event: this one
+    is called FROM the engine's worker thread and must not block. It is a
+    courtesy channel, not a result: the model's copy of the output still comes
+    back in the ToolResult, so nothing is lost when it is None (the default) or
+    when the host cannot stream (ExecHandle.peek).
     """
 
     workspace: Workspace
@@ -53,10 +63,28 @@ class ToolContext:
     host: Host = field(default_factory=LocalHost)
     backup_hook: Callable[[str, Path, str], None] | None = None
     cancel_event: threading.Event | None = None
+    on_output: Callable[[int, str], None] | None = None
 
     def cancelled(self) -> bool:
         """True once the user asked to cancel the batch this call belongs to."""
         return self.cancel_event is not None and self.cancel_event.is_set()
+
+    def emit_output(self, call_id: int, chunk: str) -> None:
+        """Push one delta at the live-output hook, if anyone is listening.
+
+        Defensive by contract: the hook crosses into the UI layer, and a view
+        that raises (a screen torn down mid-turn, say) must not turn a running
+        command into a failed tool call.
+        """
+        hook = self.on_output
+        if hook is None or not chunk:
+            return
+        try:
+            hook(call_id, chunk)
+        except Exception:  # noqa: BLE001 - a broken listener is not the command's problem
+            # ...and it is not asked again: a listener that failed once will
+            # fail five times a second for the rest of a long command.
+            self.on_output = None
 
 
 @dataclass(frozen=True, slots=True)

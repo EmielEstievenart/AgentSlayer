@@ -29,6 +29,27 @@ auto_accept_edits, commands are matched against the glob allowlist
 (fnmatch.fnmatchcase against the FULL command string - auditable at a glance,
 no regex backtracking) with the same deny-token backstop, and YOLO bypasses
 everything.
+
+THE PERMISSION MODE (both of the above) is the session-scoped dial ABOVE all of
+it - "what is the user doing right now" rather than "what is this call" - and it
+can only ever REFUSE more, never allow more:
+
+    ask         everything above, exactly as written. The default.
+    plan        the user is exploring: every `edit`/`command` call is denied
+                before anything else looks at it (YOLO included - a mode says
+                what the user wants NOW, and it outranks a flag they set
+                earlier). Read-only tools are untouched, so an `ask` or `deny`
+                rule on a read still applies.
+    unattended  the user is away: a call that would have opened a gate is denied
+                instead, because there is nobody there to answer it. Allow rules
+                still run and deny rules still deny. YOLO, being the user's
+                explicit "approve everything for me", still answers asks - the
+                one thing it still does not answer is the deny-token backstop,
+                which therefore denies here rather than gating.
+
+Both refusals are distinct verdicts ("deny_plan"/"deny_unattended") rather than
+the rule-deny "deny", because the model is told a different thing by each and
+the audit trail names a different source.
 """
 
 from __future__ import annotations
@@ -39,17 +60,38 @@ from typing import Literal
 
 from agentclip.config import ApprovalConfig
 from agentclip.permissions import (
+    PERMISSION_MODES,
+    PermissionMode,
     PermissionRule,
     always_pattern,
     evaluate,
     matching_rules,
+    normalize_mode,
     permission_target,
     rules_json,
 )
 from agentclip.protocol.types import ToolCall
 from agentclip.tools.registry import ToolSpec
 
-Verdict = Literal["auto", "needs_approval", "deny"]
+Verdict = Literal["auto", "needs_approval", "deny", "deny_plan", "deny_unattended"]
+
+# The three ways a call can be refused without ever reaching the user. Kept as a
+# set so a consumer asks "was this denied?" once instead of listing the variants.
+DENY_VERDICTS: frozenset[str] = frozenset({"deny", "deny_plan", "deny_unattended"})
+
+# The mode vocabulary is re-exported here, and this is where the layers above
+# take it from: it is DEFINED in permissions.py because config.py has to read it
+# and cannot import this module (approval imports config), but app/ and tui/ have
+# no business reaching into the rule model - the policy that applies a mode is
+# the thing they talk to.
+__all__ = [
+    "DENY_VERDICTS",
+    "PERMISSION_MODES",
+    "ApprovalPolicy",
+    "PermissionMode",
+    "Verdict",
+    "normalize_mode",
+]
 
 
 class ApprovalPolicy:
@@ -58,13 +100,17 @@ class ApprovalPolicy:
     affects run_command. yolo is the bigger hammer: it answers every question
     with yes - in legacy mode that means EVERYTHING runs, in ruleset mode
     everything except what a rule explicitly denies. The /yolo chat command
-    toggles it live."""
+    toggles it live. mode is the dial above both (see the module docstring); the
+    /mode command sets it, also live."""
 
     def __init__(
         self, config: ApprovalConfig, rules: Sequence[PermissionRule] = ()
     ) -> None:
         self.auto_accept_edits: bool = config.auto_accept_edits
         self.yolo: bool = config.yolo
+        # An unreadable value here means the session simply runs as "ask": a
+        # permission dial has to fail towards the mode that asks the human.
+        self.mode: PermissionMode = normalize_mode(config.mode) or "ask"
         self._allowlist: tuple[str, ...] = config.command_allowlist
         self._deny_tokens: tuple[str, ...] = config.command_deny_tokens
         self._rules: tuple[PermissionRule, ...] = tuple(rules)
@@ -123,23 +169,39 @@ class ApprovalPolicy:
     def verdict(self, spec: ToolSpec, call: ToolCall) -> Verdict:
         if self.ruleset_mode:
             return self._ruleset_verdict(spec, call)
+        if self._plan_denied(spec):
+            return "deny_plan"
         if spec.approval_kind == "auto":
             return "auto"
         if self.yolo:
             return "auto"  # YOLO: nothing gates - edits AND commands run unattended
         if spec.approval_kind == "edit":
-            return "auto" if self.auto_accept_edits else "needs_approval"
+            return "auto" if self.auto_accept_edits else self._gate()
         # approval_kind == "command"
         command = call.params.get("command", "")
-        return "auto" if self.command_auto_allowed(command) is not None else "needs_approval"
+        return "auto" if self.command_auto_allowed(command) is not None else self._gate()
 
     def _ruleset_verdict(self, spec: ToolSpec, call: ToolCall) -> Verdict:
         key, resource = self.target(spec, call)
         action = evaluate(key, resource, self._rules, self.session_rules).action
         if action == "deny":
-            return "deny"
+            return "deny"  # the user's standing "no" outranks even the mode
+        if self._plan_denied(spec):
+            return "deny_plan"
         if action == "allow":
             if key == "bash" and self.has_deny_token(resource):
-                return "needs_approval"  # backstop: no shell parser here
+                return self._gate()  # backstop: no shell parser here
             return "auto"
-        return "auto" if self.yolo else "needs_approval"
+        return "auto" if self.yolo else self._gate()
+
+    def _plan_denied(self, spec: ToolSpec) -> bool:
+        """Plan mode's whole rule: nothing that CHANGES anything may run.
+
+        By approval kind rather than by permission key, so a tool the ruleset has
+        never heard of is still covered by what it does."""
+        return self.mode == "plan" and spec.approval_kind in ("edit", "command")
+
+    def _gate(self) -> Verdict:
+        """What a call that would ask the user resolves to. Unattended has nobody
+        to ask, and a question nobody answers must not become a silent yes."""
+        return "deny_unattended" if self.mode == "unattended" else "needs_approval"

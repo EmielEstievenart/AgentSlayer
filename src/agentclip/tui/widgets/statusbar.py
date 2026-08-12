@@ -1,4 +1,4 @@
-"""StatusBar: one docked row of six segments (tui.md section 3.3, BMP glyphs only)."""
+"""StatusBar: one docked row of segments (tui.md section 3.3, BMP glyphs only)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,13 @@ from textual.widgets import Static
 # the session, because it qualifies the first and overrides none of the rest.
 # Its own slot, NOT the ``edits``/YOLO one: both can be true at once, and a
 # disarmed YOLO session is precisely the pair a user must be able to see.
-_SEGMENTS = ("watch", "armed", "service", "out", "turn", "edits", "root")
+# ``mode`` is the permission mode (tui.md 2.6a) and it is FIRST, left of even the
+# watch segment: it is the one cell that says what the app is allowed to do to
+# the project at all, and shift+tab changes it with no other feedback than this.
+# Unlike ``armed`` it never hides - all three modes are worth seeing, and a
+# segment that only appears in two of them is a segment the eye cannot use to
+# answer "which mode am I in?" at a glance.
+_SEGMENTS = ("mode", "watch", "armed", "service", "out", "turn", "edits", "root")
 
 
 class StatusBar(Horizontal):
@@ -25,6 +31,8 @@ class StatusBar(Horizontal):
     def update_segments(
         self,
         *,
+        mode: str,
+        mode_class: str,
         watch: str,
         watch_class: str,
         service: str,
@@ -35,6 +43,9 @@ class StatusBar(Horizontal):
         root: str,
         armed: str = "",
     ) -> None:
+        mode_seg = self.query_one("#seg-mode", Static)
+        mode_seg.update(Text(mode))
+        mode_seg.set_classes(f"seg {mode_class}".rstrip())
         seg = self.query_one("#seg-watch", Static)
         seg.update(Text(watch))
         seg.set_classes(f"seg {watch_class}")

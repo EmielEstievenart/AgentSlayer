@@ -37,36 +37,54 @@ def _parent(key: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class FakeCommand:
-    """A scripted command result. ``hangs`` never finishes - the cancel/timeout path."""
+    """A scripted command result. ``hangs`` never finishes - the cancel/timeout path.
+
+    ``chunks`` is the streaming half: one piece is revealed per ``wait()``
+    slice, so ``peek()`` grows the way a real command's output does and the
+    on_output/live-tail path can be tested without a real process. A command
+    with chunks finishes on the slice after the last one (unless it also hangs),
+    and its result is the pieces joined. Without chunks nothing streams -
+    ``output`` simply appears when the command finishes (or, for a hanging one,
+    when it is drained), which is what the non-streaming tests want.
+    """
 
     exit_code: int = 0
     output: str = ""
     hangs: bool = False
+    chunks: tuple[str, ...] = ()
 
 
 class FakeExec:
     """The ExecHandle over a scripted result; records what the caller did to it."""
 
-    __slots__ = ("command", "script", "killed", "drained")
+    __slots__ = ("command", "script", "killed", "drained", "seen", "_pending")
 
     def __init__(self, command: str, script: FakeCommand) -> None:
         self.command = command
         self.script = script
         self.killed = False
         self.drained = False
+        self.seen = ""  # what peek() answers: the chunks revealed so far
+        self._pending = list(script.chunks)
 
     def wait(self, timeout: float) -> ExecResult | None:
+        if self._pending:  # one scripted chunk per slice: still running
+            self.seen += self._pending.pop(0)
+            return None
         if self.script.hangs:
             time.sleep(max(0.0, timeout))  # burn the slice, like a real slow command
             return None
-        return ExecResult(exit_code=self.script.exit_code, output=self.script.output)
+        return ExecResult(exit_code=self.script.exit_code, output=self.seen or self.script.output)
+
+    def peek(self) -> str:
+        return self.seen
 
     def kill(self) -> None:
         self.killed = True
 
     def drain(self, timeout: float) -> str:
         self.drained = True
-        return self.script.output
+        return self.seen or self.script.output
 
 
 class FakeHost:
@@ -109,10 +127,16 @@ class FakeHost:
         self._links[key] = _key(target)
 
     def script(
-        self, command: str, *, exit_code: int = 0, output: str = "", hangs: bool = False
+        self,
+        command: str,
+        *,
+        exit_code: int = 0,
+        output: str = "",
+        hangs: bool = False,
+        chunks: tuple[str, ...] = (),
     ) -> None:
         """Script the result of one exact command string."""
-        self._scripts[command] = FakeCommand(exit_code, output, hangs)
+        self._scripts[command] = FakeCommand(exit_code, output, hangs, chunks)
 
     def text(self, path: Path | str) -> str:
         """The current content of a file, for assertions."""

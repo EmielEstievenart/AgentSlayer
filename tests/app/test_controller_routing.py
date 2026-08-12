@@ -11,7 +11,9 @@ Two mechanisms, both invisible until a sub-agent exists:
 * **the session context** (``_snapshot_ctx`` / ``_restore_ctx``). A delegation
   swaps the engine, stats, glyph strip, outbound state and YOLO mirror for the
   sub-agent's and must put every one of them back, or the master silently
-  continues with a sub-agent's numbers.
+  continues with a sub-agent's numbers. The permission mode is the one field
+  that is deliberately NOT swapped: it is an app-wide dial, not a property of
+  one conversation.
 """
 
 from __future__ import annotations
@@ -147,6 +149,7 @@ async def test_the_session_context_round_trips(
     controller._stats.replies = 7
     controller._turn_glyphs = {1: ["✓", "read_file"]}
     controller._yolo = True
+    controller._mode = "unattended"
     saved = controller._snapshot_ctx()
     master_engine = controller._engine
     master_stats = controller._stats
@@ -161,8 +164,16 @@ async def test_the_session_context_round_trips(
     assert controller._stats.replies == 0
     assert controller._turn_glyphs == {}
     assert controller._yolo is False  # YOLO deliberately does not inherit
+    # ...but the permission mode does, and the divergence is deliberate: YOLO
+    # answers a question about ONE conversation, while the mode is a statement
+    # about the user that stays true of a sub-agent ("only exploring", "not at my
+    # desk"). _sub_run arms the sub-agent's engine with it too.
+    assert controller._mode == "unattended"
     assert controller._last_outbound is None
 
+    # The dial survives the swap back untouched - it is not part of the saved
+    # context at all, so a cycle made DURING a delegation is still in force here.
+    controller._mode = "plan"
     controller._restore_ctx(saved)
 
     assert controller._engine is master_engine
@@ -170,6 +181,8 @@ async def test_the_session_context_round_trips(
     assert controller._stats.replies == 7
     assert controller._turn_glyphs == {1: ["✓", "read_file"]}
     assert controller._yolo is True
+    assert controller._mode == "plan"  # the mirror won, not the snapshot
+    assert saved.engine_mode == "unattended"  # ...which is what re-arms the engine
     assert controller._active is not None and controller._active.role == "master"
 
 

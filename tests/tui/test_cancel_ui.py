@@ -44,6 +44,7 @@ REPLY_SLOW_COMMAND = f"""Let me run that.
 ~~~~
 ===CLIP:CALL id=1 tool=run_command===
 command: {SLOW_COMMAND}
+reason: watch it work for a while
 timeout: 15
 ===CLIP:END===
 ===CLIP:CALL id=2 tool=read_file===

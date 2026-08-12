@@ -42,6 +42,35 @@ Action = Literal["allow", "ask", "deny"]
 
 ACTIONS: frozenset[str] = frozenset({"allow", "ask", "deny"})
 
+# -- the session's permission mode --------------------------------------------
+
+# NOT one of OpenCode's concepts: the mode is AgentClip's own session-scoped dial
+# ABOVE the ruleset, and it lives here for this module's founding reason - it is
+# read where config lives and applied where the verdict is made, and a leaf both
+# sides already import is the only place that can be true of.
+#
+#   ask         today's behaviour, in both modes. The default.
+#   plan        exploration only: every `edit`/`command` call is auto-denied.
+#               Read-only tools behave exactly as under "ask" (rules included) -
+#               plan never LOOSENS anything.
+#   unattended  the user is away: allow rules still run, deny rules still deny,
+#               and anything that would have opened a gate is auto-denied
+#               instead, because there is nobody there to answer it.
+PermissionMode = Literal["plan", "ask", "unattended"]
+
+# Cycle order (`/mode` with no argument, and the TUI's Shift+Tab): the harmless
+# one first, then the two that change what a turn may do.
+PERMISSION_MODES: tuple[PermissionMode, ...] = ("ask", "plan", "unattended")
+
+
+def normalize_mode(value: object) -> PermissionMode | None:
+    """``value`` as a permission mode, or None if it is not one. Case- and
+    space-insensitive, because it arrives from a config file and a chat box."""
+    if not isinstance(value, str):
+        return None
+    wanted = value.strip().lower()
+    return wanted if wanted in PERMISSION_MODES else None
+
 
 @dataclass(frozen=True, slots=True)
 class PermissionRule:
@@ -301,6 +330,8 @@ __all__ = [
     "ARITY",
     "Action",
     "DEFAULT_PERMISSIONS",
+    "PERMISSION_MODES",
+    "PermissionMode",
     "PermissionRule",
     "TOOL_PERMISSIONS",
     "always_pattern",
@@ -309,6 +340,7 @@ __all__ = [
     "evaluate",
     "expand",
     "matching_rules",
+    "normalize_mode",
     "permission_target",
     "rules_from_config",
     "rules_json",

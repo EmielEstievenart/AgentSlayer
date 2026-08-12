@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from pathlib import Path
@@ -37,7 +37,7 @@ import pytest
 
 from agentclip.app.controller import SessionController
 from agentclip.app.types import EngineRequest, SessionRef, SessionSpec
-from agentclip.app.view import SessionView, Severity
+from agentclip.app.view import RunCall, SessionView, Severity
 from agentclip.cli import make_engine_factory
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import Decision, Engine, PendingAction
@@ -64,6 +64,12 @@ class FakeChatView:
         self.chats_started: list[SessionRef] = []
         self.chats_ended: list[SessionRef] = []
         self.cleared = 0
+        # The run panel's three channels (§8a): every start_working with the
+        # rows it was given, then the per-call progress and output pushed from
+        # the engine's worker thread.
+        self.working: list[tuple[str, list[RunCall]]] = []
+        self.call_events: list[tuple[str, int, str]] = []
+        self.call_output_chunks: list[tuple[int, str]] = []
         self.new_chats_opened = 0  # /new asking for a fresh BROWSER chat, now
         self.identify_overlays = 0  # /identify asking for the debug boxes
         self.harness_log_toggles = 0  # /log flipping the decision-log pane
@@ -143,11 +149,22 @@ class FakeChatView:
     def hide_gate(self) -> None:
         pass
 
-    def start_working(self, label: str) -> None:
-        pass
+    def start_working(self, label: str, calls: Sequence[RunCall] = ()) -> None:
+        self.working.append((label, list(calls)))
 
     def stop_working(self) -> None:
         pass
+
+    # -- the turn executing, call by call (the controller pushes from a thread)
+
+    def call_started(self, call_id: int, tool: str, detail: str) -> None:
+        self.call_events.append(("started", call_id, tool or detail))
+
+    def call_finished(self, call_id: int, glyph: str) -> None:
+        self.call_events.append(("finished", call_id, glyph))
+
+    def call_output(self, call_id: int, chunk: str) -> None:
+        self.call_output_chunks.append((call_id, chunk))
 
     def reset_composer(self) -> None:
         pass
@@ -492,7 +509,8 @@ def slow_command_reply(seconds: int, *, chat: str) -> str:
         f"pathlib.Path('{MARKER}').write_text('go'); time.sleep({seconds})\""
     )
     return _wrap(
-        f"===CLIP:CALL id=1 tool=run_command===\ncommand: {command}\ntimeout: {seconds}\n"
+        f"===CLIP:CALL id=1 tool=run_command===\ncommand: {command}\n"
+        f"reason: wait for the marker\ntimeout: {seconds}\n"
         "===CLIP:END===",
         chat,
         1,

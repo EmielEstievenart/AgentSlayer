@@ -15,6 +15,10 @@ Two method families:
   view asks is its own business: the Textual front-end serves ``prompt_new_session``
   inline (composer + sidebar, no modal) and the rest as modal screens.
 
+...and one method family with a thread contract of its own: ``call_started`` /
+``call_finished`` / ``call_output`` are pushed from the engine's worker thread
+while a turn executes (see them below).
+
 Clipboard I/O (the read-watcher and the outbound write) is deliberately a view/transport
 concern - it lives behind ``copy_outbound`` / ``read_clipboard`` / ``start_input`` /
 ``stop_input`` so the controller stays free of any ``clip`` dependency. Delegation is
@@ -25,7 +29,7 @@ the same shape: the controller decides *that* a sub-agent runs, the view knows *
 
 from __future__ import annotations
 
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
 
@@ -34,6 +38,28 @@ from agentclip.engine.engine import PendingAction, StatusSnapshot
 from agentclip.protocol.types import Outbound, ToolCall
 
 Severity = Literal["information", "warning", "error"]
+
+
+@dataclass(frozen=True, slots=True)
+class RunCall:
+    """One row of the run panel: a call this turn is about to make (or made).
+
+    Handed over as a whole list when the turn starts executing, so the panel can
+    show what is QUEUED and not merely what is running - the question a user
+    staring at a five-minute build actually has is "and what comes after this?".
+    ``detail`` is the one thing worth reading next to the tool name (the command
+    line, the path), already flattened and clipped by the controller: the view
+    renders, it does not decide what matters. ``glyph`` is the row's state as of
+    now, which is only ever non-pending when a parked turn resumes (an ask_user
+    answered mid-plan re-shows the panel with the earlier calls already done).
+    ``streams`` marks the rows that can carry live output - run_command's.
+    """
+
+    call_id: int
+    tool: str
+    detail: str
+    streams: bool = False
+    glyph: str = "•"
 
 
 @dataclass(frozen=True)
@@ -86,9 +112,24 @@ class ChatView(Protocol):
     def render_state(self, view: SessionView) -> None: ...
     def show_gate(self, action: PendingAction, position: str, queue: str) -> None: ...
     def hide_gate(self) -> None: ...
-    def start_working(self, label: str) -> None: ...
+    def start_working(self, label: str, calls: Sequence[RunCall] = ()) -> None: ...
     def stop_working(self) -> None: ...
     def reset_composer(self) -> None: ...
+
+    # -- the turn executing, call by call -------------------------------------
+    # THREAD CONTRACT, and it is the only place in this port with one: these
+    # three are called from the engine's WORKER THREAD, mid-``execute()``, not
+    # from the loop the rest of the port lives on. They are the only way the
+    # user learns anything before the whole batch finishes, and the engine
+    # cannot report from anywhere else. So an implementation must be non-
+    # blocking and thread-safe - the Textual front-end posts a message and
+    # returns - and must tolerate an id it has never heard of (a call the
+    # controller did not plan) and one it has already resolved (a parked turn
+    # resuming). Everything they say is redundant with what the results payload
+    # will say at the end; nothing may depend on them having arrived.
+    def call_started(self, call_id: int, tool: str, detail: str) -> None: ...
+    def call_finished(self, call_id: int, glyph: str) -> None: ...
+    def call_output(self, call_id: int, chunk: str) -> None: ...
 
     # -- notifications --------------------------------------------------------
     def notify(

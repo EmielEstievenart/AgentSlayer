@@ -53,7 +53,10 @@ MainScreen
 │   │   │   └── Horizontal           id=action-footer
 │   │   │       ├── Static           id=action-hints      # "[y] approve  [n] reject  [a] auto-accept edits / always allow <pattern>"
 │   │   │       └── Input            id=reject-reason     # hidden until 'n'
-│   │   ├── RunningBar(Static)       id=running           # spinner + "(ctrl+x to cancel)" while a turn executes
+│   │   ├── RunPanel(Vertical)       id=running           # display:none when idle; the executing turn (§8a)
+│   │   │   ├── RunningBar(Static)   id=run-status        # spinner + label + "(ctrl+x to cancel)"
+│   │   │   ├── Static               id=run-rows          # "✓ 1 read_file src/utils.py" / "▶ 2 run_command npm run build"
+│   │   │   └── Static               id=run-tail          # the running command's last 12 lines; display:none until ctrl+o
 │   │   ├── CommandPopup(Static)     id=cmd-popup         # display:none unless a /command is being typed (§3.3a)
 │   │   └── ChatComposer(TextArea)   id=composer          # the one text box: task, answers, follow-ups
 │   ├── Sidebar(Vertical)            id=sidebar           # width 32; F3 hides it (§1.3)
@@ -76,7 +79,7 @@ MainScreen
 │       └── Static                   id=elements-mode  .el-hint  # "crops · sixel" / "crops · half-block"
 ├── HarnessLogPane(RichLog)          id=log-pane          # full width, 30% (max 14); display:none until F8 (§3.3b)
 ├── StatusBar(Horizontal)            id=statusbar         # full width, height 1 (sits above Footer)
-│   └── Static ×7                    .seg                 # see §3.3; #seg-armed hides itself while ARMED
+│   └── Static ×8                    .seg                 # see §3.3; #seg-mode is first and always shown, #seg-armed hides itself while ARMED
 └── Footer()                                              # key hints, auto-dimmed via check_action
 ```
 
@@ -126,6 +129,7 @@ Sidebar(Vertical)          id=sidebar        # width 32; F3 toggles display; ove
 │    # (normal brightness); every other row is dim ($text-muted, the
 │    # .side-state-row base).
 ├── Static                 id=side-paste-flash      # blinking ">>> PRESS CTRL+V <<<" / "PRESS ENTER" / "STREAMING k/n"; display:none when idle
+├── Button                 id=retry-insert-btn      # "Retry insert" → MainScreen.retry_insert(); display:none unless the insert failed (§3.4b)
 ├── Static                 id=side-armed-banner     # standing "⛔ DISARMED / watching only - F5 arms" (§3.5); display:none while armed
 │    # Structural siblings, opposite temperaments: the flash blinks because it
 │    # is asking for a keystroke NOW and the user is looking at their browser;
@@ -452,6 +456,24 @@ Exact wire grammar is the protocol designer's lane; the status enum + `user_note
 
 This is deliberately a **runtime** toggle (not gated behind a confirm): it is opt-in by typing, reversible with `/yolo off`, and every change still lands in the per-turn backup store, so `undo` works as usual.
 
+### 2.6a Permission modes (`shift+tab`)
+
+The mode — `ask` | `plan` | `unattended` — is the dial *above* the approval table and YOLO both, and it can only ever refuse more, never allow more; what each one does to a verdict is architecture.md's lane. The UI half is two things: a key and a cell.
+
+**The key.** `shift+tab` cycles `ask → plan → unattended → ask` (`MainScreen.action_cycle_permission_mode` → `SessionController.cycle_permission_mode()`, which does the engine call, the transcript note, the alert and the toast). One key rather than only `/mode` because the mode is the one policy a user changes *mid-glance* — they are watching a turn run, or watching the browser, and "stop changing things" / "stop asking me" is a thought that must not cost a trip to the chat box. `/mode [plan|ask|unattended]` (§3.3a) stays the way to name one directly; bare `/mode` reports rather than cycles, so the two doors never disagree about what a press means.
+
+Three deliberate choices about that binding:
+
+- **`priority=True`, and it costs backwards focus navigation.** Textual's `Screen` binds `shift+tab` to `app.focus_previous`; the composer is a focused `TextArea` and would hand the key straight to it. Priority is the same trick `F3`/`F6`/`F7`/`F8`/`ctrl+x` already use here, but this is the first one that *overrides* a Textual default rather than merely outranking a widget. Accepted: the screen has a handful of focusables and plain `tab` still cycles them forwards, whereas a permission mode you cannot reach from the box you are typing in is a feature nobody uses.
+- **Never gated.** Alone among the screen's shortcuts it has no `check_action` clause (it falls through to the default `True`), so it works with a gate up, mid-turn, while a sub-agent runs and while the app is DISARMED. The moment a user reaches for it is precisely the moment the app is busy doing the thing they want it to stop doing; a key that is dimmed exactly then is the wrong key. It is also `show=False` — the footer is already full of the loop's one-key answers, and the status segment is the discoverable half.
+- **No session ⇒ it still works, and it arms the next one.** `set_permission_mode` is deliberately *not* gated on a live engine. "Only explore, do not change anything" is a decision a user makes about the task they are **about to type**, and a dial reachable only after the bootstrap had already gone out would be missing at the one moment it is easiest to mean. Pre-session only the engine half is skipped: the mirror moves, the transcript note and toast land, and the bar repaints (`#seg-mode` falls back to `SessionController.permission_mode` when there is no snapshot — §3.3). `SessionController._session_flow` then hands that mode to the engine it builds **before `start_task`**, so the first verdict of the first turn already obeys it; because the engine is still `IDLE` at that point it treats the mode as the one the session *started in* and arms no "the mode is now …" note for the model (architecture.md). `[approval] mode` is still where the default for a fresh app run is set.
+- **It survives `/new`.** Alone among the session dials — YOLO goes back to its configured default on every reset — the mode is carried across `_reset_session` for the life of the app run, like the service picker. It describes the person, not the conversation: "I am only exploring today" is still true after a new chat, and a mode that silently reverted to `ask` would hand the next session's first edit to a user who thought they had turned changes off. It is never a hidden state, because the segment shows it in all three modes and never hides.
+- **It governs every engine in the app run, sub-agents included** — the one place it diverges from YOLO, which stays per-engine (§5.7). A `delegate` call is never gated (it is AgentClip's own control flow), so a mode that stopped at the master would let a model in plan mode make every change it liked by delegating it, and would park an absent user's `unattended` session on a sub-agent's approval gate. `_sub_run` therefore arms the sub-agent's engine with the dial before its bootstrap, exactly as `_session_flow` does for the master. Cycling *during* a delegation hits the sub-agent's engine immediately (it is the one holding the slot, and it is the conversation the user is watching); the master is re-armed on the way back out, and only if the mode actually moved — see §5.7.
+
+**The cell** is `#seg-mode`, the status bar's leftmost segment — see §3.3 for the three renderings and why this one never hides.
+
+What each mode looks like from the user's seat: `ask` is the app as it has always been. In `plan` every edit and command comes back as a **denied result** the model reads and works around — no gate opens, no keypress is needed, the turn runs to completion and the reply usually ends in a plan via `task_done`/`ask_user`; switching back to `ask` is how that plan gets carried out. In `unattended` anything that *would* have opened a gate is denied instead, so nothing waits on a human who is not there — the opposite of YOLO, which answers those gates "yes" (and wins where both are set: architecture.md's verdict order). The help screen (`F1`) carries this same three-line summary in prose.
+
 ---
 
 ## 3. Clipboard watcher integration
@@ -492,14 +514,16 @@ Messages (all `textual.message.Message` subclasses, posted from the thread): `Re
 
 ### 3.3 Status bar (the "armed/ingested/waiting" indicator)
 
-Seven `Static` segments, words not emoji, colored via CSS classes, driven by reactives:
+Eight `Static` segments, words not emoji, colored via CSS classes, driven by reactives:
 
 ```
-● ARMED │ ChatGPT 4.0k │ out 3.4k/4.0k (1/1) │ turn 5 │ EDITS:auto │ ~\Dev\AgentClip
-● ready │ ⛔ DISARMED │ ChatGPT 4.0k │ out 3.4k/4.0k (1/1) │ turn 5 │ ⚡ YOLO │ ~\Dev\AgentClip
+MODE:ask  │ ● ARMED │ ChatGPT 4.0k │ out 3.4k/4.0k (1/1) │ turn 5 │ EDITS:auto │ ~\Dev\AgentClip
+MODE:plan │ ● ready │ ⛔ DISARMED │ ChatGPT 4.0k │ out 3.4k/4.0k (1/1) │ turn 5 │ ⚡ YOLO │ ~\Dev\AgentClip
 ```
 
-`#seg-armed` (second) is empty and **hidden** whenever the app is armed, which is nearly always — the badge is an alarm, so it may not become furniture the eye stops reading. It is its own slot rather than a share of the `EDITS`/YOLO one because both can be true at once, and a disarmed YOLO session is exactly the pair a user has to be able to see. See §3.5.
+`#seg-mode` is **first** — left of even the watcher — and never hides. It is the permission mode (§2.6a): `MODE:ask` dim (`.st-dim`), `MODE:plan` blue-bold (`.st-plan`, the `$accent` the app already borders with), `MODE:unattended` warning-bold (`.st-unattended`). Neither of the two is red, because red is spoken for by the two badges that mean *approvals are off* (`⚡ YOLO`) and *the OS switch is out* (`⛔ DISARMED`). Unlike `#seg-armed` this one shows in **all three** states rather than only the alarming ones: `shift+tab` (§2.6a) is a blind cycle with no other feedback once the toast has gone, so a segment that disappeared in `ask` would leave the user unable to read the answer to "which mode am I in?" off the bar. Leftmost because it is the widest-scoped fact on the row — it governs what may happen to the project at all, while everything to its right describes one session's progress. It is painted from `StatusSnapshot.mode` while a session exists (during a delegation that is the **sub-agent's** engine, like every other field here — which reads the same, since the dial governs every engine in the run, §2.6a), and from `SessionController.permission_mode` before one — which is a live setting, not a read-only preview: `shift+tab` and `/mode` both work at the start prompt and between sessions, and whatever the segment reads there is the mode the next session is armed with (§2.6a).
+
+`#seg-armed` (third) is empty and **hidden** whenever the app is armed, which is nearly always — the badge is an alarm, so it may not become furniture the eye stops reading. It is its own slot rather than a share of the `EDITS`/YOLO one because both can be true at once, and a disarmed YOLO session is exactly the pair a user has to be able to see. See §3.5.
 
 Watcher segment states: `● ARMED` (green, polling), `◍ EXECUTING` (yellow), `◍ APPROVAL?` (yellow, blinking class), `◍ PART 2/3` (chunk mode), `○ PAUSED` (dim), `✗ CLIP ERR` (red — provider fault, manual mode active), `○ IDLE`, `✓ DONE`.
 
@@ -552,6 +576,8 @@ Five rules, and each one is a mistake the obvious implementation makes:
 - **Same child process, same bracket as the picker.** tkinter cannot share the TUI's process, so this is a second hidden CLI flag (`--show-identify`, `screen/picker.py::draw_identify_overlay`) with the element list as JSON on the child's **stdin** — a profile's worth of rectangles is well past what a command line should carry, and the picker child already established stdout as the direction results come back in. The detectors are suspended around it for the reason in §3.4e, and the overlay dismisses on any click and on any key — and on **nothing else**. It is a picture the user asked for, so it stays up until they are done reading it; neither the child nor the parent runs a clock (an earlier ~10 s self-destruct, with a 60 s cap on the parent's `subprocess.run`, took the answer away mid-read). The cost is that the detectors stay suspended, and the `regionpick` worker slot stays taken, for as long as the overlay is up — both are exactly what "the user is looking at their screen, not at the automation" should mean.
 
 - `/yolo [on|off]` — toggle YOLO mode (§2.6).
+
+- `/mode [plan|ask|unattended]` — set the permission mode (§2.6a). Bare `/mode` **reports** rather than cycles: a command naming three states must not require the user to remember which one they are in to reach the one they want — cycling is `shift+tab`'s job, where blind stepping is the point.
 
 **One registry.** The list above is data, not prose repeated per consumer: `app/commands.py` holds a frozen `ChatCommand` (name, arg hint, one-line summary, aliases) per entry, and the controller's dispatch table, the `/help` note, the "unknown command — try `/help`, `/new`, `/abort`, `/identify`, `/log`, `/armed`, or `/yolo`" hint, the F1 help screen's command section and the autocomplete popup all render from that one tuple. `SessionController._command_handlers()` is the join between a registry name and what it does, and a test pins the two sets equal, so a command cannot ship as an undiscoverable row (or a hidden feature). It sits in `app`, not `tui`, because the dispatch does — plain string work, no Textual import, which is exactly what lets a `tui` widget read the same table.
 
@@ -639,7 +665,8 @@ Most chat sites need a click to get a response onto the clipboard at all — the
   6. On a verified (or unverifiable-fallback) click: toast the diff, and snap focus back to AgentClip — a 0.15 s beat (so the browser registers the click), then `_snap_focus_back()` → `focus_window_verified(_own_window)`. `_own_window` is the foreground window handle recorded whenever the user is provably interacting with AgentClip — at mount, on every composer send, and on a press of the sidebar's own "New browser chat" button (`_remember_own_window`) — and is deliberately **not** session-scoped: the terminal outlives `/new`. `focus_window` (screen.focus) taps ALT through SendInput first, the documented input-recency loophole without which Windows refuses `SetForegroundWindow` from a background process. **Verified and retried**, because asking once is not the same as arriving: the click this follows is itself an activation request, the browser is still processing it, and a granted foreground can be taken straight back — silently, so the whole snap-back looked like a missing call. `focus_window_verified` therefore asks, waits a **growing** beat (`REFOCUS_SETTLE_S` = 0.05 s × the attempt) and only then reads `foreground_window()` back, up to `REFOCUS_ATTEMPTS` (4) times — a 0.5 s budget, off the UI thread, after which False simply means the browser kept it. On exhausted retries (the clipboard never changed across all three attempts): toast a warning ("copy click did not take — click the response's copy button yourself") and deliberately **do not** snap focus back — the browser stays focused so the user can click it themselves.
   7. **The no-CLIP harvest** (`_ingest_prose_harvest`, after a verified click, only for a service with `ServicePreset.capture_prose` on — the editor's DETECTION tick "ingest replies with no CLIP", default **off**). A model reply carrying no CLIP blocks at all used to vanish here: the watcher's pre-filter (protocol.md §1.4 tolerance #11) dropped it, and the only way to see it was the manual `i` ingest. The opt-in is the one place that filter is loosened, and it is scoped to the flow's own click **rather than to the watcher**, because the two know different things: the watcher sees every copy the user makes and must keep ignoring the non-protocol ones, while the flow just watched the copy button write *this* text — it is the reply, whatever it contains. So on a verified click the flow reads the clipboard once more: protocol-shaped text is left strictly alone (the watcher ingests it on its own, and reading it here too would be a double ingest of every normal reply); anything else goes to the controller as `submit_clipboard(text, accept_prose=True)`, which routes it through the same forced-ingest treatment the `i` key has always had — the engine still judges it `Noise("not-protocol")`, the controller shows it in the transcript as **prose** with the "press t to follow up" invitation, and nothing in it executes. The session stays in `AWAITING_REPLY`; the user reads the reply in the window, exactly as asked, and follows up when ready.
 - Every branch also repaints the sidebar's `#side-tpl-copy` line with the captured size plus a short ASCII status (`hover-scanning` / `clicked (diff 0.03)` / `click did not take` / `not found` / `capture failed`), which `Sidebar.update_template` prefixes `copy · `; it rests at `copy · no click yet`.
-- **The paste flash and auto-paste**: automation covers browser→AgentClip; AgentClip→browser used to always end in a human Ctrl+V, and now only sometimes does. Right after its focus click, `copy_outbound` checks whether that click actually landed (`_click_after_response` now returns `bool`): if it did, a 0.15 s settle and then a synthetic Ctrl+V (`screen.focus.send_paste`) drops the payload straight into the focused input, and the sidebar banner reads `>>> PRESS ENTER <<<` (`Sidebar.ENTER_FLASH_TEXT`) — the human's only job left is the send keystroke. If the click did not land, or no region was drawn at all, no paste is attempted (pasting into an unknown window is the one unforgivable failure mode) and the banner falls back to its original `>>> PRESS CTRL+V <<<` wording (`PASTE_FLASH_TEXT`). Either way it is the same obnoxious banner at the very top of the sidebar (`#side-paste-flash`, bold, red/yellow, blinking at 0.4 s via a Sidebar-owned timer toggling the `flash-alt` class — pure presentation, so the dumb widget may own it), just with different text; `Sidebar.show_paste_flash(text=...)` takes the copy to show. It hides when the moment has provably passed: a `MATCH` busy probe (the model is chewing — the paste/send landed), a new `ClipboardCaptured` (the conversation moved on without it), or `clear_transcript()`. `Sidebar.show_paste_flash`/`hide_paste_flash` are the only entry points; display on/off (and, now, which text) is the tested contract.
+- **The paste flash and auto-paste**: automation covers browser→AgentClip; AgentClip→browser used to always end in a human Ctrl+V, and now only sometimes does. Right after its focus click, `copy_outbound` checks whether that click actually landed (`_click_after_response` now returns `bool`): if it did, a `PASTE_SETTLE_DELAY` (0.2 s) settle and then a synthetic Ctrl+V (`screen.focus.send_paste`) drops the payload straight into the focused input, and the sidebar banner reads `>>> PRESS ENTER <<<` (`Sidebar.ENTER_FLASH_TEXT`) — the human's only job left is the send keystroke. **The settle is the whole reason the insert is reliable**: a click is an *activation request*, granted asynchronously, and a Ctrl+V that overtakes the browser's own activation is delivered to whatever held focus a moment ago — the payload silently fails to appear, which is precisely the intermittent "the reply did not go in" the user sees. It is the same race `focus_window_verified` fights from the other side, minus anything to verify against (the chat box is a browser widget, not a window handle), so the answer is a beat long enough to outlast the activation on a busy machine and short enough to be invisible. It is `await asyncio.sleep`, not `time.sleep`: the TUI keeps painting the rail and the flash the user is looking at instead of the browser. Both delivery modes sit behind it — the streamed one (`_stream_outbound`) pastes its first chunk into the same fresh focus. If the click did not land, or no region was drawn at all, no paste is attempted (pasting into an unknown window is the one unforgivable failure mode) and the banner falls back to its original `>>> PRESS CTRL+V <<<` wording (`PASTE_FLASH_TEXT`). Either way it is the same obnoxious banner at the very top of the sidebar (`#side-paste-flash`, bold, red/yellow, blinking at 0.4 s via a Sidebar-owned timer toggling the `flash-alt` class — pure presentation, so the dumb widget may own it), just with different text; `Sidebar.show_paste_flash(text=...)` takes the copy to show. It hides when the moment has provably passed: a `MATCH` busy probe (the model is chewing — the paste/send landed), a new `ClipboardCaptured` (the conversation moved on without it), or `clear_transcript()`. `Sidebar.show_paste_flash`/`hide_paste_flash` are the only entry points; display on/off (and, now, which text) is the tested contract.
+- **The retry button** (`#retry-insert-btn`, "Retry insert") is the flash's one action, mounted directly under it and shown by `show_paste_flash(..., retry=True)` — i.e. exactly when the banner is the `>>> PRESS CTRL+V <<<` one, because an insert that landed has nothing to re-run and offering to paste a second payload on top of the first is worse than offering nothing. `MainScreen.retry_insert()` parks the payload back on the clipboard (`_park_on_clipboard`) and re-runs `_insert_outbound` — **the same method the auto flow calls**, so the retry cannot deliver something different, skip the auto-submit tap or forget to re-open the reply gate. That shared method is the reason the split exists at all: `copy_outbound` is now "write the clipboard, remember the payload (`_pending_insert`, cleared by `clear_transcript()`), insert it", and the button is the second door onto the last step. Three refusals, all harmless to press into: nothing copied yet, DISARMED (§3.5 — a button is not an exemption from "no clicking, no typing"; the toast names F5), and an auto-copy flow mid-sequence, whose mouse work this would shove through.
 - **Scope and layering**: the captured icon lives in the service profile — shared by every window on that service, persisted to disk, so it outlives `/new` *and* the process; only the trigger state (`_copy_armed`, `_copy_changed_streak`, `_stale_arm_streak`) and the session gate (`_awaiting_pasted_reply`) are reset by `clear_transcript()`. Nothing is persisted to the config file. The flow itself lives entirely on MainScreen, like the focus click — the controller never knows the feature exists.
 
 ### 3.4c A sub-agent run, end to end
@@ -647,7 +674,7 @@ Most chat sites need a click to get a response onto the clipboard at all — the
 When the model calls `delegate`, the engine parks the turn in `AWAITING_SUBAGENT` and hands the controller a `Delegate(task, context)` step. What follows is a *nested session*, not a parallel one: the master's flow coroutine is blocked inside the delegate call for the whole run, which is exactly what lets the single clipboard watcher, the single approval gate, the single `ask_user` future and the single focused transcript be **retargeted** rather than duplicated. At most one chat is live at any instant.
 
 1. **Ask first.** `view.delegation_available()` is checked before anything is built. False ⇒ the model gets `status=error` naming the missing calibrations (`view.delegation_missing()`), the master's turn continues, and no tab is opened. The controller never learns what a "new-chat button" is — the gaps cross the port as data. The same refusal covers a second way the ground can move: `_subagent_service` is frozen at bootstrap (both pickers lock for the session's life) but the **service editor is not**, so F2 mid-session can delete the very preset that key names. A frozen key that is no longer in `config.services` refuses the delegation outright — building the engine anyway would fall through `cli.build`'s unknown-preset fallback to `[general]`, giving the sub-run neither the budget readiness advertised nor the one its window is pointed at.
-2. **Save the master.** The whole per-session context (engine, chat name, preset, stats, glyph strip, last outbound, YOLO mirror) is snapshotted into a local and restored in a `finally`. YOLO deliberately does **not** inherit: `ApprovalPolicy` is per-engine, so a sub-agent starts from the configured default.
+2. **Save the master.** The whole per-session context (engine, chat name, preset, stats, glyph strip, last outbound, YOLO mirror) is snapshotted into a local and restored in a `finally`. YOLO deliberately does **not** inherit: `ApprovalPolicy` is per-engine, so a sub-agent starts from the configured default. The **permission mode** is the exception, and the only field the swap does not touch: it is an app-wide dial (§2.6a), so `_adopt_ctx` leaves the mirror alone, `_sub_run` arms the sub-agent's engine with it before that engine's first payload, and `_restore_ctx` restores everything *except* it. `_SessionContext.engine_mode` records only what the master's **policy** was left at, so `_rearm_master_mode` can hand the master a mode cycled while it was parked — and stay silent when nothing moved, since re-sending the same mode would arm a pointless "the mode is now …" note on a conversation whose mode never changed.
 3. **Build a sub-agent, on the sub-agent window's service.** `EngineRequest(service=self._subagent_service, role="subagent", allow_delegate=False, parent_chat_name=…)` → its own Engine, its own chat name, its own `SessionStore` (the `session` event records the parent, so the audit trail joins up), the sub-agent bootstrap variant, and a catalog with no `delegate` in it — nesting is excluded by construction, not by a special case. `_subagent_service` is the service the SUB tab was on when the session armed, carried across the port in `SessionSpec.subagent_service` and frozen there (§1.6): its paste budget is the budget of the chat this run is actually going to be pasted into, and composing against the master's would silently overrun a smaller one.
 4. **Start its transcript and compose.** `open_session_view(ref)` appends the `── task: <title> ──` divider to the sub-agent window's (persistent) panel, records where this run's events begin, badges the tab `▶`, and focuses that window; the task (plus `context` under its documented heading) is composed into a bootstrap. A `BudgetExceeded` here is an error result to the master, never a crash.
 5. **Open its chat — before any paste.** `start_chat(ref)` searches the SUB-AGENT window's chat region for THAT tab's service's captured new-chat button, clicks the match, and only then retargets the automation. Three refusals, three different stories: nothing captured / no window drawn (`NOT_CALIBRATED`), the button is not on screen right now (`MISMATCH` — nothing is clicked, because clicking blind in a browser window is the one thing worse than not clicking), and the OS swallowing the input (`NOT_CLICKED`). **False aborts the delegation with zero paste calls**, because a sub-agent's bootstrap in the master's chat is unrecoverable. This is the single most damaging failure mode in the feature and has its own tests at both layers.
@@ -851,6 +878,61 @@ The user is staring at the browser; the terminal must call them back:
 
 ---
 
+## 8a. The RUN PANEL — watching a turn execute
+
+Everything else on this screen is about a turn that has already happened or one
+that has not started. This region is the only thing that says anything at all
+*while* it runs — and a turn can run for minutes, because one of the calls in it
+is `npm run build`.
+
+Its predecessor said `Working - running 3 tool calls...` on one line, which was
+enough for a turn of three reads (over before it is read) and useless for the
+one that matters. Three questions went unanswered: **which** call is running,
+**what is queued** behind it, and **what is the command printing**. The panel
+answers all three, and disappears the moment the turn ends — the results land in
+the transcript exactly as before, so nothing here is a second copy of anything.
+
+```
+⠹ Working - running 3 tool calls...  (ctrl+x to cancel)
+✓ 1 read_file    src/utils.py
+▶ 2 run_command  npm run build                      ctrl+o output
+• 3 write_file   src/build.log
+```
+
+- **One row per planned call**, in id order, handed over whole when execution
+  starts (`ChatView.start_working(label, calls)`) so the queue is visible before
+  the first call runs. Pending rows are dim, the running row is bold, finished
+  rows carry the `✓ / ✗ / −` alphabet the approval queue strip already uses.
+  `detail` — the command line, the path, the pattern — is chosen and clipped by
+  the controller; the view renders it and decides nothing.
+- **Every row resolves.** The engine reports `done` for calls that never run
+  too — denied by a rule or by plan/unattended mode, skipped behind a rejection
+  or a cancel, pre-resolved parse errors — because a row left pending forever is
+  worse than no row.
+- **`ctrl+o` opens the running command's output** (so does a click on the
+  panel): the last 12 lines of what it has printed so far, growing live, capped
+  and scrollable. Collapsed by default — most turns do not need it, and a panel
+  that jumped to twelve rows high on every `ls` would be worse than the line it
+  replaced. Only `run_command` rows can be expanded; the key is hidden outright
+  when nothing is executing.
+- **The buffer is MainScreen's, the pane is a view of it** — the harness log
+  pane's division of labour (§3.3b), for the same reasons: the deque fills
+  whether or not anyone is looking, nothing is painted while the pane is
+  collapsed, and revealing it refills in one write. Bounded per call, dropped
+  whole when the turn ends.
+
+**How the characters get here.** `run_command` peeks at its `ExecHandle` once per
+poll slice (5×/s, the same slices that check the deadline and the user's cancel)
+and pushes the *delta* to `ToolContext.on_output`; the engine hands that, and the
+per-call `running`/`done` progress, to the controller, which forwards both across
+`ChatView`. All of it arrives **on the engine's worker thread**, so MainScreen's
+three port methods do nothing but `post_message` (`CallStarted` / `CallFinished`
+/ `CallOutput`) — the same bridge the clipboard watcher uses. A host whose
+transport cannot expose partial output (`peek()` answering `""`) simply shows
+nothing live; the turn is unaffected.
+
+---
+
 ## 9. Edge cases
 
 - **Partial copy** (`===CLIP:CALL` without `===CLIP:END===`, or chunk header without body): parser returns `ParseError(kind="truncated")` → red transcript line + toast *"partial protocol block — click the reply's Copy button and try again"* + bell. State stays `ARMED`; the bad content's hash is remembered so it doesn't re-toast every tick.
@@ -899,8 +981,10 @@ Only keys that are actually bound are listed. Chunk-walk mode (§6) has none yet
 | `tab` | completes the highlighted command exactly like Enter, and does not move focus | composer focused, popup open with a highlight |
 | `↑` / `↓` | move the command-popup highlight, wrapping; from *no* highlight, `↓` arms the first row and `↑` the last | composer focused, popup open |
 | `ctrl+j` | insert a literal newline in the composer | composer focused |
+| `shift+tab` | cycle the permission mode `ask → plan → unattended → ask` (§2.6a); the leftmost status segment is the readout. **Overrides Textual's own `Screen` binding for this key** (`app.focus_previous`) — backwards focus navigation is given up on purpose, `tab` still cycles forwards | MainScreen (priority; `show=False`), **every** state — no `check_action`, so it works mid-turn, at a gate and while disarmed; a no-op with no session |
 | `ctrl+s` / `ctrl+enter` | send the composer without focusing it | MainScreen (priority) |
-| `ctrl+x` | cancel the tool calls running now (`Engine.request_cancel`) — in whichever chat is live; the turn still reports back. `/abort` is the one that ends a delegation (§3.4c) | MainScreen (priority), while the RunningBar is up (`executing`) |
+| `ctrl+x` | cancel the tool calls running now (`Engine.request_cancel`) — in whichever chat is live; the turn still reports back. `/abort` is the one that ends a delegation (§3.4c) | MainScreen (priority), while the run panel is up (`executing`) |
+| `ctrl+o` | show/hide the running command's live output in the run panel (§8a). A click on the panel is the same request | MainScreen (priority, for the same reason as `ctrl+x`; `show=False`), while a turn is executing (`executing`) — hidden outright otherwise, since there is nothing to show |
 | `ctrl+p` | command palette (every action mirrored here) | global, Textual default |
 | `ctrl+q` | quit (Confirm if mid-turn) | global, Textual default |
 | SummaryScreen: `u` undo session, `t` new session, `esc` close | | modal-local BINDINGS |

@@ -180,6 +180,17 @@ class SshExec:
                 return None
             time.sleep(min(_POLL_S, max(0.0, deadline - time.monotonic())))
 
+    def peek(self) -> str:
+        """The merged output so far, as of the last :meth:`wait`/:meth:`drain`.
+
+        No transport call of its own: the channel is pumped by the polling loop
+        that already calls ``wait()`` every slice, and touching it from here
+        would mean a second place that can discover a dead link. So a remote
+        command streams at exactly the polling loop's resolution, which is the
+        same resolution the UI redraws at.
+        """
+        return self._buffer
+
     def kill(self) -> None:
         """Kill the remote process group, best effort, never raising."""
         pgid = ""

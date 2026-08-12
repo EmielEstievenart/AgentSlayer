@@ -157,7 +157,7 @@ from textual.worker import Worker, get_current_worker
 
 from agentclip.app import SessionController, SessionSpec, SessionView
 from agentclip.app.types import EngineRequest, SessionRef
-from agentclip.app.view import Severity
+from agentclip.app.view import RunCall, Severity
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.clip.chunking import STREAM_CHUNK_CHARS, split_for_stream
 from agentclip.clip.watcher import SelfWriteSet, watch, write_via
@@ -226,6 +226,9 @@ from agentclip.tui.harness_log import (
 from agentclip.tui.loop_state import LoopState
 from agentclip.tui.messages import (
     BusyProbed,
+    CallFinished,
+    CallOutput,
+    CallStarted,
     ClipboardCaptured,
     ElementCrop,
     ElementsMatched,
@@ -245,6 +248,7 @@ from agentclip.tui.widgets.elements import (
     element_crop_image,
 )
 from agentclip.tui.widgets.log_pane import HarnessLogPane
+from agentclip.tui.widgets.run_panel import RUN_OUTPUT_LINES, RunPanel
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
     AUTO_SEND_FLASH_TEXT,
@@ -327,6 +331,23 @@ _ELEMENT_CLICK_SETTLE_S = 0.05
 # Beat between opening a fresh browser chat and treating it as the live slot -
 # the page still has to render its (centred) input box. Tests shrink this.
 _NEW_CHAT_SETTLE_S = 0.4
+# Beat between the focus click landing on the chat's input box and the synthetic
+# Ctrl+V that follows it (``_insert_outbound``).
+#
+# The click is what gives the browser window the OS focus, and focus is granted
+# ASYNCHRONOUSLY: the window is still activating itself while our next SendInput
+# burst goes out, and a paste that arrives before the caret is really in the
+# input field is delivered to whatever held focus a moment ago - which is to say
+# nowhere the user can see, and the reply silently fails to insert. This is the
+# same race ``focus_window_verified`` documents from the other direction; here
+# there is nothing to verify against (the chat box is a browser widget, not a
+# window handle), so the answer is a beat that comfortably outlasts the
+# activation on a busy machine. 200ms is under human notice next to a click the
+# user is not watching anyway. Tests shrink it.
+PASTE_SETTLE_DELAY = 0.2
+# Beat between the paste and the opt-in auto-submit Enter, for the box to render
+# and re-measure what was just dropped into it before it is sent.
+_SUBMIT_SETTLE_S = 0.15
 # Beat between the bursts of a streamed delivery (ServicePreset.delivery), so a
 # chat box that reflows and re-measures after every paste is not handed the next
 # one mid-repaint. Only between chunks: the last one is followed by the settle
@@ -687,6 +708,20 @@ class MainScreen(Screen[None]):
         # free here (f1-f4 are taken; the TextArea's own ctrl+x cut would
         # otherwise swallow it, hence priority).
         Binding("ctrl+x", "cancel_execution", "cancel run", priority=True),
+        # Its neighbour, and for the same reason: while a command is grinding
+        # away the screen is otherwise inert, and this is the key that opens
+        # what it is printing (§8a). Priority because the composer is a TextArea
+        # and ctrl+o is one of the few chords it does not already claim.
+        Binding("ctrl+o", "toggle_run_output", "output", priority=True, show=False),
+        # The permission mode (§2.6a), one key, always live - including mid-turn
+        # and with a gate up, because "stop asking me / stop changing things" is
+        # exactly the thought a user has while watching a turn run. Priority for
+        # the composer's sake like the rest, but here it also overrides a
+        # binding of Textual's own: Screen binds shift+tab to focus_previous,
+        # and a focused TextArea would hand the key straight to it. Backwards
+        # focus navigation is the accepted price - the app has four focusables
+        # and tab still cycles them forwards.
+        Binding("shift+tab", "cycle_permission_mode", "mode", priority=True, show=False),
         Binding("ctrl+s", "submit_composer", "send", priority=True, show=False),
         Binding("ctrl+enter", "submit_composer", "send", priority=True, show=False),
         Binding("escape", "cancel_entry", "cancel", show=False),
@@ -872,6 +907,14 @@ class MainScreen(Screen[None]):
         # a wedged user resets the session first and goes looking for the
         # evidence second (tui.harness_log).
         self._harness_log: deque[HarnessEntry] = deque(maxlen=HARNESS_LOG_MAX)
+        # One running command's output, per call id, as complete LINES - the run
+        # panel's tail is a view of this and nothing else (widgets/run_panel.py).
+        # Bounded and per-turn: ``stop_working`` empties both, because the
+        # model's copy of the output has by then reached the transcript and this
+        # was only ever the live view of it. ``_run_output_partial`` holds each
+        # call's unfinished last line until its newline arrives.
+        self._run_output: dict[int, deque[str]] = {}
+        self._run_output_partial: dict[int, str] = {}
         # Whether the last status push said a session was running, so the log
         # can mark the two boundaries the controller never announces directly.
         self._logged_session_active = False
@@ -884,6 +927,15 @@ class MainScreen(Screen[None]):
         # worker cannot kill the blocking child overlay process it spawned, so
         # extra button presses are refused up front instead.
         self._picker_open = False
+        # The last payload an insert was attempted with, kept so the sidebar's
+        # "Retry insert" button can re-run the click-and-paste against exactly
+        # that text (``retry_insert``). The clipboard is where the payload
+        # already is, but it is the USER's clipboard: between a failed insert and
+        # the press that retries it they may well have copied something else, and
+        # a retry that pasted whatever happens to be on the clipboard now would
+        # drop a stray copy into the chat. Session-scoped - cleared by /new,
+        # which is where "the last outbound" stops meaning anything.
+        self._pending_insert: str | None = None
         self._controller = SessionController(config, engine_factory, project_root, view=self)
 
     # -- window tabs -> slots --------------------------------------------------
@@ -987,7 +1039,7 @@ class MainScreen(Screen[None]):
                     for window in _WINDOW_SLOTS:
                         yield TranscriptPanel(id=_panel_id(window))
                 yield ActionPanel(id="action")
-                yield RunningBar(id="running")
+                yield RunPanel(id="running")
                 # Directly above the box, so the list a keystroke is filtering
                 # sits where the eye already is (§3.3a). Hidden until it isn't.
                 yield CommandPopup(id="cmd-popup")
@@ -1043,7 +1095,13 @@ class MainScreen(Screen[None]):
         return self.query_one(CommandPopup)
 
     @property
+    def run_panel(self) -> RunPanel:
+        """The whole executing-turn region: spinner, call rows, live output (§8a)."""
+        return self.query_one(RunPanel)
+
+    @property
     def running_bar(self) -> RunningBar:
+        """The run panel's spinner line - the `ctrl+x to cancel` advertisement."""
         return self.query_one(RunningBar)
 
     @property
@@ -1185,6 +1243,11 @@ class MainScreen(Screen[None]):
             return self.reject_open
         if action == "cancel_execution":  # only while tool calls are actually running
             return True if self.executing else None
+        if action == "toggle_run_output":
+            # Hidden outright rather than dimmed: there is no output to show
+            # unless a command is running THIS INSTANT, so a dimmed key in the
+            # footer would be advertising something the user cannot reach.
+            return self.executing
         return True
 
     # == ChatView: transcript =================================================
@@ -1231,6 +1294,9 @@ class MainScreen(Screen[None]):
         self._delegation_ready = self.delegation_available()
         self._reset_finish_trigger()
         self._close_reply_gate()  # whatever was pasted, no reply to it is due now
+        # ...and the last outbound belongs to the session being torn down, so
+        # there is nothing left for the retry button to re-deliver.
+        self._pending_insert = None
         # A reset, not a transition - and the log says so in those words, because
         # every other road to IDLE is the loop finishing something. This entry is
         # also the boundary marker that lets the log survive /new intact: the
@@ -1593,21 +1659,99 @@ class MainScreen(Screen[None]):
         with suppress(NoMatches):
             self.action_panel.hide_panel()
 
-    def start_working(self, label: str) -> None:
-        # The running bar and the cancel binding share one lifetime: the bar
+    def start_working(self, label: str, calls: Sequence[RunCall] = ()) -> None:
+        # The run panel and the cancel binding share one lifetime: the panel
         # advertises ctrl+x, so ctrl+x must work exactly while it is up.
         self.executing = True
         if not self.is_mounted:
             return
         with suppress(NoMatches):
-            self.running_bar.start(label)
+            self.run_panel.start(label, calls)
 
     def stop_working(self) -> None:
         self.executing = False
+        # The turn is over: its output belonged to the panel that is going away,
+        # and the model's copy of it is in the transcript.
+        self._run_output.clear()
+        self._run_output_partial.clear()
         if not self.is_mounted:
             return
         with suppress(NoMatches):
-            self.running_bar.stop()
+            self.run_panel.stop()
+
+    # -- ChatView: the turn executing, call by call (WORKER-THREAD callers) ----
+    #
+    # The engine calls these three from the thread it is executing the plan on
+    # (see ChatView), so all three do exactly one thing: post. Everything that
+    # touches a widget happens in the handlers below, on the UI thread - the
+    # same bridge the clipboard watcher uses.
+
+    def call_started(self, call_id: int, tool: str, detail: str) -> None:
+        self.post_message(CallStarted(call_id, tool, detail))
+
+    def call_finished(self, call_id: int, glyph: str) -> None:
+        self.post_message(CallFinished(call_id, glyph))
+
+    def call_output(self, call_id: int, chunk: str) -> None:
+        self.post_message(CallOutput(call_id, chunk))
+
+    def on_call_started(self, message: CallStarted) -> None:
+        message.stop()
+        with suppress(NoMatches):
+            self.run_panel.call_started(message.call_id, message.tool, message.detail)
+
+    def on_call_finished(self, message: CallFinished) -> None:
+        message.stop()
+        with suppress(NoMatches):
+            self.run_panel.call_finished(message.call_id, message.glyph)
+
+    def on_call_output(self, message: CallOutput) -> None:
+        """Append one command's newest characters to its buffer, then repaint.
+
+        The deque is the truth (log_pane.py's division of labour): it fills
+        whether or not anyone is looking, and the panel paints only while its
+        tail is expanded - which is the usual case of NOT, so a chatty command
+        costs a couple of list operations per poll slice and no render at all.
+        """
+        message.stop()
+        self._append_run_output(message.call_id, message.chunk)
+        with suppress(NoMatches):
+            panel = self.run_panel
+            if panel.expanded and panel.streaming_call == message.call_id:
+                panel.show_output(self._run_output_lines(message.call_id))
+
+    def on_run_panel_output_toggle_requested(self, message: RunPanel.OutputToggleRequested) -> None:
+        message.stop()
+        self.action_toggle_run_output()
+
+    def action_toggle_run_output(self) -> None:
+        """ctrl+o: show/hide the running command's live output (§8a)."""
+        with suppress(NoMatches):
+            panel = self.run_panel
+            call_id = panel.streaming_call
+            panel.toggle_output(self._run_output_lines(call_id) if call_id is not None else ())
+
+    def _append_run_output(self, call_id: int, chunk: str) -> None:
+        """Fold one delta into the call's line deque, holding the partial line.
+
+        A command's output arrives mid-line as often as not (a progress line, a
+        prompt), and a tail that only showed completed lines would sit one line
+        behind the thing the user opened it to watch. So the unfinished tail is
+        kept aside and shown as the last line until its newline arrives.
+        """
+        buffer = self._run_output.setdefault(call_id, deque(maxlen=RUN_OUTPUT_LINES))
+        text = self._run_output_partial.pop(call_id, "") + chunk.replace("\r\n", "\n")
+        lines = text.replace("\r", "\n").split("\n")
+        self._run_output_partial[call_id] = lines.pop()
+        buffer.extend(lines)
+
+    def _run_output_lines(self, call_id: int) -> list[str]:
+        """One call's buffered output, the unfinished last line included."""
+        lines = list(self._run_output.get(call_id, ()))
+        partial = self._run_output_partial.get(call_id, "")
+        if partial:
+            lines.append(partial)
+        return lines
 
     def reset_composer(self) -> None:
         with suppress(NoMatches):
@@ -1650,17 +1794,47 @@ class MainScreen(Screen[None]):
         # about to be delivered: a stream leaves its last chunk there, and this
         # is the write every manual recovery (the user's own Ctrl+V, /copy) is
         # aimed at.
-        clipboard_ok = True
+        clipboard_ok = await self._park_on_clipboard(text)
+        # What a retry would re-deliver, recorded before the first attempt so it
+        # is right whichever way that attempt ends (see ``retry_insert``).
+        self._pending_insert = text
+        await self._insert_outbound(text, clipboard_ok=clipboard_ok)
+
+    async def _park_on_clipboard(self, text: str) -> bool:
+        """Put the whole outbound on the clipboard, as a self-write. False = no
+        real clipboard backend, so it went out over OSC-52 (write-only) instead
+        and a synthetic Ctrl+V has nothing here to paste.
+
+        Every delivery starts here, whichever way it is about to be delivered: a
+        stream leaves its last chunk on the clipboard, and this is the write
+        every manual recovery (the user's own Ctrl+V, /copy, the retry button) is
+        aimed at.
+        """
         try:
             await asyncio.to_thread(write_via, self._provider, self._self_writes, text)
         except ClipboardUnavailable:
-            clipboard_ok = False
             self.app.copy_to_clipboard(text)  # OSC-52, write-only
             self.notify(
                 "no clipboard backend - sent via the terminal's OSC-52 escape; if pasting "
                 "fails, copy from .agentclip/sessions/<id>/outbound/",
                 severity="warning",
             )
+            return False
+        return True
+
+    async def _insert_outbound(self, text: str, *, clipboard_ok: bool) -> bool:
+        """Click the chat's input box, let the focus settle, paste, and - for a
+        service that opted in - tap Enter. True only when the payload really
+        landed in the box.
+
+        The payload is already on the clipboard when this runs (``copy_outbound``
+        and ``retry_insert`` both park it there first): this half is the OS work
+        on top of that write, and it is a method of its own precisely so the
+        retry button re-runs *this* sequence rather than a second, drifting copy
+        of it. Everything the auto flow does after the click - the settle, the
+        stream-or-burst choice, the auto-submit tap, the loop state, the reply
+        gate and the sidebar's nag - is therefore one thing, done once.
+        """
         # DISARMED stops here, one line below the clipboard write and above
         # every OS call - which is the whole shape of the feature: the payload
         # is where the user can paste it, and the click and the synthetic Ctrl+V
@@ -1681,7 +1855,14 @@ class MainScreen(Screen[None]):
         # unforgivable failure mode here.
         pasted = False
         if clicked:
-            await asyncio.sleep(0.15)  # let focus settle before typing into it
+            # THE seam between the click and the paste, and the one place it
+            # exists: the click above only tells us the OS accepted the input,
+            # never that the chat box has finished taking focus. See
+            # ``PASTE_SETTLE_DELAY``. Non-blocking, so the TUI keeps painting
+            # (the STATE rail and the flash are what the user has to look at
+            # while this happens) - and it covers the streamed delivery below
+            # too, since that is the same first Ctrl+V into the same fresh focus.
+            await asyncio.sleep(PASTE_SETTLE_DELAY)
             # Streaming needs a clipboard to write each chunk through, so a
             # service that asks for it still falls back to the single burst when
             # there is no backend - the OSC-52 payload above is all there is.
@@ -1707,7 +1888,7 @@ class MainScreen(Screen[None]):
                 # the only thing that moves the loop to WAIT_GENERATE, exactly
                 # as for a human Enter. If the tap did not take, the gate times
                 # out as ever, and the flash below says whose Enter it is now.
-                await asyncio.sleep(0.15)  # let the paste render before submitting it
+                await asyncio.sleep(_SUBMIT_SETTLE_S)
                 auto_sent = await asyncio.to_thread(send_enter)
                 self._log_harness(
                     KIND_GATE,
@@ -1748,8 +1929,62 @@ class MainScreen(Screen[None]):
                 if auto_sent
                 else ENTER_FLASH_TEXT
                 if pasted
-                else PASTE_FLASH_TEXT
+                else PASTE_FLASH_TEXT,
+                # ...and offer the one-press re-run beside that nag, exactly
+                # when the nag is the "you paste it yourself" one. An insert
+                # that landed has nothing to retry, and a button offering to
+                # click into the chat and paste a second payload on top of the
+                # first is worse than no button at all.
+                retry=not pasted,
             )
+        return pasted
+
+    # -- re-running an insert that did not land ---------------------------------
+
+    @on(Button.Pressed, "#retry-insert-btn")
+    def _on_retry_insert(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.run_worker(self.retry_insert(), group="insert", exclusive=True)
+
+    async def retry_insert(self) -> None:
+        """Do the insert again: park the last payload back on the clipboard,
+        click the chat box, settle, paste, and auto-submit if the service does.
+
+        The recovery for the failure this whole delay exists to make rarer - the
+        click landed but the paste went nowhere, and the reply is sitting on the
+        clipboard with the sidebar asking the user to Ctrl+V it into the browser
+        by hand. One press does that for them, through the SAME
+        ``_insert_outbound`` the auto flow uses, so the retry cannot deliver a
+        different thing (or skip the auto-submit) than the attempt it replaces.
+
+        Three refusals, none of them harmful to press into:
+
+        * nothing has been copied yet (a press before the first outbound);
+        * the app is DISARMED, where clicking and typing are exactly what is
+          promised not to happen - the toast names the switch;
+        * the auto-copy flow is mid-sequence, whose clicks and hover scans this
+          would shove the mouse through the middle of.
+        """
+        text = self._pending_insert
+        if text is None:
+            self.notify("nothing to re-insert yet - no outbound payload has been copied")
+            return
+        if not self._os_armed:
+            self.notify(
+                "disarmed - AgentClip may not click or type: press F5 to arm, or paste "
+                "into the chat yourself",
+                severity="warning",
+            )
+            return
+        if self._flow_running:
+            self.notify("the auto-copy flow is driving the mouse - let it finish first")
+            return
+        # Back to AUTO_INSERT even though the user asked for this by hand: the
+        # rail says what the automation is DOING, and what it is about to do is
+        # the auto insert over again.
+        self._set_loop_state(LoopState.AUTO_INSERT, "the insert is being retried from the sidebar")
+        clipboard_ok = await self._park_on_clipboard(text)
+        await self._insert_outbound(text, clipboard_ok=clipboard_ok)
 
     async def _stream_outbound(self, text: str) -> bool:
         """Walk ``text`` into the focused chat box a chunk at a time (opt-in per
@@ -1986,10 +2221,11 @@ class MainScreen(Screen[None]):
         ``focus_window_verified``) and every one of them is reached through
         exactly one of these doors:
 
-        1. the paste path (``copy_outbound``), which stops clicking and pasting
-           but still WRITES the payload to the clipboard, so the user can paste
-           it by hand - that is the existing MANUAL_INSERT fallback, and disarmed
-           mode simply routes into it;
+        1. the paste path (``_insert_outbound``, reached by ``copy_outbound``
+           and by the sidebar's retry button alike), which stops clicking and
+           pasting but still WRITES the payload to the clipboard, so the user can
+           paste it by hand - that is the existing MANUAL_INSERT fallback, and
+           disarmed mode simply routes into it;
         2. ``_click_profile_element``, the one find-then-click primitive, which
            refuses with ``ElementClick.DISARMED`` before it touches anything -
            covering /new's new-chat click and a delegation's chat-open alike;
@@ -4222,6 +4458,18 @@ class MainScreen(Screen[None]):
         controller no-ops if nothing is executing, so a stray press is safe."""
         self._controller.cancel_execution()
 
+    def action_cycle_permission_mode(self) -> None:
+        """shift+tab: ask -> plan -> unattended -> ask (§2.6a).
+
+        Deliberately ungated in ``check_action`` (it falls through to the
+        default ``True``), unlike every single-letter key on this screen: the
+        moment a user reaches for this is the moment the app is busy doing the
+        thing they want it to stop doing. Without a live session the controller
+        says so and changes nothing - the status bar is showing the configured
+        default there, which is not a session's state to change.
+        """
+        self._controller.cycle_permission_mode()
+
     def action_undo(self) -> None:
         self._controller.undo()
 
@@ -4395,6 +4643,12 @@ class MainScreen(Screen[None]):
             return
         watch_text, watch_class = self._watch_segment()
         snap = self._snap
+        # The snapshot is the authority once there is a session (it is the
+        # engine's own policy, and during a delegation it is the SUB-AGENT's,
+        # like every other field here); before one, the controller's mirror of
+        # the configured default is what shift+tab would be changing.
+        mode = snap.mode if snap else self._controller.permission_mode
+        mode_class = {"plan": "st-plan", "unattended": "st-unattended"}.get(mode, "st-dim")
         service = f"{snap.service_key} {_fmt_k(snap.budget_chars)}" if snap else "no session"
         out = (
             f"out {_fmt_k(snap.last_outbound_chars)}/{_fmt_k(snap.budget_chars)} (1/1)"
@@ -4413,6 +4667,8 @@ class MainScreen(Screen[None]):
         except ValueError:
             root = str(self._project_root)
         bar.update_segments(
+            mode=f"MODE:{mode}",
+            mode_class=mode_class,
             watch=watch_text,
             watch_class=watch_class,
             # Its own segment rather than a word folded into the watch one: that

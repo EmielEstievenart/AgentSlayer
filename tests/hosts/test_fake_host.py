@@ -118,3 +118,23 @@ def test_a_hanging_command_never_finishes_and_can_be_killed(host: FakeHost) -> N
     assert handle.wait(0.0) is None
     handle.kill()
     assert handle.killed and handle.drain(0.0) == "partial"
+
+
+def test_scripted_chunks_are_revealed_one_slice_at_a_time(host: FakeHost) -> None:
+    """The streaming half of the seam: peek() grows, then the command finishes."""
+    host.script("build", chunks=("compiling\n", "linking\n"))
+    handle = host.spawn("build", host.root)
+    assert handle.peek() == ""
+    assert handle.wait(0.0) is None and handle.peek() == "compiling\n"
+    assert handle.wait(0.0) is None and handle.peek() == "compiling\nlinking\n"
+    result = handle.wait(0.0)
+    assert result is not None and result.output == "compiling\nlinking\n"
+
+
+def test_a_command_without_chunks_streams_nothing(host: FakeHost) -> None:
+    """peek() answering "" is a legal host, not a broken one (ExecHandle)."""
+    host.script("quiet", output="all of it at the end")
+    handle = host.spawn("quiet", host.root)
+    assert handle.peek() == ""
+    result = handle.wait(0.0)
+    assert result is not None and result.output == "all of it at the end"

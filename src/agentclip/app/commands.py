@@ -92,6 +92,11 @@ COMMANDS: tuple[ChatCommand, ...] = (
         summary="toggle whether the tool may touch the screen at all (same as F5)",
     ),
     ChatCommand(
+        name="mode",
+        arg="[plan|ask|unattended]",
+        summary="set the permission mode (bare /mode says which one you are in)",
+    ),
+    ChatCommand(
         name="yolo",
         arg="[on|off]",
         summary="toggle auto-approve-everything",

@@ -8,7 +8,7 @@ install. Only mcp/client.py may import the SDK, and only lazily.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 # OpenCode's tool-id sanitizer, ported byte-for-byte (catalog.ts): the composite

@@ -1076,3 +1076,62 @@ def save_theme(theme: str, path: Path | None = None) -> None:
         with suppress(OSError):
             os.remove(tmp_name)
         raise
+
+
+def save_active_services(service: str, subagent_service: str, path: Path | None = None) -> None:
+    """Persist which service each window tab is pointed at as ``[general]
+    service`` / ``[general] subagent_service`` in the global config.toml at
+    ``path`` (default: :func:`default_global_config_path`).
+
+    This is what makes the sidebar's picker stick across restarts: switching
+    service in the TUI used to be in-memory only, so every launch came back on
+    whatever ``[general] service`` said. Signature, atomic-write mechanics and
+    ``path`` injection all mirror :func:`save_theme` - only the two keys named
+    above are touched, every other key in ``[general]`` and every other
+    top-level table survives verbatim.
+
+    ``subagent_service`` is written only when it actually names a DIFFERENT
+    service from ``service``; when the two windows agree the key is removed
+    instead. Blank/absent means "whatever the master tab is on"
+    (:func:`load_config` leaves it as ``""`` and MainScreen._initial_services
+    resolves it to the master), which round-trips to the same startup state as
+    pinning both - but keeps following the master when the master later moves,
+    rather than freezing the sub-agent window on today's coincidence.
+
+    Precedence is deliberately NOT changed: this writes the GLOBAL file, so a
+    ``--service`` flag and a project ``.agentclip.toml`` ``[general] service``
+    still win on the next launch (load_config merges the project file over the
+    global one, and the CLI override over both). A user whose project pins a
+    service therefore sees that pin, not the last thing they picked here.
+
+    Nothing validates ``service`` against the preset table: the caller only
+    ever has a key that came out of the picker. If the service editor later
+    DELETES that preset, the stale key is load_config's problem and it already
+    handles it - it warns and falls back to 'unknown' rather than raising.
+    """
+    target = path if path is not None else default_global_config_path()
+    discard_warnings: list[str] = []
+    data = _read_toml(target, discard_warnings)
+
+    general_table = dict(data.get("general", {}))
+    general_table["service"] = service
+    if subagent_service and subagent_service != service:
+        general_table["subagent_service"] = subagent_service
+    else:
+        general_table.pop("subagent_service", None)
+
+    data = dict(data)
+    data["general"] = general_table
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(data, f)
+        os.replace(tmp_name, target)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(tmp_name)
+        raise

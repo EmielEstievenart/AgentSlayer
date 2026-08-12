@@ -531,6 +531,22 @@ class AgentClipApp(App[None]):
         background: $boost;
         padding: 0 1;
     }
+    /* The one multi-line field on the form, painted as the Inputs above it are
+       so the column reads as one set of fields. Height is pinned because
+       TextArea defaults to 1fr, which in this auto-height column would eat
+       every row the other two columns have and stretch the modal; four rows is
+       a little box - room for a sentence to wrap and be read back - and the
+       cap is itself the "keep it short" warning the label repeats
+       (config.ServicePreset.extra_instructions: ~67 chars of bootstrap slack). */
+    #svc-form-col TextArea {
+        background: $boost;
+        height: 4;
+        /* The editor is a .modal-box, so the generic rule above (a full 8-row
+           entry box, floated off its title) reaches this one too. Both of its
+           declarations are overridden here, the margin included: on this form
+           a field sits directly under the label that names it. */
+        margin-top: 0;
+    }
     #svc-error {
         color: $error;
         height: auto;
@@ -690,6 +706,14 @@ class AgentClipApp(App[None]):
             profile_root if profile_root is not None else default_profile_dir()
         )
         self.main_screen: MainScreen | None = None
+
+    @property
+    def global_config_path(self) -> Path:
+        """Where preferences persist. Read-only and public because MainScreen
+        writes the last-picked service through it (config.save_active_services)
+        and must land in the SAME file the settings screens use - including the
+        tmp path a test injected above."""
+        return self._global_config_path
 
     def on_mount(self) -> None:
         self.register_theme(CLAUDE_WARM_THEME)

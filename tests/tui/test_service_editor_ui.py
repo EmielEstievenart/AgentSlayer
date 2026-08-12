@@ -27,7 +27,16 @@ import pytest
 from textual.message import Message
 from textual.pilot import Pilot
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, Input, RadioButton, RadioSet, Select, Static
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    RadioButton,
+    RadioSet,
+    Select,
+    Static,
+    TextArea,
+)
 
 import agentclip.tui.screens.main as main_mod
 import agentclip.tui.screens.service_editor as service_editor_mod
@@ -1695,13 +1704,16 @@ async def test_editor_opens_preselected_on_the_selected_window_tab_s_service(
 LINE = "always put a space between ] and ( in code you send"
 
 
-async def test_the_extra_instructions_line_round_trips_into_the_saved_services(
+async def test_the_extra_instructions_box_round_trips_into_the_saved_services(
     tmp_path: Path, profile_root: Path
 ) -> None:
     """The one field on this form the user WRITES rather than picks, and the one
     whose text ships verbatim to the model (protocol.md 2). Same live-apply,
     close-and-persist path as everything else on the column - and, being empty
-    in every built-in, absent from the file until somebody types in it."""
+    in every built-in, absent from the file until somebody types in it.
+
+    It is a TextArea and not an Input, so it round-trips through ``.text`` and
+    rides ``TextArea.Changed`` into the same revalidation the Inputs use."""
     app, global_path = _make_app(tmp_path, profile_root)
     async with app.run_test(size=(120, 45)) as pilot:
         main = app.main_screen
@@ -1714,16 +1726,16 @@ async def test_the_extra_instructions_line_round_trips_into_the_saved_services(
         editor.query_one("#svc-select", Select).value = "copilot-work"
         await pilot.pause()
         # Empty everywhere: no built-in knows how its host mangles text.
-        assert editor.query_one("#svc-extra-instructions", Input).value == ""
+        assert editor.query_one("#svc-extra-instructions", TextArea).text == ""
 
-        editor.query_one("#svc-extra-instructions", Input).value = LINE
+        editor.query_one("#svc-extra-instructions", TextArea).text = LINE
         await pilot.pause()
         assert editor._services["copilot-work"].extra_instructions == LINE
 
         # ...and it follows the selection rather than leaking onto the next one.
         editor.query_one("#svc-select", Select).value = "gemini"
         await pilot.pause()
-        assert editor.query_one("#svc-extra-instructions", Input).value == ""
+        assert editor.query_one("#svc-extra-instructions", TextArea).text == ""
         assert editor._services["gemini"].extra_instructions == ""
 
         await pilot.press("escape")

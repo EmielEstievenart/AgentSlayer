@@ -167,6 +167,7 @@ from agentclip.config import (
     SCROLL_PAGE_DOWN,
     Config,
     ServicePreset,
+    save_active_services,
 )
 from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnapshot
 from agentclip.protocol.parser import looks_like_protocol
@@ -2982,14 +2983,50 @@ class MainScreen(Screen[None]):
         is the normal way to set delegation up, and rebuilding the master's
         poller there would throw away its in-flight streaks and its trackers'
         previous frames on behalf of a window nothing is watching.
+
+        The pick also outlives the run: it is written straight back to the
+        global config.toml, so the next launch comes up on the service the user
+        last worked in rather than on whatever the file was first seeded with.
         """
         message.stop()
         self._services[self._selected_window] = message.key
         self._relabel_window(self._selected_window)
+        self._persist_active_services()
         self._paint_profile()
         self._after_calibration()
         if self._calibrating is self._live:
             self._start_detector_worker()
+
+    def _persist_active_services(self) -> None:
+        """Write both window tabs' services to the global config.toml.
+
+        Both, not just the one that changed: ``save_active_services`` decides
+        whether the sub-agent window needs its own key at all by comparing it
+        against the master's, which it can only do with the pair in hand.
+
+        Remembering the pick is a convenience, never the point of the press -
+        so every way the write can fail (read-only config dir, a locked file, a
+        full disk) degrades to a warning toast and a session that carries on
+        with the switch the user actually asked for. Only the PERSISTENCE is
+        lost; ``_services`` above is already updated either way.
+
+        A screen mounted outside the real app (unit tests do this) has no config
+        path to write to, and no business inventing the user's one, so it simply
+        skips. The host app is duck-typed rather than isinstance-checked because
+        ``AgentClipApp`` is a TYPE_CHECKING-only import here (importing it for
+        real would cycle - it imports this module).
+        """
+        target = getattr(self.app, "global_config_path", None)
+        if target is None:
+            return
+        try:
+            save_active_services(
+                self._services[MASTER_WINDOW],
+                self._services[SUBAGENT_WINDOW],
+                target,
+            )
+        except OSError as exc:
+            self.notify(f"couldn't remember the service: {exc}", severity="warning")
 
     # -- detector polling ------------------------------------------------------
 

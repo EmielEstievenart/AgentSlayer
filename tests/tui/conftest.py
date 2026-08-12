@@ -13,7 +13,8 @@ here, patched at BOTH the definition and the ``tui.app`` use site (``app.py``
 from-imports the name, so patching only ``agentclip.config`` would miss it) -
 the same "patch at the use site" discipline the OS gate in tests/conftest.py
 uses. Tests that want to inspect what landed on disk pass ``profile_root``
-explicitly and get the same directory.
+explicitly and get the same directory. ``_no_real_global_config`` is the same
+gate for the other file the app writes to, config.toml.
 
 The second is ``seed_templates``: almost every suite here needs a service that
 already knows what its copy button (or chat box, or new-chat control) looks
@@ -154,4 +155,37 @@ def _no_real_profiles(monkeypatch: pytest.MonkeyPatch, profile_root: Path) -> No
     monkeypatch.setattr("agentclip.config.default_profile_dir", fake_default_profile_dir)
     monkeypatch.setattr(
         "agentclip.tui.app.default_profile_dir", fake_default_profile_dir, raising=False
+    )
+
+
+@pytest.fixture
+def default_global_config(tmp_path: Path) -> Path:
+    """The config.toml an app built WITHOUT an explicit ``global_config_path``
+    falls back to in this suite (see ``_no_real_global_config``)."""
+    return tmp_path / "default-global-config.toml"
+
+
+@pytest.fixture(autouse=True)
+def _no_real_global_config(monkeypatch: pytest.MonkeyPatch, default_global_config: Path) -> None:
+    """The same safety gate as ``_no_real_profiles``, for config.toml.
+
+    Preferences are written back to the global config now, and not only from the
+    settings screens: pointing a window tab at another service persists that
+    pick (config.save_active_services), which every suite that switches service
+    does incidentally. Most of them build their app without a
+    ``global_config_path``, so without this the picker would rewrite the
+    developer's real ``[general] service`` mid-test. Patched at both the
+    definition and the ``tui.app`` use site, for the from-import reason above.
+    """
+
+    def fake_default_global_config_path() -> Path:
+        return default_global_config
+
+    monkeypatch.setattr(
+        "agentclip.config.default_global_config_path", fake_default_global_config_path
+    )
+    monkeypatch.setattr(
+        "agentclip.tui.app.default_global_config_path",
+        fake_default_global_config_path,
+        raising=False,
     )

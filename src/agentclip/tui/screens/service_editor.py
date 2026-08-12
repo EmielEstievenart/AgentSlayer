@@ -76,7 +76,16 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, Checkbox, Input, RadioButton, RadioSet, Select, Static
+from textual.widgets import (
+    Button,
+    Checkbox,
+    Input,
+    RadioButton,
+    RadioSet,
+    Select,
+    Static,
+    TextArea,
+)
 
 from agentclip.config import (
     BUILTIN_SERVICE_KEYS,
@@ -567,13 +576,23 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                     yield Input(id="svc-total", placeholder="e.g. 500000", compact=True)
                     yield Static(Text("Stale (seconds unchanged)"), classes="side-title")
                     yield Input(id="svc-stable", placeholder="e.g. 2.0", compact=True)
-                    # One line, deliberately: this text rides the bootstrap,
-                    # which has ~67 chars of slack on the smallest presets
-                    # (protocol.md section 2), so the box is the budget warning.
-                    yield Static(Text("Extra instructions (one short line)"), classes="side-title")
-                    yield Input(
+                    # A little box rather than a line: a sentence of guidance
+                    # does not fit in one row of this (flexible, often narrow)
+                    # column, and a one-line Input scrolls its own text out of
+                    # sight so the user cannot see what they wrote. Still SMALL
+                    # - a few rows, capped in the CSS - because this text rides
+                    # the bootstrap, which has ~67 chars of slack on the
+                    # smallest presets (protocol.md section 2): the size of the
+                    # box is the budget warning, and the label repeats it.
+                    yield Static(Text("Extra instructions (keep short)"), classes="side-title")
+                    yield TextArea(
                         id="svc-extra-instructions",
                         placeholder="e.g. put a space between ] and ( in code",
+                        # No border, like the compact Inputs above - the label
+                        # already frames the field, and a bordered box would
+                        # spend two of the column's rows on frame. tab_behavior
+                        # defaults to "focus", so tab still walks the form
+                        # instead of indenting inside the box.
                         compact=True,
                     )
                     yield Static("", id="svc-error")
@@ -717,7 +736,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         max_input = self.query_one("#svc-max", Input)
         total_input = self.query_one("#svc-total", Input)
         stable_input = self.query_one("#svc-stable", Input)
-        extra_input = self.query_one("#svc-extra-instructions", Input)
+        extra_input = self.query_one("#svc-extra-instructions", TextArea)
         preset: ServicePreset | None = None
         if key is None:
             key_input.disabled = False
@@ -729,7 +748,11 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             # universal default, and "add a service" should stay a four-field
             # job for users who never touch the stale detector.
             stable_input.value = str(DEFAULT_STABLE_SECONDS)
-            extra_input.value = ""
+            # ``.text`` is the TextArea's whole-document accessor, the way
+            # ``.value`` is the Input's; assigning it also rewinds the cursor,
+            # which is what keeps a switch of service from leaving the caret
+            # pointing past the end of the text that just replaced it.
+            extra_input.text = ""
         else:
             preset = self._services[key]
             key_input.disabled = True
@@ -738,7 +761,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             max_input.value = str(preset.max_paste_chars)
             total_input.value = str(preset.total_context_chars)
             stable_input.value = str(preset.stable_seconds)
-            extra_input.value = preset.extra_instructions
+            extra_input.text = preset.extra_instructions
         self._pending_new = None
         # For "+ Add new", the boxes show what pressing "Add service" is
         # actually going to create - i.e. the ServicePreset dataclass defaults,
@@ -849,6 +872,18 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         event.stop()
         self._revalidate()
 
+    @on(TextArea.Changed, "#svc-extra-instructions")
+    def _on_extra_instructions_changed(self, event: TextArea.Changed) -> None:
+        """The extra-instructions box rides the same live-apply path as the Inputs.
+
+        It is a TextArea, so it posts ``TextArea.Changed`` and not
+        ``Input.Changed`` - without this the field would look editable and
+        silently stop round-tripping into the working copy. Scoped by id
+        because the message is not one this screen wants from anything else.
+        """
+        event.stop()
+        self._revalidate()
+
     def _revalidate(self) -> None:  # noqa: PLR0912 - straight-line field validation
         is_new = self._selected_key is None
         key_text = self.query_one("#svc-key", Input).value.strip()
@@ -856,7 +891,9 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         max_text = self.query_one("#svc-max", Input).value.strip()
         total_text = self.query_one("#svc-total", Input).value.strip()
         stable_text = self.query_one("#svc-stable", Input).value.strip()
-        extra_text = self.query_one("#svc-extra-instructions", Input).value.strip()
+        # Stripped as before - the box may now hold newlines, and a trailing
+        # one from a stray Enter is not guidance the model needs shipped.
+        extra_text = self.query_one("#svc-extra-instructions", TextArea).text.strip()
 
         error: str | None = None
         key = self._selected_key

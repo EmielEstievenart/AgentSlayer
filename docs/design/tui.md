@@ -228,7 +228,8 @@ ServiceEditorScreen(ModalScreen)  .modal-box, id=service-editor-box (width 112, 
 │   │   ├── Input                 id=svc-max         # max paste size (chars)
 │   │   ├── Input                 id=svc-total       # total context size (chars)
 │   │   ├── Input                 id=svc-stable      # stale detector: seconds unchanged = finished (default 2.0, bounds 0.5-60)
-│   │   ├── Input                 id=svc-extra-instructions  # one short line shipped verbatim in the bootstrap → ServicePreset.extra_instructions
+│   │   ├── TextArea              id=svc-extra-instructions  # compact, height 4 — a SHORT note shipped verbatim in the bootstrap → ServicePreset.extra_instructions
+│   │   │                                           # (multi-line, so it revalidates on TextArea.Changed, not Input.Changed)
 │   │   └── Static                id=svc-error       # inline validation message, styled $error, min-height 1
 │   └── Vertical                  id=svc-appearance-col (width 44, height:auto — it NEVER scrolls; see below)
 │       ├── Static "APPEARANCE · what it looks like"    .side-title

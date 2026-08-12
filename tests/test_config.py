@@ -35,6 +35,7 @@ from agentclip.config import (
     default_services,
     load_config,
     normalize_finish_signals,
+    save_active_services,
     save_services,
     save_theme,
 )
@@ -996,6 +997,151 @@ def test_save_theme_creates_missing_parent_dirs(tmp_path: Path) -> None:
     assert raw["general"]["theme"] == "claude-warm"
 
 
+# -- the active service: remembering what the sidebar's picker was last on -----
+#
+# The TUI wiring (switching in the sidebar calls the saver) is a pilot test, in
+# tests/tui/test_slot_ui.py. Everything below is the file format and its
+# round-trip: what lands in [general], and what load_config makes of it next
+# launch.
+
+
+def test_save_active_services_then_load_round_trips(project: Path, global_path: Path) -> None:
+    save_active_services("claude", "gemini", global_path)
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.service == "claude"
+    assert cfg.general.subagent_service == "gemini"
+    assert not cfg.warnings
+
+
+def test_save_active_services_creates_the_file_when_it_is_missing(
+    project: Path, global_path: Path
+) -> None:
+    assert not global_path.exists()
+    save_active_services("claude", "", global_path)
+    assert global_path.exists()
+    assert load_config(project, global_config_path=global_path).general.service == "claude"
+
+
+def test_save_active_services_creates_missing_parent_dirs(tmp_path: Path) -> None:
+    nested = tmp_path / "nested" / "does" / "not" / "exist" / "config.toml"
+    save_active_services("gemini", "", nested)
+    assert nested.exists()
+    raw = tomllib.loads(nested.read_text(encoding="utf-8"))
+    assert raw["general"]["service"] == "gemini"
+
+
+def test_save_active_services_omits_a_subagent_that_matches_the_master(
+    project: Path, global_path: Path
+) -> None:
+    """Both windows on one service is the blank case, not a pin: the key stays
+    out of the file so the sub-agent window keeps FOLLOWING the master when the
+    master later moves, instead of freezing on today's coincidence."""
+    save_active_services("claude", "claude", global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["general"] == {"service": "claude"}
+
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.subagent_service == ""
+    assert not cfg.warnings
+
+
+def test_save_active_services_drops_a_stale_subagent_pin(
+    project: Path, global_path: Path
+) -> None:
+    save_active_services("claude", "gemini", global_path)
+    save_active_services("gemini", "gemini", global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert "subagent_service" not in raw["general"]
+    assert load_config(project, global_config_path=global_path).general.service == "gemini"
+
+
+def test_save_active_services_overwrites_a_previous_choice(global_path: Path) -> None:
+    save_active_services("claude", "", global_path)
+    save_active_services("gemini", "", global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["general"]["service"] == "gemini"
+
+
+def test_save_active_services_preserves_other_general_keys_and_top_level_tables(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        '[general]\ntheme = "claude-dark"\nchars_per_token = 4\n\n'
+        "[clipboard]\npoll_interval_ms = 500\n",
+        encoding="utf-8",
+    )
+    save_active_services("claude", "gemini", global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+
+    assert raw["general"] == {
+        "theme": "claude-dark",
+        "chars_per_token": 4,
+        "service": "claude",
+        "subagent_service": "gemini",
+    }
+    assert raw["clipboard"] == {"poll_interval_ms": 500}
+
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.theme == "claude-dark"
+    assert cfg.general.chars_per_token == 4
+    assert cfg.clipboard.poll_interval_ms == 500
+
+
+def test_save_active_services_leaves_a_custom_services_table_alone(
+    project: Path, global_path: Path
+) -> None:
+    """The service editor's writes and the picker's writes share one file and
+    must not eat each other."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], max_paste_chars=30_000)
+    save_services(services, global_path)
+
+    save_active_services("claude", "", global_path)
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"].max_paste_chars == 30_000
+    assert cfg2.general.service == "claude"
+
+
+def test_save_active_services_is_atomic_no_leftover_tmp_files(global_path: Path) -> None:
+    save_active_services("claude", "gemini", global_path)
+    assert list(global_path.parent.glob("*.tmp")) == []
+    assert global_path.exists()
+
+
+def test_a_project_file_still_beats_the_remembered_service(
+    project: Path, global_path: Path
+) -> None:
+    """Precedence is unchanged by persistence: the picker writes the GLOBAL
+    file, and a project that pins a service still wins on the next launch."""
+    save_active_services("claude", "", global_path)
+    (project / ".agentclip.toml").write_text('[general]\nservice = "gemini"\n', encoding="utf-8")
+
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.service == "gemini"
+
+
+def test_the_service_flag_still_beats_the_remembered_service(
+    project: Path, global_path: Path
+) -> None:
+    save_active_services("claude", "", global_path)
+    cfg = load_config(project, global_config_path=global_path, service_override="gemini")
+    assert cfg.general.service == "gemini"
+
+
+def test_a_remembered_service_that_was_since_deleted_warns_and_falls_back(
+    project: Path, global_path: Path
+) -> None:
+    """The service editor can delete the very preset the picker just persisted.
+    No machinery guards against it - load_config's existing unknown-preset path
+    already degrades gracefully, which is why the saver validates nothing."""
+    save_active_services("my-llm", "", global_path)
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.general.service == "unknown"
+    assert any("my-llm" in w for w in cfg.warnings)
+
+
 # -- matching (how a captured appearance is hunted for, and how strictly) ------
 
 
@@ -1284,4 +1430,26 @@ def test_save_then_load_round_trips_extra_instructions(
 
     cfg2 = load_config(project, global_config_path=global_path)
     assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings
+
+
+def test_save_then_load_round_trips_multi_line_extra_instructions(
+    project: Path, global_path: Path
+) -> None:
+    """The editor's field is a little BOX now, so the value can hold newlines -
+    and a newline is the one character that can turn a TOML string into a
+    broken file. tomlkit escapes it rather than emitting a raw line break, so
+    the file stays parseable and the text arrives back byte-for-byte (which
+    matters: it ships verbatim to the model, protocol.md 2)."""
+    text = "keep ] ( apart\nand write code in one block"
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], extra_instructions=text)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"]["extra_instructions"] == text
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"].extra_instructions == text
     assert not cfg2.warnings

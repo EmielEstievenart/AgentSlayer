@@ -24,6 +24,7 @@ capture would leave them: how they get there is the editor's story
 from __future__ import annotations
 
 import time
+import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
@@ -310,6 +311,87 @@ async def test_each_tab_carries_its_own_service(
         assert main._service_for(AgentSlot.SUBAGENT) == other
         await _select_slot(app, pilot, AgentSlot.SUBAGENT)
         assert main.sidebar.service == other
+
+
+async def test_picking_a_service_is_remembered_for_the_next_launch(
+    tmp_path: Path,
+    profile_root: Path,
+    default_global_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Switching in the sidebar writes through to the global config.toml, so a
+    restart comes up where the user left off rather than on the seeded default.
+
+    ``default_global_config`` is the tmp file this app resolves to: ``_make_app``
+    injects no path, so it takes ``default_global_config_path()`` - which the
+    suite's autouse gate has already pointed here.
+    """
+    _patch_screen(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    default, other = _service_key(app), _other_service(app)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        # Nothing has been picked yet: merely starting up must not write.
+        assert not default_global_config.exists()
+
+        await _pick_service(app, pilot, other)
+        await pilot.pause()
+
+        # The picker edits the SELECTED tab only, so the two windows have just
+        # parted company - and the file has to say so, or the sub-agent window
+        # would come back somewhere it was never pointed.
+        raw = tomllib.loads(default_global_config.read_text(encoding="utf-8"))
+        assert raw["general"]["service"] == other
+        assert raw["general"]["subagent_service"] == default
+        reloaded = load_config(app.project_root, global_config_path=default_global_config)
+        assert MainScreen._initial_services(reloaded) == {
+            MASTER_WINDOW: other,
+            SUBAGENT_WINDOW: default,
+        }
+
+        # Bringing the sub-agent window back onto the master's service drops the
+        # pin again: agreeing is the blank case, not a setting.
+        await _select_slot(app, pilot, AgentSlot.SUBAGENT)
+        await _pick_service(app, pilot, other)
+        await pilot.pause()
+
+        raw = tomllib.loads(default_global_config.read_text(encoding="utf-8"))
+        assert raw["general"]["service"] == other
+        assert "subagent_service" not in raw["general"]
+
+    # And a fresh load of that file starts both windows where they were left.
+    reloaded = load_config(app.project_root, global_config_path=default_global_config)
+    assert MainScreen._initial_services(reloaded) == {
+        MASTER_WINDOW: other,
+        SUBAGENT_WINDOW: other,
+    }
+
+
+async def test_a_failed_remember_warns_instead_of_killing_the_switch(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Remembering the pick is a convenience: an unwritable config must not take
+    the switch (or the app) down with it."""
+    _patch_screen(monkeypatch)
+
+    def boom(*args: object, **kwargs: object) -> None:
+        raise OSError("read-only config dir")
+
+    monkeypatch.setattr(main_mod, "save_active_services", boom)
+    app = _make_app(tmp_path, profile_root)
+    other = _other_service(app)
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        await _pick_service(app, pilot, other)
+        await pilot.pause()
+
+        assert main._service_for(AgentSlot.MASTER) == other  # the switch stuck
+        assert app.is_running
 
 
 async def test_a_second_service_has_its_own_appearances_and_readiness(

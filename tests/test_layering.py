@@ -6,6 +6,8 @@
             └──► protocol (leaf)
     config (leaf) ◄── imported by everyone
      ├──► permissions (leaf: the rule model, also used by engine/approval)
+     ├──► mcp (leaf: opencode.json's mcp block - types/reader for config,
+     │         the client runtime for tools; docs/design/mcp.md)
      └──► hosts (to read the project's .agentclip.toml off the project's machine)
     hosts (leaf: the OS seam - config/tools/store/engine touch files and run
            commands only through it, so a remote host can take the local one's
@@ -37,11 +39,31 @@ RULES: list[tuple[str, frozenset[str]]] = [
     # one third-party client the remote implementation IS - and that one is
     # confined to hosts/ssh.py (see test_paramiko_only_in_the_ssh_host).
     ("agentclip.hosts", frozenset({"agentclip.hosts", "paramiko"})),
+    # mcp: OpenCode's mcp block (types + reader + client runtime). A leaf like
+    # permissions and for the same reason: config.py LOADS the servers where
+    # config lives, tools invoke them where handlers live, and only a leaf both
+    # import can be true of both. The optional SDK is imported lazily inside
+    # client.py functions, so it never shows up at module level here; the
+    # ToolSpecs live in agentclip/tools/mcp_tools.py, NOT in this package,
+    # precisely so mcp never has to import tools (docs/design/mcp.md section 2).
+    ("agentclip.mcp", frozenset({"agentclip.mcp"})),
     # config: reads the project's .agentclip.toml, which in a remote session is
     # on the remote machine - hence the Host seam, one leaf below it.
     (
         "agentclip.config",
-        frozenset({"platformdirs", "tomli_w", "agentclip.hosts", "agentclip.permissions"}),
+        frozenset(
+            {
+                "platformdirs",
+                "tomli_w",
+                "agentclip.hosts",
+                "agentclip.permissions",
+                # Only the stdlib-only submodules: the client runtime (and the
+                # SDK behind it) stays out of config's import graph by listing
+                # the two leaves rather than the package.
+                "agentclip.mcp.types",
+                "agentclip.mcp.config",
+            }
+        ),
     ),
     ("agentclip.protocol", frozenset({"agentclip.config", "agentclip.protocol"})),
     (
@@ -50,6 +72,7 @@ RULES: list[tuple[str, frozenset[str]]] = [
             {
                 "agentclip.config",
                 "agentclip.hosts",
+                "agentclip.mcp",
                 "agentclip.protocol.types",
                 "agentclip.tools",
             }

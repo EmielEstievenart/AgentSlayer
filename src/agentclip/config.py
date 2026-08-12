@@ -15,7 +15,10 @@ a remote session it is read from the remote machine through the Host (hence the
 ``host`` parameter on :func:`load_config`). Permissions are the deliberate
 exception: opencode.json is read from this PC whatever the session is, because
 the user's policy must not weaken because of a remote file
-(docs/design/remote-ssh.md decision 6).
+(docs/design/remote-ssh.md decision 6). The mcp block of the same file goes one
+step further: its project layer is read with plain local I/O and skipped
+outright in remote sessions - a `local` MCP server is a command this PC will
+spawn (docs/design/mcp.md section 1).
 """
 
 from __future__ import annotations
@@ -35,6 +38,8 @@ import platformdirs
 import tomli_w
 
 from agentclip.hosts.base import Host
+from agentclip.mcp.config import load_mcp_servers
+from agentclip.mcp.types import McpConfig, McpServers
 from agentclip.permissions import (
     PERMISSION_MODES,
     PermissionRule,
@@ -453,6 +458,13 @@ class Config:
     # charge, which is what every install without an opencode.json gets.
     permission_rules: tuple[PermissionRule, ...] = ()
     permission_source: str = ""  # the file the rules came from, "" when none did
+    # The [mcp] table (is the subsystem on, and where opencode.json lives) and
+    # what the loader read out of that file's `mcp` block. Empty servers is the
+    # everyday case - no opencode.json, or [mcp] enabled=false - and means the
+    # runtime builds no manager and the bootstrap gains no MCP docs
+    # (docs/design/mcp.md sections 1 and 5).
+    mcp: McpConfig = field(default_factory=McpConfig)
+    mcp_servers: McpServers = field(default_factory=McpServers)
     exclude: tuple[str, ...] = DEFAULT_EXCLUDES
     services: dict[str, ServicePreset] = field(default_factory=default_services)
     warnings: tuple[str, ...] = ()  # non-fatal validation complaints, for the TUI to surface
@@ -885,6 +897,39 @@ def load_config(
     )
     permission_rules, permission_source = _load_permission_rules(permission, warnings)
 
+    # MCP servers ride the same opencode.json, parsed by agentclip.mcp.config
+    # (stdlib-only, so this import is unconditional). The paths are resolved
+    # HERE and handed down - the loader owns parsing, not file discovery - which
+    # is also what lets the test suite's default_opencode_config_path patch
+    # isolate the MCP reader for free (docs/design/mcp.md section 7).
+    mcp_t = merged.get("mcp", {})
+    mcp = McpConfig(
+        enabled=_take_bool(mcp_t, "enabled", True, "mcp", warnings),
+        opencode_config=_take_str(mcp_t, "opencode_config", "", "mcp", warnings),
+    )
+    if mcp.enabled:
+        # Ascending precedence: global first, then the project file, whose
+        # same-name entries merge per field over the global ones (OpenCode's
+        # deep merge). Both are plain LOCAL reads, never through the Host, and
+        # the project file only exists as a source when ``host is None`` - i.e.
+        # when project_root is a directory on THIS PC. In a remote session the
+        # project belongs to the remote machine, and a `local` MCP server is a
+        # command this PC will run: the remote end must not get to decide what
+        # the operator's PC executes (docs/design/mcp.md section 1, the same
+        # rationale that pins permissions local - remote-ssh.md decision 6).
+        mcp_paths = [
+            Path(mcp.opencode_config).expanduser()
+            if mcp.opencode_config
+            else default_opencode_config_path()
+        ]
+        if host is None:
+            mcp_paths.append(project_root / "opencode.json")
+        mcp_servers = load_mcp_servers(mcp_paths, warnings)
+    else:
+        # Disabled means DISABLED: no file is opened, so a broken opencode.json
+        # cannot even warn its way into a session the user switched MCP off for.
+        mcp_servers = McpServers()
+
     return Config(
         general=GeneralConfig(
             service=service,
@@ -926,6 +971,8 @@ def load_config(
         permission=permission,
         permission_rules=permission_rules,
         permission_source=permission_source,
+        mcp=mcp,
+        mcp_servers=mcp_servers,
         remote=_load_remote(
             remote_t if isinstance(remote_t, dict) else {},
             remote_target or "",

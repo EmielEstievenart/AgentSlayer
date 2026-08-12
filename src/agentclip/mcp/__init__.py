@@ -5,5 +5,8 @@ Layout (docs/design/mcp.md):
     config.py   reads opencode.json's `mcp` block; stdlib-only
     client.py   the McpManager runtime; the ONLY module that may import the
                 optional `mcp` SDK, and only lazily
-    tool.py     the mcp / mcp_schema ToolSpecs for the registry
+
+The mcp / mcp_schema ToolSpecs live in agentclip/tools/mcp_tools.py, not
+here: this package is a leaf below config (test_layering.py), and a spec
+module would have to import the tools layer, closing a cycle.
 """

@@ -71,7 +71,10 @@ looks small and is not.
 
 `agentclip/mcp/types.py` and `agentclip/mcp/config.py` stay stdlib-only so
 `config.py` may import them unconditionally; only `client.py` touches the
-SDK.
+SDK. The package is a leaf below config in the layering rules
+(test_layering.py), which is why the ToolSpecs of section 4 live in
+`agentclip/tools/mcp_tools.py` - the tools layer imports mcp, never the
+reverse.
 
 ## 3. Runtime: one manager, one loop thread, per process
 

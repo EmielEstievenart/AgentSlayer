@@ -29,8 +29,11 @@ from agentclip.tools.registry import ToolRegistry
 
 from .test_approval import (
     ASK_ONLY_RULESET,
+    MCP_SPEC,
     RULESET_JSON,
+    get_spec,
     make_call,
+    mcp_call,
     ruled_policy,
     transcript,
     write_ruleset,
@@ -108,6 +111,15 @@ def test_plan_denies_every_edit_and_command(
     )
 
 
+def test_plan_denies_an_mcp_call_in_both_modes() -> None:
+    """An MCP tool can do anything, which is exactly why the invoker's approval
+    kind is `command`: plan mode denies it by KIND, before any rule or allowlist
+    is consulted, in legacy and ruleset policies alike (docs/design/mcp.md section 4)."""
+    call = mcp_call("github_create_issue")
+    assert policy("plan").verdict(MCP_SPEC, call) == "deny_plan"
+    assert ruled_policy(RULESET_JSON, mode="plan").verdict(MCP_SPEC, call) == "deny_plan"
+
+
 def test_plan_outranks_yolo(registry: ToolRegistry) -> None:
     """YOLO is a flag the user set earlier; the mode is what they want NOW."""
     cmd_spec = registry.get("run_command")
@@ -121,8 +133,7 @@ def test_plan_outranks_yolo(registry: ToolRegistry) -> None:
 
 
 def test_plan_leaves_read_only_tools_exactly_as_they_were(registry: ToolRegistry) -> None:
-    specs = {name: registry.get(name) for name in ("read_file", "list_dir", "glob", "grep")}
-    assert all(specs.values())
+    specs = {name: get_spec(registry, name) for name in ("read_file", "list_dir", "glob", "grep")}
     legacy = policy("plan")
     assert legacy.verdict(specs["read_file"], make_call("read_file", path="x")) == "auto"
     assert legacy.verdict(specs["list_dir"], make_call("list_dir", path=".")) == "auto"
@@ -164,6 +175,14 @@ def test_unattended_denies_what_would_have_gated(registry: ToolRegistry) -> None
     assert away.verdict(edit_spec, make_call("edit_file", path="x")) == "deny_unattended"
     # ...and what would NOT have gated is untouched: the allowlist still runs.
     assert away.verdict(cmd_spec, make_call("run_command", command="pytest -q")) == "auto"
+
+
+def test_unattended_denies_an_mcp_call_in_legacy_mode() -> None:
+    """`mcp` always gates in legacy mode, and unattended has nobody to ask - so
+    it is refused rather than run, with no allowlist shortcut to fall back on."""
+    assert policy("unattended").verdict(MCP_SPEC, mcp_call("github_create_issue")) == (
+        "deny_unattended"
+    )
 
 
 def test_unattended_keeps_allow_rules_running_and_deny_rules_denying(

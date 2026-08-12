@@ -7,7 +7,13 @@ from pathlib import Path
 from agentclip.config import Config, LimitsConfig, caps_for_budget
 from agentclip.protocol.types import ToolCall
 from agentclip.tools import meta
-from agentclip.tools.registry import ToolContext, default_registry
+from agentclip.tools.registry import (
+    ToolContext,
+    ToolRegistry,
+    ToolSpec,
+    default_registry,
+    ok_result,
+)
 from agentclip.tools.sandbox import Workspace
 
 ALL_TOOLS = (
@@ -36,19 +42,25 @@ def test_default_registry_has_all_ten_tools_in_order() -> None:
     assert default_registry().names() == ALL_TOOLS
 
 
+def _get(reg: ToolRegistry, name: str) -> ToolSpec:
+    spec = reg.get(name)
+    assert spec is not None, name
+    return spec
+
+
 def test_approval_kinds() -> None:
     reg = default_registry()
     for name in ("read_file", "list_dir", "glob", "grep", "ask_user", "task_done"):
-        assert reg.get(name).approval_kind == "auto", name
+        assert _get(reg, name).approval_kind == "auto", name
     for name in ("write_file", "edit_file", "delete_file"):
-        assert reg.get(name).approval_kind == "edit", name
-    assert reg.get("run_command").approval_kind == "command"
+        assert _get(reg, name).approval_kind == "edit", name
+    assert _get(reg, "run_command").approval_kind == "command"
 
 
 def test_gated_tools_have_previews_auto_tools_do_not() -> None:
     reg = default_registry()
     for name in ALL_TOOLS:
-        spec = reg.get(name)
+        spec = _get(reg, name)
         if spec.approval_kind == "auto":
             assert spec.preview is None, name
         else:
@@ -68,6 +80,17 @@ def test_render_catalog_contains_every_tool_and_examples() -> None:
     assert catalog.count("===CLIP:END===") == len(ALL_TOOLS)
     # bootstrap section-4 size target: ~4,200 chars
     assert 2_500 <= len(catalog) <= 6_000, len(catalog)
+
+
+def test_mcp_specs_slot_between_run_command_and_the_meta_tools() -> None:
+    """`mcp_specs` land after run_command (and skill, when present) and before
+    delegate/ask_user/task_done - capabilities together, hand-off tools last."""
+
+    def spec(name: str) -> ToolSpec:
+        return ToolSpec(name, "auto", lambda ctx, call: ok_result(call, ""), None, f"{name}()")
+
+    reg = default_registry(mcp_specs=(spec("mcp_schema"), spec("mcp")))
+    assert reg.names() == (*ALL_TOOLS[:8], "mcp_schema", "mcp", "ask_user", "task_done")
 
 
 def test_meta_handlers_are_inert_stubs(tmp_path: Path) -> None:

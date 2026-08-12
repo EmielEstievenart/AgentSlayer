@@ -17,6 +17,7 @@ import pytest
 
 from agentclip import permissions
 from agentclip.permissions import (
+    TOOL_PERMISSIONS,
     PermissionRule,
     always_pattern,
     default_rules,
@@ -248,3 +249,61 @@ def test_always_pattern_for_everything_else_is_the_whole_key() -> None:
     assert always_pattern("edit", "src/utils.py") == "*"
     assert always_pattern("read", ".env") == "*"
     assert always_pattern("task", "explore") == "*"
+
+
+# -- MCP: the two tools' permission wiring ------------------------------------
+#
+# docs/design/mcp.md section 4. `mcp` invokes a server tool and can do anything;
+# `mcp_schema` only reads the connect-time cache. The wiring below is what keeps
+# those two facts apart in the rule model.
+
+
+def test_the_mcp_invoker_is_keyed_on_its_composite_tool_id() -> None:
+    """The resource is the composite id (`sanitize(server)_sanitize(tool)`), so a
+    ruleset rule like {"mcp": {"github_*": "allow"}} gates per server prefix or
+    per individual tool - the same glob meaning OpenCode gives it."""
+    assert TOOL_PERMISSIONS["mcp"] == ("mcp", "tool")
+    assert permission_target("mcp", {"tool": "github_create_issue"}, "command") == (
+        "mcp",
+        "github_create_issue",
+    )
+
+
+def test_mcp_schema_takes_the_unknown_tool_fallback_on_purpose() -> None:
+    """It has no TOOL_PERMISSIONS entry by design: approval kind "auto" is not in
+    _KIND_KEYS, so the metadata reader falls back to its OWN NAME as the key and
+    a user can keep the listing cheap ("mcp_schema": "allow") even where `mcp`
+    itself is locked down."""
+    assert "mcp_schema" not in TOOL_PERMISSIONS
+    assert permission_target("mcp_schema", {}, "auto") == ("mcp_schema", "*")
+
+
+def test_the_defaults_ask_before_every_mcp_call(case_sensitive: None) -> None:
+    """The rule that must come LAST in DEFAULT_PERMISSIONS: without it the
+    built-in "*": "allow" above it would silently auto-approve every MCP call in
+    ruleset mode - the one outcome docs/design/mcp.md must make impossible."""
+    rules = default_rules()
+    assert evaluate("mcp", "anything_at_all", rules).action == "ask"
+    assert evaluate("mcp", "github_create_issue", rules).action == "ask"
+    # ...while the blanket allow still stands for every other key.
+    assert evaluate("bash", "ls", rules).action == "allow"
+    assert evaluate("edit", "src/utils.py", rules).action == "allow"
+
+
+def test_a_user_mcp_rule_still_outranks_the_default_ask(case_sensitive: None) -> None:
+    """The default is a floor, not a ceiling: the user's own rules load after it
+    and the last match wins, exactly as for every other key."""
+    rules = default_rules() + (PermissionRule("mcp", "github_*", "allow"),)
+    assert evaluate("mcp", "github_create_issue", rules).action == "allow"
+    assert evaluate("mcp", "jira_search", rules).action == "ask"
+
+
+def test_always_pattern_for_mcp_is_the_exact_tool_id() -> None:
+    """Per tool, not per server and not the whole key: the user approved ONE
+    tool's behaviour at the gate, not a server's entire surface. Sanitized ids
+    hold no `*`/`?`, so the id read back as a pattern matches only itself."""
+    assert always_pattern("mcp", "github_create_issue") == "github_create_issue"
+    assert always_pattern("mcp", "jira_search") == "jira_search"
+    # contrast: every other non-bash key remembers the key, and bash the arity.
+    assert always_pattern("edit", "src/utils.py") == "*"
+    assert always_pattern("bash", "git commit -m 'wip'") == "git commit *"

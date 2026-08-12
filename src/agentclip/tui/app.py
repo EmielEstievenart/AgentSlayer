@@ -25,6 +25,7 @@ from agentclip.config import (
     save_theme,
 )
 from agentclip.engine.engine import Engine
+from agentclip.mcp.client import McpManager
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.help import HelpScreen
 from agentclip.tui.screens.main import MainScreen
@@ -686,12 +687,19 @@ class AgentClipApp(App[None]):
         project_root: Path,
         global_config_path: Path | None = None,
         profile_root: Path | None = None,
+        mcp_manager: McpManager | None = None,
     ) -> None:
         super().__init__()
         self.app_config = config
         self.provider = provider
         self.engine_factory = engine_factory
         self.project_root = project_root
+        # The process-wide MCP runtime, or None when MCP is unconfigured.
+        # Inert storage for now: cli.py owns its lifecycle (built in main(),
+        # closed in main()'s finally) and the engine factory holds its own
+        # reference for the tools - the TUI wave will read statuses off this
+        # for the statusbar/sidebar (docs/design/mcp.md section 6).
+        self.mcp_manager = mcp_manager
         # Where the service editor and the settings screen persist edits.
         # Defaults to the real global config.toml; tests override it to a tmp
         # path so they never touch the user's actual config.

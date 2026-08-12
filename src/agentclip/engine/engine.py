@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -315,9 +315,17 @@ class Engine:
         chat_name: str,
         role: Literal["master", "subagent"] = "master",
         host: Host | None = None,
+        build_warnings: Sequence[str] = (),
     ) -> None:
         self._config = config
         self._role = role
+        # One-line facts about how this session was ASSEMBLED that the user
+        # should see once at session start (today: "the paste budget could not
+        # hold the MCP tools", docs/design/mcp.md section 5). The factory has no
+        # view, so they ride the engine to whoever starts the session - the
+        # controller surfaces them as transcript notes, the same channel
+        # config.warnings use at app start.
+        self.build_warnings: tuple[str, ...] = tuple(build_warnings)
         # The machine the project lives on. Every tool's filesystem and command
         # access goes through it; local unless a session was pointed elsewhere.
         self._host = host if host is not None else LocalHost()

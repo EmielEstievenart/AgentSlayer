@@ -28,7 +28,11 @@ LEGACY MODE (no ruleset). Unchanged: read-only tools are auto, edits gate until
 auto_accept_edits, commands are matched against the glob allowlist
 (fnmatch.fnmatchcase against the FULL command string - auditable at a glance,
 no regex backtracking) with the same deny-token backstop, and YOLO bypasses
-everything.
+everything. One command-kind call never reaches the allowlist: `mcp`, whose
+resource is a composite tool id rather than a shell command line, always gates
+here (docs/design/mcp.md section 4) - the allowlist matches shell prefixes, and
+an MCP call carrying a decoy `command` param must not be able to buy itself an
+allowlist hit.
 
 THE PERMISSION MODE (both of the above) is the session-scoped dial ABOVE all of
 it - "what is the user doing right now" rather than "what is this call" - and it
@@ -177,9 +181,20 @@ class ApprovalPolicy:
             return "auto"  # YOLO: nothing gates - edits AND commands run unattended
         if spec.approval_kind == "edit":
             return "auto" if self.auto_accept_edits else self._gate()
-        # approval_kind == "command"
-        command = call.params.get("command", "")
-        return "auto" if self.command_auto_allowed(command) is not None else self._gate()
+        # approval_kind == "command". Which command-kind calls the allowlist may
+        # judge is decided by the PERMISSION KEY, not by the approval kind: the
+        # allowlist matches shell command lines, so only a call whose key is
+        # "bash" has a resource it can meaningfully match. That keeps unknown
+        # command-kind tools on the bash path (their _KIND_KEYS fallback is
+        # "bash" - unchanged behaviour) while `mcp`, whose key is "mcp" and whose
+        # resource is a composite tool id, always gates. Reading the resource
+        # from target() rather than call.params also closes the decoy: an mcp
+        # call carrying `command: git status` would otherwise have matched the
+        # allowlist and auto-approved itself (docs/design/mcp.md section 4).
+        key, resource = self.target(spec, call)
+        if key != "bash":
+            return self._gate()
+        return "auto" if self.command_auto_allowed(resource) is not None else self._gate()
 
     def _ruleset_verdict(self, spec: ToolSpec, call: ToolCall) -> Verdict:
         key, resource = self.target(spec, call)

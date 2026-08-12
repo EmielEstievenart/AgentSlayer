@@ -6,7 +6,7 @@ import argparse
 import getpass
 import platform
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -17,16 +17,60 @@ from agentclip.config import Config, default_remote_state_dir, load_config
 from agentclip.engine.engine import Engine
 from agentclip.hosts.base import Host
 from agentclip.hosts.local import LocalHost
+from agentclip.mcp.client import McpManager
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.names import generate_chat_name
+from agentclip.protocol.spec import render_spec
 from agentclip.screen.matchers import MATCHERS, select_matcher
 from agentclip.store.backups import BackupStore
 from agentclip.store.session import SessionStore, prune_sessions
-from agentclip.tools.registry import default_registry
+from agentclip.tools.mcp_tools import make_mcp_specs
+from agentclip.tools.registry import ToolRegistry, default_registry
 from agentclip.tools.sandbox import Workspace
-from agentclip.tools.skills import discover_skills
+from agentclip.tools.skills import Skill, discover_skills
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.graphics import probe_terminal
+
+# -- MCP catalog sizing (docs/design/mcp.md section 5: the budget rule) --------
+
+# What the real bootstrap adds BEYOND the rendered spec: render_spec covers
+# sections 1-5, and composer.bootstrap then appends section 6 - its fixed
+# scaffolding ("SECTION 6 - THE TASK", the ===CLIP:TASK=== marker, the
+# newline joins and the ===CLIP:EOM turn=1 chat=...=== line come to ~85 chars
+# with a generous chat name) plus the user's typed task, which does not exist
+# yet when the registry is sized. 500 = that scaffolding plus ~400 chars (a
+# few typed lines) of task allowance. An allowance, not a guarantee: a longer
+# task was already gambling against the budget without MCP (the smallest
+# presets run ~67 chars under it with a saturated skills listing -
+# protocol.md section 2, "Budget headroom"), and the failure this reserve
+# exists to prevent is the NEW one: a preset that bootstrapped yesterday
+# raising BudgetExceeded today only because MCP appeared.
+_MCP_BOOTSTRAP_RESERVE = 500
+
+# The MCP listing never takes more than this, however huge the preset's
+# budget: past a couple thousand chars a bigger bootstrap teaser stops earning
+# its keep - mcp_schema serves the full list on demand for one cheap call.
+_MCP_LISTING_CAP = 2_000
+
+# Bounded refinement passes when shrinking the listing to the measured room -
+# the same shape (and the same reason) as the composer's _FIT_ATTEMPTS: the
+# fixed doc prose rides on top of the listing budget, so the first candidate
+# can overshoot and the budget is re-derived from the real overshoot. Failing
+# to converge falls through to the drop, never to an over-budget catalog.
+_MCP_FIT_ATTEMPTS = 6
+
+# Each pass shrinks by at least this much: the listing shrinks in whole-line
+# steps (a line is an id plus a clipped description), so a small overshoot
+# alone can stall above the room forever - a line-sized floor sheds roughly
+# one listed tool per pass instead.
+_MCP_FIT_STEP = 160
+
+# The user-visible half of degradation step 3 (design section 5): both specs
+# dropped for the session, said once in the transcript via Engine.build_warnings.
+_MCP_DROPPED_WARNING = (
+    "paste budget too small for MCP tools on this service - "
+    "the mcp/mcp_schema tools were left out of this session"
+)
 
 
 def make_engine_factory(
@@ -38,6 +82,7 @@ def make_engine_factory(
     os_name: str | None = None,
     data_root: Path | None = None,
     home: Path | None = None,
+    mcp_manager: McpManager | None = None,
 ) -> Callable[[EngineRequest | str], Engine]:
     """Build one fresh Engine (and session directory) per started session.
 
@@ -69,6 +114,13 @@ def make_engine_factory(
     root is not on this PC; ``home`` is whose home directory holds the global
     skill folders. All of them default to "this machine", which is what every
     local run passes.
+
+    ``mcp_manager`` is the process-wide MCP runtime built in main(), or None
+    when MCP is unconfigured - in which case every session this factory builds
+    is byte-identical to a pre-MCP one. With a manager, each build sizes the
+    mcp/mcp_schema catalog addition against the chosen preset's paste budget
+    by MEASUREMENT and degrades before it ever breaks a bootstrap
+    (docs/design/mcp.md section 5; see _sized_registry).
     """
     # Skills are discovered once per process from the same folders Claude Code
     # and OpenCode use. The registry is rebuilt per session so the skill listing
@@ -81,6 +133,7 @@ def make_engine_factory(
     # the remote machine's skill folders (design 6): the project-local ones AND
     # the ones under the REMOTE user's home, all through the same host.
     session_host: Host = host if host is not None else LocalHost()
+    session_os = os_name or platform.system() or "unknown OS"
     skills = discover_skills(project_root, home=home, host=session_host)
 
     def build(request: EngineRequest | str) -> Engine:
@@ -89,11 +142,8 @@ def make_engine_factory(
         cfg = get_config()
         if req.service != cfg.general.service and req.service in cfg.services:
             cfg = replace(cfg, general=replace(cfg.general, service=req.service))
-        registry = default_registry(
-            skills,
-            max_skill_listing_chars=cfg.preset().max_paste_chars // 6,
-            role=req.role,
-            allow_delegate=req.allow_delegate,
+        registry, build_warnings = _sized_registry(
+            mcp_manager, cfg, skills, req, project_root.name, session_os, session_chat_name
         )
         workspace = Workspace(project_root, cfg.excluded_names(), host=session_host)
         session = SessionStore(
@@ -114,7 +164,7 @@ def make_engine_factory(
             cfg.caps(),
             registry.render_catalog(),
             project_root.name,
-            os_name or platform.system() or "unknown OS",
+            session_os,
             session_chat_name,
             role=req.role,
         )
@@ -128,9 +178,96 @@ def make_engine_factory(
             session_chat_name,
             role=req.role,
             host=session_host,
+            build_warnings=build_warnings,
         )
 
     return build
+
+
+def _sized_registry(
+    manager: McpManager | None,
+    cfg: Config,
+    skills: Sequence[Skill],
+    req: EngineRequest,
+    workdir_name: str,
+    session_os: str,
+    session_chat_name: str,
+) -> tuple[ToolRegistry, tuple[str, ...]]:
+    """The session's registry, with the MCP tools included only if they FIT.
+
+    THE BUDGET RULE (docs/design/mcp.md section 5, binding): adding MCP must
+    never push a preset that bootstrapped without it over its paste budget -
+    the bootstrap has no chunked fallback, so over budget is a session that
+    never arms. So this measures instead of guessing: render_spec is pure, and
+    the same inputs the composer will use render the MCP-free spec once, the
+    MCP-carrying spec once, and the difference is the real addition. In order
+    of degradation: the listing inside the mcp_schema doc is bounded (its cap
+    below), and when even the fixed prose plus mcp_listing's guaranteed one
+    line cannot fit the remaining room, both specs are dropped for the session
+    and the second return value carries the one-line warning the controller
+    surfaces (Engine.build_warnings).
+    """
+    max_skill_chars = cfg.preset().max_paste_chars // 6
+    base = default_registry(
+        skills,
+        max_skill_listing_chars=max_skill_chars,
+        role=req.role,
+        allow_delegate=req.allow_delegate,
+    )
+    # No manager: MCP is unconfigured and this build is byte-identical to a
+    # pre-MCP one. All-disabled servers keep the manager for status display but
+    # add no catalog text (design section 5, degradation step 1).
+    if manager is None or all(s.state == "disabled" for s in manager.statuses()):
+        return base, ()
+    # Lazy but eager-on-arm (design section 3): the first session build kicks
+    # off every connect and does NOT wait - a tool not live yet is simply not
+    # listed, and mcp_schema serves the live cache later.
+    manager.ensure_started()
+
+    preset = cfg.preset()
+    spec_free = render_spec(
+        preset,
+        cfg.caps(),
+        base.render_catalog(),
+        workdir_name,
+        session_os,
+        session_chat_name,
+        role=req.role,
+    )
+    room = preset.max_paste_chars - len(spec_free) - _MCP_BOOTSTRAP_RESERVE
+    # The same budget/6 discipline the skills listing follows, with a hard cap
+    # on top and never more than the measured room. The listing budget bounds
+    # only the LISTING, and the docs' fixed prose rides on top - so the fit is
+    # re-measured and the budget shrunk by the observed overshoot, bounded
+    # attempts, the same shape as the composer's results fitting. The listing
+    # always emits at least one line however small its budget, which is exactly
+    # what makes a hopeless room fail the measurement here (and drop the specs)
+    # instead of raising BudgetExceeded at bootstrap time.
+    listing_budget = min(room, preset.max_paste_chars // 6, _MCP_LISTING_CAP)
+    for _ in range(_MCP_FIT_ATTEMPTS):
+        if listing_budget <= 0:
+            break
+        candidate = default_registry(
+            skills,
+            max_skill_listing_chars=max_skill_chars,
+            role=req.role,
+            allow_delegate=req.allow_delegate,
+            mcp_specs=make_mcp_specs(manager, max_listing_chars=listing_budget),
+        )
+        spec_with = render_spec(
+            preset,
+            cfg.caps(),
+            candidate.render_catalog(),
+            workdir_name,
+            session_os,
+            session_chat_name,
+            role=req.role,
+        )
+        addition = len(spec_with) - len(spec_free)
+        if addition <= room:
+            return candidate, ()
+        listing_budget -= max(addition - room, _MCP_FIT_STEP)
+    return base, (_MCP_DROPPED_WARNING,)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -371,6 +508,16 @@ def main(argv: list[str] | None = None) -> int:
     # sixel (tui.graphics, tui.md 1.7).
     probe_terminal()
     provider = select_provider(config.clipboard.provider)
+    # The MCP runtime: built ONCE per process, the same lifetime as skill
+    # discovery (docs/design/mcp.md section 3). Every configured server goes in
+    # - disabled ones too, so statuses() can say "disabled" - but nothing
+    # connects until the first session build calls ensure_started(). With no
+    # servers (or [mcp] enabled=false, which loads none) there is NO manager at
+    # all: the factory and the app hold None and behave exactly as before MCP
+    # existed.
+    mcp_manager: McpManager | None = None
+    if config.mcp.enabled and config.mcp_servers.servers:
+        mcp_manager = McpManager(config.mcp_servers.servers, launch.project_root)
     app = AgentClipApp(
         config=config,
         provider=provider,
@@ -383,12 +530,16 @@ def main(argv: list[str] | None = None) -> int:
             os_name=launch.os_name,
             data_root=launch.data_root if launch.data_root != launch.project_root else None,
             home=launch.home,
+            mcp_manager=mcp_manager,
         ),
         project_root=launch.project_root,
+        mcp_manager=mcp_manager,
     )
     try:
         app.run()
     finally:
+        if mcp_manager is not None:
+            mcp_manager.close()
         close = getattr(launch.host, "close", None)
         if close is not None:
             close()

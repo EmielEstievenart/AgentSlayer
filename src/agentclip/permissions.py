@@ -216,6 +216,13 @@ def rules_from_config(obj: object) -> tuple[tuple[PermissionRule, ...], tuple[st
 DEFAULT_PERMISSIONS: dict[str, object] = {
     "*": "allow",
     "read": {"*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow"},
+    # LAST on purpose (dict order is rule order, and the last match wins): without
+    # this rule the built-in "*": "allow" above would silently auto-approve EVERY
+    # MCP call in ruleset mode - the one outcome docs/design/mcp.md section 4 must
+    # make impossible, since an MCP tool can do anything. A user's own `mcp` rules
+    # load after the defaults, so they still override this (yolo may answer the
+    # ask; an explicit user deny still wins).
+    "mcp": "ask",
 }
 
 
@@ -230,6 +237,13 @@ def default_rules() -> tuple[PermissionRule, ...]:
 # parameter that names the resource being acted on. ask_user/task_done are
 # absent on purpose: they are AgentClip's own control flow, not access to the
 # user's machine, and gating them would deadlock the turn that asks.
+#
+# `mcp_schema` is absent on purpose too, and for a different reason: with no
+# entry here it falls back to its OWN NAME as the permission key (approval_kind
+# "auto" is not in _KIND_KEYS, so permission_target's unknown-tool fallback
+# returns ("mcp_schema", "*")). That keeps the cache-only metadata listing cheap
+# - a user can write `{"mcp_schema": "allow"}` - even where `mcp` itself is
+# locked down, which is exactly what docs/design/mcp.md section 4 asks for.
 TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "read_file": ("read", "path"),
     "write_file": ("edit", "path"),
@@ -241,6 +255,11 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "run_command": ("bash", "command"),
     "skill": ("skill", "name"),
     "delegate": ("task", "task"),
+    # The MCP invoker's resource is the composite tool id (sanitize(server) + "_"
+    # + sanitize(tool)), so a ruleset rule such as {"mcp": {"github_*": "allow"}}
+    # gates per server prefix or per individual tool - the same glob meaning
+    # OpenCode gives it (docs/design/mcp.md section 4).
+    "mcp": ("mcp", "tool"),
 }
 
 # What a tool the table has never heard of is treated as, by its approval kind.
@@ -305,10 +324,17 @@ ARITY: dict[str, int] = {
 def always_pattern(key: str, resource: str) -> str:
     """The resource pattern an "always allow" decision should remember.
 
-    Everything but bash remembers the whole key (``*``): "always allow edits"
-    is the decision users actually make, and it is the one today's
+    Everything but bash and mcp remembers the whole key (``*``): "always allow
+    edits" is the decision users actually make, and it is the one today's
     approve-all-edits already means.
     """
+    if key == "mcp":
+        # Per TOOL, not per server, and never the whole key: the user approved
+        # ONE tool's behaviour at the gate, not a server's entire surface
+        # (docs/design/mcp.md section 4). Composite ids are sanitized to
+        # [a-zA-Z0-9_-], so they can contain no `*` or `?` - the id is literal
+        # when read back as a wildcard pattern, and matches only itself.
+        return resource
     if key != "bash":
         return "*"
     try:

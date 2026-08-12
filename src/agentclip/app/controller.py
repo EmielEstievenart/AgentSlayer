@@ -1239,6 +1239,13 @@ class SessionController:
         self._stats = SessionStats(service=spec.service)
         await self._view.add_user(spec.task)
         await self._copy_outbound(out)
+        # How this session was ASSEMBLED, said once where the user will read it
+        # (e.g. "paste budget too small for MCP tools" - docs/design/mcp.md
+        # section 5). The factory that decided it has no view, so the facts ride
+        # the engine to here, the first moment a transcript exists to hold them.
+        for warning in engine.build_warnings:
+            await self._view.add_note(f"! {warning}")
+            self._view.notify(warning, severity="warning", timeout=8)
         await self._view.add_note(
             f"chat name: {engine.chat_name} - the model echoes chat={engine.chat_name} on "
             "every reply; pastes without it are ignored"

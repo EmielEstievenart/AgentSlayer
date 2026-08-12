@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -22,12 +23,29 @@ from agentclip.engine.approval import ApprovalPolicy
 from agentclip.engine.engine import Engine, NewTurn, Send
 from agentclip.engine.states import Decision
 from agentclip.permissions import PermissionRule, default_rules, rules_from_config
-from agentclip.protocol.types import ToolCall
-from agentclip.tools.registry import ToolRegistry
+from agentclip.protocol.types import ToolCall, ToolResult
+from agentclip.tools.registry import ToolContext, ToolRegistry, ToolSpec
 
 
 def make_call(tool: str, **params: str) -> ToolCall:
     return ToolCall(id=1, tool=tool, params=dict(params), raw="")
+
+
+def mcp_call(tool_id: str, **params: str) -> ToolCall:
+    """An `mcp` call carrying the composite tool id. Built here rather than via
+    make_call because the call's own param is named `tool`, which collides with
+    that helper's first positional argument."""
+    return ToolCall(id=1, tool="mcp", params={"tool": tool_id, **params}, raw="")
+
+
+def _mcp_handler(ctx: ToolContext, call: ToolCall) -> ToolResult:
+    return ToolResult(call_id=call.id, status="ok", body="", tool=call.tool)
+
+
+# The real spec lives in agentclip/tools/mcp_tools.py; the policy reads nothing
+# off it but the name and the approval kind, so a stand-in keeps these tests
+# about the permission wiring (docs/design/mcp.md section 4).
+MCP_SPEC = ToolSpec("mcp", "command", _mcp_handler, None, "")
 
 
 @pytest.fixture
@@ -244,6 +262,37 @@ def test_yolo_loads_from_toml(project, make_engine) -> None:
     assert len(pend) == 1 and pend[0].kind == "command"
 
 
+# -- the MCP invoker in legacy mode ---------------------------------------------
+
+
+def test_legacy_mode_never_lets_an_mcp_call_ride_the_allowlist() -> None:
+    """The allowlist matches shell command lines; a composite MCP tool id is not
+    one, so `mcp` gates no matter what the allowlist says (docs/design/mcp.md
+    section 4). The decoy is the sharper danger: the branch used to read
+    `params["command"]`, so an mcp call carrying `command: git status` would have
+    bought itself an allowlist hit and auto-approved."""
+    plain = ApprovalPolicy(ApprovalConfig())
+    call = mcp_call("github_create_issue")
+    assert plain.verdict(MCP_SPEC, call) == "needs_approval"
+
+    wide_open = ApprovalPolicy(ApprovalConfig(command_allowlist=("*",)))
+    assert wide_open.verdict(MCP_SPEC, call) == "needs_approval"
+    decoy = mcp_call("github_create_issue", command="git status")
+    assert wide_open.verdict(MCP_SPEC, decoy) == "needs_approval"
+    assert plain.verdict(MCP_SPEC, decoy) == "needs_approval"
+    # ...and a real command still consults the allowlist as it always did.
+    assert plain.command_auto_allowed("git status") == "git status"
+
+
+def test_legacy_yolo_answers_an_mcp_call_too() -> None:
+    """Deliberate, and the reason the yolo check was NOT moved below the command
+    branch: in legacy mode YOLO is the user's explicit "approve everything for
+    me" and it already answers every edit and every command. `mcp` is not carved
+    out of that - only the allowlist shortcut is closed to it."""
+    policy = ApprovalPolicy(ApprovalConfig(yolo=True))
+    assert policy.verdict(MCP_SPEC, mcp_call("github_create_issue")) == "auto"
+
+
 # == ruleset mode: OpenCode's allow/ask/deny rules ==============================
 
 # A miniature of the real opencode.json (tests never read the developer's own).
@@ -276,8 +325,15 @@ def ruleset(json_text: str = RULESET_JSON) -> tuple[PermissionRule, ...]:
     return default_rules() + rules
 
 
-def ruled_policy(json_text: str = RULESET_JSON, **kwargs: bool | str) -> ApprovalPolicy:
+def ruled_policy(json_text: str = RULESET_JSON, **kwargs: Any) -> ApprovalPolicy:
     return ApprovalPolicy(ApprovalConfig(**kwargs), ruleset(json_text))
+
+
+def get_spec(registry: ToolRegistry, name: str) -> ToolSpec:
+    """A registry lookup that cannot be None - keeps spec dicts precisely typed."""
+    spec = registry.get(name)
+    assert spec is not None, name
+    return spec
 
 
 def write_ruleset(project: Path, json_text: str = RULESET_JSON) -> Path:
@@ -305,8 +361,7 @@ def test_rules_replace_the_allowlist(registry: ToolRegistry) -> None:
 
 def test_verdict_per_permission_key(registry: ToolRegistry) -> None:
     policy = ruled_policy()
-    specs = {name: registry.get(name) for name in ("read_file", "edit_file", "list_dir", "grep")}
-    assert all(specs.values())
+    specs = {name: get_spec(registry, name) for name in ("read_file", "edit_file", "list_dir", "grep")}
     assert policy.verdict(specs["read_file"], make_call("read_file", path="src/a.py")) == "auto"
     assert policy.verdict(specs["grep"], make_call("grep", pattern="TODO")) == "auto"
     assert policy.verdict(specs["edit_file"], make_call("edit_file", path="src/a.py")) == "auto"
@@ -382,6 +437,51 @@ def test_legacy_mode_is_untouched_when_no_rules_are_loaded(
     assert cmd_spec and list_spec
     assert policy.verdict(cmd_spec, make_call("run_command", command="pytest -q")) == "auto"
     assert policy.verdict(list_spec, make_call("list_dir", path=".")) == "auto"
+
+
+# -- the MCP invoker under a ruleset ---------------------------------------------
+
+# `mcp` needs no code in _ruleset_verdict: the shipped default rule plus normal
+# evaluation already do the whole job. These pin that (docs/design/mcp.md section 4).
+
+MCP_DENY_RULESET = """{"permission": {"mcp": {"github_*": "deny"}}}"""
+
+
+def test_the_default_ask_rule_gates_every_mcp_call_under_a_ruleset() -> None:
+    """A ruleset that says nothing about MCP still asks: the shipped default
+    ("mcp", "*", "ask") sits after the built-in "*": "allow", so an MCP call can
+    never be auto-approved by a blanket allow the user wrote for everything."""
+    policy = ruled_policy(ASK_ONLY_RULESET)
+    assert PermissionRule("mcp", "*", "ask") in ruleset(ASK_ONLY_RULESET)
+    call = mcp_call("github_create_issue")
+    assert policy.verdict(MCP_SPEC, call) == "needs_approval"
+    # YOLO is still allowed to answer that ask, exactly as for any other key.
+    assert ruled_policy(ASK_ONLY_RULESET, yolo=True).verdict(MCP_SPEC, call) == "auto"
+
+
+def test_an_explicit_mcp_deny_beats_yolo() -> None:
+    call = mcp_call("github_create_issue")
+    assert ruled_policy(MCP_DENY_RULESET).verdict(MCP_SPEC, call) == "deny"
+    assert ruled_policy(MCP_DENY_RULESET, yolo=True).verdict(MCP_SPEC, call) == "deny"
+    # The glob is a server prefix here, so another server's tool is untouched.
+    other = mcp_call("jira_search")
+    assert ruled_policy(MCP_DENY_RULESET).verdict(MCP_SPEC, other) == "needs_approval"
+
+
+def test_always_allow_on_an_mcp_call_remembers_that_one_tool() -> None:
+    """Per tool, not per server: the user approved one tool's behaviour at the
+    gate, not a server's whole surface."""
+    policy = ruled_policy(ASK_ONLY_RULESET)
+    call = mcp_call("github_create_issue")
+    assert policy.always_rule(MCP_SPEC, call) == PermissionRule(
+        "mcp", "github_create_issue", "allow"
+    )
+
+    policy.remember(policy.always_rule(MCP_SPEC, call))
+    assert policy.verdict(MCP_SPEC, call) == "auto"
+    assert policy.verdict(MCP_SPEC, mcp_call("github_delete_repo")) == (
+        "needs_approval"
+    )
 
 
 # -- through the Engine ---------------------------------------------------------

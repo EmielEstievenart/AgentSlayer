@@ -247,6 +247,18 @@ class ServicePreset:
     # prose renderer, and the reply must not be run. That is a fact about one
     # service, so it is a per-service setting.
     require_fenced_reply: bool = False
+    # A line or two of host-specific guidance for the model, written by the
+    # user and shipped verbatim: "always put a space between ] and ( in code
+    # you send" is the case that prompted it - M365 Copilot corrupts `](`
+    # sequences, and no amount of protocol design fixes a host that eats
+    # characters. Per-service because it describes THIS chat's quirks; empty
+    # everywhere by default, and empty means the bootstrap section and the
+    # `r` reminder both simply do not exist.
+    #
+    # Keep it SHORT. It rides the bootstrap, which has ~67 chars of slack on
+    # the smallest presets (protocol.md section 2, "Budget headroom"), and a
+    # paragraph pasted in here is a session that never arms.
+    extra_instructions: str = ""
 
 
 def default_services() -> dict[str, ServicePreset]:
@@ -819,6 +831,13 @@ def load_config(
                 ctx,
                 warnings,
             ),
+            extra_instructions=_take_str(
+                table,
+                "extra_instructions",
+                base.extra_instructions if base else "",
+                ctx,
+                warnings,
+            ),
         )
         if preset.max_paste_chars > preset.total_context_chars:
             warnings.append(
@@ -996,6 +1015,10 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
         # the gate.
         if preset.require_fenced_reply != (base.require_fenced_reply if base else False):
             services_table[key]["require_fenced_reply"] = preset.require_fenced_reply
+        # Same rule again: no built-in ships with instructions, so the key
+        # appears only for a user who actually wrote some.
+        if preset.extra_instructions != (base.extra_instructions if base else ""):
+            services_table[key]["extra_instructions"] = preset.extra_instructions
 
     data = dict(data)
     if services_table:

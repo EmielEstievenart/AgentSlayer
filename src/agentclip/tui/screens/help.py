@@ -81,6 +81,9 @@ Session  (press Esc first if the chat box has focus - twice if you have typed)
   c  re-copy the last outbound payload    i  force-ingest the clipboard now
      press c TWICE (quickly) and AgentClip also pastes it into the chat for
      you, exactly as it does when it sends a payload of its own
+  r  re-send this service's extra instructions with the next message (only
+     shown when the service has any - set them with F2). The chat may drift
+     back to mangling code halfway through a long session; this reminds it.
   w  pause/resume the clipboard watcher   t  jump to the chat box
   e  end session / show the summary       x  expand the last collapsed output
   l  export the full chat log to a file (raw blocks + payloads, for debugging)

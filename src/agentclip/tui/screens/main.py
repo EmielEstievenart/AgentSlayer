@@ -717,6 +717,10 @@ class MainScreen(Screen[None]):
         # a key whose second press moves the mouse has to announce itself.
         Binding("c", "recopy", "re-copy · cc pastes"),
         Binding("i", "force_ingest", "ingest"),
+        # Hidden until the active service actually carries extra instructions
+        # (check_action), because on every other service there is nothing to
+        # re-inject and the footer must not offer a key that only ever toasts.
+        Binding("r", "reinstruct", "re-instruct"),
         Binding("w", "toggle_watch", "watcher"),
         Binding("t", "follow_up", "type message"),
         Binding("e", "end_session", "summary"),
@@ -774,6 +778,11 @@ class MainScreen(Screen[None]):
     watch_paused: reactive[bool] = reactive(False, bindings=True)
     reject_open: reactive[bool] = reactive(False, bindings=True)
     has_outbound: reactive[bool] = reactive(False, bindings=True)
+    # Does the LIVE session's preset carry extra_instructions? Mirrors the
+    # engine's snapshot, not the config: a service edited mid-session has not
+    # reached the running engine, and `r` may only offer what that engine would
+    # actually send.
+    has_extra_instructions: reactive[bool] = reactive(False, bindings=True)
     # True for the whole of a delegated sub-agent run. The master's flow is busy
     # throughout, which would normally disable the composer - but /abort is the
     # only way out of a sub-run, so the box has to stay reachable.
@@ -1244,6 +1253,13 @@ class MainScreen(Screen[None]):
             return True if ok else None
         if action == "recopy":
             return True if self.has_outbound else None
+        if action == "reinstruct":
+            # Hidden outright, not dimmed, on a service with nothing to
+            # re-inject: unlike `undo` or `ingest` this is not a key that
+            # becomes available in a moment - on this service it never does.
+            if not self.has_extra_instructions:
+                return False
+            return True if self.session_active else None
         if action == "force_ingest":  # ingest only parses in AWAITING_REPLY
             ok = self.session_active and not self.busy and self.phase_name == "AWAITING_REPLY"
             return True if ok else None
@@ -1626,6 +1642,9 @@ class MainScreen(Screen[None]):
         self.sub_running = view.session_role == "subagent"
         self.session_active = view.session_active
         self.has_outbound = view.has_outbound
+        self.has_extra_instructions = bool(
+            view.snapshot and view.snapshot.has_extra_instructions
+        )
         self.pending_approval = view.pending_approval
         self.awaiting_answer = view.awaiting_answer
         self.busy = view.busy
@@ -4618,6 +4637,13 @@ class MainScreen(Screen[None]):
         ``redeliver_outbound``)."""
         self._controller.recopy()
 
+    def action_reinstruct(self) -> None:
+        """`r`: arm/disarm the service's extra instructions for the next payload
+        (tui.md 3.4h). The controller owns the whole decision - including both
+        refusals - because the engine is the only thing that knows whether there
+        is a session and what its preset actually says."""
+        self._controller.reinstruct()
+
     def action_force_ingest(self) -> None:
         # The user says the reply is on the clipboard right now. If the parse
         # then fails, the settled status push walks this back to idle.
@@ -4830,6 +4856,8 @@ class MainScreen(Screen[None]):
             service=service,
             out=out,
             turn=turn,
+            # Lit only between the `r` press and the payload that spends it.
+            instr="✎ INSTR" if snap and snap.instructions_armed else "",
             edits=edits,
             edits_class=edits_class,
             root=root,

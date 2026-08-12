@@ -13,6 +13,7 @@ Layout per docs/design/protocol.md section 2:
     3 HOW TO EMIT CALLS     (grammar + chat-name echo; fence conditional)
     4 TOOL CATALOG          (passed in, header from here)
     5 RULES OF ENGAGEMENT   (max_calls substituted from the budget caps)
+    - EXTRA INSTRUCTIONS    (unnumbered, only when the preset carries some)
 
 Sections 1 and 5 come in two variants: the master brief and the sub-agent one
 (`role="subagent"`), which explains the one-shot delegated task and the
@@ -196,6 +197,13 @@ SECTION_RULES_SUBAGENT = _RULES_HEAD + "\n" + _DONE_RULE_SUBAGENT
 
 SECTION_TASK_HEADER = "SECTION 6 - THE TASK"
 
+# Appended after section 5 only when the active preset carries
+# ``extra_instructions``: the user's own words about THIS host's quirks. No
+# number of its own - it is the user talking, not another clause of the
+# protocol - and no prose around it, because every character here comes out of
+# the bootstrap's slack (see the budget-headroom note in protocol.md section 2).
+EXTRA_INSTRUCTIONS_HEADER = "EXTRA INSTRUCTIONS FROM THE USER:"
+
 
 def render_spec(
     preset: ServicePreset,
@@ -222,7 +230,7 @@ def render_spec(
     attachment_note = ATTACHMENT_NOTE + "\n" if preset.attachment_note else ""
     fence_instruction = FENCE_INSTRUCTION if preset.wrap_blocks_in_fence else ""
     subagent = role == "subagent"
-    sections = (
+    sections: list[str] = [
         (SECTION_ROLE_SUBAGENT if subagent else SECTION_ROLE).format(
             workdir_name=workdir_name, os_name=os_name
         ),
@@ -233,5 +241,8 @@ def render_spec(
             batching_instruction=BATCHING_INSTRUCTION,
             max_calls=caps.advised_max_calls,
         ),
-    )
+    ]
+    extra = preset.extra_instructions.strip()
+    if extra:
+        sections.append(f"{EXTRA_INSTRUCTIONS_HEADER}\n{extra}")
     return "\n\n".join(sections) + "\n"

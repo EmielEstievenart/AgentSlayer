@@ -20,7 +20,12 @@ from textual.widgets import Static
 # Unlike ``armed`` it never hides - all three modes are worth seeing, and a
 # segment that only appears in two of them is a segment the eye cannot use to
 # answer "which mode am I in?" at a glance.
-_SEGMENTS = ("mode", "watch", "armed", "service", "out", "turn", "edits", "root")
+# ``instr`` is the extra-instructions re-inject (tui.md 3.4h) and hides itself
+# when empty for ``armed``'s reason: it is true only between an `r` press and
+# the payload that spends it, which is usually seconds, and a permanently
+# present "not armed" cell would be six characters of furniture. It sits next to
+# ``edits`` because both describe what the NEXT thing out of here will carry.
+_SEGMENTS = ("mode", "watch", "armed", "service", "out", "turn", "instr", "edits", "root")
 
 
 class StatusBar(Horizontal):
@@ -42,6 +47,7 @@ class StatusBar(Horizontal):
         edits_class: str = "",
         root: str,
         armed: str = "",
+        instr: str = "",
     ) -> None:
         mode_seg = self.query_one("#seg-mode", Static)
         mode_seg.update(Text(mode))
@@ -59,6 +65,9 @@ class StatusBar(Horizontal):
         self.query_one("#seg-service", Static).update(Text(service))
         self.query_one("#seg-out", Static).update(Text(out))
         self.query_one("#seg-turn", Static).update(Text(turn))
+        instr_seg = self.query_one("#seg-instr", Static)
+        instr_seg.update(Text(instr))
+        instr_seg.display = bool(instr)
         edits_seg = self.query_one("#seg-edits", Static)
         edits_seg.update(Text(edits))
         edits_seg.set_classes(f"seg {edits_class}".rstrip())

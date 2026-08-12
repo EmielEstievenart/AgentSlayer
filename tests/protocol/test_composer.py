@@ -29,9 +29,16 @@ def make_composer(
     fence: bool = True,
     attach: bool = True,
     catalog: str = "read_file(path, start, end)\n  Read a file.\n",
+    extra: str = "",
 ) -> Composer:
     preset = ServicePreset(
-        "test", "Test preset", budget, budget * 20, wrap_blocks_in_fence=fence, attachment_note=attach
+        "test",
+        "Test preset",
+        budget,
+        budget * 20,
+        wrap_blocks_in_fence=fence,
+        attachment_note=attach,
+        extra_instructions=extra,
     )
     return Composer(
         preset, caps_for_budget(budget), catalog, "AgentClip", "Windows 11", CHAT_NAME
@@ -474,3 +481,36 @@ def test_the_fence_is_inside_the_paste_budget() -> None:
     # And it is actually close to the budget: the fence is not bought by leaving
     # a fence-sized hole unused.
     assert len(payload) > budget - 100
+
+
+def test_task_notes_render_as_a_note_block_ahead_of_the_task() -> None:
+    """`task()` carries the same notes channel `results()` does, so anything
+    armed for "the next thing we send" is spent by a typed follow-up too
+    (protocol.md section 4). Ahead of the TASK block, not inside it: a NOTE
+    spliced between that header and the user's words reads as part of the task.
+    """
+    note = "note: user instructions reminder: keep ] and ( apart in code."
+    out = make_composer().task(6, "carry on", notes=[note])
+    assert out.chunks == (
+        "~~~~\n"
+        "===CLIP:NOTE===\n"
+        f"{note}\n"
+        "===CLIP:END===\n"
+        "===CLIP:TASK===\ncarry on\n===CLIP:EOM turn=6 chat=amber-falcon===\n"
+        "~~~~\n",
+    )
+    assert out.total_chars == len(out.chunks[0])
+
+
+def test_task_without_notes_is_byte_identical_to_before() -> None:
+    """The parameter is additive: an ordinary follow-up gains nothing at all."""
+    assert make_composer().task(5, "x").chunks == make_composer().task(5, "x", ()).chunks
+
+
+def test_bootstrap_extra_instructions_toggle() -> None:
+    task = "do something"
+    with_extra = make_composer(extra="keep ] and ( apart").bootstrap(task).chunks[0]
+    without_extra = make_composer().bootstrap(task).chunks[0]
+    assert "keep ] and ( apart" in with_extra
+    assert "EXTRA INSTRUCTIONS FROM THE USER:" in with_extra
+    assert "EXTRA INSTRUCTIONS FROM THE USER:" not in without_extra

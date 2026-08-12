@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from agentclip.config import ServicePreset, caps_for_budget
 from agentclip.protocol import spec
 
@@ -26,8 +28,11 @@ def render(
     fence: bool = True,
     attach: bool = True,
     catalog: str = CATALOG,
+    extra: str = "",
 ) -> str:
-    preset = make_preset(budget, fence=fence, attach=attach)
+    preset = replace(
+        make_preset(budget, fence=fence, attach=attach), extra_instructions=extra
+    )
     return spec.render_spec(
         preset, caps_for_budget(budget), catalog, "AgentClip", "Windows 11", CHAT_NAME
     )
@@ -229,3 +234,48 @@ def test_rules_of_engagement_essentials() -> None:
 
 def test_uses_lf_line_endings_only() -> None:
     assert "\r" not in render()
+
+
+EXTRA_LINE = "always put a space between ] and ( in code you send"
+
+
+def test_extra_instructions_section_appears_only_when_the_preset_carries_some() -> None:
+    """The user's own words about this host, shipped verbatim under a bare
+    header - and on every other service, not shipped at all (protocol.md 2)."""
+    with_extra = render(extra=EXTRA_LINE)
+    assert spec.EXTRA_INSTRUCTIONS_HEADER in with_extra
+    assert EXTRA_LINE in with_extra
+
+    without = render()
+    assert spec.EXTRA_INSTRUCTIONS_HEADER not in without
+
+
+def test_whitespace_only_extra_instructions_render_nothing() -> None:
+    assert spec.EXTRA_INSTRUCTIONS_HEADER not in render(extra="   \n  ")
+
+
+def test_extra_instructions_come_last_after_the_numbered_sections() -> None:
+    """Last word before the task: the protocol talks first, then the user talks
+    over it. Unnumbered for the same reason (and so 2.1's "sections 1 and 5
+    swapped" stays true of the sub-agent variant, which gets this one too)."""
+    text = render(extra=EXTRA_LINE)
+    assert text.index("SECTION 5 - RULES OF ENGAGEMENT") < text.index(
+        spec.EXTRA_INSTRUCTIONS_HEADER
+    )
+    assert "SECTION 6" not in text  # still the Composer's to append
+    assert text.rstrip("\n").endswith(EXTRA_LINE)
+
+
+def test_the_subagent_brief_carries_the_extra_instructions_too() -> None:
+    """A sub-agent talks to the same host, so it meets the same mangling."""
+    preset = replace(make_preset(), extra_instructions=EXTRA_LINE)
+    text = spec.render_spec(
+        preset,
+        caps_for_budget(12_000),
+        CATALOG,
+        "AgentClip",
+        "Windows 11",
+        CHAT_NAME,
+        role="subagent",
+    )
+    assert EXTRA_LINE in text

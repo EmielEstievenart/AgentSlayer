@@ -567,6 +567,15 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                     yield Input(id="svc-total", placeholder="e.g. 500000", compact=True)
                     yield Static(Text("Stale (seconds unchanged)"), classes="side-title")
                     yield Input(id="svc-stable", placeholder="e.g. 2.0", compact=True)
+                    # One line, deliberately: this text rides the bootstrap,
+                    # which has ~67 chars of slack on the smallest presets
+                    # (protocol.md section 2), so the box is the budget warning.
+                    yield Static(Text("Extra instructions (one short line)"), classes="side-title")
+                    yield Input(
+                        id="svc-extra-instructions",
+                        placeholder="e.g. put a space between ] and ( in code",
+                        compact=True,
+                    )
                     yield Static("", id="svc-error")
                 with Vertical(id="svc-appearance-col"):
                     yield Static(Text("APPEARANCE · what it looks like"), classes="side-title")
@@ -708,6 +717,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         max_input = self.query_one("#svc-max", Input)
         total_input = self.query_one("#svc-total", Input)
         stable_input = self.query_one("#svc-stable", Input)
+        extra_input = self.query_one("#svc-extra-instructions", Input)
         preset: ServicePreset | None = None
         if key is None:
             key_input.disabled = False
@@ -719,6 +729,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             # universal default, and "add a service" should stay a four-field
             # job for users who never touch the stale detector.
             stable_input.value = str(DEFAULT_STABLE_SECONDS)
+            extra_input.value = ""
         else:
             preset = self._services[key]
             key_input.disabled = True
@@ -727,6 +738,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             max_input.value = str(preset.max_paste_chars)
             total_input.value = str(preset.total_context_chars)
             stable_input.value = str(preset.stable_seconds)
+            extra_input.value = preset.extra_instructions
         self._pending_new = None
         # For "+ Add new", the boxes show what pressing "Add service" is
         # actually going to create - i.e. the ServicePreset dataclass defaults,
@@ -844,6 +856,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         max_text = self.query_one("#svc-max", Input).value.strip()
         total_text = self.query_one("#svc-total", Input).value.strip()
         stable_text = self.query_one("#svc-stable", Input).value.strip()
+        extra_text = self.query_one("#svc-extra-instructions", Input).value.strip()
 
         error: str | None = None
         key = self._selected_key
@@ -913,6 +926,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                 max_paste_chars=max_val,
                 total_context_chars=total_val,
                 stable_seconds=stable_val,
+                extra_instructions=extra_text,
             )
             self.query_one("#svc-add-btn", Button).disabled = False
         else:
@@ -923,6 +937,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                 max_paste_chars=max_val,
                 total_context_chars=total_val,
                 stable_seconds=stable_val,
+                extra_instructions=extra_text,
             )
 
     # -- the detection checklist -------------------------------------------------

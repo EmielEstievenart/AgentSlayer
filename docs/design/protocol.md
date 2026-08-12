@@ -251,6 +251,28 @@ SECTION 6 — THE TASK (~variable)
 ===CLIP:EOM turn=1 chat={chat_name}===
 ```
 
+**The user's own extra instructions (unnumbered, conditional).** A preset may
+carry `extra_instructions` — a line or two the user wrote about *this host*,
+shipped verbatim under a bare `EXTRA INSTRUCTIONS FROM THE USER:` header
+appended after section 5 (so it reads as the last word before the task). The
+case it exists for is a host that corrupts what the model sends and cannot be
+argued out of it: M365 Copilot eats `](` sequences, and "always put a space
+between ] and ( in code you send" is a fix no protocol design can supply,
+because it is a fact about one chat client. Per-service for that reason, empty
+in every built-in, and when empty the section does not exist at all.
+
+Unnumbered deliberately: sections 1–5 are the protocol talking, and this is the
+user talking over it. Numbering it would invite the model to weigh it against
+the rules above rather than on top of them, and would make the count in §2.1's
+"sections 1 and 5 swapped" wrong for the sub-agent variant (which gets this
+section too, unchanged — a sub-agent talks to the same host).
+
+**It is not free.** Every character comes out of the headroom below, and it is
+the *only* section a user can grow without touching this repo. The editor's
+field is a single-line `Input` for exactly that reason: a paragraph pasted in
+there is a session that never arms. The re-inject in §4 exists so that a long
+session does not need a long instruction — one short line, repeated on demand.
+
 **Budget headroom — read before adding prose here.** The whole bootstrap must fit ONE paste: there is no chunked-bootstrap fallback, so over-budget means `BudgetExceeded`, an error toast, and a session that never arms. Assembled with a real skills library (listing saturated at its budget/6 cap) it measures **11,933 chars** against the smallest presets' 12,000-char `max_paste_chars` — **67 chars of slack**, and the skills listing is only capped at budget/6, not fitted to what's left. (It was 11,885 / 115 before `run_command` gained its required `reason`, which cost +48 after trimming that entry's prose.) Every sentence added to sections 1–5 spends that slack. Measure before and after (`Engine.start_task` on a `max_paste_chars=12000` preset), and if a rule can be stated in one line, state it in one line.
 
 ### 2.1 Sub-agent bootstrap variant
@@ -343,6 +365,8 @@ R2
   - `plan` mode, every `edit`/`command` call: body `plan mode is active: the user is only exploring and no changes may be made.` and `hint: explore with read_file/list_dir/glob/grep and present your plan via task_done or ask_user; the user can switch modes to enable execution.`
   - `unattended` mode, every call that would have opened a gate: body `auto-denied: the user is away (unattended mode) and this call is not covered by an allow rule.`, then — when a ruleset is loaded — the rule-denial's own `Here are some of the relevant rules <json array>` line, then `hint: do not retry unchanged; continue with calls that allow rules cover, or finish with task_done and list what was blocked.`
 - **The notes channel** (`===CLIP:RESULTS`'s leading `note:` lines — §6's id-hygiene rule is its other user) carries one more thing besides id hygiene: a **permission-mode change** made mid-session. Exactly one of `permission mode is now plan: exploration only; edit/command calls will be denied.` / `permission mode is now unattended: only calls covered by allow rules will run; everything else is auto-denied.` / `permission mode is now ask: normal approvals resumed.`, on the first results payload after the change and never again (a user who cycles three times meant the mode they landed on). It is deliberately NOT in the bootstrap: §2's budget headroom has no room for prose about a mode that may never be used, and every mode denial explains itself in-band.
+- **The notes channel carries one more one-shot**: the user's `extra_instructions` (§2), re-injected on demand. The bootstrap already carried them, and a long session on a host that mangles code drifts back to mangling it — so `r` in the TUI (tui.md §3.4h) arms a one-shot reminder that rides the **next outbound of any kind**, as `note: user instructions reminder: <the user's line>`, and clears. "Any kind" is load-bearing: a session steered by typed follow-ups produces no results payload for many turns, so `Composer.task()` takes the same `notes` sequence `results()` does and renders the same `===CLIP:NOTE===` block — ahead of the `===CLIP:TASK===` block rather than inside it, since `===CLIP:RESULTS turn=N===` is an envelope line notes can sit under and `===CLIP:TASK===` is the block itself. The bootstrap is the one outbound that never spends the flag: it embeds the instructions already, and the flag cannot be armed before a session exists.
+
 - Result bodies are always heredoc-framed with tool-chosen collision-free tags, so a result that *contains* `===CLIP:` lines (grepping AgentClip's own source!) cannot confuse the LLM's reading of the envelope.
 
 ### 4.1 Outbound payloads are fenced too

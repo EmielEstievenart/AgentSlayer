@@ -117,6 +117,17 @@ def _image(size: int = 32) -> RegionImage:
 async def _open_editor_via_f2(app: AgentClipApp, pilot: Pilot) -> None:
     await pilot.press("f2")
     await _wait_for(pilot, lambda: isinstance(app.screen, ServiceEditorScreen), "editor opened")
+    # The screen becomes `app.screen` before its own on_mount has run
+    # `_load_service`, and nearly every test below opens by SELECTING a service.
+    # A `Select.Changed` racing an unfinished mount loads the INITIAL preset
+    # over the chosen one, and the test then edits a form belonging to a service
+    # it did not pick - a load-sensitive flake rather than a reproducible one.
+    # Waiting for the form to be filled in is waiting for that mount.
+    await _wait_for(
+        pilot,
+        lambda: bool(app.screen.query_one("#svc-label", Input).value),
+        "the editor's form filled in",
+    )
 
 
 async def test_f2_opens_editor_edits_persist_and_sidebar_updates(
@@ -1679,3 +1690,46 @@ async def test_editor_opens_preselected_on_the_selected_window_tab_s_service(
         editor = app.screen
         assert isinstance(editor, ServiceEditorScreen)
         assert editor.query_one("#svc-select", Select).value == "claude"
+
+
+LINE = "always put a space between ] and ( in code you send"
+
+
+async def test_the_extra_instructions_line_round_trips_into_the_saved_services(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The one field on this form the user WRITES rather than picks, and the one
+    whose text ships verbatim to the model (protocol.md 2). Same live-apply,
+    close-and-persist path as everything else on the column - and, being empty
+    in every built-in, absent from the file until somebody types in it."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "copilot-work"
+        await pilot.pause()
+        # Empty everywhere: no built-in knows how its host mangles text.
+        assert editor.query_one("#svc-extra-instructions", Input).value == ""
+
+        editor.query_one("#svc-extra-instructions", Input).value = LINE
+        await pilot.pause()
+        assert editor._services["copilot-work"].extra_instructions == LINE
+
+        # ...and it follows the selection rather than leaking onto the next one.
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        assert editor.query_one("#svc-extra-instructions", Input).value == ""
+        assert editor._services["gemini"].extra_instructions == ""
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["copilot-work"].extra_instructions == LINE
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["copilot-work"]["extra_instructions"] == LINE
+        assert "gemini" not in raw["services"]

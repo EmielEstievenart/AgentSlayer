@@ -112,6 +112,18 @@ _MODE_NOTES: dict[str, str] = {
     "ask": "permission mode is now ask: normal approvals resumed.",
 }
 
+# The prefix the re-injected `extra_instructions` ride under. Named as a
+# reminder, because it is one: the same words already went out with the
+# bootstrap, and a model that reads this as a NEW rule has been told the
+# opposite of what the user meant by pressing `r`.
+_INSTRUCTIONS_NOTE_PREFIX = "user instructions reminder:"
+
+# What arm_extra_instructions() answers with. Four states rather than a bool
+# because the two refusals are the interesting ones: the UI has to say which
+# door is shut ("no session" vs "this service has nothing to re-inject"), and
+# neither is an error worth raising.
+ArmResult = Literal["armed", "disarmed", "no-session", "no-instructions"]
+
 
 # -- value types returned to the TUI ------------------------------------------
 
@@ -167,6 +179,11 @@ class StatusSnapshot:
     mode: PermissionMode  # ask | plan (no changes) | unattended (nothing gates)
     session_dir: Path
     last_outbound_chars: int
+    # Does this session's preset carry extra_instructions at all, and has the
+    # user armed a re-injection of them? The pair the `r` key needs: the first
+    # decides whether the key exists, the second whether it is lit.
+    has_extra_instructions: bool = False
+    instructions_armed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,6 +362,12 @@ class Engine:
         # on. At most one: a user who cycles three times before the next turn
         # meant the mode they landed on, not the trip.
         self._mode_note: str | None = None
+        # Has the user asked for the preset's extra_instructions to ride the
+        # next outbound? Same shape as _mode_note and for the same reason: a
+        # fact about this session, spent on the next payload that actually goes
+        # out. Not reset anywhere else, because an engine is per-session - a
+        # `/new` builds a fresh one, which starts here at False.
+        self._instructions_armed = False
         # Watchers of the plan as it executes; see set_progress_hook.
         self._progress_hook: ProgressHook | None = None
 
@@ -413,12 +436,16 @@ class Engine:
         """An extra TASK payload from the user. Legal while AWAITING_REPLY (the
         user steers mid-session) and after DONE (task_done completes the session
         but the user may continue - protocol.md section 8). From DONE this
-        reopens the session, transitioning back to AWAITING_REPLY for the reply."""
+        reopens the session, transitioning back to AWAITING_REPLY for the reply.
+
+        Spends an armed extra-instructions reminder like a results payload does:
+        "the next thing we send" has to mean the next thing, or a session steered
+        by typed messages would never deliver one."""
         if self._phase not in (Phase.AWAITING_REPLY, Phase.DONE):
             raise EngineStateError(
                 f"follow_up() requires phase AWAITING_REPLY or DONE, but engine is {self._phase.name}"
             )
-        outbound = self._composer.task(self._turn + 1, text)
+        outbound = self._composer.task(self._turn + 1, text, self._take_instructions_note())
         self._turn += 1
         self._session.append_event("task", text=text, turn=self._turn)
         self._register_outbound(outbound)
@@ -834,6 +861,8 @@ class Engine:
             mode=self._policy.mode,
             session_dir=self._session.session_dir,
             last_outbound_chars=self._last_outbound_chars,
+            has_extra_instructions=bool(self._config.preset().extra_instructions.strip()),
+            instructions_armed=self._instructions_armed,
         )
 
     def set_yolo(self, enabled: bool) -> bool:
@@ -871,6 +900,30 @@ class Engine:
         if self._phase is not Phase.IDLE:
             self._mode_note = _MODE_NOTES[mode]
         return mode
+
+    def arm_extra_instructions(self) -> ArmResult:
+        """Toggle "the next payload also carries the preset's extra_instructions".
+
+        The re-inject half of the feature (tui.md 3.4h): the instructions go out
+        once with the bootstrap, and a long session on a host that mangles code
+        drifts back to mangling it. This arms a ONE-SHOT reminder, spent by the
+        next outbound of any kind - results or a typed follow-up, whichever the
+        session reaches first (see _take_instructions_note).
+
+        A toggle rather than a latch, because the only way to see the flag is
+        the status bar and the only way out of a press the user did not mean has
+        to be the same key. Refuses in two cases, each named in the return so the
+        UI can explain rather than sit there: IDLE (there is no next payload -
+        and once there is, it is the bootstrap, which embeds the instructions
+        anyway) and a preset with nothing to re-inject.
+        """
+        if self._phase is Phase.IDLE:
+            return "no-session"
+        if not self._config.preset().extra_instructions.strip():
+            return "no-instructions"
+        self._instructions_armed = not self._instructions_armed
+        self._session.append_event("extra_instructions", armed=self._instructions_armed)
+        return "armed" if self._instructions_armed else "disarmed"
 
     # -- planning ----------------------------------------------------------------
 
@@ -1237,17 +1290,21 @@ class Engine:
             self._session.append_event(
                 "task_done", summary=exec_.done_summary, result_chars=len(exec_.done_result)
             )
-            # No results means no payload, so a pending mode note is NOT taken:
-            # it keeps waiting for one that actually goes out (a follow-up after
+            # No results means no payload, so the pending notes are NOT taken:
+            # they keep waiting for one that actually goes out (a follow-up after
             # task_done reopens the session - protocol.md section 8).
             outbound = (
-                self._compose_results(results, notes + self._take_mode_note())
+                self._compose_results(
+                    results, notes + self._take_mode_note() + self._take_instructions_note()
+                )
                 if results
                 else None
             )
             self._set_phase(Phase.DONE)
             return Done(exec_.done_summary, outbound, exec_.done_result)
-        outbound = self._compose_results(results, notes + self._take_mode_note())
+        outbound = self._compose_results(
+            results, notes + self._take_mode_note() + self._take_instructions_note()
+        )
         self._set_phase(Phase.AWAITING_REPLY)
         return Send(outbound)
 
@@ -1258,6 +1315,16 @@ class Engine:
             return []
         note, self._mode_note = self._mode_note, None
         return [f"note: {note}"]
+
+    def _take_instructions_note(self) -> list[str]:
+        """The armed extra-instructions reminder, once - same contract as
+        _take_mode_note, and taken alongside it wherever a payload is composed.
+        Both pending at the same time is legal and rides as two note lines."""
+        if not self._instructions_armed:
+            return []
+        self._instructions_armed = False
+        text = self._config.preset().extra_instructions.strip()
+        return [f"note: {_INSTRUCTIONS_NOTE_PREFIX} {text}"] if text else []
 
     def _compose_results(self, results: list[ToolResult], notes: list[str]) -> Outbound:
         capped = fit_results(results, self._config.limits.max_result_chars)

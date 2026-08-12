@@ -575,6 +575,7 @@ def test_save_services_writes_the_opt_ins_only_when_they_differ(
     assert "auto_submit" not in written
     assert "capture_prose" not in written
     assert "require_fenced_reply" not in written
+    assert "extra_instructions" not in written
 
 
 # -- require_fenced_reply (the unfenced-reply gate, protocol.md 1.4 #15) --------
@@ -1232,3 +1233,55 @@ def test_default_opencode_path_is_opencodes_own() -> None:
     assert path.name == "opencode.json"
     assert path.parent.name == "opencode"
     assert path.parent.parent.name == ".config"
+
+
+# -- extra_instructions (the user's own host-specific line, protocol.md 2) -----
+
+
+def test_extra_instructions_ship_empty_everywhere() -> None:
+    """No built-in knows anything about how its host mangles text: the line is
+    the USER's, written after they have watched one get eaten. Empty means the
+    bootstrap section and the `r` reminder both simply do not exist."""
+    for key, preset in default_services().items():
+        assert preset.extra_instructions == "", key
+    assert ServicePreset("k", "K", 1_000, 5_000).extra_instructions == ""
+
+
+def test_load_config_reads_extra_instructions(project: Path, global_path: Path) -> None:
+    global_path.write_text(
+        '[services.copilot-work]\n'
+        'extra_instructions = "always put a space between ] and ( in code you send"\n',
+        encoding="utf-8",
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["copilot-work"].extra_instructions == (
+        "always put a space between ] and ( in code you send"
+    )
+    assert not cfg.warnings
+
+
+def test_load_config_rejects_non_string_extra_instructions(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        "[services.claude]\nextra_instructions = 12\n", encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].extra_instructions == ""
+    assert any("extra_instructions" in w for w in cfg.warnings)
+
+
+def test_save_then_load_round_trips_extra_instructions(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], extra_instructions="keep ] ( apart")
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"]["extra_instructions"] == "keep ] ( apart"
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings

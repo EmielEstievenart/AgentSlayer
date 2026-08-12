@@ -254,10 +254,26 @@ class Composer:
         )
         return self._single("bootstrap", payload, turn=1)
 
-    def task(self, turn: int, text: str) -> Outbound:
-        """A follow-up task/message from the user, mid- or post-session."""
+    def task(self, turn: int, text: str, notes: Sequence[str] = ()) -> Outbound:
+        """A follow-up task/message from the user, mid- or post-session.
+
+        ``notes`` renders the same leading ``===CLIP:NOTE===`` block
+        :meth:`results` does, inside the same fence: the notes channel is about
+        the payload the model is being handed, and a typed follow-up is as much
+        an outbound as a results batch. The engine uses it for anything armed
+        and waiting for "the next thing we send", which must not mean "the next
+        RESULTS we send" - a session steered by follow-ups would never spend it.
+        """
         body = text.rstrip("\n")
-        payload = wrap_in_fence(f"===CLIP:TASK===\n{body}\n{self._eom(turn)}\n")
+        lines: list[str] = []
+        if notes:
+            # Ahead of the TASK block, not inside it: `===CLIP:RESULTS turn=N===`
+            # is an envelope line the notes can sit under, but `===CLIP:TASK===`
+            # is the block itself, and a NOTE spliced between that header and
+            # the user's words would read as part of the task.
+            lines += ["===CLIP:NOTE===", *notes, "===CLIP:END==="]
+        lines += ["===CLIP:TASK===", body, self._eom(turn)]
+        payload = wrap_in_fence("\n".join(lines) + "\n")
         return self._single("user_answer", payload, turn)
 
     def note(self, turn: int, text: str) -> Outbound:

@@ -175,6 +175,11 @@ _MODE_YOLO_CAUTION = (
     "says."
 )
 
+_REINSTRUCT_NOTE = (
+    "extra instructions armed - your service's instructions ride the next payload "
+    "(results or a typed message) as a note, once. Press r again to disarm."
+)
+
 _MODE_ALERT_TEXT: dict[str, str] = {
     "ask": "mode: ASK - approvals restored",
     "plan": "mode: PLAN - edits and commands are denied",
@@ -714,6 +719,55 @@ class SessionController:
         severity: Severity = "information" if target == "ask" else "warning"
         self._view.alert(_MODE_ALERT_TEXT[target], severity=severity)
         self._view.notify(_MODE_ALERT_TEXT[target], severity=severity)
+
+    # -- the extra-instructions re-inject (`r`) --------------------------------
+
+    def reinstruct(self) -> None:
+        """`r`: arm (or disarm) the service's extra instructions for the next send.
+
+        ``cycle_permission_mode``'s shape - the engine owns the flag, this only
+        asks and reports - and ungated for its reason: the moment a user reaches
+        for this is the moment they have just watched the model mangle something,
+        which is as likely to be mid-turn as not. The engine refuses what it
+        cannot do (no session, nothing to re-inject) and names which, so the two
+        refusals read as different sentences rather than one silent no-op.
+        """
+        if self._engine is None:
+            self._view.notify(
+                "no session - the instructions ride the bootstrap when one starts",
+                severity="warning",
+            )
+            return
+        self._view.spawn(self._apply_reinstruct())
+
+    async def _apply_reinstruct(self) -> None:
+        engine = self._engine
+        if engine is None:
+            return
+        try:
+            result = await self._engine_call(engine.arm_extra_instructions)
+        except Exception as exc:
+            await self._view.add_error(f"could not arm the instructions: {exc}")
+            self._view.alert("re-instruct failed - see transcript", severity="error")
+            return
+        if result == "no-session":
+            self._view.notify(
+                "no session - the instructions ride the bootstrap when one starts",
+                severity="warning",
+            )
+            return
+        if result == "no-instructions":
+            self._view.notify(
+                "this service has no extra instructions - add them in the service editor (F2)",
+                severity="warning",
+            )
+            return
+        await self._refresh_status()  # repaint the status bar (instructions segment)
+        if result == "armed":
+            await self._view.add_note(_REINSTRUCT_NOTE)
+            self._view.notify("instructions armed - they ride the next send", severity="warning")
+        else:
+            self._view.notify("instructions disarmed", severity="information")
 
     def _cmd_new(self) -> None:
         """Open a fresh BROWSER chat now, and start a fresh session behind it.

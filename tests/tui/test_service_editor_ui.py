@@ -1133,6 +1133,46 @@ async def test_the_automation_ticks_round_trip_into_the_saved_services(
         assert raw["services"]["claude"]["capture_prose"] is True
 
 
+async def test_the_require_fenced_tick_round_trips_into_the_saved_services(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The unfenced-reply gate is a fact about ONE host's copy path (protocol.md
+    1.4 #15), so it rides this column like every other per-service tick: working
+    copy, then the close-and-persist path."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        # Off everywhere by default: per-block copy buttons legitimately strip
+        # the fence, so this must never be assumed.
+        assert not editor.query_one("#svc-require-fenced", Checkbox).value
+
+        editor.query_one("#svc-require-fenced", Checkbox).value = True
+        await pilot.pause()
+        assert editor._services["claude"].require_fenced_reply is True
+
+        # ...and it follows the selection rather than leaking onto the next one.
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        assert not editor.query_one("#svc-require-fenced", Checkbox).value
+        assert editor._services["gemini"].require_fenced_reply is False
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["claude"].require_fenced_reply is True
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["claude"]["require_fenced_reply"] is True
+        assert "gemini" not in raw["services"]
+
+
 # -- SCROLL: how the auto-copy flow reaches the newest reply --------------------
 
 

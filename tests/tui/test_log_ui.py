@@ -497,7 +497,11 @@ async def test_a_near_miss_on_the_copy_button_logs_how_close_it_came(
     """The question the whole search extension exists for. "Copy button not
     found" has two causes needing opposite fixes - it is not on screen, or the
     capture has stopped matching it - and only a number tells them apart. A near
-    miss means recapture it in F2."""
+    miss means recapture it in F2.
+
+    The number the report keeps is the closest ANY of the flow's snap rounds
+    came, and the rounds that missed on the way say so themselves, so a failure
+    reads as a hunt rather than as one unlucky frame."""
     _patch_flow_io(monkeypatch)
     monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21))
     app, _ = _make_app(tmp_path)
@@ -509,7 +513,14 @@ async def test_a_near_miss_on_the_copy_button_logs_how_close_it_came(
 
         text = await _read_log(app, pilot)
         needed = f"{TemplateKind.COPY.max_diff:.2f}"
-        assert f"copy button not found (best candidate diff 0.21, needs ≤ {needed})" in text
+        rounds = main_mod._COPY_SNAP_ROUNDS
+        assert (
+            f"copy button not found after {rounds} snaps "
+            f"(best candidate diff 0.21, needs ≤ {needed}" in text
+        )
+        for attempt in range(1, rounds):
+            assert f"copy button not found on round {attempt}/{rounds}" in text
+        assert "snapping to the bottom again" in text
         assert "AUTO_COPY → MANUAL_COPY — the copy button was not found on screen" in text
 
 
@@ -575,7 +586,10 @@ async def test_a_search_with_nothing_even_shaped_like_it_says_so_in_words(
         )
 
         text = await _read_log(app, pilot)
-        assert "copy button not found (no candidate cleared the first-stage sniff test)" in text
+        assert (
+            f"copy button not found after {main_mod._COPY_SNAP_ROUNDS} snaps "
+            "(no candidate cleared the first-stage sniff test" in text
+        )
 
 
 async def test_a_failed_capture_of_the_chat_region_is_logged_as_such(

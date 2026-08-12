@@ -174,6 +174,13 @@ HOVER_SCAN_LABEL = "hover-scan for copy icon"
 # ignored. Rides the DETECTION column because it is a fact about what the
 # harvest may ingest, worded - like everything here - as what the user SEES.
 CAPTURE_PROSE_LABEL = "ingest replies with no CLIP"
+# The other end of the same column's question - what may be ingested - one step
+# stricter: on a host that markdown-processes unfenced text, a reply that
+# arrived without a fence has been through the prose renderer and its code
+# cannot be trusted, so the whole reply is bounced back for a fenced resend
+# (protocol.md 1.4 tolerance #15). Off everywhere by default: per-block copy
+# buttons legitimately strip fences.
+REQUIRE_FENCED_LABEL = "require fenced replies"
 # The delivery mode, as a tick rather than a picker: there are exactly two modes
 # and one of them is the default, so "off" says "paste" without a second row of
 # form to read. Worded as what the user will SEE, like the signal labels - and
@@ -510,6 +517,9 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                         )
                     yield Checkbox(HOVER_SCAN_LABEL, id="svc-hover-scan", compact=True)
                     yield Checkbox(CAPTURE_PROSE_LABEL, id="svc-capture-prose", compact=True)
+                    yield Checkbox(
+                        REQUIRE_FENCED_LABEL, id="svc-require-fenced", compact=True
+                    )
                     yield Static("", id="svc-signal-warning")
                     yield Static(Text("DELIVERY · how it goes in"), classes="side-title")
                     yield Checkbox(
@@ -730,6 +740,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             box.value = signal in signals
         self.query_one("#svc-hover-scan", Checkbox).value = hover
         self.query_one("#svc-capture-prose", Checkbox).value = shown.capture_prose
+        self.query_one("#svc-require-fenced", Checkbox).value = shown.require_fenced_reply
         self.query_one("#svc-stream-delivery", Checkbox).value = shown.delivery == DELIVERY_STREAM
         self.query_one("#svc-auto-submit", Checkbox).value = shown.auto_submit
         # The SCROLL radio follows the selection the same way the MATCHING one
@@ -946,6 +957,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             hover_scan=hover,
             delivery=DELIVERY_STREAM if streaming else DELIVERY_PASTE,
             capture_prose=self.query_one("#svc-capture-prose", Checkbox).value,
+            require_fenced_reply=self.query_one("#svc-require-fenced", Checkbox).value,
             auto_submit=self.query_one("#svc-auto-submit", Checkbox).value,
         )
         self._paint_signal_warning(self._profile(key))

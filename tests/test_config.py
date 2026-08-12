@@ -574,6 +574,56 @@ def test_save_services_writes_the_opt_ins_only_when_they_differ(
     written = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
     assert "auto_submit" not in written
     assert "capture_prose" not in written
+    assert "require_fenced_reply" not in written
+
+
+# -- require_fenced_reply (the unfenced-reply gate, protocol.md 1.4 #15) --------
+
+
+def test_require_fenced_reply_ships_off_everywhere() -> None:
+    """Golden fixture 002 is the reason. An unfenced arrival is NORMAL on the
+    hosts whose per-code-block copy button hands over the block's contents
+    WITHOUT its fence lines, so a default-on gate would refuse every good reply
+    on exactly the services the fence-agnostic parser was built for."""
+    for key, preset in default_services().items():
+        assert preset.require_fenced_reply is False, key
+    assert ServicePreset("k", "K", 1_000, 5_000).require_fenced_reply is False
+
+
+def test_load_config_reads_require_fenced_reply(project: Path, global_path: Path) -> None:
+    global_path.write_text(
+        "[services.claude]\nrequire_fenced_reply = true\n", encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].require_fenced_reply is True
+    assert not cfg.warnings
+
+
+def test_load_config_rejects_a_non_bool_require_fenced_reply(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        '[services.claude]\nrequire_fenced_reply = "yes"\n', encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].require_fenced_reply is False
+    assert any("require_fenced_reply" in w for w in cfg.warnings)
+
+
+def test_save_then_load_round_trips_require_fenced_reply(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], require_fenced_reply=True)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"]["require_fenced_reply"] is True
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings
 
 
 # -- save_services: round trip + minimal diff ----------------------------------

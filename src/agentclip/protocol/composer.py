@@ -10,10 +10,44 @@ M1 chunking policy: single chunk only. A RESULTS payload that exceeds the
 paste budget is fitted by middle-truncating the largest result bodies; a
 bootstrap/task/note that cannot fit raises BudgetExceeded.
 # M3: replace with PART/ACK chunked send
+
+Outbound payloads ride inside a ~~~~ fence
+------------------------------------------
+`results`, `task` and `note` payloads are rendered already wrapped in a tilde
+fence (`wrap_in_fence`); `bootstrap` deliberately is not (protocol.md section 4,
+"outbound payloads are fenced too"). The reason is symmetric with tolerance
+#14/#15 on the way in: some hosts treat the INPUT box as rich text as well, and
+a payload pasted in as plain prose is rewritten before the model ever reads it -
+blank lines came back as literal `<br>` on the host that prompted this. A fence
+tells the box "this is code", and the model reads the raw text either way.
+
+The fence lives in the payload STRING, at render time, which is what makes the
+rest of the system agree with itself for free:
+
+- `outbound/turn-NNNN.txt` on disk shows exactly what was delivered, not a
+  pre-fence draft that no chat ever saw;
+- re-copy (the double-tap-c path) re-sends the same string, so a redelivery is
+  fenced by construction rather than by remembering to wrap it again;
+- streamed delivery (`clip.chunking.split_for_stream`) splits the ALREADY
+  fenced string, so the fence wraps the one chat message rather than each
+  burst inside it;
+- self-write suppression is unaffected: `parser.normalized_hash` strips fence
+  lines before hashing, so a fenced payload and its unfenced body hash the same
+  and re-ingesting our own text is still `Noise("own-outbound")`;
+- the fence characters count against `max_paste_chars`, because they are part
+  of the message the host has to accept - hence the wrapping happens INSIDE
+  `_render_results` (so the fit loop measures the real thing) and before
+  `_single`'s budget check.
+
+There is no knob. On a host that does not process its input box the fence is
+two inert lines, and per section 0.6 every fenced payload re-teaches the
+fence-your-reply rule by example; a setting would be a config surface with no
+failure mode behind it.
 """
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from typing import Literal
 
@@ -26,6 +60,40 @@ TRUNCATION_MARKER = "[truncated by AgentClip to fit the paste budget - request s
 
 # Bounded refinement passes when fitting RESULTS payloads to the budget.
 _FIT_ATTEMPTS = 10
+
+# The shortest fence we ever emit. Three tildes would be legal (`parser._FENCE_RE`
+# accepts `~{3,}`), but four is what the bootstrap teaches the model to use, and
+# outbound is the example the model imitates - section 0.6's symmetry is a
+# feature, not a coincidence.
+_MIN_FENCE_TILDES = 4
+
+# A line that could close our fence from inside: a run of 3+ tildes at the start
+# of a line, which is exactly what the fence recogniser matches. Only tildes are
+# checked because we only ever fence with tildes - a body line of backticks is
+# inert inside a tilde fence, which is why the tilde fence was chosen (section
+# 3 of the transport research: file content is full of backticks).
+_LEADING_TILDES_RE = re.compile(r"^(~{3,})")
+
+
+def wrap_in_fence(payload: str) -> str:
+    """``payload`` inside a tilde fence long enough that nothing in it can close.
+
+    The collision rule of section 2, now applied to our OWN payloads rather than
+    only taught: the outer delimiter must not be reachable from inside, so the
+    fence is one tilde longer than the longest leading tilde run in the content
+    (minimum :data:`_MIN_FENCE_TILDES`). A payload containing a `~~~~~` line -
+    a result body quoting this very file, say - gets a six-tilde fence.
+
+    Keeps the payloads-end-with-a-newline convention: the closing fence is the
+    last line and it is newline-terminated.
+    """
+    longest = max(
+        (len(m.group(1)) for m in map(_LEADING_TILDES_RE.match, payload.split("\n")) if m),
+        default=0,
+    )
+    fence = "~" * max(_MIN_FENCE_TILDES, longest + 1)
+    body = payload.rstrip("\n")
+    return f"{fence}\n{body}\n{fence}\n"
 
 
 class BudgetExceeded(Exception):
@@ -145,7 +213,27 @@ class Composer:
         return self._role
 
     def bootstrap(self, task: str) -> Outbound:
-        """The full protocol spec + tool catalog + initial task. Always turn 1."""
+        """The full protocol spec + tool catalog + initial task. Always turn 1.
+
+        The one outbound that is NOT fenced (see the module docstring for what
+        the fence is for). Three reasons, all specific to this payload:
+
+        1. It is the ROLE framing's payload. Section 2 beat 1 exists to defeat
+           the turn-1 refusal - some models read a pasted operating brief as
+           injected content trying to redefine them and stall - and handing that
+           brief over as one big code block is plausibly the exact reading it
+           works to prevent. A fence says "this is data"; the bootstrap's whole
+           job is to say "this is your brief".
+        2. It is the payload with no headroom. Assembled with a saturated skills
+           listing it measures ~11,933 chars against the smallest presets'
+           12,000-char budget (protocol.md section 2, "Budget headroom"), and it
+           is the one payload with no chunked fallback: over budget means
+           BudgetExceeded and a session that never arms. Ten fence characters
+           fit today; that slack is the only slack there is.
+        3. Its corruption is LOUD. A mangled brief misbehaves visibly on the
+           very first reply, whereas a rewritten results payload corrupts code
+           silently - which is the failure the fence is actually for.
+        """
         spec_text = render_spec(
             self._preset,
             self._caps,
@@ -169,13 +257,13 @@ class Composer:
     def task(self, turn: int, text: str) -> Outbound:
         """A follow-up task/message from the user, mid- or post-session."""
         body = text.rstrip("\n")
-        payload = f"===CLIP:TASK===\n{body}\n{self._eom(turn)}\n"
+        payload = wrap_in_fence(f"===CLIP:TASK===\n{body}\n{self._eom(turn)}\n")
         return self._single("user_answer", payload, turn)
 
     def note(self, turn: int, text: str) -> Outbound:
         """An informational notice to the LLM (e.g. 'the user reverted turn 5')."""
         body = text.rstrip("\n")
-        payload = f"===CLIP:NOTE===\n{body}\n{self._eom(turn)}\n"
+        payload = wrap_in_fence(f"===CLIP:NOTE===\n{body}\n{self._eom(turn)}\n")
         return self._single("note", payload, turn)
 
     def results(
@@ -266,4 +354,9 @@ class Composer:
             lines.append(tag)
             lines.append("===CLIP:END===")
         lines.append(self._eom(turn))
-        return "\n".join(lines) + "\n"
+        # Wrapped HERE, not by the caller: `results()` fits the payload to the
+        # budget by measuring what it renders, and the fence is part of what the
+        # host has to swallow. Fitting an unfenced draft and wrapping afterwards
+        # would put every payload that landed within ~10 chars of the budget
+        # back over it, silently, at the one moment nothing is left to cut.
+        return wrap_in_fence("\n".join(lines) + "\n")

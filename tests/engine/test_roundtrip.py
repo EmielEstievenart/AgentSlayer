@@ -101,7 +101,11 @@ def test_full_roundtrip(project: Path, make_engine) -> None:
     assert payload.count("status=ok") == 3
     assert "replaced 1 occurrence" in payload
     assert "601" in payload  # run_command output made it into the results
-    assert payload.rstrip().endswith("===CLIP:EOM turn=2 chat=amber-falcon===")
+    # The EOM is the last line of the PROTOCOL, but not of the payload: results
+    # ride inside a ~~~~ fence (composer module docstring), so the closing fence
+    # comes after it - as it must, or the host renders the EOM as prose.
+    assert payload.startswith("~~~~\n") and payload.endswith("\n~~~~\n")
+    assert "===CLIP:EOM turn=2 chat=amber-falcon===\n~~~~\n" in payload
 
     # THE EDIT IS ON DISK.
     on_disk = (project / "src" / "utils.py").read_text(encoding="utf-8")

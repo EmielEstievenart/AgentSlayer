@@ -210,6 +210,12 @@ class _Parser:
         self.prose: list[str] = []
         self._cur_prose: list[str] = []
         self.saw_sentinel = False
+        # A fence line consumed at a STRUCTURAL position (see ParsedReply.
+        # saw_fence). Set in exactly the two places the parser skips one: the
+        # top-level scan and the CALL-body scan. Heredoc content never passes
+        # through either, which is the whole point - a reply writing a markdown
+        # file must not look fenced because the file it writes contains ```.
+        self.saw_fence = False
         self.truncated_eof = False
         self.eom_present = False
         self.eom_calls: int | None = None
@@ -231,6 +237,7 @@ class _Parser:
             match = _SENTINEL_RE.match(stripped)
             if match is None:
                 if _FENCE_RE.match(stripped):  # tolerance #1: fences ignored
+                    self.saw_fence = True
                     i += 1
                     continue
                 self._cur_prose.append(self.lines[i])
@@ -438,7 +445,13 @@ class _Parser:
                 j += 1
                 continue
             # Fences, blanks, and soft-wrap debris inside a block: skipped
-            # (still present in `raw` for the transcript).
+            # (still present in `raw` for the transcript). The fence is checked
+            # by name rather than left in the debris bucket because a fence HERE
+            # is evidence about the whole reply - a model that fences each call
+            # separately still proves the transport carried fence lines through
+            # - and that evidence is what tolerance #15 turns on.
+            if _FENCE_RE.match(stripped):
+                self.saw_fence = True
             j += 1
         if not closed:
             # EOF inside the block with no heredoc open: truncated mid-block.
@@ -532,6 +545,7 @@ def parse_reply(text: str) -> ParsedReply:
             present=p.eom_present, calls=p.eom_calls, turn=p.eom_turn, chat=p.eom_chat
         ),
         truncated=truncated,
+        saw_fence=p.saw_fence,
         normalized_hash=normalized_hash(text),
         ack_part=p.ack_part,
         ack_total=p.ack_total,

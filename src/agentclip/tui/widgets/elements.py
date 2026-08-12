@@ -22,6 +22,16 @@ sidebar's DETECTION block still gives verdict LINES to the four the loop turns
 on - it is the words about the decisions, this is the pictures of the evidence,
 and the extra rows here are evidence nobody was deciding anything from.
 
+**A capture is enough. A tick is not required, and is not asked for.** The busy
+and idle rows follow the same rule as the other five: the service having a
+picture of the appearance is the whole of what puts a row to work. Whether the
+finish-signal checklist ticks that signal decides what may END a response and
+touches nothing here - so a captured stop icon nobody ticked is searched, cut
+and drawn every tick, and votes on nothing. This column shows what button WOULD
+be used if it were going to be used, regardless of what is currently active,
+which is the readout a user needs while deciding whether to tick it at all
+(tui.md 3.4d). It used to be withheld from them at exactly that moment.
+
 **The two chat boxes will usually disagree**, and that is right: only one layout
 is on screen at a time, so the fresh-chat row and the ongoing-chat row are
 expected to read "found" and "not on screen" respectively (or the reverse). Two

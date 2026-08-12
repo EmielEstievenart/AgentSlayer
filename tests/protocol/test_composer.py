@@ -12,7 +12,9 @@ from agentclip.protocol.composer import (
     BudgetExceeded,
     Composer,
     pick_heredoc_tag,
+    wrap_in_fence,
 )
+from agentclip.protocol.parser import normalized_hash
 from agentclip.protocol.types import ToolResult
 
 CHAT_NAME = "amber-falcon"
@@ -150,7 +152,12 @@ def test_every_outbound_kind_carries_the_chat_name() -> None:
         composer.note(3, "reverted").chunks[0],
         composer.results(4, [ToolResult(1, "ok", "fine")]).chunks[0],
     ):
-        assert payload.rstrip().endswith(" chat=amber-falcon===")
+        # The EOM is the last PROTOCOL line of every payload; on the three that
+        # are fenced, the closing fence sits behind it (see the fence tests).
+        assert f" chat={CHAT_NAME}===" in payload
+        assert payload.rstrip().removesuffix("~~~~").rstrip().endswith(
+            f" chat={CHAT_NAME}==="
+        )
 
 
 def test_bootstrap_contains_task_block_and_batching_instruction() -> None:
@@ -206,7 +213,11 @@ def test_task_payload_exact_form() -> None:
     out = make_composer().task(5, "Also update the README")
     assert out.kind == "user_answer"
     assert out.turn == 5
-    assert out.chunks == ("===CLIP:TASK===\nAlso update the README\n===CLIP:EOM turn=5 chat=amber-falcon===\n",)
+    assert out.chunks == (
+        "~~~~\n"
+        "===CLIP:TASK===\nAlso update the README\n===CLIP:EOM turn=5 chat=amber-falcon===\n"
+        "~~~~\n",
+    )
     assert out.total_chars == len(out.chunks[0])
 
 
@@ -215,8 +226,10 @@ def test_note_payload_exact_form() -> None:
     assert out.kind == "note"
     assert out.turn == 7
     assert out.chunks == (
+        "~~~~\n"
         "===CLIP:NOTE===\nthe user reverted turn 6; file states rolled back\n"
-        "===CLIP:EOM turn=7 chat=amber-falcon===\n",
+        "===CLIP:EOM turn=7 chat=amber-falcon===\n"
+        "~~~~\n",
     )
 
 
@@ -241,8 +254,8 @@ def test_results_basic_round_trip() -> None:
     payload = out.chunks[0]
     assert out.kind == "results"
     assert out.turn == 4
-    assert payload.startswith("===CLIP:RESULTS turn=4===\n")
-    assert payload.endswith("===CLIP:EOM turn=4 chat=amber-falcon===\n")
+    assert payload.startswith("~~~~\n===CLIP:RESULTS turn=4===\n")
+    assert payload.endswith("===CLIP:EOM turn=4 chat=amber-falcon===\n~~~~\n")
     assert "===CLIP:RESULT id=1 status=ok===" in payload
     assert "===CLIP:RESULT id=2 status=ok===" in payload
     assert payload.index("id=1") < payload.index("id=2")  # execution order preserved
@@ -312,12 +325,14 @@ def test_results_notes_render_as_note_block_before_results() -> None:
 
 def test_results_empty_list_still_framed() -> None:
     payload = make_composer().results(8, []).chunks[0]
-    assert payload == "===CLIP:RESULTS turn=8===\n===CLIP:EOM turn=8 chat=amber-falcon===\n"
+    assert payload == (
+        "~~~~\n===CLIP:RESULTS turn=8===\n===CLIP:EOM turn=8 chat=amber-falcon===\n~~~~\n"
+    )
 
 
 def test_results_eom_turn_stamping() -> None:
     payload = make_composer().results(42, [ToolResult(1, "ok", "x")]).chunks[0]
-    assert payload.endswith("===CLIP:EOM turn=42 chat=amber-falcon===\n")
+    assert payload.endswith("===CLIP:EOM turn=42 chat=amber-falcon===\n~~~~\n")
 
 
 # ---------------------------------------------------------------------------
@@ -345,12 +360,13 @@ def test_results_over_budget_truncates_largest_body_to_fit() -> None:
     assert TRUNCATION_MARKER in truncated_lines
     # The small body is untouched.
     assert bodies[2] == small_body
-    # Sentinel lines are never truncated.
-    assert payload.startswith("===CLIP:RESULTS turn=3===\n")
+    # Sentinel lines are never truncated - and neither is the fence, which is
+    # inside the budget the fit loop just met.
+    assert payload.startswith("~~~~\n===CLIP:RESULTS turn=3===\n")
     assert "===CLIP:RESULT id=1 status=ok===" in payload
     assert "===CLIP:RESULT id=2 status=ok===" in payload
     assert payload.count("===CLIP:END===") == 2
-    assert payload.endswith("===CLIP:EOM turn=3 chat=amber-falcon===\n")
+    assert payload.endswith("===CLIP:EOM turn=3 chat=amber-falcon===\n~~~~\n")
 
 
 def test_results_under_budget_not_truncated() -> None:
@@ -377,3 +393,84 @@ def test_results_unfittable_raises_budget_exceeded() -> None:
         composer.results(2, [ToolResult(1, "ok", body)])
     assert exc_info.value.budget_chars == 300
     assert exc_info.value.needed_chars > 300
+
+
+# ---------------------------------------------------------------------------
+# the outbound fence (composer module docstring; protocol.md section 4)
+
+
+def _fence_lines(payload: str) -> tuple[str, str]:
+    lines = payload.split("\n")
+    return lines[0], lines[-2]  # -1 is the empty string after the trailing \n
+
+
+def test_results_task_and_note_ride_inside_a_tilde_fence() -> None:
+    """Some hosts rewrite plain text pasted into the input box (blank lines came
+    back as literal <br>). A fence tells the box this is code; the model reads
+    the raw text either way."""
+    composer = make_composer()
+    for payload in (
+        composer.results(4, [ToolResult(1, "ok", "fine")]).chunks[0],
+        composer.task(5, "more").chunks[0],
+        composer.note(6, "reverted").chunks[0],
+    ):
+        opener, closer = _fence_lines(payload)
+        assert opener == "~~~~"
+        assert closer == "~~~~"
+        assert payload.endswith("~~~~\n")  # the convention: payloads end in \n
+
+
+def test_the_bootstrap_is_deliberately_not_fenced() -> None:
+    """It is the ROLE framing's payload (a code block reads as data, which is
+    what the turn-1 refusal wants to believe), and the one payload with no
+    budget headroom and no chunked fallback."""
+    payload = make_composer().bootstrap("Fix the bug").chunks[0]
+    assert not payload.startswith("~~~~\n")
+    assert payload.rstrip().endswith("===CLIP:EOM turn=1 chat=amber-falcon===")
+
+
+def test_the_fence_outgrows_a_tilde_run_in_a_result_body() -> None:
+    """Section 2's collision rule, applied to our own payloads: the outer
+    delimiter must not be reachable from inside."""
+    body = "the model's own fenced reply, quoted back:\n~~~~\n===CLIP:CALL id=1===\n~~~~"
+    payload = make_composer().results(2, [ToolResult(1, "ok", body)]).chunks[0]
+    opener, closer = _fence_lines(payload)
+    assert opener == "~~~~~" == closer  # strictly more than the longest run inside
+    assert extract_result_bodies(payload)[1] == body
+
+
+def test_the_fence_outgrows_the_longest_run_not_the_first() -> None:
+    body = "~~~\nplain\n~~~~~~\nplain"
+    payload = make_composer().results(2, [ToolResult(1, "ok", body)]).chunks[0]
+    assert _fence_lines(payload)[0] == "~" * 7
+
+
+def test_wrap_in_fence_only_counts_leading_tilde_runs() -> None:
+    # A tilde run mid-line cannot close a fence, so it must not inflate one.
+    assert wrap_in_fence("approx ~~~~~ five\n").startswith("~~~~\n")
+    # ...and a backtick run cannot either: we fence with tildes on purpose.
+    assert wrap_in_fence("```python\ncode\n```\n").startswith("~~~~\n")
+
+
+def test_wrapping_does_not_move_the_self_suppression_hash() -> None:
+    """normalized_hash strips fence lines, so a fenced payload and its bare body
+    hash the same - which is what keeps a re-ingest of our own text
+    Noise("own-outbound") instead of a reply."""
+    payload = "===CLIP:RESULTS turn=4===\n===CLIP:EOM turn=4 chat=amber-falcon===\n"
+    assert normalized_hash(wrap_in_fence(payload)) == normalized_hash(payload)
+
+
+def test_the_fence_is_inside_the_paste_budget() -> None:
+    """The fit loop measures the fenced string, so a payload that only just fits
+    still fits WITH its fence - the fence is part of the message the host has to
+    accept."""
+    budget = 2_000
+    body = "\n".join(f"line {i:04d} of the command output" for i in range(200))
+    out = make_composer(budget).results(3, [ToolResult(1, "ok", body)])
+    payload = out.chunks[0]
+    assert len(payload) <= budget
+    assert out.total_chars == len(payload)
+    assert payload.startswith("~~~~\n") and payload.endswith("\n~~~~\n")
+    # And it is actually close to the budget: the fence is not bought by leaving
+    # a fence-sized hole unused.
+    assert len(payload) > budget - 100

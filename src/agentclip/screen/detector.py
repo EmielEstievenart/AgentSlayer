@@ -12,12 +12,21 @@ sightings, it never decides what gets looked for.
 
 **The policy here is calibration and nothing else.** EVERY kind the live
 window's service has a picture of is searched on every frame - all seven of
-them, not the four the automation happens to consume:
+them, not the four the automation happens to consume. **A picture is the whole
+of the calibration for SEARCHING**, for every one of the seven, busy and idle
+included: the finish-signal checklist decides what may end a response, not what
+the eyes are allowed to look at. That is the same mistake as the send gate one
+level down - a captured busy icon the checklist does not tick used to leave its
+ELEMENTS row (tui.md 1.7) at "no match yet" forever, so the user could not see
+whether the appearance they are about to tick still matches anything.
 
 * ``BUSY`` / ``IDLE`` through a :class:`~agentclip.screen.presence.PresenceTracker`
-  each - calibrated meaning the service's finish-signal checklist ticks the
-  signal *and* it has a capture of the appearance (a ticked signal with no
-  picture can search for nothing);
+  each **where the checklist ticks the signal and the service has the capture** -
+  a tracker is a finish DETECTOR, it carries the debounce and produces the
+  verdict, and a ticked signal with no picture can search for nothing. Where the
+  picture is there and the tick is not, the same kind is searched as a plain
+  presence search instead: the row reports what is on screen, and no verdict is
+  ever produced from it (tui.md 3.4d).
 * the drawn region's own stillness through a
   :class:`~agentclip.screen.stale.StaleTracker`, when the checklist ticks it -
   the one detector with no appearance behind it;
@@ -26,6 +35,14 @@ them, not the four the automation happens to consume:
   service has a capture of it. None of them has a checklist entry because there
   is nothing to decide: a service either shows such a control or it does not
   (tui.md 3.4d).
+
+**Searching and deciding are two questions, and they have two answers here.**
+:meth:`ScreenDetector.searches` is the first - *will a frame be looked at for
+this kind*, which is now true of anything captured. :attr:`active_detectors` is
+the second - *what can close a tick and fold into a finish verdict*, which is
+still the three trackers and only them. Nothing that reads ``searches`` is
+asking about the finish decision, and nothing asking about the finish decision
+reads it.
 
 The three that used to be excluded (the two chat boxes and the new-chat button)
 were left out because nothing on the poll timer *consumed* them - they are found
@@ -103,16 +120,17 @@ RUNTIME_KINDS: tuple[TemplateKind, ...] = (
     TemplateKind.NEW_CHAT,
 )
 
-# The kinds this module searches for DIRECTLY, rather than through a tracker:
-# presence questions with no de-bounce, because none of them is a finish
-# detector. A tracker would actively harm the send gate - "not seen yet" and
-# "has gone" are opposite answers and a debounce cannot tell them apart.
-# Derived rather than retyped, so the two lists cannot drift: everything that is
-# not busy or idle is a plain search.
+# The two kinds that CAN be searched through a tracker, because they are the two
+# a finish verdict can be built out of. Whether either one actually is on a given
+# run is the checklist's business (``build_detector``); a captured busy icon the
+# checklist does not tick falls through to a plain search instead, which is what
+# keeps its ELEMENTS row live without giving it a vote.
+#
+# Every OTHER kind is a presence question with no de-bounce, always, because none
+# of them is a finish detector. A tracker would actively harm the send gate -
+# "not seen yet" and "has gone" are opposite answers and a debounce cannot tell
+# them apart - so there is deliberately no way to ask for one.
 _TRACKED_KINDS: tuple[TemplateKind, ...] = (TemplateKind.BUSY, TemplateKind.IDLE)
-PROBE_KINDS: tuple[TemplateKind, ...] = tuple(
-    kind for kind in RUNTIME_KINDS if kind not in _TRACKED_KINDS
-)
 
 # The finish detectors, in the canonical order they are built, observed and
 # posted in - the same order as config.FINISH_SIGNALS.
@@ -151,10 +169,16 @@ class DetectionSnapshot:
     ``sightings`` holds an entry for every kind that was SEARCHED and nothing
     else, which is what makes three states expressible: a kind mapped to a
     :class:`Sighting` was found, a kind mapped to ``None`` was searched and is
-    not on screen, and a kind that is **absent** was not searched at all -
-    because the live window's service has no capture of it (or, for busy/idle,
-    does not tick it). A frame that failed to capture searched nothing, so the
-    map is empty: a dropped frame is not evidence that anything went away.
+    not on screen, and a kind that is **absent** was not searched at all - which
+    now means exactly one thing, for all seven kinds alike: the live window's
+    service has no capture of it. A frame that failed to capture searched
+    nothing, so the map is empty: a dropped frame is not evidence that anything
+    went away.
+
+    ``busy`` / ``idle`` are the FINISH verdicts and are narrower than the
+    sightings deliberately: they are ``None`` unless the service's checklist
+    ticks that signal, even when the same frame carries a sighting for the kind.
+    A capture the checklist does not tick is display-only.
     """
 
     at: float
@@ -249,10 +273,16 @@ class ScreenDetector:
         # least one picture" are the same statement, and a kind mapped to an
         # empty tuple would report itself searched every tick while searching
         # for nothing.
+        #
+        # Every RUNTIME kind is eligible, busy and idle included - a picture is
+        # the whole of the calibration for being LOOKED for. The one exclusion is
+        # a kind whose tracker was built: that tracker already scans the frame
+        # and ``observe`` reads its sighting back, so searching here too would be
+        # the same scan twice a tick for the same answer.
         self._templates: dict[TemplateKind, tuple[Template, ...]] = {
             kind: tuple(templates[kind])
-            for kind in PROBE_KINDS
-            if templates is not None and templates.get(kind)
+            for kind in RUNTIME_KINDS
+            if templates is not None and templates.get(kind) and self._tracker(kind) is None
         }
         self._clock = clock
         self._latest: DetectionSnapshot | None = None
@@ -264,10 +294,11 @@ class ScreenDetector:
     def active_detectors(self) -> tuple[str, ...]:
         """The FINISH detectors that will report, in canonical order.
 
-        Only the three: none of the plain searches (the send button, the copy
-        button, the two chat boxes, the new-chat button) closes a tick or folds
-        into a verdict, and the tick-closing rule (``_finish_tick_closed_by``)
-        reads exactly this.
+        Only the three: none of the plain searches closes a tick or folds into a
+        verdict - not the send button, the copy button, the chat boxes, the
+        new-chat button, nor a busy/idle appearance the checklist left unticked,
+        which is searched and drawn every frame and decides nothing. The
+        tick-closing rule (``_finish_tick_closed_by``) reads exactly this.
         """
         return tuple(
             name
@@ -279,17 +310,35 @@ class ScreenDetector:
             if tracker is not None
         )
 
+    def _tracker(self, kind: TemplateKind) -> PresenceTracker | None:
+        """The finish tracker that already searches this kind, if there is one.
+
+        The one place the busy/idle pair is turned back into a lookup, so
+        composition, the tick and ``searches`` cannot disagree about which kinds
+        arrive through a tracker and which through a plain search.
+        """
+        if kind is TemplateKind.BUSY:
+            return self.busy
+        if kind is TemplateKind.IDLE:
+            return self.idle
+        return None
+
     @property
     def searched_kinds(self) -> tuple[TemplateKind, ...]:
         """Every appearance a frame will be searched for, in ELEMENTS order."""
         return tuple(kind for kind in RUNTIME_KINDS if self.searches(kind))
 
     def searches(self, kind: TemplateKind) -> bool:
-        if kind is TemplateKind.BUSY:
-            return self.busy is not None
-        if kind is TemplateKind.IDLE:
-            return self.idle is not None
-        return kind in self._templates
+        """Will a frame be LOOKED at for this kind? Not "does it decide anything".
+
+        True for everything the service has a picture of, whichever way the
+        looking happens - a finish tracker's own scan or a plain presence
+        search. The question of what can end a response is
+        :attr:`active_detectors`, and no caller of this one is asking it: a
+        captured busy icon nobody ticked is searched, reported and drawn, and
+        produces no verdict at all.
+        """
+        return self._tracker(kind) is not None or kind in self._templates
 
     @property
     def watching(self) -> bool:
@@ -318,11 +367,15 @@ class ScreenDetector:
         stale_probe = self.stale.observe(scene) if self.stale is not None else None
         sightings: dict[TemplateKind, Sighting | None] = {}
         if scene is not None:
-            for kind, tracker in ((TemplateKind.BUSY, self.busy), (TemplateKind.IDLE, self.idle)):
+            for kind in _TRACKED_KINDS:
+                tracker = self._tracker(kind)
                 if tracker is not None:
                     # The tracker has already searched this very frame - taking
                     # its sighting rather than searching again is the difference
-                    # between two template scans a tick and four.
+                    # between two template scans a tick and four. The kinds with
+                    # no tracker are not skipped, only searched below like any
+                    # other picture: what is missing there is the verdict, not
+                    # the sighting.
                     sightings[kind] = self._sight(kind, tracker.last_sighting, at)
             for kind, templates in self._templates.items():
                 sightings[kind] = self._sight(
@@ -415,11 +468,22 @@ def build_detector(
     The whole "what do I search for" policy, in one place and with nothing else
     in scope: ``signals`` is the service's finish-signal checklist
     (``ServicePreset.finish_signals``) and ``profile`` is what it has pictures
-    of. Busy and idle need both halves - a ticked signal with no capture
-    searches for nothing, a capture the checklist does not tick is not wanted -
-    while stale needs no picture at all and the other five kinds need no tick:
-    having a picture of one IS the whole of their calibration, so every one the
-    profile holds is handed over and searched on every frame.
+    of. The two answer two different questions and the split is the point:
+
+    * **searched** is the profile alone. Every kind the service has a picture of
+      is handed over and looked for on every frame, busy and idle included, so
+      the ELEMENTS column can always say whether the appearance the automation
+      *would* use still matches anything.
+    * **decides** is the checklist AND the profile. A ``PresenceTracker`` - the
+      thing that carries a debounce and emits a verdict - is built for busy or
+      idle only where the checklist ticks it and there is a capture behind it. A
+      ticked signal with no picture is a wish and runs nothing; a capture the
+      checklist does not tick is display-only, searched every frame and never
+      folded into a finish verdict.
+
+    Stale needs no picture at all, and the other five kinds need no tick: having
+    a picture of one IS the whole of their calibration, and there is nothing to
+    decide about them (tui.md 3.4d).
 
     Every image the service has of a kind is passed on, not one: the searches OR
     them, so a second capture of the same control drawn differently is one more
@@ -433,6 +497,9 @@ def build_detector(
     same tolerance so a service cannot end up with its busy probe judging
     pixels differently from its copy button.
     """
+    # The tracker halves only. The pictures themselves go into ``templates=``
+    # below whatever the checklist says - ``ScreenDetector`` drops whichever of
+    # them a tracker is already scanning for, so nothing is searched twice.
     busy_templates = profile.variants(TemplateKind.BUSY) if "busy" in signals else ()
     idle_templates = profile.variants(TemplateKind.IDLE) if "idle" in signals else ()
     source = select_matcher(matcher)
@@ -469,7 +536,7 @@ def build_detector(
             if "stale" in signals
             else None
         ),
-        templates={kind: profile.variants(kind) for kind in PROBE_KINDS},
+        templates={kind: profile.variants(kind) for kind in RUNTIME_KINDS},
         tolerance=tolerance,
         matcher=source,
         clock=clock,

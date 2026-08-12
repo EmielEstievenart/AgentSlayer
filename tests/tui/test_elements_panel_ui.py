@@ -9,10 +9,12 @@ wiring and the ownership rules:
 * a tick's crops reach the rows they belong to, and a row nobody searched this
   tick is left alone rather than blanked,
 * every CALIBRATED appearance reaches the column on every tick - including the
-  send button with no gate open, the copy button with no flow running, and the
-  chat boxes and new-chat button nothing on the timer consumes at all, which is
-  the whole point of the detector being independent of the state machine
-  (screen/detector.py),
+  send button with no gate open, the copy button with no flow running, the chat
+  boxes and new-chat button nothing on the timer consumes at all, and a busy or
+  idle icon whose finish signal is unticked, which is the whole point of the
+  detector being independent of the state machine (screen/detector.py): a
+  capture is enough, and what the checklist decides is what may END a response,
+  never what the user is allowed to see,
 * every TemplateKind has a row, because a column that shows four of the seven
   things the tool can recognise is a picture of the automation rather than of
   what the tool can see,
@@ -663,6 +665,57 @@ async def test_an_uncaptured_appearance_is_the_row_that_stays_resting(
         # ...while the send button is not captured at all, so nothing is ever
         # claimed about it.
         assert ELEMENT_RESTING in _label(app, TemplateKind.SEND_READY)
+
+
+async def test_an_unticked_busy_capture_still_reaches_the_column(
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row that used to be dead for the worst possible reason.
+
+    The finish-signal checklist decides what may END a response; it never
+    decided what the column may show, and gating the search on it meant a user
+    could not see whether their stop-button capture still matched anything until
+    after they had ticked it - which is precisely when they needed to know. The
+    column shows what button would be used if it were going to be used, whatever
+    is switched on: here the checklist ticks stale and nothing else, the busy
+    icon is captured and on screen, and its row says so.
+    """
+    app = _make_app(tmp_path, profile_root)
+    service = sorted(app.app_config.services)[0]
+    if app.app_config.general.service in app.app_config.services:
+        service = app.app_config.general.service
+    seed_templates(service, TemplateKind.BUSY, size=(24, 24))
+
+    scene = bytearray(_frame(REGION).pixels)
+    patch = template_image(24, 24)
+    for row in range(24):
+        start = ((100 + row) * REGION.width + 200) * 4
+        scene[start : start + 24 * 4] = patch.pixels[row * 24 * 4 : (row + 1) * 24 * 4]
+    frame = RegionImage(REGION.width, REGION.height, bytes(scene))
+
+    monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
+    monkeypatch.setattr(main_mod, "capture_region", lambda region: frame)
+    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+
+    async with app.run_test(size=SIZE) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed")
+        _with_signals(main, "stale")
+        await _press(app, pilot, "#set-region-btn")
+        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+
+        await _wait_for(
+            pilot, lambda: _drawn(app, TemplateKind.BUSY), "the busy crop reaches the column"
+        )
+        assert "found" in _label(app, TemplateKind.BUSY)
+        # ...and it decides nothing: no tracker was built, so nothing about it
+        # can close a tick or fold into a finish verdict.
+        assert main._active_detectors == ("stale",)
+        assert main._busy_tracker is None
 
 
 async def test_the_auto_copy_flow_posts_the_copy_buttons_crop(

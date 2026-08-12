@@ -227,6 +227,26 @@ class ServicePreset:
     # ignored); scoped to the flow's own click - the watcher never loosens, so
     # the user's ordinary copies stay invisible either way.
     capture_prose: bool = False
+    # Refuse a reply that carries CALL blocks but arrived with no code fence
+    # around them, and ask for a fenced resend instead (protocol.md 1.4
+    # tolerance #15).
+    #
+    # OFF by default, and that default is the whole design of the knob. An
+    # unfenced arrival is NORMAL on the hosts this protocol was built for:
+    # Copilot's and Gemini's per-code-block copy buttons hand over the block's
+    # CONTENTS without the fence lines (protocol.md 0.2), so on those services
+    # every well-behaved reply looks unfenced - golden fixture 002 is exactly
+    # that shape. A global gate, or an on-by-default one, would therefore break
+    # the very hosts the fence-agnostic parser exists to serve.
+    #
+    # It is worth turning on for the opposite kind of host: one whose
+    # whole-message copy PRESERVES fence lines when the model fenced, and
+    # markdown-processes the text when it did not - stripping `[label](target)`
+    # shapes out of code and sometimes collapsing newlines. There, "no fence
+    # line arrived" is reliable evidence that the text has been through the
+    # prose renderer, and the reply must not be run. That is a fact about one
+    # service, so it is a per-service setting.
+    require_fenced_reply: bool = False
 
 
 def default_services() -> dict[str, ServicePreset]:
@@ -792,6 +812,13 @@ def load_config(
             capture_prose=_take_bool(
                 table, "capture_prose", base.capture_prose if base else False, ctx, warnings
             ),
+            require_fenced_reply=_take_bool(
+                table,
+                "require_fenced_reply",
+                base.require_fenced_reply if base else False,
+                ctx,
+                warnings,
+            ),
         )
         if preset.max_paste_chars > preset.total_context_chars:
             warnings.append(
@@ -964,6 +991,11 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
             services_table[key]["auto_submit"] = preset.auto_submit
         if preset.capture_prose != (base.capture_prose if base else False):
             services_table[key]["capture_prose"] = preset.capture_prose
+        # Newest of all, same write-only-when-moved rule: a user who never met
+        # a host that corrupts unfenced replies gets a file that never mentions
+        # the gate.
+        if preset.require_fenced_reply != (base.require_fenced_reply if base else False):
+            services_table[key]["require_fenced_reply"] = preset.require_fenced_reply
 
     data = dict(data)
     if services_table:

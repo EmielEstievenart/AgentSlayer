@@ -326,6 +326,80 @@ def test_tilde_line_inside_heredoc_is_content_not_a_fence() -> None:
     assert not reply.truncated
 
 
+# --- saw_fence: was there a fence at a STRUCTURAL position? ------------------
+#
+# Recorded by the parser, acted on by the engine (tolerance #15). "Structural"
+# is the whole definition: a fence line the parser SKIPPED while reading
+# grammar. Heredoc content is never read as grammar, so a reply writing a
+# markdown file cannot look fenced because the file it writes is.
+
+_UNFENCED_REPLY = (
+    "===CLIP:CALL id=1 tool=read_file===\n"
+    "path: README.md\n"
+    "===CLIP:END===\n"
+    "===CLIP:EOM calls=1 chat=amber-falcon===\n"
+)
+
+
+def test_saw_fence_is_true_for_a_tilde_fenced_reply() -> None:
+    assert parse_reply(f"~~~~\n{_UNFENCED_REPLY}~~~~\n").saw_fence
+
+
+def test_saw_fence_is_true_for_a_backtick_fenced_reply() -> None:
+    # Backticks are discouraged (file content is full of them) but tolerated,
+    # and a reply that used them still proves fence lines crossed the wire.
+    assert parse_reply(f"```text\n{_UNFENCED_REPLY}```\n").saw_fence
+
+
+def test_saw_fence_is_true_for_a_fence_inside_a_call_body() -> None:
+    # A model that fences each block separately: the fence lands inside the
+    # CALL-body scan rather than at top level, and counts just the same.
+    reply = parse_reply(
+        "===CLIP:CALL id=1 tool=read_file===\n"
+        "```\n"
+        "path: README.md\n"
+        "```\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
+    )
+    assert reply.saw_fence
+    assert reply.calls[0].params == {"path": "README.md"}
+
+
+def test_saw_fence_is_false_for_an_unfenced_reply() -> None:
+    assert not parse_reply(_UNFENCED_REPLY).saw_fence
+
+
+def test_a_fence_inside_heredoc_content_does_not_count() -> None:
+    """The point of defining saw_fence structurally: a reply WRITING a markdown
+    file is full of ``` lines, and none of them says anything about how the
+    reply itself was rendered."""
+    reply = parse_reply(
+        "===CLIP:CALL id=1 tool=write_file===\n"
+        "path: README.md\n"
+        "content << EOT\n"
+        "# Title\n"
+        "```python\n"
+        "print('hi')\n"
+        "```\n"
+        "~~~~\n"
+        "EOT\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
+    )
+    assert not reply.saw_fence
+    assert reply.calls[0].params["content"].count("```") == 2
+
+
+def test_saw_fence_on_the_golden_pair() -> None:
+    """001 is the fenced reply, 002 the same reply unfenced - the fixtures the
+    per-block copy button legitimately produces."""
+    fenced = (GOLDEN_DIR / "001-two-calls-fenced.input.txt").read_text(encoding="utf-8")
+    unfenced = (GOLDEN_DIR / "002-two-calls-crlf-nofence.input.txt").read_text(encoding="utf-8")
+    assert parse_reply(fenced).saw_fence is True
+    assert parse_reply(unfenced).saw_fence is False
+
+
 # The real wreckage from the incident: a chat client read `<SUMMARY_TAG` as an
 # HTML start tag, absorbed the rest of the reply as attributes, sorted them
 # (note the ASCII order of the words), quoted them - eating one `=` per `===`

@@ -339,9 +339,12 @@ async def test_typing_a_whole_command_then_two_enters_runs_it(tmp_path: Path) ->
         await _wait_for(pilot, lambda: main._snap is not None and main._snap.yolo, "yolo armed")
 
 
-async def test_escape_closes_the_popup_first_and_blurs_second(tmp_path: Path) -> None:
-    """Escape has to keep its old job (drop to command mode) without eating the
-    text: with a list up it dismisses the list only."""
+async def test_escape_closes_the_popup_before_the_composer_sees_it(tmp_path: Path) -> None:
+    """The popup gets first refusal on Escape, ahead of both of the composer's
+    own stages (§3.3c): with a list up it dismisses the list ONLY - neither the
+    half-typed command nor the focus may move, or the key that closes the list
+    would take the command with it. Only once the list is gone does Escape mean
+    what it means at any other line."""
     app, _, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 40)) as pilot:
         await _start_session(app, pilot)
@@ -357,7 +360,11 @@ async def test_escape_closes_the_popup_first_and_blurs_second(tmp_path: Path) ->
         assert main.composer.text == "/n"  # the text survived
         assert app.focused is main.composer  # ...and so did the focus
 
-        await pilot.press("escape")  # no popup now: the old blur behaviour
+        await pilot.press("escape")  # no popup now: stage one clears the box
+        assert main.composer.text == ""
+        assert app.focused is main.composer
+
+        await pilot.press("escape")  # empty now: stage two blurs, as it always did
         assert app.focused is not main.composer
 
 

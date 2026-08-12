@@ -56,6 +56,8 @@ class FakeChatView:
         self.notifications: list[tuple[str, str]] = []  # (message, severity)
         self.alerts: list[tuple[str, str]] = []
         self.copied: list[str] = []  # every copy_outbound payload, in order
+        self.parked: list[str] = []  # `c` stage one: clipboard only, no delivery
+        self.redelivered: list[str] = []  # `c` stage two: the double tap's re-send
         self.states: list[SessionView] = []  # every render_state push
         self.gates: list[tuple[PendingAction, str]] = []
         self.opened: list[SessionRef] = []
@@ -189,6 +191,23 @@ class FakeChatView:
 
     async def copy_outbound(self, text: str) -> None:
         self.trace.append("copy")
+        self.copied.append(text)
+
+    async def park_outbound(self, text: str) -> None:
+        # Stage one of `c`: the clipboard write WITHOUT the delivery. Recorded
+        # separately from ``copied`` on purpose - the whole point of the split
+        # is that a re-copy does not click or paste, and a fake that folded the
+        # two together could not tell a test which one happened.
+        self.trace.append("park")
+        self.parked.append(text)
+
+    def redeliver_outbound(self, text: str) -> None:
+        # Stage two, the double tap. Fire-and-forget in the real view (it
+        # schedules a worker), so the fake records and returns - and it records
+        # into ``copied`` as well, because a re-delivery IS a ``copy_outbound``
+        # over there and a test asserting what reached the chat should see it.
+        self.trace.append("redeliver")
+        self.redelivered.append(text)
         self.copied.append(text)
 
     def open_new_chat_now(self) -> None:

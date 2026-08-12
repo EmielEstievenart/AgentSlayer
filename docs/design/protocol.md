@@ -103,7 +103,8 @@ Rejected alternative: **turn echo** (`===CLIP:EOM calls=N turn=T===`, reply drop
 | 11 | Whole reply has no sentinel lines | Not protocol traffic — watcher ignores (pre-filter is the literal substring `===CLIP:` per the clipboard research) |
 | 12 | `chat=` missing / wrong / differently-cased / backticked on EOM or ACK/NACK | Parser records it verbatim-but-normalized and never rejects; the *engine* gates (§6.2) |
 | 13 | Reply flattened by the chat client into one HTML element (see below) | Per-call `client_mangled_heredoc` issue, fatal — call never executes, and the id=0 "reply was cut off" result is suppressed because it would send the model in a loop |
-| 14 | Sentinel line with another `CLIP:` marker glued on after its `===` (see below) | Attributes before the terminator still parse; reply-level `flattened_reply` warning, and the *engine* refuses the whole reply (§6.2) |
+| 14 | Sentinel line with another `CLIP:` marker glued on after its `===` (see below) | Attributes before the terminator still parse; reply-level `flattened_reply` warning, and the *engine* refuses the whole reply and asks the model to resend it fenced — twice, then it asks the user instead (§6.2) |
+| 15 | Reply carrying CALL blocks but **no structural fence line at all**, on a service preset with `require_fenced_reply` (see below) | Parser records `saw_fence` and changes nothing else — the reply parses normally. The *engine* refuses the whole reply and bounces an `id=0 code=reply_unfenced` result asking for a fenced resend, sharing the two-then-the-user budget with #14 (§6.2) |
 
 **Tolerance #11 has one scoped opt-out.** A service preset may set `capture_prose` (default off), which lets the auto-copy flow's **verified copy click** — and only that click — hand its harvest to the session even when it carries no `===CLIP:` at all; the text is shown in the transcript as prose and nothing in it executes (the engine still answers `Noise("not-protocol")` — §6.2's gate order is untouched). The watcher's pre-filter itself never loosens: it sees every copy the user makes and must keep ignoring the non-protocol ones, while the flow just watched the copy button write *this* text, so it alone knows the text is the model's reply. Display-only, per tolerance #2's rule: prose reaches the transcript, never the executor.
 
@@ -115,7 +116,29 @@ Response: fail the call with `code=client_mangled_reply` and a message addressed
 
 **Tolerance #14 — the other flattening: a reply that was never fenced.** CLIP blocks emitted *outside* a `~~~~` fence render as markdown prose, where single newlines are not line breaks; the copy button then hands over one long line — an EOM with the next message's whole `CALL … END` sequence riding behind it. Two consequences, both silent before this tolerance: the marker's own `===` terminator landed inside the last attribute value (`chat=swift-forge===~~~~`, which then failed the §6.2 chat gate and blamed the *chat name* for a transport fault), and the blocks behind it were never parsed at all — a reply whose one surviving call happened to satisfy `calls=` executed as if nothing were missing.
 
-Detection is two signals together, as in #13: text after the sentinel's `===` terminator, **and** `CLIP:` inside that text. The attributes ahead of the terminator parse as usual, so the chat gate sees the real name; the glued text is *not* re-split into blocks. Reassembling it would mean guessing where the model's line breaks were and then executing the result — `run_command` included — from a line the transport already proved it mangled. Instead the parser records one reply-level `flattened_reply` warning and `Engine.ingest` refuses the whole reply as a `ProtocolError` naming the real fault, so nothing executes and nothing is silently dropped. Recovery is the user's: ask the chat to resend inside one `~~~~` fence (bootstrap §3 already requires it).
+Detection is two signals together, as in #13: text after the sentinel's `===` terminator, **and** `CLIP:` inside that text. The attributes ahead of the terminator parse as usual, so the chat gate sees the real name; the glued text is *not* re-split into blocks. Reassembling it would mean guessing where the model's line breaks were and then executing the result — `run_command` included — from a line the transport already proved it mangled. Instead the parser records one reply-level `flattened_reply` warning and `Engine.ingest` refuses the whole reply, so nothing executes and nothing is silently dropped.
+
+**Recovery is the model's, then the user's.** Unlike #13, resending is not a loop here: the usual cause is a fence the model left off, and putting one back costs it one reply. So the refusal goes *to the model first*, as an ordinary RESULTS payload carrying one `id=0 status=error code=reply_flattened` result (§4) — the same shape as the `reply_truncated` result of §5.2, copied to the clipboard by the same path, with the phase unmoved (still `AWAITING_REPLY`, now for the corrected reply). The body says two things the model would otherwise get wrong: **nothing ran** (so it resends *everything* — the truncation reflex of resending only the tail is the wrong instinct here), and the `~~~~` fence goes around the **whole** reply *including* the final EOM line (an EOM left outside the fence is flattened onto the fence line and the next paste fails identically). It quotes the offending line back, clipped to ~160 chars, because "your reply was flattened" is abstract until the model sees its own text with the break missing. None of this is taught in the bootstrap: §2's budget has no room, and this text only needs to exist at the moment it happens.
+
+**At most two such bounces in a row** (`Engine._transport_bounces`, reset only by a paste that passes both transport checks — this one and #15's, see §6.2). Two populations of hosts hide behind one symptom: the model forgot the fence — one resend fixes it — or the host's copy path strips newlines from *every* copy, in which case the corrected reply comes back flattened exactly like the last one and the loop never terminates, burning the model's context and the user's turns. The third consecutive flattened paste is therefore refused to the **user** as a `ProtocolError` that quotes the same line and names the likely cause (copy from the raw/code view instead of the rendered message), because the host is what needs changing and the human is the only one who can change it.
+
+**Tolerance #15 — the flattening that leaves no trace.** #14 is the *loud* half of prose rendering: the newlines died, whole blocks rode onto one line, and the wreckage is visible in the text. The quiet half is worse. When a host renders an unfenced reply as markdown, the copy hands back text that has been through the **inline** processor as well, and the transformation that matters is link-stripping: `[label](target)` becomes `target`. That shape is not rare in code — it is a C++ lambda introducer. `set_receive_handler([this](uint8_t const* d) {` comes back as `set_receive_handler(uint8_t const* d) {`, the capture list simply gone. The whole class of damage is reproducible in one line:
+
+```python
+re.sub(r"\[[^\]]*\]\(([^)]*)\)", r"\1", text)
+```
+
+**The reply parses perfectly.** That is the entire problem. Nothing in the CLIP grammar was touched — the sentinels, the heredoc tags, the EOM and its chat name all survive, because none of them are link-shaped. The corruption is *inside* a heredoc body, i.e. inside the one place the protocol promises to carry verbatim, and there is nothing downstream that can notice: `write_file` writes the mangled line to disk and reports success, or `edit_file` reports `match_not_found` against a find-block the model is certain it copied correctly and rewrites the file to "fix" a mismatch that never existed. AgentClip's own pipeline is byte-clean here and pinned by `tests/protocol/test_payload_fidelity.py`; the loss happens in the chat, before the clipboard.
+
+So the refusal is a **transport-safety gate, not a parse failure**, and the `reply_unfenced` body says exactly that in its second sentence. A model told only "your reply was refused" goes hunting for a grammar mistake that does not exist, rewrites its perfectly good CALL blocks, and sends the rewrite unfenced again; naming the mechanism (and showing the `[this](int a)` example) is what turns the next reply into a *resend* instead of a *rewrite*.
+
+**Why per-service, and off by default.** A missing fence is not evidence of corruption everywhere — on Copilot and Gemini it is evidence of the *recommended* workflow. Their per-code-block copy buttons hand over the block's **contents**, without the fence lines (§0.2), so on those hosts a perfect reply arrives unfenced every single time; golden fixture `002-two-calls-crlf-nofence` is exactly that shape, and it is a fixture rather than a bug report on purpose. A global gate, or one that defaulted on, would refuse every good reply on precisely the hosts the fence-agnostic parser was built to serve. `require_fenced_reply` is therefore a `[services.*]` key (and a tick in the service editor), turned on for the other kind of host: one whose whole-message copy *preserves* fence lines when the model fenced, and markdown-processes the text when it did not. There, and only there, "no fence arrived" is reliable evidence that the text has been through the renderer.
+
+**Why `saw_fence` is structural.** The parser sets it only for a fence line it skipped while reading *grammar* — the top-level scan between blocks, or the debris scan inside a CALL body. Heredoc content is never scanned, so a reply whose only ```` ``` ```` lines sit inside the markdown file it is writing is correctly seen as unfenced. Any looser definition would be defeated by the most ordinary task there is.
+
+**Why calls-only.** Only a reply carrying at least one CALL is gated. A zero-call reply has nothing executable in it to corrupt, and it already earns the "every reply must contain at least one tool call" nag — replacing that with a lecture about fences helps nobody. ACK and NACK are taught as *bare single lines* (§2 section 2) with no fence anywhere near them, so gating them would break the chunk handshake outright. A **truncated** reply that carries calls *is* gated, deliberately: the §5.2 path would otherwise execute its complete calls and ask for the tail, and executing code that came through the prose renderer is the exact silent corruption this exists to stop.
+
+**Why the budget is shared with #14.** One counter (`Engine._transport_bounces`), one cap, one reset. Flattening and fence-stripping are not two problems: they are two symptoms of one fault — the transport mangled a reply — and they have one remedy, the fenced resend both payloads ask for. A host that alternates symptoms (this paste lost its newlines, the next arrived intact but unfenced) is still one broken host, and two separate budgets would let the pair ping-pong four turns deep before the human hears about it. #14 is checked first because it is the more specific diagnosis: it has hard evidence in hand — a sentinel line with another marker glued onto it — and its message already demands the same fenced resend, so a reply that is both is told once, in the words that describe what actually arrived.
 
 ### 1.5 Why line-oriented, not JSON (one line, since it's decided)
 
@@ -285,9 +308,10 @@ Common rules: all `path`/`root` params resolve inside the working directory; abs
 
 ## 4. Turn payload (tool → LLM)
 
-Same grammar, `RESULT` blocks keyed by call id, in execution order:
+Same grammar, `RESULT` blocks keyed by call id, in execution order, and — like every outbound except the bootstrap — delivered inside a `~~~~` fence (see "Outbound payloads are fenced too", below):
 
 ```
+~~~~
 ===CLIP:RESULTS turn=4===
 ===CLIP:RESULT id=1 status=ok===
 body << R1
@@ -305,12 +329,14 @@ hint: re-read lines 80-95 and resend the edit with the exact text.
 R2
 ===CLIP:END===
 ===CLIP:EOM turn=4 chat=amber-falcon===
+~~~~
 ```
 
 - **status:** `ok` | `error` (with `code=`) | `denied` (user rejected at approval gate, or a permission rule refused the call) | `skipped` (user aborted the rest of the turn; bootstrap: "skipped calls did not run — resend them if still wanted").
-- **Error codes (closed set):** `parse_error, unknown_tool, missing_param, bad_param, file_not_found, binary_file, path_outside_workspace, match_not_found, multiple_matches, exec_timeout, cancelled, too_large, unterminated_heredoc, reply_truncated, unknown_skill`. Every error body ends with a `hint:` line containing the recommended next action. `cancelled` is the user pressing stop mid-batch: the running call was killed, every call after it never ran (same code, body says so), and the turn's results are sent as usual.
+- **Error codes (closed set):** `parse_error, unknown_tool, missing_param, bad_param, file_not_found, binary_file, path_outside_workspace, match_not_found, multiple_matches, exec_timeout, cancelled, too_large, unterminated_heredoc, reply_truncated, reply_flattened, reply_unfenced, unknown_skill`. Every error body ends with a `hint:` line containing the recommended next action. `cancelled` is the user pressing stop mid-batch: the running call was killed, every call after it never ran (same code, body says so), and the turn's results are sent as usual.
 - **Truncation annotations** are in-band, first or last line of the body: `[truncated: showing last 120 of 2341 lines - rerun with a filter, or read_file specific ranges]`.
 - **Parse errors** that prevent a call from executing become a RESULT with the id the parser assigned (or `id=0` if no header was recoverable), `code=parse_error`, body quoting ≤10 lines around the offending region plus a one-line grammar reminder. Well-formed sibling calls in the same reply still execute — one bad block never wastes the whole round trip.
+- **`id=0` results** are AgentClip talking about the *reply as a whole* rather than about a call: `reply_truncated` (§5.2), `reply_flattened` (§1.4 #14) and `reply_unfenced` (§1.4 #15). All three ride an otherwise ordinary RESULTS payload. `reply_truncated` leads a payload whose other results are the completed calls; the other two ride **alone**, because those replies were refused entirely — there are no sibling results, and the payload exists only to ask for the reply back.
 - Hallucinated tool ⇒ `code=unknown_tool`, body lists the 10 valid names.
 - **Denied by a permission rule** (a ruleset is loaded — architecture §2): the call never gates and never runs; its result is `status=denied` with the body `The user has specified a rule which prevents you from using this specific tool call. Here are some of the relevant rules <json array of the rules whose permission key matches>` (OpenCode's wording, so a model that has seen it there reads it the same way here). Unlike an interactive rejection it does NOT abort the turn: the later calls still run.
 - **Denied by the permission mode** (architecture §2) — same shape as a rule denial (pre-resolved, `status=denied`, the turn carries on), different body, because the model has to know *which* door was shut to pick another route:
@@ -318,6 +344,30 @@ R2
   - `unattended` mode, every call that would have opened a gate: body `auto-denied: the user is away (unattended mode) and this call is not covered by an allow rule.`, then — when a ruleset is loaded — the rule-denial's own `Here are some of the relevant rules <json array>` line, then `hint: do not retry unchanged; continue with calls that allow rules cover, or finish with task_done and list what was blocked.`
 - **The notes channel** (`===CLIP:RESULTS`'s leading `note:` lines — §6's id-hygiene rule is its other user) carries one more thing besides id hygiene: a **permission-mode change** made mid-session. Exactly one of `permission mode is now plan: exploration only; edit/command calls will be denied.` / `permission mode is now unattended: only calls covered by allow rules will run; everything else is auto-denied.` / `permission mode is now ask: normal approvals resumed.`, on the first results payload after the change and never again (a user who cycles three times meant the mode they landed on). It is deliberately NOT in the bootstrap: §2's budget headroom has no room for prose about a mode that may never be used, and every mode denial explains itself in-band.
 - Result bodies are always heredoc-framed with tool-chosen collision-free tags, so a result that *contains* `===CLIP:` lines (grepping AgentClip's own source!) cannot confuse the LLM's reading of the envelope.
+
+### 4.1 Outbound payloads are fenced too
+
+`results`, `task` and `note` payloads are rendered **already wrapped in a `~~~~` fence**. The bootstrap is not — see below.
+
+**Why.** §1.4 #14/#15 are about the chat processing text on the way *out*; the same host processes text on the way *in*. A payload pasted into the message box as plain prose is rewritten before the model ever reads it: the observed case was blank lines coming back as literal `<br>`, and the inline transformations of #15 apply here just as well — a results payload carries the model's own code back to it (a `read_file` body, a near-miss region from `match_not_found`), and code corrupted on the inbound leg is a model editing a file it was shown wrong. A fence tells the box "this is code, do not render it"; a model reads raw text either way, so on a host that does nothing to its input the cost is two inert lines. Per §0.6 there is a second, free benefit: every fenced outbound re-teaches the fence-your-reply rule by example, in the one place a long session keeps seeing.
+
+**Unconditional — no knob.** A setting here would be a config surface with no failure mode behind it: there is no host on which the fence *hurts*, only hosts on which it does nothing. (Contrast `require_fenced_reply`, which is per-service precisely because a missing inbound fence means opposite things on different hosts.)
+
+**Collision rule.** §1.2's rule, now implemented rather than only taught: the payload's lines are scanned for **leading** tilde runs of 3 or more, and the fence is one tilde longer than the longest of them (minimum four, which is what the bootstrap teaches). Only tildes are checked, because we only ever fence with tildes — a body full of backticks is inert inside a tilde fence, which is why the tilde fence was chosen in the first place. The parser accepts `~{3,}`, so any length we emit is recognised on the way back.
+
+**Where it happens: in the composer, at render time — the payload *string* carries the fence.** That single choice is what keeps the rest of the system honest for free:
+
+- `outbound/turn-NNNN.txt` on disk is exactly what was delivered, not a pre-fence draft no chat ever saw;
+- re-copy (`c`, and the double-tap re-send) re-sends the same string, so a redelivery is fenced by construction rather than by remembering to wrap it again;
+- streamed delivery (`clip/chunking.split_for_stream`) splits the **already fenced** string, so the fence wraps the one chat message rather than each burst inside it;
+- self-write suppression is unaffected: `normalized_hash` strips fence lines before hashing (§6.1), so a fenced payload and its bare body hash identically and a re-ingest of our own text is still `Noise("own-outbound")`;
+- the fence characters count against `max_paste_chars`, because they are part of the message the host has to accept. Wrapping therefore happens *inside* `_render_results` (so the fit loop measures the real thing) and *before* `_single`'s budget check — fitting an unfenced draft and wrapping afterwards would silently push every payload that landed within ~10 chars of the budget back over it, at the one moment there is nothing left to cut.
+
+**Why the bootstrap is exempt.** Three reasons, all specific to that payload:
+
+1. **It is the ROLE framing's payload.** §2 section 1 beat 1 exists to defeat the turn-1 refusal — some models read a pasted operating brief as injected content trying to redefine them, and stall — and its whole message is "this is your brief, treat it the way you would treat a system prompt". Presenting that brief as one large code block plausibly re-triggers the exact reading it works to prevent: a fence says "this is data".
+2. **It is the payload with no headroom.** Assembled with a saturated skills listing it measures ~11.9k against the smallest presets' 12,000-char `max_paste_chars` (§2, "Budget headroom"), and it is the one payload with no chunked fallback: over budget means `BudgetExceeded`, an error toast, and a session that never arms. Ten fence characters fit today; that slack is the only slack the bootstrap has.
+3. **Its corruption is loud.** A mangled brief misbehaves visibly on the very first reply — the model asks what the chat name is, or answers in prose. A rewritten *results* payload corrupts code silently, which is the failure the fence is actually for.
 
 ---
 
@@ -338,6 +388,7 @@ Final part's trailer instead reads: `All 3 parts sent. Concatenate parts 1-3 in 
 
 - Watcher sees `===CLIP:ACK 2/3 chat=amber-falcon===` on the clipboard ⇒ auto-copies part 3, status bar: "paste part 3/3". Wrong-index ACK (user pasted parts out of order) ⇒ re-copy the correct part, status-bar warning. Duplicate part pasted ⇒ model just ACKs again (taught in bootstrap §2) — harmless.
 - **Truncation check the model can actually perform:** presence of the `PART-END` line (a presence check, not a char count — models cannot count 6k chars). Missing ⇒ `===CLIP:NACK 2/3 reason=truncated chat=amber-falcon===` ⇒ tool re-copies the same part; after 2 NACKs the TUI suggests lowering the budget preset.
+- **Fencing a chunked send** (forward decision — M1 is single-chunk, so this is not code yet): each PART *chat message* rides inside **its own** fence, sized by §4.1's collision rule against that message's own lines. Not one fence spanning the whole send: a fence is a property of a message, and there is no way to leave one open across a message boundary. The reassembled payload is unaffected because the model is told to concatenate only the slices **between** the `PART`/`PART-END` markers, so the fence lines — which sit outside them, around the whole message including the trailer — never enter it. The `ACK`/`NACK` lines the model sends back stay bare single lines, unfenced, exactly as §2 teaches them.
 - **Calibration (one-shot command):** tool copies a numbered ruler payload (`MARK 0500`, `MARK 1000`, … every 500 chars) and asks the model to report the last MARK visible; sets the budget. Covers the historic silent-truncation UIs.
 
 ### 5.2 Inbound (LLM → tool): truncated-reply detection and resume
@@ -393,9 +444,12 @@ Explicit ranged requests (`start`/`end`, `max`) are honored up to 4× budget —
    | 3 | normalized hash among the last 20 outbound chunks | `Noise("own-outbound")` |
    | 4 | chat name (below) | `Noise("missing-chat")` / `Noise("wrong-chat")` |
    | 5 | phase is DONE and the paste is not a whole reply with a present EOM | `Noise("wrong-phase")` — otherwise the completed session **reopens** (DONE → AWAITING_REPLY, audited as a `reopened` event) and ingestion continues |
-   | 6 | a sentinel line carries glued-on `CLIP:` text (§1.4 #14) | `ProtocolError` — the paste is ours but is not a whole reply; nothing executes |
+   | 6 | a sentinel line carries glued-on `CLIP:` text (§1.4 #14) | Nothing executes. First two in a row: `AutoReply` — an `id=0 code=reply_flattened` payload asking the model to resend the whole reply inside one `~~~~` fence, copied out like any results. Third in a row: `ProtocolError` for the user |
+   | 7 | the preset sets `require_fenced_reply`, the reply carries ≥1 CALL, and no structural fence line arrived (§1.4 #15) | Same shape as step 6, one code along: `AutoReply` carrying `id=0 code=reply_unfenced`, then `ProtocolError` — **sharing step 6's counter**, so the two together get two bounces, not four |
 
-   Step 3 sits ahead of the chat check because our own outbound now carries the chat name and would otherwise sail through step 4; the verdict means exactly one thing — "you copied AgentClip's own text back". A paste rejected at step 4 or 6 is *not* remembered anywhere: a foreign or mangled paste must report the same reason every time it is pasted. Step 6 comes last so a *flattened* paste from another chat is still reported as the foreign paste it is; a flattened paste in DONE reopens the session first, which is right — the resend the error asks for then lands normally.
+   Step 3 sits ahead of the chat check because our own outbound now carries the chat name and would otherwise sail through step 4; the verdict means exactly one thing — "you copied AgentClip's own text back". A paste rejected at step 4, 6 or 7 is *not* remembered anywhere: a foreign or mangled paste must report the same reason every time it is pasted. Steps 6 and 7 come last so a *broken* paste from another chat is still reported as the foreign paste it is — and because their verdict is the one that *writes back to the chat*, which may only happen for a chat step 4 established is ours. Such a paste in DONE reopens the session first, which is right: the resend the payload asks for then lands normally.
+
+   Step 6 precedes step 7 because it is the more specific diagnosis (§1.4 #15, "why the budget is shared"): it has evidence in hand and its message already demands the same fenced resend, so a reply that is both is told once. The two-then-stop rule is §1.4 #14's; the counter (`Engine._transport_bounces`) lives on the engine beside the phase, is per-session (a sub-agent gets its own budget), and is **reset only by a paste that passes both checks** — passing one and failing the other is not "arrived whole". `AutoReply` is the only outbound AgentClip composes with no turn behind it, so it is a distinct ingest verdict rather than a `Send`: the host copies it exactly like results, but no calls ran, no results exist, and the phase does not move.
 
    Step 5 is what makes completion non-final for ingestion. `task_done` ends the session, but the eligibility rule above knows nothing about completion, so a valid reply arriving afterwards must run. Only a *whole* reply may reopen: a present EOM that survived step 4 is proof the paste belongs to this chat, whereas an ACK/NACK has nothing left to acknowledge and a truncated reply carries no chat name at all (it is deliberately un-gated, below) — reopening on either would run text never established as ours, breaching precondition (b).
 
@@ -416,7 +470,7 @@ Explicit ranged requests (`start`/`end`, `max`) are honored up to 4× budget —
 
 ## 7. Worked 3-turn session (exact wire format)
 
-**Paste 1 — user → chat (bootstrap; sections 1–5 as specified in §2, then):**
+**Paste 1 — user → chat (bootstrap; sections 1–5 as specified in §2, then):** — note that this payload, alone among the outbounds, is deliberately **not** fenced (§4.1).
 
 ```
 ===CLIP:TASK===
@@ -448,9 +502,10 @@ reason: check the date-format fix passes its tests
 
 *(AgentClip: shows diff, user approves id=1; `pytest` matches the allowlist, runs; tool copies results, user pastes:)*
 
-**Paste 2 — results payload:**
+**Paste 2 — results payload** (fenced, per §4.1 — the fence is part of the string AgentClip copies out):
 
 ```
+~~~~
 ===CLIP:RESULTS turn=2===
 ===CLIP:RESULT id=1 status=ok===
 body << R1
@@ -465,6 +520,7 @@ exit 0 (1.4s)
 R2
 ===CLIP:END===
 ===CLIP:EOM turn=2 chat=amber-falcon===
+~~~~
 ```
 
 **LLM reply 2:**

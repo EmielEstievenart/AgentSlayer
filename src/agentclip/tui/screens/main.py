@@ -353,12 +353,32 @@ _SUBMIT_SETTLE_S = 0.15
 # one mid-repaint. Only between chunks: the last one is followed by the settle
 # the user's own Enter provides.
 _STREAM_CHUNK_SETTLE_S = 0.12
+# The wheel flick's size, in detents, for the auto-copy flow's snap to the
+# bottom. Deliberately far more than it takes to cross one screenful: a flick
+# that stops short leaves the newest reply's copy button above the fold and the
+# harvest hunts a transcript that is not showing the answer, which is a silent
+# fall to MANUAL_COPY. Over-shooting costs nothing at all - the page is already
+# at its bottom and the extra detents land on a wall - so the number is chosen
+# for the worst long response rather than the typical one.
+_SNAP_WHEEL_DETENTS = -100
 # How many Page Down taps a "page_down" scroll action sends in one burst
-# (ServicePreset.scroll_action). Sized like the wheel flick's -40 detents: a
-# generous over-shoot that stops at the bottom, because the flow wants the
-# newest reply on screen, not a measured scroll. End needs no such count - one
-# tap is the bottom by definition.
-_PAGE_DOWN_TAPS = 8
+# (ServicePreset.scroll_action). Sized like the wheel flick above and for the
+# same reason: a generous over-shoot that stops at the bottom, because the flow
+# wants the newest reply on screen, not a measured scroll. Twelve taps is
+# roughly a dozen screenfuls, which comfortably covers a long reply the user
+# scrolled away from. End needs no such count - one tap is the bottom by
+# definition, which is why it is left at one.
+_PAGE_DOWN_TAPS = 12
+# How many times the flow will snap-and-search before giving up on the static
+# frame. Pages that stream a reply keep growing while the flow is already
+# running, and a lazily rendered transcript can still be laying out the last
+# response when the first capture is taken - so one snap that comes up empty is
+# weak evidence. Each extra round re-scrolls (the same action, the same settle)
+# and re-searches; the pointer and the focus stay where round 1 put them.
+_COPY_SNAP_ROUNDS = 3
+# Beat between the snap and the capture, for the page to render what it just
+# scrolled to. Paid once per round.
+_SNAP_SETTLE_S = 0.4
 # How far ABOVE the chat box a keyboard-scroll focus click lands (see
 # ``_above_chatbox``). The gap between the transcript and the input box is
 # padding, and this is deliberately a small number: a few pixels higher is the
@@ -572,6 +592,19 @@ def _lowest_match_scored(
     return best, best_miss
 
 
+def _how_close(best_miss: float | None) -> str:
+    """The one number that turns "not found" into an actionable report.
+
+    A near miss says the capture has drifted and wants recapturing (F2), while
+    nothing judged at all says the icon simply was not on the frame. Written
+    once and read by every round of the auto-copy flow's hunt, so the retry
+    lines and the final verdict phrase the same fact the same way.
+    """
+    if best_miss is None:
+        return "no candidate cleared the first-stage sniff test"
+    return f"best candidate diff {best_miss:.2f}, needs ≤ {TemplateKind.COPY.max_diff:.2f}"
+
+
 def _element_crop(scene: RegionImage, sighting: Sighting | None) -> ElementCrop | None:
     """Cut a verified match out of the frame it was found in, panel-sized.
 
@@ -678,7 +711,11 @@ class MainScreen(Screen[None]):
         Binding("n", "reject", "reject"),
         Binding("a", "auto_edits", "auto-edits"),
         Binding("u", "undo", "undo"),
-        Binding("c", "recopy", "re-copy"),
+        # Two words longer than every other label here, and they buy the only
+        # thing the footer can say about a double tap: that there IS one. The
+        # escalation is otherwise invisible until the first press toasts it, and
+        # a key whose second press moves the mouse has to announce itself.
+        Binding("c", "recopy", "re-copy · cc pastes"),
         Binding("i", "force_ingest", "ingest"),
         Binding("w", "toggle_watch", "watcher"),
         Binding("t", "follow_up", "type message"),
@@ -1799,6 +1836,53 @@ class MainScreen(Screen[None]):
         # is right whichever way that attempt ends (see ``retry_insert``).
         self._pending_insert = text
         await self._insert_outbound(text, clipboard_ok=clipboard_ok)
+
+    async def park_outbound(self, text: str) -> None:
+        """ChatView: put the last outbound back on the clipboard and stop there.
+
+        Stage one of the `c` re-copy (tui.md 3.4a). It is exactly the clipboard
+        half of ``copy_outbound`` and none of the rest - no focus click, no
+        synthetic Ctrl+V, and no ``_set_loop_state``, because nothing about the
+        browser round trip has moved: the payload is simply back where the user
+        can paste it. It goes through ``_park_on_clipboard`` like every other
+        write, so this copy is registered as a self-write and the watcher cannot
+        ingest our own outbound back as if it were a reply.
+
+        ``_pending_insert`` is deliberately left alone: it is what the sidebar's
+        retry button would re-deliver, and re-copying the payload that is
+        already the pending one changes nothing about that.
+        """
+        await self._park_on_clipboard(text)
+
+    def redeliver_outbound(self, text: str) -> None:
+        """ChatView: send the last outbound again, the way a normal send sends.
+
+        Stage two of the `c` re-copy - the double tap (tui.md 3.4a). It is
+        ``copy_outbound`` and nothing else, so the re-delivery cannot drift from
+        the delivery it repeats: the same park, the same verified focus click,
+        the same burst-or-stream choice and the same opt-in Enter tap, chosen by
+        the same live preset. The two refusals are the view-only half of
+        ``SessionController.recopy``'s guards, and they are the retry button's -
+        the same act, so the same three reasons it may not happen (the third,
+        "nothing has been copied yet", is the controller's ``_last_outbound``
+        and never reaches here).
+
+        Scheduled rather than awaited, in the retry button's exclusive worker
+        group: the controller is on the event loop and must not park for the
+        seconds a streamed delivery takes, and two inserts racing into one chat
+        box is exactly what the group exists to prevent.
+        """
+        if not self._os_armed:
+            self.notify(
+                "disarmed - AgentClip may not click or type: press F5 to arm, or paste "
+                "the payload into the chat yourself",
+                severity="warning",
+            )
+            return
+        if self._flow_running:
+            self.notify("the auto-copy flow is driving the mouse - let it finish first")
+            return
+        self.run_worker(self.copy_outbound(text), group="insert", exclusive=True)
 
     async def _park_on_clipboard(self, text: str) -> bool:
         """Put the whole outbound on the clipboard, as a self-write. False = no
@@ -3851,6 +3935,25 @@ class MainScreen(Screen[None]):
         with suppress(NoMatches):
             self.elements_panel.show_matches({TemplateKind.COPY: _element_crop(scene, sighting)})
 
+    async def _snap_to_bottom(self, region: ScreenRegion, scroll_action: str) -> None:
+        """One snap of the transcript to its bottom, the way this service scrolls.
+
+        Pulled out of ``_auto_copy_flow`` because the flow does it up to
+        ``_COPY_SNAP_ROUNDS`` times and the three branches must not drift apart
+        between rounds - a retry that quietly used the wheel on a page whose
+        preset says End would be a retry of something else.
+
+        Deliberately *only* the scroll: the focus click and the pointer park in
+        front of round 1 are one-time choreography (nothing between rounds moves
+        either), and the settle belongs to the caller, which pays it per round.
+        """
+        if scroll_action == SCROLL_PAGE_DOWN:
+            await asyncio.to_thread(send_scroll_key, "page_down", _PAGE_DOWN_TAPS)
+        elif scroll_action == SCROLL_END:
+            await asyncio.to_thread(send_scroll_key, "end")
+        else:
+            await asyncio.to_thread(scroll_region, region, _SNAP_WHEEL_DETENTS)
+
     def _copy_last_seen_note(self) -> str:
         """What the always-running detector remembers about the copy button.
 
@@ -3889,6 +3992,29 @@ class MainScreen(Screen[None]):
         screen, anywhere) from the one a harvest asks (which is the LOWEST, i.e.
         newest), and it stops at the first hit to stay cheap. What the poller's
         record IS good for is explaining a miss, which is where it is read below.
+
+        **The snap gets ``_COPY_SNAP_ROUNDS`` goes, not one.** A miss on the
+        static frame used to end the hunt, and the commonest cause of one is not
+        a drifted capture at all - it is a page that had not finished arriving.
+        A streamed reply keeps growing after the detectors call it finished, a
+        virtualized transcript renders the rows it just scrolled to a beat later,
+        and either way the bottom moves out from under a single snap. So a miss
+        re-scrolls (the same action, the same settle) and re-searches, up to
+        three rounds in all, each one logged as *round n/3* so a failure reads as
+        "we tried and the page never showed one" rather than as one unlucky
+        frame. The focus click and the pointer park are **not** repeated: nothing
+        between rounds touches the mouse or the focus, so both are still exactly
+        where round 1 put them, and re-clicking a transcript risks selecting text
+        or following a link.
+
+        The hover scan (opt-in, per service) runs after the LAST static miss, not
+        after the first: it drives the user's real cursor across the screen, and
+        doing that three times over would be three times the intrusion for the
+        same answer. The failure report keeps the **best** ``best_miss`` of all
+        the rounds - the closest the capture ever came is the number that
+        separates "drifted, recapture it" from "no candidate at all", and taking
+        the last round's would throw away the one informative frame whenever the
+        final scroll landed somewhere blank.
         """
         region = self.live.chat_region
         templates = self._live_profile().variants(TemplateKind.COPY)
@@ -3902,10 +4028,11 @@ class MainScreen(Screen[None]):
             )
             return
 
-        # Focus the chat window, then snap the transcript to the bottom the way
-        # this service says it scrolls (``ServicePreset.scroll_action``): the
-        # wheel flick by default, or Page Down / End taps for pages the wheel
-        # does not reach.
+        # Focus the chat window and park the pointer on the transcript. Both are
+        # done ONCE, in front of the first snap: the rounds that follow scroll
+        # the way this service says it scrolls (``ServicePreset.scroll_action``,
+        # ``_snap_to_bottom``) and touch neither the focus nor the mouse, so a
+        # retry inherits this choreography rather than repeating it.
         #
         # The keyboard forms ride this focus click - keys go to whatever has
         # focus - so the click may not land in the CHAT BOX the way the paste
@@ -3937,40 +4064,56 @@ class MainScreen(Screen[None]):
         await asyncio.to_thread(move_cursor, *region.center)
         await asyncio.sleep(0.1)  # let the page's hover tracking register it
 
-        if scroll_action == SCROLL_PAGE_DOWN:
-            await asyncio.to_thread(send_scroll_key, "page_down", _PAGE_DOWN_TAPS)
-        elif scroll_action == SCROLL_END:
-            await asyncio.to_thread(send_scroll_key, "end")
-        else:
-            await asyncio.to_thread(scroll_region, region, -40)
-        await asyncio.sleep(0.4)  # let the page settle/render after the snap
-
-        try:
-            scene = await asyncio.to_thread(capture_region, region)
-        except CaptureError as exc:
-            self.notify(f"could not capture the chat region: {exc}", severity="error")
-            self._copy_status("capture failed")
-            self._log_harness(KIND_COPY, f"could not capture the chat region: {exc}")
-            self._set_loop_state(
-                LoopState.MANUAL_COPY, "the chat region could not be captured to search in"
-            )
-            return
         tolerance, matcher = self._live_search()
-        found, best_miss = await asyncio.to_thread(
-            _lowest_match_scored,
-            templates,
-            scene,
-            max_diff=TemplateKind.COPY.max_diff,
-            tolerance=tolerance,
-            matcher=matcher,
-        )
-        # The ELEMENTS column's picture of the frame the click is being AIMED
-        # at, which the poller's own copy row cannot be: this frame is the one
-        # after the scroll and the settle. Cut from THIS frame, which is why it
-        # happens before the hover scan - a hover-scan hit was verified against
-        # a frame taken with the pointer somewhere else, and cutting it out of
-        # the static one would draw whatever the icon was hiding.
-        self._show_copy_crop(scene, found)
+        found: tuple[Template, RegionMatch] | None = None
+        best_miss: float | None = None
+        for attempt in range(1, _COPY_SNAP_ROUNDS + 1):
+            await self._snap_to_bottom(region, scroll_action)
+            await asyncio.sleep(_SNAP_SETTLE_S)  # let the page render what it scrolled to
+
+            try:
+                scene = await asyncio.to_thread(capture_region, region)
+            except CaptureError as exc:
+                self.notify(f"could not capture the chat region: {exc}", severity="error")
+                self._copy_status("capture failed")
+                self._log_harness(KIND_COPY, f"could not capture the chat region: {exc}")
+                self._set_loop_state(
+                    LoopState.MANUAL_COPY, "the chat region could not be captured to search in"
+                )
+                return
+            found, miss = await asyncio.to_thread(
+                _lowest_match_scored,
+                templates,
+                scene,
+                max_diff=TemplateKind.COPY.max_diff,
+                tolerance=tolerance,
+                matcher=matcher,
+            )
+            # The closest ANY round came, not the last one's: see the docstring.
+            if miss is not None and (best_miss is None or miss < best_miss):
+                best_miss = miss
+            # The ELEMENTS column's picture of the frame the click is being
+            # AIMED at, which the poller's own copy row cannot be: this frame is
+            # the one after the scroll and the settle. Cut from THIS frame, which
+            # is why it happens before the hover scan - a hover-scan hit was
+            # verified against a frame taken with the pointer somewhere else, and
+            # cutting it out of the static one would draw whatever the icon was
+            # hiding. Repainted every round, so the column shows the frame the
+            # flow is looking at now rather than the one it started with.
+            self._show_copy_crop(scene, found)
+            if found is not None:
+                break
+            if attempt < _COPY_SNAP_ROUNDS:
+                # Deliberately NOT the word "not found": that line is the
+                # flow's verdict, and a hunt that is still scrolling has not
+                # reached one. Saying it here would report a failure the very
+                # next round can overturn.
+                self._copy_status(f"re-snapping ({attempt + 1}/{_COPY_SNAP_ROUNDS})")
+                self._log_harness(
+                    KIND_COPY,
+                    f"copy button not found on round {attempt}/{_COPY_SNAP_ROUNDS} "
+                    f"({_how_close(best_miss)}) - snapping to the bottom again",
+                )
         if found is None and self._live_preset().hover_scan:
             # Nothing in the static frame: this service is one of the chats that
             # only paint the icon under the pointer, so try again while hovering
@@ -3989,19 +4132,13 @@ class MainScreen(Screen[None]):
         if found is None:
             self.notify("copy button not found on screen", severity="warning")
             self._copy_status("not found")
-            # The one number that turns "not found" into an actionable report:
-            # a near miss says the capture has drifted (recapture it in F2),
-            # while nothing judged at all says the icon simply was not there.
-            how_close = (
-                f"best candidate diff {best_miss:.2f}, needs ≤ {TemplateKind.COPY.max_diff:.2f}"
-                if best_miss is not None
-                else "no candidate cleared the first-stage sniff test"
-            )
             # The number goes on the ``copy`` entry, the consequence on the
             # ``state`` one: the two print on adjacent lines, and repeating the
             # parenthetical on both made the log read as a stutter.
             self._log_harness(
-                KIND_COPY, f"copy button not found ({how_close}{self._copy_last_seen_note()})"
+                KIND_COPY,
+                f"copy button not found after {_COPY_SNAP_ROUNDS} snaps "
+                f"({_how_close(best_miss)}{self._copy_last_seen_note()})",
             )
             self._set_loop_state(
                 LoopState.MANUAL_COPY, "the copy button was not found on screen"
@@ -4474,6 +4611,11 @@ class MainScreen(Screen[None]):
         self._controller.undo()
 
     def action_recopy(self) -> None:
+        """`c`: re-copy the last outbound - and, on a second press inside the
+        double-tap window, re-deliver it. The controller owns both the payload
+        and the window, so the whole decision is made there; this screen only
+        supplies the two halves it can act on (``park_outbound`` /
+        ``redeliver_outbound``)."""
         self._controller.recopy()
 
     def action_force_ingest(self) -> None:
@@ -4567,9 +4709,17 @@ class MainScreen(Screen[None]):
         ):  # armed and idle, or completed: ready for a follow-up (DONE reopens it)
             composer.disabled = False
             composer.border_title = (
-                "Task done · type a follow-up to continue · Esc for shortcuts"
+                # "Esc clears / shortcuts" is the two-stage key (§3.3c) in the
+                # width a border title has: Esc empties the box, and Esc on an
+                # already-empty box frees the single-key shortcuts. The old
+                # "Esc for shortcuts" now describes only the second press, and
+                # a title that promises the wrong thing about a key that can
+                # throw away a paragraph is worse than a shorter one. The full
+                # story, including the ctrl+z that gives the text back, is on
+                # the help screen.
+                "Task done · type a follow-up to continue · Esc clears / shortcuts"
                 if self.phase_name == "DONE"
-                else "Message the model  ·  Enter sends · Ctrl+J newline · Esc for shortcuts"
+                else "Message the model  ·  Enter sends · Ctrl+J newline · Esc clears / shortcuts"
             )
         else:  # no session, executing, at a gate, etc.
             composer.disabled = True

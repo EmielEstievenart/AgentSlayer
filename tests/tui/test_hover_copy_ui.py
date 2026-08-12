@@ -1,11 +1,16 @@
 """Pilot tests for the hover-scan fallback in the auto-copy flow.
 
 Claude's chat only renders a response's copy button while the pointer is over
-that response, so the cheap static capture of the chat region finds nothing.
+that response, so the cheap static captures of the chat region find nothing.
 The flow then walks the real cursor up the chat region, re-capturing after each
 stop, and stops at the FIRST frame the icon appears in - but only for a service
 whose preset asked for it (``ServicePreset.hover_scan``, off by default, since
 the scan takes the user's mouse over and most chats do not need it).
+
+The scan is the LAST resort and runs once, after all ``_COPY_SNAP_ROUNDS`` of
+the static snap-and-search have missed: walking someone's mouse across their
+screen three times over would be three times the intrusion for one answer. So
+the stubbed searches below count those rounds off before the scan begins.
 
 Everything that touches the OS - picker, capture, cursor move, click, focus -
 is monkeypatched at its use site (agentclip.tui.screens.main), including the
@@ -214,12 +219,17 @@ async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
 
         looks = {"n": 0}
 
+        static = main_mod._COPY_SNAP_ROUNDS
+
         def fake_find(
             template: Template, scene: RegionImage, **kw: object
         ) -> tuple[RegionMatch | None, float | None]:
-            # Look 1 is the cheap static pass; then one look per hover stop.
+            # The first ``static`` looks are the cheap snap-and-search rounds -
+            # the flow re-scrolls and re-searches before it will touch the
+            # mouse - and then one look per hover stop. The icon appears on the
+            # third stop.
             looks["n"] += 1
-            return (match, None) if looks["n"] > 3 else (None, 0.21)
+            return (match, None) if looks["n"] > static + 2 else (None, 0.21)
 
         monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", fake_find)
 

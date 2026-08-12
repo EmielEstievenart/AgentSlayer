@@ -7,6 +7,11 @@ kind is searched on every frame - which is what makes the ELEMENTS column able
 to show the user what the tool can see at any moment, rather than only during
 the two windows the old code happened to look in.
 
+Busy and idle are the pair where that is easy to get wrong, so they are pinned
+from both sides: **searching follows the capture, deciding follows the checklist
+AND the capture**. A captured stop button nobody ticked is searched, sighted and
+remembered every frame, and produces no verdict any consumer could act on.
+
 The consumers (the send gate, the auto-copy flow) are tested where they live,
 in tests/tui - here they are deliberately absent, because the point is that
 this module cannot see them.
@@ -193,13 +198,76 @@ def test_a_ticked_signal_with_no_capture_searches_for_nothing() -> None:
     assert detector.watching is False
 
 
-def test_a_captured_appearance_the_checklist_does_not_tick_stays_out() -> None:
+def test_a_captured_appearance_the_checklist_does_not_tick_is_still_watched() -> None:
+    """Searching follows the CAPTURE; only deciding follows the checklist.
+
+    The user pointed at their stop button, so the column shows them whether that
+    picture still matches - which is the whole readout they need before ticking
+    the signal, and which used to be unavailable precisely when it mattered. It
+    is searched, sighted and drawn like any other appearance, and it produces no
+    finish verdict: no tracker is built, so ``tick.busy`` stays None and nothing
+    ``_evaluate_finish`` reads has heard of it.
+    """
     detector = build_detector(
         REGION, profile_with(busy=BUSY_ICON), signals=("stale",), required_ticks=2
     )
 
     assert detector.active_detectors == ("stale",)
-    assert not detector.searches(TemplateKind.BUSY)
+    assert detector.searches(TemplateKind.BUSY)
+    assert detector.searched_kinds == (TemplateKind.BUSY,)
+    assert detector.busy is None  # nothing to debounce, nothing to vote with
+
+    tick = detector.observe(BUSY_ON_SCREEN)
+
+    assert tick.busy is None
+    sighting = tick.found(TemplateKind.BUSY)
+    assert sighting is not None
+    assert (sighting.match.x, sighting.match.y) == (10, 10)
+    assert detector.last_seen(TemplateKind.BUSY) is sighting
+
+
+def test_an_unticked_appearance_still_reports_a_miss() -> None:
+    """The other half of the display-only rule: "we looked and it is not there"
+    is the answer that explains a signal about to be ticked in vain, so an
+    unticked capture reports its misses as loudly as its hits."""
+    detector = build_detector(
+        REGION, profile_with(idle=SEND_BUTTON), signals=(), required_ticks=2
+    )
+
+    tick = detector.observe(EMPTY)
+
+    assert detector.watching is True  # a picture is worth a poll loop by itself
+    assert detector.active_detectors == ()
+    assert tick.idle is None
+    assert tick.searched(TemplateKind.IDLE)
+    assert tick.present(TemplateKind.IDLE) is False
+
+
+def test_a_ticked_signal_is_a_tracker_and_an_unticked_one_is_a_plain_search() -> None:
+    """Both halves of the split in one detector, so the two cannot be confused.
+
+    Busy is ticked and captured, so it is a tracker: a debounced verdict AND a
+    sighting. Idle is captured and unticked, so it is a plain search: a sighting
+    and no verdict at all. Both rows of the column are alive; only one of them
+    can end a response.
+    """
+    detector = build_detector(
+        REGION,
+        profile_with(busy=BUSY_ICON, idle=SEND_BUTTON),
+        signals=("busy",),
+        required_ticks=2,
+    )
+
+    assert detector.active_detectors == ("busy",)
+    assert detector.busy is not None and detector.idle is None
+    assert detector.searched_kinds == (TemplateKind.BUSY, TemplateKind.IDLE)
+
+    tick = detector.observe(paste(BUSY_ON_SCREEN, SEND_BUTTON, 60, 40))
+
+    assert tick.busy is not None and tick.busy.state is BusyState.MATCH
+    assert tick.idle is None
+    assert tick.present(TemplateKind.BUSY) is True
+    assert tick.present(TemplateKind.IDLE) is True
 
 
 def test_send_and_copy_alone_are_still_worth_a_poll_loop() -> None:
@@ -279,7 +347,15 @@ def test_a_failed_capture_is_an_error_everywhere_and_evidence_nowhere() -> None:
 
 def test_the_busy_tracker_is_not_asked_to_search_twice() -> None:
     """The presence trackers already scan the frame, so the detector reads
-    their sighting back instead of paying for a second scan of the same kind."""
+    their sighting back instead of paying for a second scan of the same kind.
+
+    The pictures are handed over anyway - ``build_detector`` passes every
+    calibrated kind, ticked or not - so this is also the test that the tracker
+    and the plain search never both run for one kind on one frame. The stack
+    below is deliberately a picture of something ELSE: the plain search runs
+    after the trackers and would overwrite their sighting with its own miss, so
+    "the tracker's hit survived" is the assertion that it never ran.
+    """
     scans = 0
     real = PresenceTracker((Template.build(BUSY_ICON),), found_is_busy=True)
 
@@ -290,7 +366,9 @@ def test_the_busy_tracker_is_not_asked_to_search_twice() -> None:
             return real._find(scene)  # noqa: SLF001
 
     detector = ScreenDetector(
-        REGION, busy=Counting((Template.build(BUSY_ICON),), found_is_busy=True)
+        REGION,
+        busy=Counting((Template.build(BUSY_ICON),), found_is_busy=True),
+        templates={TemplateKind.BUSY: (Template.build(COPY_ICON),)},
     )
     tick = detector.observe(BUSY_ON_SCREEN)
 

@@ -365,8 +365,11 @@ async def test_flow_searches_the_chat_region_and_clicks_the_lowest_match(
             pilot, lambda: "clicked (diff 0.03)" in _copy_label(app), "copy button clicked"
         )
 
-        # The chat region is what gets scrolled AND what gets searched.
-        assert scrolls == [(CHAT_REGION, -40)]
+        # The chat region is what gets scrolled AND what gets searched. One
+        # scroll, because this round finds the icon: the flow's extra snap
+        # rounds are a retry budget for a miss, not a schedule
+        # (test_scroll_action_ui owns that rule).
+        assert scrolls == [(CHAT_REGION, main_mod._SNAP_WHEEL_DETENTS)]
         assert CHAT_REGION in searched
         assert len(clicks) == 2  # the focus poke, then the verified copy click
         assert clicks[0] == CHAT_REGION

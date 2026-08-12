@@ -20,11 +20,20 @@ left in the input box means a wheel turning against a one-line field. That park
 is a real ``move_cursor``, and it is best-effort - a refused move must not cost
 the snap.
 
+And the snap gets ``_COPY_SNAP_ROUNDS`` goes rather than one, because the
+commonest reason the copy button is not on the frame is a page that had not
+finished arriving - a reply still streaming, a virtualized transcript still
+laying out what it just scrolled to. So each miss re-scrolls and re-searches.
+The choreography in FRONT of the snap is not repeated: nothing between rounds
+touches the mouse or the focus, so the click and the park stay one-time and
+the counts below say so.
+
 The flow is invoked directly (``_auto_copy_flow``); what arms and fires it is
 test_copy_region_ui.py's subject. Every OS touch is monkeypatched at the use
 site (``main_mod.click_region`` / ``move_cursor`` / ``scroll_region`` /
-``send_scroll_key``), and the copy search is stubbed to find nothing - the
-scroll happens before the hunt, which is all these tests are about.
+``send_scroll_key``), and the copy search is stubbed to find nothing unless a
+test says otherwise - the scroll happens before the hunt, which is all these
+tests are about.
 """
 
 from __future__ import annotations
@@ -61,6 +70,11 @@ ABOVE_BOX = ScreenRegion(
     1,
     1,
 )
+# One round of the default snap, as ``scroll_region`` sees it, and how many
+# rounds a hunt that never finds anything gets. Read off the module rather than
+# retyped: the sizes are tuning numbers and these tests are about the shape.
+FLICK = (CHAT_REGION, main_mod._SNAP_WHEEL_DETENTS)
+ROUNDS = main_mod._COPY_SNAP_ROUNDS
 
 
 def _frame(region: ScreenRegion) -> RegionImage:
@@ -184,6 +198,17 @@ def _clicks(monkeypatch: pytest.MonkeyPatch) -> list[ScreenRegion]:
     return clicks
 
 
+async def _clicked_it(self: object, target: ScreenRegion) -> bool:
+    """A copy click that took, without the clipboard round-trip.
+
+    Stands in for ``MainScreen._verified_copy_click`` in the one test that lets
+    the hunt succeed: verifying a click means three offset clicks and up to six
+    clipboard reads a fifth of a second apart, and none of that is about where
+    the transcript scrolled to.
+    """
+    return True
+
+
 def _seed_chatbox(profile_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Calibrate the docked input box and put it on screen where ONGOING_BOX
     says, the way a capture in the service editor plus a real search would.
@@ -217,7 +242,7 @@ async def test_the_default_snap_is_still_the_wheel_flick(
     async with app.run_test(size=(110, 55)) as pilot:
         await _run_flow(app, pilot)
 
-    assert snap.scrolls == [(CHAT_REGION, -40)]
+    assert snap.scrolls == [FLICK] * ROUNDS
     assert snap.keys == []
 
 
@@ -227,8 +252,8 @@ async def test_page_down_taps_replace_the_flick_when_configured(
     seed_templates: Callable[..., None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A burst of taps, like the flick's -40 detents: an over-shoot that stops
-    at the bottom, not a measured scroll."""
+    """A burst of taps, like the flick's detents: an over-shoot that stops at
+    the bottom, not a measured scroll."""
     snap = _recorders(monkeypatch)
     app, _fake = _make_app(tmp_path, profile_root, scroll_action="page_down")
     seed_templates(SERVICE, TemplateKind.COPY, size=(24, 24))
@@ -236,7 +261,7 @@ async def test_page_down_taps_replace_the_flick_when_configured(
         await _run_flow(app, pilot)
 
     assert snap.scrolls == []
-    assert snap.keys == [("page_down", main_mod._PAGE_DOWN_TAPS)]
+    assert snap.keys == [("page_down", main_mod._PAGE_DOWN_TAPS)] * ROUNDS
 
 
 async def test_one_end_tap_replaces_the_flick_when_configured(
@@ -253,7 +278,9 @@ async def test_one_end_tap_replaces_the_flick_when_configured(
         await _run_flow(app, pilot)
 
     assert snap.scrolls == []
-    assert snap.keys == [("end", 1)]
+    # One tap per round, and never a burst: the count is what the flick's is
+    # over-shooting towards, and End is already there.
+    assert snap.keys == [("end", 1)] * ROUNDS
 
 
 # -- where the focus click in front of the snap aims ------------------------------
@@ -363,7 +390,7 @@ async def test_the_wheel_flick_parks_the_pointer_on_the_transcript_first(
         await _run_flow(app, pilot)
 
     assert snap.moves == [CHAT_REGION.center]
-    assert snap.order == ["move", "scroll"]
+    assert snap.order == ["move"] + ["scroll"] * ROUNDS
 
 
 @pytest.mark.parametrize("action", ["page_down", "end"])
@@ -387,7 +414,7 @@ async def test_a_keyboard_snap_parks_the_pointer_on_the_transcript_too(
         await _run_flow(app, pilot)
 
     assert snap.moves == [CHAT_REGION.center]
-    assert snap.order == ["move", "keys"]
+    assert snap.order == ["move"] + ["keys"] * ROUNDS
 
 
 async def test_a_refused_move_still_lets_the_snap_go_out(
@@ -407,4 +434,69 @@ async def test_a_refused_move_still_lets_the_snap_go_out(
         await _run_flow(app, pilot)
 
     assert snap.moves == [CHAT_REGION.center]
-    assert snap.scrolls == [(CHAT_REGION, -40)]
+    assert snap.scrolls == [FLICK] * ROUNDS
+
+
+# -- and how many times it goes out -----------------------------------------------
+
+
+async def test_a_missed_hunt_snaps_again_instead_of_giving_up(
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reason the rounds exist. A reply that is still streaming, or a
+    transcript still laying out what it just scrolled to, puts the newest copy
+    button on the page a beat AFTER the first capture - so one miss is no
+    evidence at all and the flow snaps again rather than falling to MANUAL_COPY
+    on the strength of a frame that arrived early."""
+    snap = _recorders(monkeypatch)
+    clicks = _clicks(monkeypatch)
+    monkeypatch.setattr(main_mod.MainScreen, "_verified_copy_click", _clicked_it)
+    seen: list[int] = []
+
+    def found_on_the_second_look(template: Template, scene: RegionImage, **kw: object) -> object:
+        seen.append(1)
+        return (None, 0.30) if len(seen) == 1 else (RegionMatch(20, 30, 0.02), None)
+
+    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", found_on_the_second_look)
+    app, _fake = _make_app(tmp_path, profile_root, scroll_action=None)
+    seed_templates(SERVICE, TemplateKind.COPY, size=(24, 24))
+    _seed_chatbox(profile_root, monkeypatch)
+    async with app.run_test(size=(110, 55)) as pilot:
+        await _run_flow(app, pilot)
+
+    # Two snaps, and the flow stops the moment a round finds one - the third
+    # round is a retry budget, not a schedule.
+    assert snap.scrolls == [FLICK] * 2
+    # ...and the choreography in front of the snap happened once, for the first
+    # round only: nothing between rounds moves the pointer or the focus, and
+    # re-clicking a transcript risks selecting text or following a link.
+    assert clicks == [ONGOING_BOX]
+    assert snap.moves == [CHAT_REGION.center]
+    assert snap.order == ["move", "scroll", "scroll"]
+
+
+async def test_the_focus_click_and_the_park_are_not_repeated_per_round(
+    tmp_path: Path,
+    profile_root: Path,
+    seed_templates: Callable[..., None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same rule against the longest run: three rounds, all missing, and the
+    click and the park are still one each. The pointer is where round 1 parked
+    it for the whole hunt, because a capture and a template search touch
+    nothing."""
+    snap = _recorders(monkeypatch)
+    clicks = _clicks(monkeypatch)
+    app, _fake = _make_app(tmp_path, profile_root, scroll_action=None)
+    seed_templates(SERVICE, TemplateKind.COPY, size=(24, 24))
+    _seed_chatbox(profile_root, monkeypatch)
+    async with app.run_test(size=(110, 55)) as pilot:
+        await _run_flow(app, pilot)
+
+    assert clicks == [ONGOING_BOX]
+    assert snap.moves == [CHAT_REGION.center]
+    assert len(snap.scrolls) == ROUNDS
+    assert snap.order == ["move"] + ["scroll"] * ROUNDS

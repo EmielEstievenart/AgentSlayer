@@ -36,7 +36,8 @@ def help_text() -> str:
 Chat box (bottom of the screen)
   Type a message and press Enter to send it to the model.
   Ctrl+J inserts a newline; pasting keeps its newlines.
-  Esc frees the single-key shortcuts below; press t (or click) to type again.
+  Esc clears the box (Ctrl+Z puts the text back); Esc on an EMPTY box frees the
+  single-key shortcuts below - press t (or click) to type again.
 
 Chat commands (type in the chat box, leading slash)
 {commands_block()}
@@ -75,9 +76,11 @@ Permission mode (bottom-left of the status bar, e.g. MODE:ask)
               you walk away. Allowed things still run; nothing waits on you.
   The key works while you are typing and while a turn is running.
 
-Session  (press Esc first if the chat box has focus)
+Session  (press Esc first if the chat box has focus - twice if you have typed)
   u  undo last turn (confirm; copies a revert notice for the model)
   c  re-copy the last outbound payload    i  force-ingest the clipboard now
+     press c TWICE (quickly) and AgentClip also pastes it into the chat for
+     you, exactly as it does when it sends a payload of its own
   w  pause/resume the clipboard watcher   t  jump to the chat box
   e  end session / show the summary       x  expand the last collapsed output
   l  export the full chat log to a file (raw blocks + payloads, for debugging)

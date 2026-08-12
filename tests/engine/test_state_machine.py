@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from agentclip.config import Config
 from agentclip.engine.engine import (
     AskUser,
+    AutoReply,
     ChunkAck,
     Done,
     Engine,
@@ -151,6 +155,19 @@ def test_own_outbound_is_suppressed(engine: Engine) -> None:
     assert isinstance(result, Noise) and result.reason == "own-outbound"
 
 
+def test_a_fenced_results_payload_pasted_back_is_still_own_outbound(engine: Engine) -> None:
+    """Results now go out inside a ~~~~ fence. The self-write key strips fence
+    lines before hashing (normalized_hash), so the fence cannot smuggle our own
+    payload past the suppression and back in as a reply."""
+    engine.start_task("t")
+    assert isinstance(engine.ingest(READ_REPLY), NewTurn)
+    step = engine.execute()
+    assert isinstance(step, Send)
+    payload = step.outbound.chunks[0]
+    assert payload.startswith("~~~~\n")
+    assert engine.ingest(payload) == Noise("own-outbound")
+
+
 def test_chat_name_is_stamped_on_the_bootstrap(engine: Engine) -> None:
     out = engine.start_task("t")
     assert engine.chat_name == "amber-falcon"
@@ -183,19 +200,239 @@ def test_chat_name_match_is_case_and_quote_tolerant(engine: Engine) -> None:
     assert isinstance(engine.ingest(reply), NewTurn)
 
 
-def test_flattened_reply_is_refused_and_blames_the_transport(engine: Engine) -> None:
+def test_flattened_reply_is_bounced_back_to_the_model(engine: Engine) -> None:
     """The paste is ours - the chat name survived - but the reply is not whole:
-    a `run_command` block is glued onto the EOM line and was never parsed. It
-    must not execute the fragment that did parse, and the error must name the
-    lost line breaks rather than the chat name."""
+    a `run_command` block is glued onto the EOM line and was never parsed. The
+    fragment that did parse must not execute (the `task_done` in it would end
+    the session!), and the model - not just the user - must be told, or it sits
+    waiting for results that are never coming."""
     engine.start_task("t")
+    result = engine.ingest(FLATTENED_REPLY)
+    assert isinstance(result, AutoReply)
+    assert "line breaks" in result.detail and "~~~~" in result.detail
+    assert "chat name" not in result.detail
+    payload = result.outbound.chunks[0]
+    assert "===CLIP:RESULT id=0 status=error code=reply_flattened===" in payload
+    assert "chat=amber-falcon" in payload  # it is an ordinary outbound payload
+    # It quotes what actually arrived, so the model can see its own lost break.
+    assert "===CLIP:EOM calls=1 chat=amber-falcon===~~~~ ===CLIP:CALL" in payload
+    # And it asks for ALL of it back, inside one fence - not just the tail.
+    assert "ENTIRE reply" in payload and "~~~~ fence" in payload
+    assert "===CLIP:EOM" in payload
+    assert engine.status().phase is Phase.AWAITING_REPLY  # nothing ran
+
+
+def test_flattened_bounces_are_capped_then_handed_to_the_user(engine: Engine) -> None:
+    """A host that strips newlines from every copy would ping-pong forever, so
+    the engine asks for a resend twice and then tells the human instead."""
+    engine.start_task("t")
+    assert isinstance(engine.ingest(FLATTENED_REPLY), AutoReply)
+    assert isinstance(engine.ingest(FLATTENED_REPLY), AutoReply)
     result = engine.ingest(FLATTENED_REPLY)
     assert isinstance(result, ProtocolError)
     assert "line breaks" in result.detail and "~~~~" in result.detail
     assert "chat name" not in result.detail
-    assert engine.status().phase is Phase.AWAITING_REPLY  # nothing ran
-    # Like a chat-gate rejection: a re-paste says the same thing every time.
+    assert "===CLIP:EOM calls=1 chat=amber-falcon===~~~~" in result.detail  # quoted
+    assert engine.status().phase is Phase.AWAITING_REPLY  # still nothing ran
+    # Past the cap it stays the user's problem: no further payloads are composed.
     assert isinstance(engine.ingest(FLATTENED_REPLY), ProtocolError)
+
+
+def test_a_whole_reply_restores_the_flattened_bounce_budget(engine: Engine) -> None:
+    """The cap is for a transport that is broken NOW. One paste that arrived
+    with its line breaks intact proves it is not, so the next flattening is a
+    fresh incident with its own two tries."""
+    engine.start_task("t")
+    assert isinstance(engine.ingest(FLATTENED_REPLY), AutoReply)
+    assert isinstance(engine.ingest(FLATTENED_REPLY), AutoReply)
+    assert isinstance(engine.ingest(READ_REPLY), NewTurn)
+    assert isinstance(engine.execute(), Send)
+    assert isinstance(engine.ingest(FLATTENED_REPLY), AutoReply)
+
+
+# -- tolerance #15: a reply that arrived outside a fence ----------------------
+#
+# Only on a service preset that asks for it (`require_fenced_reply`): unfenced
+# arrivals are legitimate wherever the per-code-block copy button hands over the
+# block's contents without its fence lines (golden fixture 002). On a host whose
+# whole-message copy markdown-processes unfenced text instead, the missing fence
+# is the only evidence there is that the code has been rewritten - link-stripped
+# `[label](target)` shapes, sometimes collapsed newlines - and the reply parses
+# perfectly either way, so the refusal has to happen here or not at all.
+
+
+@pytest.fixture
+def fenced_engine(config: Config, make_engine) -> Engine:  # type: ignore[no-untyped-def]
+    """An engine whose service preset demands fenced replies."""
+    key = config.general.service
+    services = dict(config.services)
+    services[key] = replace(services[key], require_fenced_reply=True)
+    return make_engine(replace(config, services=services))
+
+
+def _fenced(reply: str, fence: str = "~~~~") -> str:
+    return f"{fence}\n{reply}{fence}\n"
+
+
+# The one that must NOT be fooled: every fence-looking line in it is inside a
+# heredoc body, i.e. content of a file being written, not evidence about how the
+# reply itself was rendered.
+HEREDOC_FENCES_REPLY = """===CLIP:CALL id=1 tool=write_file===
+path: README.md
+content <<EOT
+# Title
+```python
+print("hi")
+```
+~~~~
+EOT
+===CLIP:END===
+===CLIP:EOM calls=1 chat=amber-falcon===
+"""
+
+# Sentinels, one complete call, no EOM: the truncation signature. The truncated
+# path would happily run that complete call - which is exactly the silent
+# corruption this gate exists to stop.
+TRUNCATED_UNFENCED_REPLY = """===CLIP:CALL id=1 tool=write_file===
+path: notes.txt
+content <<EOT
+hello from the model
+EOT
+===CLIP:END===
+===CLIP:CALL id=2 tool=write_file===
+path: other.txt
+content <<EOT
+the reply was cut off before the heredoc terminator
+"""
+
+
+def test_an_unfenced_reply_is_bounced_when_the_service_asks_for_fences(
+    fenced_engine: Engine, project: Path
+) -> None:
+    fenced_engine.start_task("t")
+    result = fenced_engine.ingest(EDIT_REPLY)
+    assert isinstance(result, AutoReply)
+    payload = result.outbound.chunks[0]
+    assert "===CLIP:RESULT id=0 status=error code=reply_unfenced===" in payload
+    assert "NOTHING in it ran" in payload
+    assert "not a parse failure" in payload.replace("NOT a parse failure", "not a parse failure")
+    assert "[this](int a)" in payload  # the corruption, made concrete
+    assert "ENTIRE reply" in payload and "~~~~ fence" in payload
+    assert fenced_engine.status().phase is Phase.AWAITING_REPLY  # no turn was built
+    assert not (project / "notes.txt").exists()  # and the write never happened
+
+
+def test_an_unfenced_reply_runs_normally_when_the_service_does_not_ask(
+    engine: Engine,
+) -> None:
+    """The default. Refusing unfenced text globally would break every host whose
+    copy button strips the fence for us."""
+    engine.start_task("t")
+    assert isinstance(engine.ingest(EDIT_REPLY), NewTurn)
+
+
+@pytest.mark.parametrize("fence", ["~~~~", "```", "```text"])
+def test_a_fenced_reply_passes_the_gate(fenced_engine: Engine, fence: str) -> None:
+    """Tilde or backtick, any length: the parser accepts both as fences, so both
+    are proof that fence lines survived this host's copy."""
+    fenced_engine.start_task("t")
+    assert isinstance(fenced_engine.ingest(_fenced(READ_REPLY, fence)), NewTurn)
+
+
+def test_a_reply_with_no_calls_is_not_gated(fenced_engine: Engine) -> None:
+    """A zero-call reply has nothing executable to corrupt, and it already earns
+    the no-calls nag. ACK/NACK are taught as bare single lines and would be
+    refused outright by a gate that did not stop at calls."""
+    fenced_engine.start_task("t")
+    assert isinstance(fenced_engine.ingest(EMPTY_REPLY), NewTurn)
+    assert isinstance(fenced_engine.execute(), Send)
+    assert isinstance(
+        fenced_engine.ingest("===CLIP:ACK 2/3 chat=amber-falcon==="), ChunkAck
+    )
+
+
+def test_fences_inside_heredoc_content_do_not_count_as_a_fence(
+    fenced_engine: Engine, project: Path
+) -> None:
+    """saw_fence is structural on purpose: a reply WRITING a markdown file is
+    full of ``` lines and is no more fenced for it."""
+    fenced_engine.start_task("t")
+    result = fenced_engine.ingest(HEREDOC_FENCES_REPLY)
+    assert isinstance(result, AutoReply)
+    assert "code=reply_unfenced" in result.outbound.chunks[0]
+    assert (project / "README.md").read_text(encoding="utf-8") == "demo project for engine tests\n"
+
+
+def test_a_truncated_unfenced_reply_with_calls_is_still_bounced(
+    fenced_engine: Engine, project: Path
+) -> None:
+    fenced_engine.start_task("t")
+    result = fenced_engine.ingest(TRUNCATED_UNFENCED_REPLY)
+    assert isinstance(result, AutoReply)
+    assert "code=reply_unfenced" in result.outbound.chunks[0]
+    assert fenced_engine.status().phase is Phase.AWAITING_REPLY
+    # The complete call in it - which the truncated path WOULD have executed.
+    assert not (project / "notes.txt").exists()
+
+
+def test_flattened_and_unfenced_share_one_bounce_budget(fenced_engine: Engine) -> None:
+    """One fault class, one budget: both symptoms mean "the transport mangled
+    this reply" and both are answered by the same fenced resend. Separate
+    budgets would let a host that alternates symptoms ping-pong twice as long
+    before the human hears about it."""
+    fenced_engine.start_task("t")
+    assert isinstance(fenced_engine.ingest(FLATTENED_REPLY), AutoReply)
+    assert isinstance(fenced_engine.ingest(EDIT_REPLY), AutoReply)
+    third = fenced_engine.ingest(READ_REPLY)  # unfenced again: over the shared cap
+    assert isinstance(third, ProtocolError)
+    assert "stopped asking" in third.detail
+    assert "require-fenced" in third.detail
+    assert fenced_engine.status().phase is Phase.AWAITING_REPLY
+
+
+def test_two_unfenced_bounces_then_the_user_is_told(fenced_engine: Engine) -> None:
+    fenced_engine.start_task("t")
+    assert isinstance(fenced_engine.ingest(READ_REPLY), AutoReply)
+    assert isinstance(fenced_engine.ingest(READ_REPLY), AutoReply)
+    result = fenced_engine.ingest(READ_REPLY)
+    assert isinstance(result, ProtocolError)
+    assert "raw/code view" in result.detail
+    # Past the cap it stays the user's problem: nothing further is composed.
+    assert isinstance(fenced_engine.ingest(READ_REPLY), ProtocolError)
+
+
+def test_an_accepted_fenced_reply_restores_the_shared_budget(
+    fenced_engine: Engine,
+) -> None:
+    """The cap is for a transport that is broken NOW. One paste that arrived
+    whole - line breaks AND fence - proves it is not."""
+    fenced_engine.start_task("t")
+    assert isinstance(fenced_engine.ingest(FLATTENED_REPLY), AutoReply)
+    assert isinstance(fenced_engine.ingest(READ_REPLY), AutoReply)  # unfenced
+    assert isinstance(fenced_engine.ingest(_fenced(READ_REPLY)), NewTurn)
+    assert isinstance(fenced_engine.execute(), Send)
+    assert isinstance(fenced_engine.ingest(READ_REPLY), AutoReply)  # a fresh two tries
+    assert isinstance(fenced_engine.ingest(READ_REPLY), AutoReply)
+
+
+def test_the_unfenced_bounce_is_audited_with_the_raw_paste(
+    fenced_engine: Engine,
+) -> None:
+    fenced_engine.start_task("t")
+    assert isinstance(fenced_engine.ingest(READ_REPLY), AutoReply)
+    events = [
+        json.loads(line)
+        for line in (fenced_engine.status().session_dir / "transcript.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line
+    ]
+    unfenced = [e for e in events if e["t"] == "unfenced"]
+    assert len(unfenced) == 1
+    assert unfenced[0]["attempt"] == 1
+    assert unfenced[0]["bounced"] is True
+    assert unfenced[0]["raw"] == READ_REPLY  # what the transport actually delivered
+    assert not any(e["t"] == "inbound" for e in events)  # it never became a turn
 
 
 def test_truncated_reply_without_eom_skips_the_chat_gate(engine: Engine) -> None:

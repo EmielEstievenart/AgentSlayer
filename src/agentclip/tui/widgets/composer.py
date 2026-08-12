@@ -4,8 +4,12 @@ A small ``TextArea`` subclass that *sends on Enter* (chat convention) instead of
 inserting a newline, so the steady-state loop reads like any chat app: type a
 message, press Enter. Multi-line input still works two ways - pasting preserves
 newlines (paste is a Paste event, not a stream of Enter keypresses) and ``ctrl+j``
-inserts a literal newline. ``escape`` blurs the box so the main screen's
-single-key shortcuts (u/c/i/w/e/x) become reachable again ("command mode").
+inserts a literal newline. ``escape`` is two-stage: with text in the box it
+clears the box (keeping focus, so the rewrite starts immediately), and on an
+already-empty box it blurs, so the main screen's single-key shortcuts
+(u/c/i/w/e/x) become reachable again ("command mode"). Clearing is an *edit*, so
+``ctrl+z`` gives the message straight back - a key that can throw away a
+paragraph of typing must never be the last word on it.
 
 It also drives the slash-command popup (``CommandPopup``, §3.3a): the box is the
 only thing that knows what has been typed, so it decides when the popup is up
@@ -42,7 +46,7 @@ from agentclip.tui.widgets.command_popup import CommandPopup
 
 
 class ChatComposer(TextArea):
-    """A chat-style input: Enter sends, ctrl+j newline, esc blurs to the screen."""
+    """A chat-style input: Enter sends, ctrl+j newline, esc clears then blurs."""
 
     class Submitted(Message):
         """Posted when the user presses Enter in the composer."""
@@ -157,10 +161,29 @@ class ChatComposer(TextArea):
         if event.key == "escape":
             event.stop()
             event.prevent_default()
-            self.screen.set_focus(None)  # drop to single-key "command mode"
+            if self.text:
+                # Stage one: empty the box but KEEP the focus, so the cursor is
+                # already sitting where the rewrite gets typed. Deliberately an
+                # edit and not ``load_text``/``reset`` - those throw the undo
+                # history away, and a single key that can destroy a paragraph of
+                # typing has to be one ctrl+z from handing it back. The
+                # checkpoint is what makes that undo restore *exactly* what was
+                # there: without it the clear can be batched with the last few
+                # keystrokes, and ctrl+z would return a half-typed line.
+                self.history.checkpoint()
+                self.clear()
+                return
+            # Stage two: an empty box has nothing to lose, so escape means what
+            # it always did - drop to the screen's single-key "command mode".
+            self.screen.set_focus(None)
             return
         await super()._on_key(event)
 
     def reset(self) -> None:
-        """Clear the box after a message is sent."""
+        """Clear the box after a message is sent.
+
+        Deliberately ``load_text`` and not the undoable clear escape uses: this
+        drops the undo history, and a message that has already *left* is not one
+        ctrl+z should be able to resurrect into the box behind it.
+        """
         self.load_text("")

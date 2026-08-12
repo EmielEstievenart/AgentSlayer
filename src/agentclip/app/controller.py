@@ -38,6 +38,7 @@ future and the single focused transcript be *retargeted* instead of duplicated.
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -51,6 +52,7 @@ from agentclip.config import Config, ServicePreset
 from agentclip.engine.approval import PERMISSION_MODES, normalize_mode
 from agentclip.engine.engine import (
     AskUser,
+    AutoReply,
     CallProgress,
     ChunkAck,
     Decision,
@@ -73,6 +75,16 @@ from agentclip.protocol.parser import peek_chat_name
 from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus, ToolCall
 
 _T = TypeVar("_T")
+
+# How long a first `c` stays armed for the second one that turns a re-copy into
+# a re-DELIVERY (tui.md 3.4a). Short on purpose, and measured with
+# ``time.monotonic`` so a clock adjustment mid-session cannot widen it: the
+# second press must be part of the *same gesture* as the first. A generous
+# window would mean a `c` pressed now and another one pressed absent-mindedly
+# some seconds later moves the mouse into the browser and pastes - and the
+# whole point of the two stages is that nothing touches the machine until the
+# user has said so twice, deliberately, in a row.
+_RECOPY_DOUBLE_TAP_S = 1.5
 
 # What a delegation hands back to the master when it could not run. Every one of
 # these is delivered as an `error` ToolResult on the `delegate` call, never as a
@@ -334,6 +346,12 @@ class SessionController:
         self._answer_future: asyncio.Future[str] | None = None
         self._queued_capture: str | None = None
         self._last_outbound: str | None = None
+        # When the last `c` landed, or None when no re-copy is armed for the
+        # escalation (see ``recopy``). Deliberately NOT part of
+        # ``_SessionContext``: it is half a keystroke, not session state, and a
+        # delegation that starts between two presses has plainly ended the
+        # gesture the second press would have completed.
+        self._recopy_armed_at: float | None = None
         self._stats = SessionStats()
         self._turn_glyphs: dict[int, list[str]] = {}  # call id -> [glyph, tool]
         # The same turn's calls as the run panel lists them, in id order: what
@@ -942,9 +960,43 @@ class SessionController:
         self._spawn_flow(self._show_summary())
 
     def recopy(self) -> None:
+        """`c`: the last outbound back onto the clipboard - and, pressed twice,
+        back into the chat (tui.md 3.4a).
+
+        Two stages, because the two things a user means by `c` are not the same
+        size. *Give me that payload again* is a clipboard write and costs
+        nothing; *send it again* moves the mouse into the browser, clicks a chat
+        box and pastes into whatever has focus, which is the one class of act
+        this whole app asks before doing. So the first press parks and says what
+        the second one would do, and only a second press inside
+        ``_RECOPY_DOUBLE_TAP_S`` escalates - the double tap IS the confirmation
+        dialog, spent as one gesture instead of a modal.
+
+        The arm is consumed on every press, so a `c` after the window has
+        expired is simply a fresh first press rather than a delivery the user
+        stopped expecting. Stage one is deliberately ungated - a clipboard write
+        is safe mid-turn, like `/log` and the log export - while stage two takes
+        the same ``_busy`` / ``_turn_aborting`` refusal the flow-spawning
+        actions do: a payload pasted on top of a turn that is about to compose
+        its own would put two messages in the box. The states only the VIEW can
+        see (disarmed, an auto-copy flow already driving the mouse) are refused
+        on the far side of ``redeliver_outbound``, where they are visible.
+        """
         text = self._last_outbound
         if text is None:
             return
+        armed_at, self._recopy_armed_at = self._recopy_armed_at, None
+        now = time.monotonic()
+        if armed_at is not None and now - armed_at <= _RECOPY_DOUBLE_TAP_S:
+            if self._busy or self._turn_aborting:
+                self._view.notify(
+                    "a turn is running - the payload is on your clipboard to paste yourself",
+                    severity="warning",
+                )
+                return
+            self._view.redeliver_outbound(text)
+            return
+        self._recopy_armed_at = now
         self._view.spawn(self._recopy(text))
 
     def export_log(self) -> None:
@@ -1174,6 +1226,27 @@ class SessionController:
                 f"protocol error: {result.detail} - press c to re-copy the last outbound"
             )
             self._view.alert("protocol error - see transcript", severity="error")
+            return
+        if isinstance(result, AutoReply):
+            # The engine answered the model itself (a broken paste nothing could
+            # be run from). Same copy-and-tell shape as a turn's results - the
+            # payload is one, and the user's next move is the same paste - with
+            # the transcript saying why it exists.
+            await self._view.add_error(f"protocol error: {result.detail}")
+            await self._copy_outbound(result.outbound)
+            await self._view.add_outbound(result.outbound, "resend request copied")
+            # Deliberately says "refused as sent" rather than naming a cause:
+            # two different transport faults arrive here (a flattened reply and
+            # an unfenced one), the toast is one line, and the transcript error
+            # above it already carries the engine's own diagnosis. A toast that
+            # says "flattened" for a reply that was merely unfenced sends the
+            # user hunting for missing line breaks that are all present.
+            self._view.alert(
+                f"{self._alert_prefix}reply refused as sent - a resend request was "
+                "copied; paste it into the chat",
+                severity="warning",
+            )
+            await self._refresh_status()
             return
         if isinstance(result, ChunkAck):
             self._view.notify("chunk ACK received, but chunked sends land in M3", severity="warning")
@@ -1626,6 +1699,23 @@ class SessionController:
                     "sub-agent: protocol error - re-copy its reply", severity="warning"
                 )
                 continue
+            if isinstance(result, AutoReply):
+                # A sub-agent's chat breaks replies exactly like the master's -
+                # flattened, or unfenced on a require-fenced service - and the
+                # engine bounces it exactly the same way (the counter is
+                # per-engine, so a sub-agent gets its own budget). The only thing
+                # this loop does differently is what it does differently for
+                # every payload: copy, tell, and go back to waiting for a reply
+                # instead of returning to the flow.
+                await self._view.add_error(f"protocol error: {result.detail}")
+                await self._copy_outbound(result.outbound)
+                await self._view.add_outbound(result.outbound, "resend request copied")
+                self._view.alert(
+                    "sub-agent: reply refused as sent - a resend request was copied; "
+                    "paste it into the sub-agent chat"
+                )
+                await self._refresh_status()
+                continue
             assert isinstance(result, NewTurn)
             self._stats.replies += 1
             self._stats.chars_in += len(text)
@@ -1900,11 +1990,20 @@ class SessionController:
         await self._view.copy_outbound(text)
         self._last_outbound = text
         self._has_outbound = True
+        # A fresh payload ends any half-finished `c` gesture: the second press
+        # would otherwise deliver THIS one, which is not the message the first
+        # press was about and has just been delivered anyway.
+        self._recopy_armed_at = None
         self._stats.chars_out += outbound.total_chars
 
     async def _recopy(self, text: str) -> None:
-        await self._view.copy_outbound(text)
-        self._view.notify(f"re-copied the last outbound ({len(text):,} chars)")
+        # ``park_outbound``, not ``copy_outbound``: the clipboard write and
+        # nothing else. The toast is what makes the second stage discoverable -
+        # a double tap nobody is told about is a feature nobody has.
+        await self._view.park_outbound(text)
+        self._view.notify(
+            f"re-copied the last outbound ({len(text):,} chars) - press c again to deliver it"
+        )
 
     # -- export log -----------------------------------------------------------
 

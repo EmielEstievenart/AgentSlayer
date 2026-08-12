@@ -18,8 +18,9 @@ Semantics implemented here (protocol.md sections 4-6 + plan synthesis):
   rule after a failed/denied mutation, rejection-aborts-turn, the per-turn
   backup bracket (begin_turn at first mutation, finish_turn at turn end),
   ask_user pause/resume, delegate pause/resume (the host runs a sub-agent and
-  feeds its deliverable back), task_done collection, id=0 reply_truncated
-  results, and cooperative cancellation (request_cancel, from any thread).
+  feeds its deliverable back), task_done collection, id=0 reply_truncated /
+  reply_flattened / reply_unfenced results, and cooperative cancellation
+  (request_cancel, from any thread).
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from agentclip.hosts.local import LocalHost
 from agentclip.permissions import PermissionRule
 from agentclip.protocol.composer import BudgetExceeded, Composer
 from agentclip.protocol.names import normalize_chat_name
-from agentclip.protocol.parser import normalized_hash, parse_reply
+from agentclip.protocol.parser import normalize, normalized_hash, parse_reply
 from agentclip.protocol.types import (
     Outbound,
     ParsedReply,
@@ -67,6 +68,35 @@ _NOTE_WARNINGS = frozenset({"renumbered", "duplicate_id", "missing_end", "unknow
 
 # Chunks of one outbound are joined with this separator in outbound/turn-NNNN.txt.
 _CHUNK_SEPARATOR = "\n␞\n"
+
+# How many times in a row the engine answers a TRANSPORT-BROKEN reply BY ITSELF
+# (an id=0 reply_flattened or reply_unfenced payload asking for a fenced resend)
+# before it gives up and hands the problem to the user instead.
+#
+# The cap is the whole reason this is safe to automate. Flattening is a
+# TRANSPORT fault, not a model mistake, so there are two populations of hosts:
+# ones where the model simply forgot the fence (a resend fixes it, and two
+# tries is generous) and ones whose copy path strips newlines from EVERY copy,
+# where the model's corrected reply comes back flattened exactly like the last
+# one. Without a cap the second population ping-pongs forever - AgentClip
+# composes, the user pastes, the host flattens, AgentClip composes - burning
+# the model's context and the user's turns while never once being able to
+# succeed. After two bounces the evidence points at the host, and the only
+# actor who can do anything about the host is the human.
+#
+# ONE budget, SHARED by both bounce kinds (protocol.md 1.4 #15). Flattening and
+# fence-stripping are not two problems: they are two symptoms of one fault -
+# the transport mangled a reply - and they have one remedy, the fenced resend
+# both payloads ask for. A host that alternates symptoms (this paste lost its
+# newlines, the next arrived unfenced but intact) is still one broken host, and
+# two separate budgets would let the pair ping-pong 2N turns deep before the
+# human hears about it. Any paste that arrives whole clears it.
+_MAX_TRANSPORT_BOUNCES = 2
+
+# How much of the glued-together line is quoted back at the model. Enough to
+# recognise its own text and see where the break should have been; short enough
+# that a 20k-char single line does not become the payload.
+_FLATTENED_QUOTE_CHARS = 160
 
 # What the model is told when the user changes the permission mode mid-session.
 # It rides the NEXT results payload's note channel rather than a payload of its
@@ -161,7 +191,31 @@ class ProtocolError:
     detail: str
 
 
-IngestResult = NewTurn | ChunkAck | Noise | ProtocolError
+@dataclass(frozen=True, slots=True)
+class AutoReply:
+    """A payload the engine composed BY ITSELF, with no turn behind it.
+
+    Every other outbound answers something the model asked for: results answer
+    calls, a NOTE answers an undo, a TASK answers the user. This one answers a
+    paste that never became a turn - a reply the transport broke badly enough
+    that nothing in it could run: the flattened reply of protocol.md section 1.4
+    tolerance #14, or the unfenced one of #15. The alternative, telling only the
+    human, leaves
+    the model sitting in silence waiting for results that are never coming: the
+    session looks stalled from the one side that could actually fix it.
+
+    ``outbound`` is an ordinary RESULTS payload carrying one id=0 error result,
+    so the host copies it out exactly like a turn's results and the model reads
+    it with the envelope it already knows. ``detail`` is the human's version of
+    the same fact, for the transcript. The phase does not move: the engine was
+    AWAITING_REPLY and it still is, now waiting for the corrected reply.
+    """
+
+    outbound: Outbound
+    detail: str
+
+
+IngestResult = NewTurn | ChunkAck | Noise | ProtocolError | AutoReply
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +335,12 @@ class Engine:
         self._plan: list[_Planned] = []
         self._exec: _ExecState | None = None
         self._last_outbound_chars = 0
+        # Consecutive transport-broken ingests answered automatically (flattened
+        # AND unfenced together - see _MAX_TRANSPORT_BOUNCES for why one
+        # counter); reset by any paste that parsed whole. Lives here, next to
+        # the phase and the turn counter, because it is the same kind of fact:
+        # where this session has got to.
+        self._transport_bounces = 0
         # A one-line "the mode changed" note waiting for a payload to ride out
         # on. At most one: a user who cycles three times before the next turn
         # meant the mode they landed on, not the trip.
@@ -387,9 +447,19 @@ class Engine:
         otherwise read as a reply.
 
         Gate order is load-bearing: wrong-phase, not-protocol, own-outbound, the
-        chat name, the DONE-reopen rule, then the flattened-reply check. The
-        flattening check comes last so a corrupt paste from ANOTHER chat is
-        still reported as the foreign paste it is."""
+        chat name, the DONE-reopen rule, then the two transport checks
+        (flattened, then unfenced). The transport checks come last so a corrupt
+        paste from ANOTHER chat is still reported as the foreign paste it is -
+        and because the answer to either is a payload back to the model (see
+        _flattened_ingest / _unfenced_ingest), which must only ever be composed
+        for a chat we established is ours.
+
+        Flattened is asked FIRST because it is the more specific diagnosis: a
+        flattened paste has hard evidence in hand (a sentinel line with another
+        marker glued onto it), and its message already demands the fenced
+        resend the unfenced bounce would ask for. A reply that is both is one
+        broken paste, told once, in the words that describe what actually
+        arrived."""
         if self._phase not in (Phase.AWAITING_REPLY, Phase.DONE):
             return Noise("wrong-phase")
         reply = parse_reply(text)
@@ -415,15 +485,28 @@ class Engine:
             self._session.append_event("reopened", turn=self._turn)
         flattened = next((w for w in reply.warnings if w.kind == "flattened_reply"), None)
         if flattened is not None:
-            # The paste is ours (it passed the chat gate) but it is not a whole
-            # reply: its line breaks were lost in transport, so blocks are glued
-            # onto sentinel lines and were never parsed. Executing the fragment
-            # that did parse would silently drop the rest - the one failure mode
-            # the design forbids. Not remembered, for the chat gate's reason.
-            return ProtocolError(
-                f"{flattened.detail}. Nothing ran - ask the chat to resend the whole "
-                "reply with every CLIP block inside one ~~~~ fence"
-            )
+            return self._flattened_ingest(text, flattened)
+        if self._config.preset().require_fenced_reply and reply.calls and not reply.saw_fence:
+            # Scope, deliberate on both sides (protocol.md 1.4 #15):
+            #
+            # - only replies carrying AT LEAST ONE CALL are gated. A zero-call
+            #   reply has nothing executable in it to corrupt; refusing it would
+            #   replace the no-calls nag - which already says the useful thing -
+            #   with a lecture about fences. ACK and NACK are taught as bare
+            #   single lines with no fence anywhere near them, and gating those
+            #   would break the chunk handshake outright.
+            # - a TRUNCATED reply that carries calls IS gated, even though the
+            #   truncation path would otherwise handle it. That path executes
+            #   the complete calls and asks for the tail - and executing code
+            #   that came through the prose renderer is precisely the silent
+            #   corruption this gate exists to stop.
+            return self._unfenced_ingest(text)
+        # A paste that parsed whole clears the bounce budget: whatever went
+        # wrong before, this transport is delivering line breaks and fences now,
+        # so the NEXT mangling is a fresh incident with its own two tries. It
+        # sits after BOTH checks because passing one and failing the other is
+        # not "arrived whole".
+        self._transport_bounces = 0
         self._session.append_event("inbound", raw=text)
         self._session.append_event(
             "parsed",
@@ -448,6 +531,109 @@ class Engine:
         self._plan = self._build_plan(reply)
         self._set_phase(Phase.REVIEW)
         return NewTurn(reply)
+
+    def _flattened_ingest(self, text: str, issue: ParseIssue) -> AutoReply | ProtocolError:
+        """Answer a paste whose line breaks died in transport (section 1.4 #14).
+
+        The paste is ours - it passed the chat gate - but it is not a whole
+        reply: blocks are glued onto sentinel lines and were never parsed.
+        Executing the fragment that DID parse would silently drop the rest, the
+        one failure mode the design forbids, and re-splitting the glued line
+        would mean executing a command AgentClip reassembled. So nothing here
+        runs, and nothing is recovered; the only question is who gets told.
+
+        The model gets told first, up to _MAX_TRANSPORT_BOUNCES times: an id=0
+        `reply_flattened` result riding the ordinary results envelope, exactly
+        like the `reply_truncated` result of section 5.2 and for the same
+        reason - the actor that can fix this in one move is the one that wrote
+        the reply, and it is currently waiting on results that will never come.
+        The offending line is quoted back at it because "your reply was
+        flattened" is abstract until you see your own text with the breaks
+        missing, and the fix (one ~~~~ fence around EVERYTHING) is stated in
+        full, since the bootstrap has no budget left to teach this case.
+
+        Past the cap the user gets told instead, with the same quoted line: at
+        that point the host, not the model, is the thing that needs changing.
+        The paste is not remembered either way - a mangled paste must report
+        the same thing every time it is pasted.
+        """
+        quoted = _offending_line(text, issue.line)
+        self._transport_bounces += 1
+        attempt = self._transport_bounces
+        # One event with the raw paste in it, not the usual "inbound" + verdict
+        # pair: this text never became a turn, and the whole point of auditing it
+        # is being able to read afterwards exactly what the transport delivered.
+        self._session.append_event(
+            "flattened",
+            line=issue.line,
+            attempt=attempt,
+            quoted=quoted,
+            bounced=attempt <= _MAX_TRANSPORT_BOUNCES,
+            raw=text,
+        )
+        if attempt > _MAX_TRANSPORT_BOUNCES:
+            return ProtocolError(
+                f"{issue.detail}. Nothing ran, and this is broken paste"
+                f" #{attempt} in a row - AgentClip has already asked the chat to"
+                f" resend {_MAX_TRANSPORT_BOUNCES} times, so it has stopped asking."
+                f" What arrived: {quoted}. This host is probably stripping line"
+                " breaks from every copy: ask the chat to resend the whole reply"
+                " inside one ~~~~ fence, or copy the reply from its raw/code view"
+                " instead of the rendered message"
+            )
+        outbound = self._compose_results([_flattened_result(quoted)], [])
+        return AutoReply(
+            outbound,
+            f"{issue.detail}. Nothing ran - asked the chat to resend the whole reply"
+            f" inside one ~~~~ fence ({attempt} of {_MAX_TRANSPORT_BOUNCES})",
+        )
+
+    def _unfenced_ingest(self, text: str) -> AutoReply | ProtocolError:
+        """Answer a reply that carries calls but arrived unfenced (§1.4 #15).
+
+        The paste is ours and it PARSED - that is exactly what makes it
+        dangerous. On a host whose whole-message copy markdown-processes text
+        outside a fence, the reply comes back structurally perfect with its code
+        quietly rewritten: `[label](target)` shapes link-stripped (a C++
+        `[this](int a)` capture list simply gone), sometimes newlines collapsed
+        as well. Nothing in the parse can tell a rewritten line from an intended
+        one, so there is nothing to detect downstream - the corrupted text
+        writes itself to disk, or `edit_file` loops on match_not_found and the
+        model rewrites a file to "fix" a mismatch that was never there. The
+        service preset says this host does that; the only safe reading of a
+        missing fence is that this text has been through the renderer.
+
+        Everything else mirrors _flattened_ingest, and mirrors it deliberately:
+        same shared budget, same model-first escalation, same "the paste is not
+        remembered" rule. What it does NOT do is quote a line back - there is no
+        offending line to point at, and the damage is invisible in the text.
+        """
+        self._transport_bounces += 1
+        attempt = self._transport_bounces
+        self._session.append_event(
+            "unfenced",
+            attempt=attempt,
+            bounced=attempt <= _MAX_TRANSPORT_BOUNCES,
+            raw=text,
+        )
+        if attempt > _MAX_TRANSPORT_BOUNCES:
+            return ProtocolError(
+                "the reply arrived outside a code fence, so nothing in it ran."
+                f" This is broken paste #{attempt} in a row - AgentClip has already"
+                f" asked the chat to resend {_MAX_TRANSPORT_BOUNCES} times, so it has"
+                " stopped asking. This service is marked require-fenced, and either the"
+                " model keeps replying without a fence or this host strips the fence on"
+                " copy. Ask the chat by hand to resend the whole reply inside one ~~~~"
+                " fence, copy it from the raw/code view instead of the rendered message,"
+                " or turn the require-fenced setting off for this service (F2)"
+            )
+        outbound = self._compose_results([_unfenced_result()], [])
+        return AutoReply(
+            outbound,
+            "the reply arrived outside a code fence, where this host rewrites code"
+            " before the copy. Nothing ran - asked the chat to resend the whole reply"
+            f" inside one ~~~~ fence ({attempt} of {_MAX_TRANSPORT_BOUNCES})",
+        )
 
     def _chat_gate(self, reply: ParsedReply) -> Noise | None:
         """Require this session's chat name on every line the model was told to
@@ -1238,6 +1424,113 @@ def _truncated_result(reply: ParsedReply) -> ToolResult:
     return ToolResult(call_id=0, status="error", body=body, tool="", code="reply_truncated")
 
 
+def _offending_line(text: str, line_no: int) -> str:
+    """The glued-together line a `flattened_reply` issue points at, quoted.
+
+    Read from the INGESTED TEXT rather than carried on the ParseIssue: the
+    parser reports anomalies, it does not ship evidence, and keeping it that way
+    means parse_reply's output stays a description of structure instead of
+    growing a copy of the input. Line numbers are 1-based over the NORMALIZED
+    text, which is what the parser counted, so normalization is re-applied here
+    rather than assumed away (a CRLF reply would otherwise be off by nothing and
+    a BOM by one, which is exactly the kind of bug that only shows up on someone
+    else's machine).
+
+    Returns "" for a line number that does not exist, so a quote is always
+    optional to the caller and never a crash on the error path.
+    """
+    lines = normalize(text).split("\n")
+    if not 1 <= line_no <= len(lines):
+        return ""
+    line = lines[line_no - 1].strip()
+    if len(line) > _FLATTENED_QUOTE_CHARS:
+        line = line[:_FLATTENED_QUOTE_CHARS].rstrip() + "..."
+    return line
+
+
+def _flattened_result(quoted: str) -> ToolResult:
+    """The id=0 reply_flattened error result (protocol.md sections 1.4 #14, 4).
+
+    Addressed to the MODEL, unlike `client_mangled_reply`: there the client
+    destroys valid output the same way every time and resending is an infinite
+    loop, here the usual cause is the fence the model left off, and putting one
+    back costs it one reply. The two things it must be told are that NOTHING
+    ran (so it resends everything, not the tail - the truncation reflex is
+    wrong here) and that the fence goes around the WHOLE reply including the
+    EOM line, which is the part models get wrong when they do refence: an EOM
+    left outside the fence is flattened onto the fence line and the next paste
+    fails identically.
+
+    The quoted line is the model's own text, so it can see which break went
+    missing. It is safe inside the payload because result bodies are heredoc-
+    framed with a collision-free tag (section 4), so the `===CLIP:` fragments
+    riding in it cannot be read as part of our envelope.
+    """
+    lines = [
+        "Your last reply arrived with its line breaks GONE - several CLIP blocks"
+        " were glued onto one line, so they were never parsed.",
+        "NOTHING in that reply ran. No file was read, no file was changed, no"
+        " command was executed.",
+    ]
+    if quoted:
+        lines.append("This is the line that arrived:")
+        lines.append(quoted)
+    lines.append(
+        "The cause is markdown: CLIP blocks written as ordinary message text are"
+        " rendered as prose, where single newlines are not line breaks, and the"
+        " copy button then hands over one long line."
+    )
+    hint = (
+        "resend the ENTIRE reply - every ===CLIP:CALL block AND the final"
+        " ===CLIP:EOM line - inside ONE ~~~~ fence, with nothing of the protocol"
+        " outside it. Do not resend only part of it and do not use several"
+        " fences: nothing ran, so all of it is still owed."
+    )
+    return ToolResult(
+        call_id=0, status="error", body="\n".join(lines) + f"\nhint: {hint}", code="reply_flattened"
+    )
+
+
+def _unfenced_result() -> ToolResult:
+    """The id=0 reply_unfenced error result (protocol.md §1.4 #15, §4).
+
+    Addressed to the MODEL, like `reply_flattened` and for the same reason: the
+    fix is one fenced resend. Two things have to be said that the model would
+    otherwise get wrong. First that NOTHING ran - the reply parsed, so its
+    natural reading of any answer is "some of it worked". Second that this is
+    not a parse complaint: told only "your reply was refused", a model rewrites
+    its perfectly good CALL blocks, hunting a grammar mistake that does not
+    exist, and sends the rewrite unfenced again. Naming the real mechanism -
+    prose processing between the chat and the relay, with the bracket-paren
+    example that makes it concrete - is what turns the next reply into a resend
+    rather than a rewrite.
+    """
+    lines = [
+        "Your last reply arrived OUTSIDE a code fence, so NOTHING in it ran. No"
+        " file was read, no file was changed, no command was executed.",
+        "This is a transport-safety gate, NOT a parse failure: the reply itself"
+        " parsed fine.",
+        "On this chat, text outside a fence is processed as prose before it"
+        " reaches the relay, and that processing corrupts code invisibly:"
+        " bracket-paren shapes like [label](target) are stripped to just the"
+        " target (a C++ capture like [this](int a) loses its capture list), and"
+        " line breaks can collapse. The result parses perfectly and is wrong,"
+        " which is why it cannot be run.",
+    ]
+    hint = (
+        "resend the ENTIRE reply - every ===CLIP:CALL block AND the final"
+        " ===CLIP:EOM line - inside ONE ~~~~ fence, with nothing of the protocol"
+        " outside it."
+    )
+    return ToolResult(
+        call_id=0,
+        status="error",
+        body="\n".join(lines) + f"\nhint: {hint}",
+        tool="",
+        code="reply_unfenced",
+    )
+
+
 def _undo_notice(report: UndoReport) -> str:
     lines = [
         f"The user reverted turn {report.turn} with AgentClip's undo."
@@ -1260,6 +1553,7 @@ def _undo_notice(report: UndoReport) -> str:
 
 __all__ = [
     "AskUser",
+    "AutoReply",
     "ChunkAck",
     "Decision",
     "Delegate",

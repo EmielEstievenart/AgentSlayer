@@ -51,6 +51,8 @@ ERROR_CODES = frozenset(
         "too_large",
         "unterminated_heredoc",
         "reply_truncated",
+        "reply_flattened",
+        "reply_unfenced",
         "unknown_skill",
         "client_mangled_reply",
     }
@@ -113,6 +115,13 @@ class ParsedReply:
     warnings: tuple[ParseIssue, ...] = ()
     eom: EomInfo = EomInfo(present=False)
     truncated: bool = False  # missing EOM / unterminated structures / count mismatch
+    # Did a code-fence line appear at a STRUCTURAL position - between blocks or
+    # inside a CALL body, i.e. anywhere the parser was reading grammar rather
+    # than heredoc content? Heredoc bodies deliberately do not count: a reply
+    # writing a markdown file is full of ``` lines that say nothing about how
+    # the reply itself was rendered. Recorded, never acted on here; the engine
+    # decides what an unfenced reply means (protocol.md 1.4 tolerance #15).
+    saw_fence: bool = False
     normalized_hash: str = ""  # blake2b hex over the normalized text (self-write key)
     ack_part: int | None = None  # k in ACK/NACK k/n
     ack_total: int | None = None  # n in ACK/NACK k/n

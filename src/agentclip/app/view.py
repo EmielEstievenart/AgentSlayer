@@ -144,8 +144,30 @@ class ChatView(Protocol):
     def alert(self, message: str, severity: Severity = "information") -> None: ...
 
     # -- clipboard / transport ------------------------------------------------
+    # ``copy_outbound`` is the whole DELIVERY of a payload, not a clipboard
+    # write: the view parks the text, clicks the chat box, pastes it and - for a
+    # service that opted in - taps Enter. Every composed outbound goes out this
+    # way and there is exactly one implementation of it.
     async def copy_outbound(self, text: str) -> None: ...
     async def read_clipboard(self) -> str | None: ...
+
+    # The two halves of the `c` re-copy (tui.md 3.4a), split precisely because
+    # the call above does so much. A user pressing `c` has asked for their
+    # payload back on the CLIPBOARD; they have not asked for the mouse to move
+    # into the browser and paste a second copy on top of whatever is in the box.
+    # So the first press parks the text and stops there...
+    async def park_outbound(self, text: str) -> None: ...
+
+    # ...and only a second press inside the double-tap window escalates to the
+    # real thing, which is `copy_outbound` again and nothing else - a re-delivery
+    # that skipped the stream mode or the auto-submit tap would be a second,
+    # drifting send path. Never blocking (it returns as soon as the work is
+    # scheduled), for the same reason ``open_new_chat_now`` is not: the delivery
+    # clicks, settles, pastes and may stream for several seconds, and the
+    # controller must not be parked on it. It refuses - with its own toast - in
+    # the states only the view can see (disarmed, an auto-copy flow already
+    # driving the mouse), exactly as the sidebar's retry button does.
+    def redeliver_outbound(self, text: str) -> None: ...
 
     # /new wants the next conversation in a FRESH browser chat, and only the
     # view knows what a new-chat button is - so the controller states the intent

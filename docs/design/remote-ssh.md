@@ -183,11 +183,14 @@ describes paths that do not exist over there, so in practice it either matched
 nothing or matched by accident. The machine whose files are at risk is the machine
 that should say what may happen to them.
 
-**New rule of thumb.** Everything describing *the work* — the project, its skills,
-its permissions, its MCP servers — lives on the target. Everything describing *the
-tool's own operation* — clipboard relay, screen matching, service profiles, session
-storage, how to dial the target — stays on the host PC, because that is where those
-things physically happen. One deliberate exception, below.
+**New rule of thumb: the target owns the rules, the host owns the gate.** What may
+be done to the project — the ruleset, the skills, the MCP servers — is described on
+the target, because that is where the files are. How a question about it gets
+answered — the permission mode, yolo, the legacy allowlist, the deny tokens — lives
+on the host, because that is where the human who answers it is sitting. Everything
+serving the tool's own operation (clipboard relay, screen matching, service
+profiles, session storage, how to dial the target) stays on the host for the older
+reason: that is where it physically happens.
 
 ### What moves
 
@@ -217,12 +220,20 @@ token sitting beside `opencode.json` on the box is found where its author put it
 connect (`bash -lc printenv`) and cached for the session — for the same reason: the
 person who wrote `{env:API_TOKEN}` into a file on that box exported it on that box.
 
-**MCP transport.** HTTP servers are dialed **through an SSH tunnel** (paramiko
-`direct-tcpip`), so the connection originates from the target. Dialing straight from
-the host PC would have been less work and would have covered public web APIs, but it
-silently fails for exactly the endpoints a remote box is interesting for —
-`localhost:<port>` on the target, internal services, IP-allowlisted APIs — and fails
-by timeout, which teaches the user nothing.
+**MCP transport stays on the host.** The config describing an HTTP server is read
+from the target, but the connection is dialed by AgentClip itself, from the host PC.
+Tunnelling it through paramiko (`direct-tcpip`) so it originated from the target was
+considered and rejected: it is new transport code with its own lifecycle and
+reconnect interactions, and it carried most of this wave's risk for a case the
+intended use — public web APIs, reachable from anywhere — does not hit.
+
+The accepted cost, eyes open: a URL only the target can reach does not work.
+`http://localhost:<port>` on the box resolves to the *host PC's* localhost, an
+internal or VPN-only endpoint is unreachable, and an API that allowlists the target's
+IP sees the host's. Since one of those (localhost) fails by connecting to the wrong
+thing rather than by failing, the connection error for a remote-session HTTP server
+must say which machine dialed it. A bare timeout would send the user looking on the
+wrong box.
 
 **MCP stdio servers are not supported in a remote session.** A `type: "local"` entry
 in the target's config is reported as an unsupported-here server in the MCP status
@@ -235,17 +246,26 @@ exec channel is a plausible later wave; it is not this one.
 Global `config.toml`, CLI flags, `~/.ssh/*`, service appearance profiles, and the
 `.agentclip` session/transcript/backup tree — all as built in phase 2.
 
-**The one exception: `command_deny_tokens`.** The host PC's `[approval]
-command_deny_tokens` are always applied, and no remote layer can drop one. The rest
-of `[approval]` — `mode`, `yolo`, `command_allowlist` — follows the target, which is
-already what happens, since the remote `.agentclip.toml` merges over the host's.
+**All of `[approval]` — `mode`, `yolo`, `command_allowlist`, `command_deny_tokens`.**
+This is a change from today: the remote `.agentclip.toml` currently merges over the
+host's, so a remote layer can set them. In a remote session, `[approval]` is now read
+from the host's `config.toml` only, and the remote layer's `[approval]` table is
+ignored.
 
-Deny tokens are the exception because they are the only setting whose entire job is
-to be unreachable: a brake that a config file can release is not a brake. A remote
-layer may still *add* tokens (tightening is always safe); the effective set is the
-union, and removal is not expressible. This costs one asymmetry in an otherwise
-clean rule, and buys a guarantee that survives cloning an unfamiliar repo onto the
-box.
+They belong together on the host because they are one mechanism — the gate — and
+because two of them are barely file settings at all. `mode` is cycled with shift+tab
+and `yolo` is a chat command; the file supplies a starting value for live session
+state that the human at the host keyboard drives. The other two are the same
+mechanism seen from the other side: deny tokens decide whether a call needs a human
+(`approval.py:207` demotes an `allow` to a gate), and `mode` decides what that gate
+resolves to (`approval.py:219`).
+
+An earlier draft of this section kept only `command_deny_tokens` local, on the
+grounds that a brake a config file can release is not a brake. That was wrong on its
+own terms: `approval.py:180` returns `auto` for yolo *before* deny tokens are
+consulted in legacy mode, so a remote layer setting `yolo = true` would have released
+the brake anyway. Splitting the table would have bought a guarantee that did not
+hold.
 
 ### Consequences to handle when implementing
 
@@ -258,5 +278,13 @@ box.
 - The permission-source string shown in the TUI must name the machine, not just the
   path — `dev-box:~/.config/opencode/opencode.json` — or two identical-looking
   paths become indistinguishable in a screenshot.
-- Tests: `FakeHost` gains the ruleset/MCP fixtures; the tunnel and remote `printenv`
-  belong behind the existing `AGENTCLIP_SSH_TESTS=1` gate.
+- `[approval]` needs its layers separated: it is read from the merged config dict
+  today, so honouring only the host layer means keeping that table out of the merge
+  (or re-reading it from the host layer alone) rather than filtering after the fact.
+- Tests: `FakeHost` gains the ruleset/MCP fixtures; the remote `printenv` belongs
+  behind the existing `AGENTCLIP_SSH_TESTS=1` gate.
+- `ApprovalConfig.yolo`'s comment (`config.py:345`) says yolo bypasses the deny
+  tokens "entirely". True on the legacy path (`approval.py:180`), no longer true in
+  ruleset mode, where an `allow`ed bash command carrying a deny token still gates
+  (`approval.py:207`) with no yolo check. Pre-existing and unrelated to remote work;
+  worth correcting while nearby.

@@ -165,18 +165,39 @@ preset (`render_spec` is pure) and size the addition from the real number.
 
 ## 6. TUI surface
 
-- Statusbar: a new optional `mcp` segment ("mcp 2/3"), hidden via
-  `.display = False` when no servers are configured, following the
-  `armed`/`instr` pattern.
-- Sidebar: an "MCP" titled block, one `side-status` line per server (name +
-  state), painted from `McpManager.statuses()` on connect events - display
-  only, like `show_profile()`.
-- Connect failures and `needs_auth` land once in the transcript via
-  `view.add_note(...)`; transitions toast via `notify`.
+- Statusbar: a new optional `mcp` segment ("mcp 2/3" = connected over
+  enabled; disabled entries count in neither), hidden via `.display = False`
+  when the app has no manager, following the `armed`/`instr` pattern. It sits
+  at the far right against the project root - both are facts about the app
+  run, not about one session's turn.
+- Sidebar: an "MCP" titled block with PROJECT (same scope), one `side-status`
+  line per server (name + human state, tool count when connected, detail on
+  `failed`/`needs_auth`, one ellipsized row each), painted from
+  `McpManager.statuses()` - display only, like `show_profile()`. Composed
+  only when the app was built with a manager, and painted once at mount so
+  the lazy-connect resting states (pending/disabled) show before any
+  transition fires. Rows are addressed by config-order index, not name -
+  names can collide once sanitized into widget ids.
+- Connect failures and `needs_auth` land in the transcript **once per server
+  per state** (reconnect churn spams nothing) and toast as warnings; `connected` toasts quietly (severity
+  information, once) and never notes. The note goes to the **master window's
+  panel** directly rather than the controller-focused one: MCP state is
+  app-level - sessions come and go under it, and mid-delegation the focused
+  panel is the sub-agent's. The panels are mounted for the app's whole life,
+  so the channel exists pre-session too; nothing has to be parked for the
+  next session start.
+- `/mcp` (app/commands.py registry, so help/popup/dispatch stay pinned): the
+  full listing - state, tool count, detail - as one transcript note, no
+  session gate. The controller stays clear of `agentclip.mcp` (layering): it
+  takes a supplier of duck-typed status rows, and the TUI hands it
+  `McpManager.statuses` bound.
 
 Status flows from the manager to the TUI over a thread-safe callback the
-manager invokes from its loop thread; the app marshals onto Textual's loop
-(`call_from_thread`), the same discipline as `_on_call_output`.
+manager invokes from its loop thread; the screen's hook only posts a
+`McpStatusChanged` message (`post_message`, the same discipline as
+`_on_call_output` - not `call_from_thread`, which refuses the same-thread
+case `ensure_started`'s missing_sdk report can produce) and the handler
+repaints both surfaces from a fresh `statuses()` on Textual's loop.
 
 ## 7. Testing
 

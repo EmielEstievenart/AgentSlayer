@@ -39,11 +39,11 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any, Protocol, TypeVar
 
 from agentclip.app.commands import command_list, help_text, lookup
 from agentclip.app.types import EngineRequest, SessionRef, SessionStats
@@ -271,6 +271,38 @@ def _budget_body(exc: BudgetExceeded) -> str:
     )
 
 
+class McpStatusLine(Protocol):
+    """One MCP server's status row, as `/mcp` reads it.
+
+    Structural on purpose: the real rows are ``agentclip.mcp.types
+    .McpServerStatus``, but the app layer does not import ``agentclip.mcp``
+    (test_layering.py RULES - mcp is a leaf below config, and this layer's
+    only use for it is four read-only fields). Read-only properties so the
+    frozen dataclass satisfies it.
+    """
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def state(self) -> str: ...
+    @property
+    def detail(self) -> str: ...
+    @property
+    def tool_count(self) -> int: ...
+
+
+def _mcp_server_line(status: McpStatusLine) -> str:
+    """One transcript row per server: name, state, tools when connected, and
+    the detail whenever there is one (a failure's whole value is its detail,
+    and a connected server's can carry the shadowed-ids warning)."""
+    parts = [status.name, status.state]
+    if status.state == "connected":
+        parts.append(f"{status.tool_count} tool{'' if status.tool_count == 1 else 's'}")
+    if status.detail:
+        parts.append(status.detail)
+    return "  " + " · ".join(parts)
+
+
 class _SubagentAborted(Exception):
     """The user ended a sub-agent run with /abort.
 
@@ -336,11 +368,17 @@ class SessionController:
         project_root: Path,
         *,
         view: ChatView,
+        mcp_statuses: Callable[[], Sequence[McpStatusLine]] | None = None,
     ) -> None:
         self._config = config
         self._engine_factory = engine_factory
         self._project_root = project_root
         self._view = view
+        # Where /mcp reads its listing, or None when the app runs without an
+        # MCP manager. A supplier of duck-typed rows rather than the manager
+        # itself, so this layer stays clear of agentclip.mcp (see
+        # McpStatusLine); the TUI passes McpManager.statuses, bound.
+        self._mcp_statuses = mcp_statuses
 
         self._engine: Engine | None = None
         self._chat_name: str | None = None  # this session's agreed chat name
@@ -563,6 +601,7 @@ class SessionController:
             "help": lambda _arg: self._cmd_help(),
             "identify": lambda _arg: self._cmd_identify(),
             "log": lambda _arg: self._cmd_log(),
+            "mcp": lambda _arg: self._cmd_mcp(),
             "armed": self._cmd_armed,
         }
 
@@ -894,6 +933,28 @@ class SessionController:
 
     def _cmd_help(self) -> None:
         self._view.spawn(self._view.add_note(help_text()))
+
+    def _cmd_mcp(self) -> None:
+        """`/mcp`: list every configured MCP server into the transcript.
+
+        No session gate, `/log`'s reasoning: the listing answers "why does the
+        model not have my server's tools?", which is asked before a session as
+        readily as during one, and the manager is process-wide - nothing here
+        reads session state. Text into the transcript rather than a toast
+        because a failed server's detail is a sentence worth keeping; the
+        sidebar's block shows the same facts clipped to a 30-cell column and
+        this is where the whole line can be read.
+        """
+        source = self._mcp_statuses
+        statuses = source() if source is not None else ()
+        if not statuses:
+            self._view.notify(
+                "MCP is not configured - add servers to the mcp block of opencode.json",
+                severity="information",
+            )
+            return
+        listing = "\n".join(_mcp_server_line(status) for status in statuses)
+        self._view.spawn(self._view.add_note(f"MCP servers:\n{listing}"))
 
     def _cmd_identify(self) -> None:
         """Show the user what the tool believes it can see in the chat window.
@@ -1726,6 +1787,14 @@ class SessionController:
             )
             return (_NEW_CHAT_FAILED_BODY, "error", "new_chat_failed")
         await self._copy_outbound(out)
+        # How this sub-session was ASSEMBLED, the master flow's surfacing verbatim
+        # (see _session_flow): the sub-agent's engine is built by the same factory
+        # against its own service, so "paste budget too small for MCP tools" can
+        # be true of the sub-run alone - and the note lands in the sub-agent's
+        # tab, the only transcript anyone will read this run in.
+        for warning in engine.build_warnings:
+            await self._view.add_note(f"! {warning}")
+            self._view.notify(warning, severity="warning", timeout=8)
         await self._view.add_note(
             f"→ sub-agent bootstrap copied ({out.total_chars:,} chars) - it goes into the "
             "sub-agent chat"

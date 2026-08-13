@@ -142,7 +142,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from rich.table import Table
 from textual import on
@@ -170,6 +170,7 @@ from agentclip.config import (
     save_active_services,
 )
 from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnapshot
+from agentclip.mcp.types import McpServerStatus
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.busy import BusyProbe, BusyState
@@ -234,6 +235,7 @@ from agentclip.tui.messages import (
     ElementCrop,
     ElementsMatched,
     IdleProbed,
+    McpStatusChanged,
     SendReadyProbed,
     StaleProbed,
 )
@@ -706,6 +708,20 @@ def _stale_verdict(probe: StaleProbe) -> bool | None:
     return probe.state is StaleState.STALE
 
 
+class McpStatusSource(Protocol):
+    """What this screen needs of the process-wide ``McpManager``: the status
+    tuple and the one listener slot (docs/design/mcp.md sections 3 and 6).
+
+    A Protocol rather than the class so a Pilot test can hand in a three-line
+    stub with neither the SDK nor a loop thread behind it - the screen only
+    ever paints from ``statuses()`` and bridges the hook; connecting is the
+    manager's business and stays untested here.
+    """
+
+    def statuses(self) -> tuple[McpServerStatus, ...]: ...
+    def set_status_hook(self, cb: Callable[[McpServerStatus], None] | None) -> None: ...
+
+
 class MainScreen(Screen[None]):
     BINDINGS = [
         Binding("y", "approve", "approve"),
@@ -796,11 +812,25 @@ class MainScreen(Screen[None]):
         engine_factory: Callable[[EngineRequest], Engine],
         project_root: Path,
         profile_root: Path,
+        *,
+        mcp_manager: McpStatusSource | None = None,
     ) -> None:
         super().__init__()
         self._config = config
         self._provider = provider
         self._project_root = project_root
+        # The process-wide MCP runtime, or None when MCP is unconfigured - which
+        # keeps every MCP surface off the screen entirely (no sidebar block, no
+        # statusbar segment, no hook). Handed down from AgentClipApp; this
+        # screen only READS statuses and listens, the lifecycle stays cli.py's.
+        self._mcp_manager = mcp_manager
+        # Which (server, state) pairs have already been announced - the
+        # once-per-server-per-state memory behind the failed/needs_auth
+        # transcript notes and the connected toast, so reconnect churn cannot
+        # spam either channel. Never reset: MCP state is app-level and connects
+        # happen once per process, so "already said" stays said across /new
+        # (which empties the transcript but changes nothing about the servers).
+        self._mcp_announced: set[tuple[str, str]] = set()
         # Where each service's captured appearances live on disk, and the
         # per-run cache of the ones already read back (see ``_profile``).
         self._profile_root = profile_root
@@ -983,7 +1013,16 @@ class MainScreen(Screen[None]):
         # drop a stray copy into the chat. Session-scoped - cleared by /new,
         # which is where "the last outbound" stops meaning anything.
         self._pending_insert: str | None = None
-        self._controller = SessionController(config, engine_factory, project_root, view=self)
+        self._controller = SessionController(
+            config,
+            engine_factory,
+            project_root,
+            view=self,
+            # A bound method, not the manager: the controller is UI- and
+            # MCP-agnostic (layering), so /mcp takes a supplier of duck-typed
+            # status rows and None means "say MCP is not configured".
+            mcp_statuses=mcp_manager.statuses if mcp_manager is not None else None,
+        )
 
     # -- window tabs -> slots --------------------------------------------------
 
@@ -1091,7 +1130,17 @@ class MainScreen(Screen[None]):
                 # sits where the eye already is (§3.3a). Hidden until it isn't.
                 yield CommandPopup(id="cmd-popup")
                 yield ChatComposer(id="composer")
-            yield Sidebar(self._config, self._project_root, id="sidebar")
+            yield Sidebar(
+                self._config,
+                self._project_root,
+                # The MCP block exists exactly when a manager does; the tuple
+                # is the initial paint, so pending/disabled states show from
+                # the first frame (docs/design/mcp.md section 6).
+                mcp_statuses=(
+                    self._mcp_manager.statuses() if self._mcp_manager is not None else None
+                ),
+                id="sidebar",
+            )
             # The pictures the sidebar's DETECTION lines are words about, in a
             # column of their own rather than at the bottom of one that already
             # overflows (tui.md 1.3/1.7). F7 hides it, F3 hides its neighbour.
@@ -1209,6 +1258,17 @@ class MainScreen(Screen[None]):
         # is about (the master's) from the first frame rather than after the
         # first calibration.
         self._start_detector_worker()
+        if self._mcp_manager is not None:
+            # Hook first, paint second, so no transition can fall in the gap: one
+            # landing between the two lines posts a message that arrives after
+            # this paint, and both read a fresh statuses(). The screen mounts
+            # once per process (the app pushes it at its own mount and never
+            # pops it), so this IS app-mount wiring; connects are lazy
+            # (eager-on-arm), which is why the paint below usually shows
+            # pending/disabled - the states that exist before any transition
+            # fires.
+            self._mcp_manager.set_status_hook(self._mcp_status_hook)
+            self._paint_mcp()
         self._remember_own_window()  # the user just launched us - focus is our terminal
         self._controller.start()
 
@@ -1629,6 +1689,73 @@ class MainScreen(Screen[None]):
         and once on mount, so the rail is never blank before the first one."""
         with suppress(NoMatches):
             self.sidebar.show_loop(self._loop_state)
+
+    # -- MCP status (docs/design/mcp.md section 6) -----------------------------
+
+    def _mcp_status_hook(self, status: McpServerStatus) -> None:
+        """The manager's status listener: hand off to the UI loop, nothing else.
+
+        Called from the manager's loop thread (and, for missing_sdk, from
+        whichever thread called ensure_started - possibly Textual's own, which
+        is why this is post_message and not call_from_thread). The contract is
+        the run-panel hooks' (`_on_call_output`): non-blocking, thread-safe,
+        and it must never raise - the manager silently drops a listener that
+        does, once, for good.
+        """
+        self.post_message(McpStatusChanged(status))
+
+    def _paint_mcp(self) -> None:
+        """Repaint both MCP readouts - the sidebar block and the statusbar
+        segment - from a fresh ``statuses()``. A no-op without a manager."""
+        if self._mcp_manager is None:
+            return
+        with suppress(NoMatches):
+            self.sidebar.show_mcp(self._mcp_manager.statuses())
+        self._paint_status()
+
+    @on(McpStatusChanged)
+    async def _on_mcp_status_changed(self, message: McpStatusChanged) -> None:
+        """One server moved: repaint, and announce the transitions worth words.
+
+        The repaint reads statuses() rather than patching one row in - the
+        message is a tick, and a connect can change a NEIGHBOUR's line too
+        (shadowed tool ids). The announcements are once per server PER STATE
+        (``_mcp_announced``): failed/needs_auth land in the transcript (they
+        need the user) and toast as warnings; connected only toasts, quietly -
+        a working server is not worth a permanent transcript line.
+
+        The note goes to the MASTER window's panel directly, not through
+        ``self.transcript``: MCP state is app-level - sessions come and go
+        under it, and mid-delegation the focused panel is the sub-agent's,
+        where an infrastructure note would read as part of that run. The
+        panels are mounted for the app's whole life (only /new empties them),
+        so the channel exists pre-session too and nothing has to be parked for
+        the next session start.
+        """
+        self._paint_mcp()
+        status = message.status
+        if status.state not in ("failed", "needs_auth", "connected"):
+            return
+        key = (status.name, status.state)
+        if key in self._mcp_announced:
+            return
+        self._mcp_announced.add(key)
+        if status.state == "connected":
+            self.notify(
+                f"MCP server {status.name!r} connected"
+                f" · {status.tool_count} tool{'' if status.tool_count == 1 else 's'}",
+                severity="information",
+            )
+            return
+        what = "needs auth" if status.state == "needs_auth" else "failed"
+        text = f"✗ MCP server {status.name!r} {what}"
+        if status.detail:
+            text += f" - {status.detail}"
+        panel = self._panels.get(MASTER_WINDOW)
+        if panel is not None:
+            with suppress(NoMatches):
+                await panel.add_note(text)
+        self.notify(text, severity="warning", timeout=8)
 
     def render_state(self, view: SessionView) -> None:
         if not self.is_mounted:
@@ -4879,6 +5006,17 @@ class MainScreen(Screen[None]):
             root = str(Path("~") / self._project_root.relative_to(Path.home()))
         except ValueError:
             root = str(self._project_root)
+        # "mcp 2/3" = connected servers over enabled ones (disabled entries are
+        # a config statement, not a runtime hope, so they are out of both
+        # numbers' way). Empty - which hides the segment - exactly when the app
+        # has no manager: an install without MCP gets the bar it always had.
+        mcp = ""
+        if self._mcp_manager is not None:
+            statuses = self._mcp_manager.statuses()
+            if statuses:
+                connected = sum(1 for s in statuses if s.state == "connected")
+                enabled_total = sum(1 for s in statuses if s.state != "disabled")
+                mcp = f"mcp {connected}/{enabled_total}"
         bar.update_segments(
             mode=f"MODE:{mode}",
             mode_class=mode_class,
@@ -4897,6 +5035,7 @@ class MainScreen(Screen[None]):
             instr="✎ INSTR" if snap and snap.instructions_armed else "",
             edits=edits,
             edits_class=edits_class,
+            mcp=mcp,
             root=root,
         )
 

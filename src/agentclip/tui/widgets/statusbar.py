@@ -25,7 +25,14 @@ from textual.widgets import Static
 # the payload that spends it, which is usually seconds, and a permanently
 # present "not armed" cell would be six characters of furniture. It sits next to
 # ``edits`` because both describe what the NEXT thing out of here will carry.
-_SEGMENTS = ("mode", "watch", "armed", "service", "out", "turn", "instr", "edits", "root")
+# ``mcp`` is the MCP runtime's one-cell readout ("mcp 2/3" =
+# connected/enabled-total, docs/design/mcp.md section 6) and it hides itself
+# whenever the app has no MCP servers configured - which is most installs, and
+# an empty "mcp 0/0" cell would be furniture on every one of them. It sits at
+# the far right, against ``root``: like the project root it is a fact about the
+# APP RUN rather than about this session's turn, so it stays out of the block
+# that changes as a turn progresses.
+_SEGMENTS = ("mode", "watch", "armed", "service", "out", "turn", "instr", "edits", "mcp", "root")
 
 
 class StatusBar(Horizontal):
@@ -48,6 +55,7 @@ class StatusBar(Horizontal):
         root: str,
         armed: str = "",
         instr: str = "",
+        mcp: str = "",
     ) -> None:
         mode_seg = self.query_one("#seg-mode", Static)
         mode_seg.update(Text(mode))
@@ -71,4 +79,10 @@ class StatusBar(Horizontal):
         edits_seg = self.query_one("#seg-edits", Static)
         edits_seg.update(Text(edits))
         edits_seg.set_classes(f"seg {edits_class}".rstrip())
+        # Hidden, not blanked, when empty - ``armed``'s rule for ``armed``'s
+        # reason: most installs configure no MCP servers, and they must get
+        # exactly the bar they always had, padding included.
+        mcp_seg = self.query_one("#seg-mcp", Static)
+        mcp_seg.update(Text(mcp))
+        mcp_seg.display = bool(mcp)
         self.query_one("#seg-root", Static).update(Text(root))

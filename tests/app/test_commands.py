@@ -9,6 +9,7 @@ agrees with the dispatcher about what counts as a command in progress.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from agentclip.app.commands import (
@@ -21,11 +22,13 @@ from agentclip.app.commands import (
 )
 from agentclip.app.controller import SessionController
 from agentclip.app.types import SessionSpec
+from agentclip.config import Config
 
 from .conftest import (
     MASTER_CHAT,
     FakeChatView,
     edit_reply,
+    make_factory,
     read_file_reply,
     settle,
     start_session,
@@ -42,6 +45,7 @@ def test_the_registry_is_the_documented_commands() -> None:
         "abort",
         "identify",
         "log",
+        "mcp",
         "armed",
         "mode",
         "yolo",
@@ -94,7 +98,7 @@ def test_unknown_command_hint_lists_every_command() -> None:
     for command in COMMANDS:
         assert command.slash in hint
     # An English list, not a dump.
-    assert hint == "/help, /new, /abort, /identify, /log, /armed, /mode, or /yolo"
+    assert hint == "/help, /new, /abort, /identify, /log, /mcp, /armed, /mode, or /yolo"
 
 
 def test_identify_dispatches_to_the_view_with_no_session_of_any_kind(
@@ -126,6 +130,52 @@ def test_log_dispatches_to_the_view_with_no_session_of_any_kind(
     # rather than stacking a second view of the same log.
     controller.submit_message("/log")
     assert view.harness_log_toggles == 2
+
+
+def test_mcp_without_a_source_says_mcp_is_not_configured(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """The fixture controller is built without ``mcp_statuses`` - the app shape
+    when opencode.json has no mcp block - so the command answers with a toast,
+    not a transcript listing, and needs no session to do it."""
+    controller.submit_message("/mcp")
+    assert view.events == []
+    assert any("MCP is not configured" in message for message in view.toasts())
+
+
+async def test_mcp_lists_every_server_with_state_tools_and_detail(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """`/mcp` renders the supplier's rows into one transcript note - state
+    always, tool count when connected, the detail line whenever there is one -
+    and needs no session (`/log`'s rule: "where are my server's tools?" is
+    asked before a session as readily as during one)."""
+
+    @dataclass(frozen=True)
+    class Row:  # duck-typed McpStatusLine - the app layer never imports agentclip.mcp
+        name: str
+        state: str
+        detail: str = ""
+        tool_count: int = 0
+
+    rows = (
+        Row("github", "connected", tool_count=12),
+        Row("linear", "needs_auth", detail="server rejected the request (401/403)"),
+        Row("scratch", "disabled"),
+    )
+    controller = SessionController(
+        app_config, make_factory(project), project, view=view, mcp_statuses=lambda: rows
+    )
+    view.controller = controller
+
+    controller.submit_message("/mcp")
+    await settle(view)
+
+    note = next(text for text in view.notes() if text.startswith("MCP servers:"))
+    assert "github · connected · 12 tools" in note
+    assert "linear · needs_auth · server rejected the request (401/403)" in note
+    assert "scratch · disabled" in note
+    assert "disabled ·" not in note  # no tool count, no detail: the state says it all
 
 
 def test_armed_dispatches_to_the_view_with_no_session_of_any_kind(
@@ -387,7 +437,9 @@ async def test_the_mode_survives_a_new_session(
 def test_match_prefix_narrows_as_the_user_types() -> None:
     assert match_prefix("/") == COMMANDS  # a bare slash offers everything
     assert [c.name for c in match_prefix("/y")] == ["yolo"]
-    assert [c.name for c in match_prefix("/m")] == ["mode"]
+    assert [c.name for c in match_prefix("/m")] == ["mcp", "mode"]  # registry order
+    assert [c.name for c in match_prefix("/mo")] == ["mode"]
+    assert [c.name for c in match_prefix("/mc")] == ["mcp"]
     assert [c.name for c in match_prefix("/i")] == ["identify"]
     assert [c.name for c in match_prefix("/n")] == ["new"]
     assert [c.name for c in match_prefix("/yolo")] == ["yolo"]

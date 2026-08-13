@@ -235,7 +235,7 @@ class AgentClipApp(App[None]):
         /* The whole registry plus its border - a bare `/` offers everything, and
            a cap below that would hide the last command rather than shorten the
            list. Grows with app.commands.COMMANDS (a test pins the two). */
-        max-height: 10;
+        max-height: 11;
         background: $surface;
         color: $text;
         border: round $accent;
@@ -695,10 +695,11 @@ class AgentClipApp(App[None]):
         self.engine_factory = engine_factory
         self.project_root = project_root
         # The process-wide MCP runtime, or None when MCP is unconfigured.
-        # Inert storage for now: cli.py owns its lifecycle (built in main(),
-        # closed in main()'s finally) and the engine factory holds its own
-        # reference for the tools - the TUI wave will read statuses off this
-        # for the statusbar/sidebar (docs/design/mcp.md section 6).
+        # cli.py owns its lifecycle (built in main(), closed in main()'s
+        # finally) and the engine factory holds its own reference for the
+        # tools; this one is handed to MainScreen at mount, which paints the
+        # sidebar block + statusbar segment off statuses() and bridges
+        # set_status_hook onto Textual's loop (docs/design/mcp.md section 6).
         self.mcp_manager = mcp_manager
         # Where the service editor and the settings screen persist edits.
         # Defaults to the real global config.toml; tests override it to a tmp
@@ -738,6 +739,7 @@ class AgentClipApp(App[None]):
             self.engine_factory,
             self.project_root,
             self.profile_root,
+            mcp_manager=self.mcp_manager,
         )
         self.push_screen(self.main_screen)
         for warning in self.app_config.warnings:

@@ -9,8 +9,8 @@ unlocks again whenever the app is waiting for a new session's first message.
 
 The widget is dumb on purpose: it holds no session state, exposes ``service``
 (the chosen preset key), ``set_locked``, ``refresh_services``, ``show_slot``,
-``show_profile``, ``update_region``, ``update_template``, ``update_stale``,
-``show_loop``, ``show_armed_state`` and the ``show_paste_flash``/
+``show_profile``, ``show_mcp``, ``update_region``, ``update_template``,
+``update_stale``, ``show_loop``, ``show_armed_state`` and the ``show_paste_flash``/
 ``hide_paste_flash`` pair; MainScreen owns every bit of routing. The paste
 flash is the one animated thing here - a deliberately obnoxious blinking banner
 that nags the user to Ctrl+V the outbound payload into the chat; the blink timer
@@ -77,6 +77,7 @@ list rather than a pile of one-off ids.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from rich.text import Text
@@ -88,6 +89,7 @@ from textual.timer import Timer
 from textual.widgets import Button, Select, Static
 
 from agentclip.config import Config
+from agentclip.mcp.types import McpServerStatus
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, SlotCalibration, can_delegate, missing
@@ -170,6 +172,48 @@ PROFILE_HINT = " · F2 for captures + detection"
 
 def profile_summary(profile: ServiceProfile) -> str:
     return f"appearance: {profile.describe()}{PROFILE_HINT}"
+
+
+# The MCP block: one side-status line per configured server, painted from
+# McpManager.statuses() (docs/design/mcp.md section 6). The block is composed
+# ONLY when the app was built with an MCP manager - most installs configure no
+# servers, and an empty "MCP" heading would be a standing question with no
+# answer - so the number of lines is fixed for the process (opencode.json is
+# read once, the manager's record list never grows) and the lines are
+# addressed by config-order INDEX rather than by server name: names are the
+# user's and can collide once sanitized, ids must not.
+MCP_TITLE = "MCP"
+
+# The state literal -> the words the column shows. Human wording, one cell of
+# intent each; the full detail line rides `failed`/`needs_auth` because those
+# are the two states whose whole value is their explanation.
+_MCP_STATE_LABEL: dict[str, str] = {
+    "pending": "pending",
+    "connecting": "connecting",
+    "connected": "connected",
+    "disabled": "disabled",
+    "failed": "failed",
+    "needs_auth": "needs auth",
+    "missing_sdk": "no mcp sdk",
+}
+
+
+def mcp_row_id(index: int) -> str:
+    return f"side-mcp-{index}"
+
+
+def mcp_line(status: McpServerStatus) -> str:
+    """One server's line: name + human state (+ tools when connected, + the
+    detail on the two states that are questions until it is read). A 30-cell
+    column cuts long details mid-sentence (CSS ellipsis); the full text is
+    `/mcp`'s job, and this line is what tells the user to go ask."""
+    label = _MCP_STATE_LABEL.get(status.state, status.state)
+    parts = [status.name, label]
+    if status.state == "connected":
+        parts.append(f"{status.tool_count} tool{'' if status.tool_count == 1 else 's'}")
+    if status.state in ("failed", "needs_auth") and status.detail:
+        parts.append(status.detail)
+    return " · ".join(parts)
 
 
 # The stale detector has nothing to capture - it watches the drawn window stop
@@ -318,6 +362,15 @@ class Sidebar(Vertical):
         color: $text;
         text-style: bold reverse;
     }
+    Sidebar .side-mcp-row {
+        /* One server, one row, whatever its detail says: a failed server's
+           explanation can run to a sentence, and wrapping it would walk every
+           block below up and down the column as servers connect and fail. Cut
+           with an ellipsis instead - /mcp prints the whole thing. */
+        height: 1;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
+    }
     """
 
     class ServiceChanged(Message):
@@ -331,10 +384,23 @@ class Sidebar(Vertical):
             self.key = key
             super().__init__()
 
-    def __init__(self, config: Config, project_root: Path, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
+    def __init__(
+        self,
+        config: Config,
+        project_root: Path,
+        *,
+        mcp_statuses: Sequence[McpServerStatus] | None = None,
+        id: str | None = None,  # noqa: A002 - Textual API
+    ) -> None:
         super().__init__(id=id)
         self._config = config
         self._project_root = project_root
+        # The MCP block's initial paint, and the decision whether the block
+        # exists at all: None (or empty) means the app runs without an MCP
+        # manager and the column stays exactly what it always was. The count is
+        # fixed for the process - ``show_mcp`` repaints these rows, it never
+        # adds one - see MCP_TITLE above.
+        self._mcp_statuses: tuple[McpServerStatus, ...] = tuple(mcp_statuses or ())
         self._flash_timer: Timer | None = None
         # The service the ServiceChanged message last reported. Textual fires
         # Select.Changed for the value compose sets as readily as for a user's
@@ -365,6 +431,18 @@ class Sidebar(Vertical):
         yield Static(Text(DISARMED_BANNER_TEXT), id="side-armed-banner")
         yield Static(Text("PROJECT"), classes="side-title")
         yield Static(Text(_short_root(self._project_root)), id="side-root")
+        # The MCP block sits with PROJECT, above the per-tab blocks: like the
+        # root it is a fact about the whole app run (one manager per process,
+        # docs/design/mcp.md section 3), not about whichever tab is selected.
+        # Absent entirely - heading included - when there is no manager.
+        if self._mcp_statuses:
+            yield Static(Text(MCP_TITLE), id="side-mcp-title", classes="side-title")
+            for index, status in enumerate(self._mcp_statuses):
+                yield Static(
+                    Text(mcp_line(status)),
+                    id=mcp_row_id(index),
+                    classes="side-status side-mcp-row",
+                )
         yield Static(Text("SERVICE"), classes="side-title")
         yield Select(
             _service_options(self._config),
@@ -567,6 +645,24 @@ class Sidebar(Vertical):
         that rebuilds the detectors, and it happens there.
         """
         self.query_one("#side-profile-note", Static).update(Text(profile_summary(profile)))
+
+    # -- the MCP servers -------------------------------------------------------
+
+    def show_mcp(self, statuses: Sequence[McpServerStatus]) -> None:
+        """Repaint the MCP block from a fresh ``McpManager.statuses()`` tuple.
+
+        Display only, like ``show_profile``: MainScreen owns the manager and
+        the hook that hears its transitions; this only words the lines. Rows
+        are matched by config-order index - statuses() promises that order, and
+        the server set is fixed for the process - and a widget-less status (a
+        manager handed in after compose, which production never does) is
+        dropped rather than mounted: the block's existence was decided when the
+        column was built.
+        """
+        if not self._mcp_statuses:
+            return
+        for index, status in enumerate(statuses[: len(self._mcp_statuses)]):
+            self.query_one(f"#{mcp_row_id(index)}", Static).update(Text(mcp_line(status)))
 
     def show_detection_window(self, window_name: str) -> None:
         """Name the window the DETECTION lines below are about.

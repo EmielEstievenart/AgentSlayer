@@ -87,6 +87,10 @@ COMMANDS: tuple[ChatCommand, ...] = (
         summary="show why the harness moved through its recent states",
     ),
     ChatCommand(
+        name="mcp",
+        summary="list the MCP servers: state, tools, and what went wrong",
+    ),
+    ChatCommand(
         name="armed",
         arg="[on|off]",
         summary="toggle whether the tool may touch the screen at all (same as F5)",

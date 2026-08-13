@@ -66,6 +66,7 @@ from dataclasses import dataclass
 
 from textual.message import Message
 
+from agentclip.mcp.types import McpServerStatus
 from agentclip.screen.busy import BusyProbe
 from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
@@ -111,6 +112,30 @@ class CallOutput(Message):
     def __init__(self, call_id: int, chunk: str) -> None:
         self.call_id = call_id
         self.chunk = chunk
+        super().__init__()
+
+
+class McpStatusChanged(Message):
+    """One MCP server changed state (posted from the manager's loop thread).
+
+    The third background thread this module bridges, same idiom as the other
+    two: ``McpManager.set_status_hook``'s contract is a non-blocking listener
+    called from the manager's own loop thread (and, for ``missing_sdk``, from
+    whatever thread called ``ensure_started`` - which can be Textual's own, so
+    ``call_from_thread`` would refuse it), and a listener that raises is
+    silently dropped for good. ``post_message`` is safe from every one of
+    those threads including the UI's, the hook stays three lines, and the
+    repaint - sidebar block, statusbar segment, the once-per-state transcript
+    note - happens on the loop where widgets may be touched
+    (docs/design/mcp.md section 6).
+
+    Carries the transition itself so the note/toast logic knows WHAT changed;
+    the repaint reads a fresh ``statuses()`` instead, because the message is a
+    tick, not the state.
+    """
+
+    def __init__(self, status: McpServerStatus) -> None:
+        self.status = status
         super().__init__()
 
 

@@ -72,8 +72,14 @@ MISSING_SDK_HINT = "the mcp extra is not installed - run: uv pip install 'agentc
 _CALL_SLACK_S = 2.0
 
 # close() is called from cli.py's finally, often with a user watching a TUI tear
-# down. A server that will not let go does not get to hold the process.
+# down. A server that will not let go does not get to hold the process - but
+# a CANCELLED server task must still get to finish killing its child: the SDK's
+# stdio unwind (flush stdin, terminate, force-kill, reap) budgets ~6.5s worst
+# case, and stopping the loop under it orphans the process tree on POSIX and
+# leaves Proactor transports to die noisily at loop.close(). Hence two phases:
+# a graceful wait, then cancel plus a second wait sized to the SDK's unwind.
 _CLOSE_WAIT_S = 3.0
+_CANCEL_WAIT_S = 5.0
 _JOIN_S = 3.0
 
 _DETAIL_MAX = 200
@@ -183,6 +189,10 @@ class McpManager:
         self._thread: threading.Thread | None = None
         self._tasks: list[asyncio.Task[None]] = []
         self._closing: asyncio.Event | None = None  # created on the loop
+        # In-flight call() futures, so close() can fail them fast: a call queued
+        # onto a loop that stops before running it would otherwise block its
+        # worker thread for the full timeout+slack with nothing to wake it.
+        self._call_futs: set[concurrent.futures.Future[str]] = set()
         self._started = False
         self._closed = False
         self._sdk_missing = False
@@ -230,9 +240,14 @@ class McpManager:
         the first session build never waits on a slow server (the design's
         "lazy but eager-on-arm"). A no-op after close().
         """
-        if self._started or self._closed:
-            return
-        self._started = True
+        # The flag transition rides the records lock so ensure_started and
+        # close() cannot interleave: without it, a close() landing between the
+        # loop being assigned and the thread starting would find nothing to
+        # tear down, and the thread would then connect servers post-teardown.
+        with self._lock:
+            if self._started or self._closed:
+                return
+            self._started = True
 
         try:
             # A real import statement, not importlib: the missing-extra path is
@@ -250,19 +265,26 @@ class McpManager:
             return  # nothing to connect; _settled stays set
 
         with self._lock:
+            # Re-checked under the lock: a close() that won the race since the
+            # flag transition above must not have a loop appear behind it.
+            if self._closed:
+                return
             self._pending = len(enabled)
             self._settled.clear()
-
-        # Windows: SelectorEventLoop cannot spawn subprocesses at all
-        # (NotImplementedError on stdio servers), and while new_event_loop()
-        # gives a Proactor loop by default on 3.11, that default is a *policy*
-        # anything in-process could have replaced. A local MCP server failing to
-        # spawn because some unrelated library set a policy is not a failure
-        # anyone could diagnose from the status line, so we pin it here.
-        loop = asyncio.ProactorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
-        self._loop = loop
-        self._thread = threading.Thread(target=self._run_loop, name="agentclip-mcp", daemon=True)
-        self._thread.start()
+            # Windows: SelectorEventLoop cannot spawn subprocesses at all
+            # (NotImplementedError on stdio servers), and while new_event_loop()
+            # gives a Proactor loop by default on 3.11, that default is a *policy*
+            # anything in-process could have replaced. A local MCP server failing
+            # to spawn because some unrelated library set a policy is not a
+            # failure anyone could diagnose from the status line, so we pin it.
+            loop = (
+                asyncio.ProactorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
+            )
+            self._loop = loop
+            self._thread = threading.Thread(
+                target=self._run_loop, name="agentclip-mcp", daemon=True
+            )
+            self._thread.start()
         asyncio.run_coroutine_threadsafe(self._spawn_all(), loop)
 
     def _run_loop(self) -> None:
@@ -286,15 +308,23 @@ class McpManager:
     def close(self) -> None:
         """Close every client, stop the loop, join the thread. Idempotent, and
         safe on a manager that was never started."""
-        if self._closed:
-            return
-        self._closed = True
-        loop, thread = self._loop, self._thread
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            loop, thread = self._loop, self._thread
+            calls = list(self._call_futs)
         if loop is None or thread is None:
             return
+        # Fail the in-flight (and, crucially, the queued-but-never-run) call
+        # futures FIRST: a worker thread blocked in fut.result() has nothing
+        # else that can wake it once the loop stops, and concurrent.futures'
+        # atexit join would then hold the whole process for timeout+slack.
+        for fut in calls:
+            fut.cancel()
         try:
-            fut = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
-            fut.result(timeout=_CLOSE_WAIT_S + 1.0)
+            done = asyncio.run_coroutine_threadsafe(self._shutdown(), loop)
+            done.result(timeout=_CLOSE_WAIT_S + _CANCEL_WAIT_S + 1.0)
         except Exception:  # noqa: BLE001 - a server that will not let go does not block exit
             pass
         loop.call_soon_threadsafe(loop.stop)
@@ -310,6 +340,14 @@ class McpManager:
         _done, pending = await asyncio.wait(self._tasks, timeout=_CLOSE_WAIT_S)
         for task in pending:
             task.cancel()
+        if pending:
+            # The cancellation has to LAND before the loop stops: the SDK's
+            # stdio unwind (shielded against this very cancel) is what
+            # terminates the child process tree, and returning here at
+            # cancel-call time meant the loop stopped under it - orphaning the
+            # tree on POSIX and leaving live Proactor transports to complain
+            # all over stderr at loop.close().
+            await asyncio.wait(pending, timeout=_CANCEL_WAIT_S)
 
     # ------------------------------------------------------------- per-server
 
@@ -341,10 +379,16 @@ class McpManager:
                 connected = True
                 self._set_connected(rec, client, tools)
         finally:
+            # The unwind lives in the finally because CancelledError is a
+            # BaseException: it sails past the except arms above, and an
+            # unwind sitting after this block never runs for it - abandoning
+            # a half-spawned child with no one left to terminate it. Ordinary
+            # failures take the same path; `connected` guards the parked case.
             self._settle_one()
+            if not connected:
+                await _quiet_aclose(stack)
 
         if not connected:
-            await _quiet_aclose(stack)
             return
         try:
             assert self._closing is not None
@@ -441,17 +485,23 @@ class McpManager:
         # parked in this cell for the failure path to consult.
         auth_rejected = [False]
 
+        # BaseException, not Exception, on both unwinds: until the last line
+        # hands `attempt` to the caller's stack, nobody else can close what it
+        # holds - and a cancellation (the timeout in _serve, or shutdown) is
+        # exactly when an entered httpx client would otherwise be abandoned.
         attempt = AsyncExitStack()
         try:
             client = await self._open_streamable(entry, attempt, timeout_s, auth_rejected)
-        except Exception as exc:
+        except BaseException as exc:
             await _quiet_aclose(attempt)
+            if not isinstance(exc, Exception):
+                raise  # cancellation: unwound, now get out of the way
             if auth_rejected[0]:
                 raise self._needs_auth(entry) from exc
             attempt = AsyncExitStack()
             try:
                 client = await self._open_sse(entry, attempt, timeout_s)
-            except Exception:
+            except BaseException:
                 await _quiet_aclose(attempt)
                 raise  # the SSE error is the more recent one; both were the same server
         stack.push_async_callback(attempt.aclose)
@@ -685,16 +735,37 @@ class McpManager:
             )
 
         timeout_s = timeout_ms / 1000
-        fut = asyncio.run_coroutine_threadsafe(
-            self._call(client, info.name, args, timeout_s, timeout_ms), loop
-        )
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                self._call(client, info.name, args, timeout_s, timeout_ms), loop
+            )
+        except RuntimeError:
+            # The loop closed between the _closed check above and here - the
+            # gap is real (close() runs on another thread) and this is the
+            # error shape it produces. A handler must see section 8's codes,
+            # never an SDK/loop internal.
+            raise McpCallError("mcp_unavailable", "the MCP runtime is shutting down") from None
+        with self._lock:
+            if self._closed:
+                # close() may already have swept _call_futs; a future added
+                # after the sweep would block its thread on a loop that will
+                # never run it. Refuse instead.
+                fut.cancel()
+                raise McpCallError("mcp_unavailable", "the MCP runtime is shutting down")
+            self._call_futs.add(fut)
         try:
             return fut.result(timeout=timeout_s + _CALL_SLACK_S)
+        except concurrent.futures.CancelledError:
+            # close() cancelled us to free this thread; same story as above.
+            raise McpCallError("mcp_unavailable", "the MCP runtime is shutting down") from None
         except concurrent.futures.TimeoutError:
             # The loop itself did not answer - the in-loop wait_for should have
             # fired first. Drop the call rather than leak a running request.
             fut.cancel()
             raise McpCallError("mcp_error", f"tool call timed out after {timeout_ms} ms") from None
+        finally:
+            with self._lock:
+                self._call_futs.discard(fut)
 
     async def _call(
         self, client: Any, name: str, args: dict[str, Any], timeout_s: float, timeout_ms: int

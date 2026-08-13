@@ -449,14 +449,27 @@ MCP_DENY_RULESET = """{"permission": {"mcp": {"github_*": "deny"}}}"""
 
 def test_the_default_ask_rule_gates_every_mcp_call_under_a_ruleset() -> None:
     """A ruleset that says nothing about MCP still asks: the shipped default
-    ("mcp", "*", "ask") sits after the built-in "*": "allow", so an MCP call can
-    never be auto-approved by a blanket allow the user wrote for everything."""
+    ("mcp", "*", "ask") sits after the BUILT-IN "*": "allow", so the defaults
+    alone can never auto-approve an MCP call. (What a user's own blanket allow
+    means is a different question - the test below.)"""
     policy = ruled_policy(ASK_ONLY_RULESET)
     assert PermissionRule("mcp", "*", "ask") in ruleset(ASK_ONLY_RULESET)
     call = mcp_call("github_create_issue")
     assert policy.verdict(MCP_SPEC, call) == "needs_approval"
     # YOLO is still allowed to answer that ask, exactly as for any other key.
     assert ruled_policy(ASK_ONLY_RULESET, yolo=True).verdict(MCP_SPEC, call) == "auto"
+
+
+def test_a_user_written_blanket_allow_covers_mcp_too_as_it_does_in_opencode() -> None:
+    """`{"permission": {"*": "allow"}}` written by the USER auto-approves MCP
+    calls - pinned deliberately, not an accident: user rules load after the
+    defaults and last match wins, exactly as in OpenCode, and the design's
+    founding rule (a rule the user already trusts means HERE what it means
+    THERE) outranks any instinct to special-case MCP out of it. The shipped
+    default only guarantees the built-ins never do this on their own
+    (docs/design/mcp.md section 4)."""
+    policy = ruled_policy("""{"permission": {"*": "allow"}}""")
+    assert policy.verdict(MCP_SPEC, mcp_call("github_create_issue")) == "auto"
 
 
 def test_an_explicit_mcp_deny_beats_yolo() -> None:

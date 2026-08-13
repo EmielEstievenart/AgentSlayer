@@ -45,7 +45,12 @@ comments needs a real stripper; a wrong one corrupts strings).
 leaf after parsing. OpenCode substitutes over the raw text before parsing;
 the post-parse form covers every real use (secrets in `headers`,
 `environment`, `url`) without letting a placeholder rewrite the config's
-structure. An unset `{env:...}` substitutes empty, matching OpenCode.
+structure - and unlike the pre-parse form, a secret containing a quote
+cannot corrupt the file it is spliced into. An unset `{env:...}`
+substitutes empty, matching OpenCode. A relative `{file:...}` path anchors
+to the directory of the config file that declared the server, as OpenCode
+resolves it - "the token sits next to the config that names it" - never to
+the process's cwd.
 
 The loader lives in `agentclip/mcp/config.py`, follows
 `_load_permission_rules`'s triage exactly (silent when the file is absent,
@@ -133,8 +138,12 @@ Permission wiring:
   listing stays cheap even where `mcp` is locked down.
 - `default_rules()` appends `("mcp", "*", "ask")`. Without it the built-in
   `"*": allow` would silently auto-approve every MCP call in ruleset mode -
-  the one outcome this design must make impossible. Yolo may answer the ask;
-  an explicit user `deny` still wins, as everywhere.
+  the outcome the DEFAULTS must make impossible on their own. A blanket
+  `"*": "allow"` the user wrote loads after the defaults and wins, for MCP
+  as for everything: that is what the same file means to OpenCode, and this
+  design's founding rule is that a rule the user already trusts means here
+  exactly what it means there. Yolo may answer the ask; an explicit user
+  `deny` still wins, as everywhere.
 - Legacy mode (no opencode.json ruleset): `mcp` always gates. The command
   allowlist matches shell prefixes and must not be consulted for MCP ids.
 - "Always allow" remembered from the gate maps to
@@ -230,4 +239,19 @@ timeout named in ms.
 - MCP resources and prompts (OpenCode's synthetic `list_mcp_resources`
   family), `tools/list_changed` live refresh, `opencode.jsonc`, nested
   `.opencode/opencode.json` discovery, and remote-project config files.
+- The REST of OpenCode's discovery surface, named honestly: it also walks
+  parent directories for plain `opencode.json` (monorepos), reads the
+  legacy `~/.config/opencode/config.json` and TOML files, and honours the
+  `OPENCODE_CONFIG` / `OPENCODE_CONFIG_DIR` / `OPENCODE_CONFIG_CONTENT`
+  env overrides. Servers declared only in those places are invisible to
+  AgentClip, silently - it reads exactly the two files section 1 lists.
 - Per-server `[mcp]` overrides in `.agentclip.toml` beyond `enabled`.
+- Known edges, recorded: OpenCode's per-CALL timeout has no 30s fallback
+  (the SDK default applies there; AgentClip applies the 30s to both
+  connect and call). And a composite id's owner can in principle change
+  mid-run when two configured servers collide on a sanitized id and the
+  config-order winner connects late - the status panel carries the shadow
+  warning; a remembered allow follows the id, not the (server, tool) pair.
+- An `oauth` OBJECT's contents (clientId etc.) are read only for their
+  truthiness; phase 2's token reuse would be the first consumer of the
+  fields themselves.

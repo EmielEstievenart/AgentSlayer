@@ -87,8 +87,15 @@ class McpToolSource(Protocol):
 
 
 def _clip(text: str, limit: int) -> str:
-    """Collapse whitespace to one line and clip to `limit` chars for listing."""
-    flat = " ".join(text.split())
+    """Collapse whitespace to one line and clip to `limit` chars for listing.
+
+    Also neuters CLIP sentinels: listing lines ride the deliberately UNFENCED
+    bootstrap, and a server whose tool description contains `===CLIP:...` text
+    would put sentinel-shaped prose inside the model's operating brief. Servers
+    come from the user's own opencode.json, so this is hygiene at a trust
+    boundary rather than a hole being closed - but hygiene is cheap.
+    """
+    flat = " ".join(text.split()).replace("===CLIP:", "==CLIP:")
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
 
 
@@ -177,7 +184,7 @@ tool: {example}
 ===CLIP:END==="""
 
 
-def _schema_body(source: McpToolSource, tool_id: str) -> str:
+def _schema_body(source: McpToolSource, tool_id: str, max_schema_chars: int) -> str:
     info = source.schema(tool_id)
     if info is None:
         raise ToolError(
@@ -185,11 +192,40 @@ def _schema_body(source: McpToolSource, tool_id: str) -> str:
             f"no connected MCP server exports {tool_id!r}",
             _unknown_tool_hint(source, tool_id),
         )
+    schema_json = info.input_schema_json
+    if len(schema_json) > max_schema_chars:
+        # Summarize rather than ship: a schema past the result cap would be cut
+        # mid-JSON by the generic middle-truncator (engine/results.py), handing
+        # the model syntactically broken text with no ranged re-request to
+        # recover through. Names and the required list are the part a call can
+        # actually be built from.
+        schema_line = _schema_summary(schema_json)
+    else:
+        schema_line = f"input schema: {schema_json}"
     return "\n".join(
         (
             f"{info.id} = {info.server}.{info.name}",
             info.description.strip() or "(no description)",
-            f"input schema: {info.input_schema_json}",
+            schema_line,
+        )
+    )
+
+
+def _schema_summary(schema_json: str) -> str:
+    """The legible stand-in for a schema too large to ship whole."""
+    try:
+        schema = json.loads(schema_json)
+    except ValueError:
+        return "input schema: (too large to include and not parseable for a summary)"
+    props = schema.get("properties") if isinstance(schema, dict) else None
+    names = sorted(props) if isinstance(props, dict) else []
+    required = schema.get("required") if isinstance(schema, dict) else None
+    required_names = [r for r in required if isinstance(r, str)] if isinstance(required, list) else []
+    return "\n".join(
+        (
+            "input schema: too large to include whole; its top level:",
+            f"  properties: {', '.join(names) if names else '(none)'}",
+            f"  required: {', '.join(required_names) if required_names else '(none)'}",
         )
     )
 
@@ -296,7 +332,11 @@ def make_mcp_specs(source: McpToolSource, *, max_listing_chars: int) -> tuple[To
         tool_id = call.params.get("tool", "").strip()
         if not tool_id:
             return _full_listing(source.tools())
-        return _schema_body(source, tool_id)
+        # Room for the three-line body's framing under the engine's result cap:
+        # the schema gets what the cap leaves after the id/description lines.
+        return _schema_body(
+            source, tool_id, max(1_000, ctx.limits.max_result_chars - 500)
+        )
 
     @tool_handler
     def mcp_handler(ctx: ToolContext, call: ToolCall) -> str:

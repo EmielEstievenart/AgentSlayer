@@ -188,11 +188,15 @@ def test_oauth_absent_means_true(tmp_path: Path) -> None:
     assert server.oauth is True
 
 
+# ONLY a literal `false` disables OAuth - OpenCode's schema is
+# Union([OAuth struct, Literal(false)]), and `{}` is a legal OAuth struct
+# (every field optional) meaning "attempt via auto-discovery". Reading for
+# Python truthiness got `{}` exactly backwards; found by the compat review.
 @pytest.mark.parametrize(
     ("value", "expected"),
-    [(False, False), (True, True), ("dcr", True), (0, False), ({}, False)],
+    [(False, False), (True, True), ("dcr", True), (0, True), ({}, True)],
 )
-def test_oauth_is_read_for_truthiness(tmp_path: Path, value: object, expected: bool) -> None:
+def test_oauth_only_a_literal_false_disables(tmp_path: Path, value: object, expected: bool) -> None:
     path = write(
         tmp_path / "opencode.json",
         {"mcp": {"gh": {"type": "remote", "url": "https://x", "oauth": value}}},

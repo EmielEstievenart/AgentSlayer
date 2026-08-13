@@ -91,7 +91,13 @@ def load_mcp_servers(paths: Sequence[Path], warnings: list[str]) -> McpServers:
         ctx = f"config: {blame[name]}: mcp.{name}"
         server = _parse_entry(name, entry, ctx, warnings)
         if server is not None:
-            servers.append(_substitute(server, ctx, warnings))
+            # The blame file's directory anchors relative {file:...} paths -
+            # OpenCode resolves them against the config file being parsed, and
+            # "the secret sits next to the config that names it" is the layout
+            # that implies. (When two layers both touched a server, the LAST
+            # file anchors: per-field origins are gone after the raw merge,
+            # and the later file is the one whose author saw the final shape.)
+            servers.append(_substitute(server, ctx, blame[name].parent, warnings))
     return McpServers(servers=tuple(servers), source=", ".join(sources))
 
 
@@ -211,11 +217,15 @@ def _parse_remote(
         headers=_take_str_table(entry, "headers", ctx, warnings),
         enabled=_take_enabled(entry, ctx, warnings),
         timeout_ms=_take_timeout(entry, ctx, warnings),
-        # Absent means OpenCode would try OAuth; present is read for truthiness
-        # so `false` switches it off the way OpenCode's own config does. The
-        # flag only records the intent - phase 1 performs no OAuth, it just
-        # wants an accurate hint to attach to a 401 (McpRemoteServer docstring).
-        oauth=True if "oauth" not in entry else bool(entry["oauth"]),
+        # OpenCode's schema is Union([OAuth struct, Literal(false)]): ONLY a
+        # literal `false` disables OAuth. Everything else - absent, an oauth
+        # object with fields, or `{}` (every OAuth field is optional, so an
+        # empty object is legal and means "attempt via auto-discovery") - keeps
+        # it on. `bool(entry["oauth"])` was wrong precisely for `{}`, which is
+        # falsy in Python and would have flipped the meaning. The flag only
+        # records the intent - phase 1 performs no OAuth, it just wants an
+        # accurate hint to attach to a 401 (McpRemoteServer docstring).
+        oauth=entry.get("oauth", True) is not False,
     )
 
 
@@ -282,7 +292,9 @@ def _take_timeout(entry: dict, ctx: str, warnings: list[str]) -> int:
 # -- placeholder substitution -------------------------------------------------
 
 
-def _substitute(server: McpServerConfig, ctx: str, warnings: list[str]) -> McpServerConfig:
+def _substitute(
+    server: McpServerConfig, ctx: str, base_dir: Path, warnings: list[str]
+) -> McpServerConfig:
     """Expand ``{env:VAR}`` / ``{file:path}`` on every string leaf of a parsed
     server: command elements, cwd, environment values, url, header values.
 
@@ -293,20 +305,23 @@ def _substitute(server: McpServerConfig, ctx: str, warnings: list[str]) -> McpSe
     if isinstance(server, McpLocalServer):
         return replace(
             server,
-            command=tuple(_expand(part, ctx, warnings) for part in server.command),
-            cwd=_expand(server.cwd, ctx, warnings),
+            command=tuple(_expand(part, ctx, base_dir, warnings) for part in server.command),
+            cwd=_expand(server.cwd, ctx, base_dir, warnings),
             environment=tuple(
-                (key, _expand(value, ctx, warnings)) for key, value in server.environment
+                (key, _expand(value, ctx, base_dir, warnings))
+                for key, value in server.environment
             ),
         )
     return replace(
         server,
-        url=_expand(server.url, ctx, warnings),
-        headers=tuple((key, _expand(value, ctx, warnings)) for key, value in server.headers),
+        url=_expand(server.url, ctx, base_dir, warnings),
+        headers=tuple(
+            (key, _expand(value, ctx, base_dir, warnings)) for key, value in server.headers
+        ),
     )
 
 
-def _expand(value: str, ctx: str, warnings: list[str]) -> str:
+def _expand(value: str, ctx: str, base_dir: Path, warnings: list[str]) -> str:
     if "{" not in value:  # the overwhelmingly common case; skip the regex
         return value
 
@@ -319,7 +334,14 @@ def _expand(value: str, ctx: str, warnings: list[str]) -> str:
             # better story than a literal "{env:TOKEN}" travelling as a token.
             return os.environ.get(arg, "")
         try:
-            text = Path(arg).expanduser().read_text(encoding="utf-8")
+            # Relative paths anchor to the CONFIG FILE's directory, as OpenCode
+            # resolves them - never to this process's cwd, which is wherever
+            # AgentClip was launched from and would send "{file:./token.txt}"
+            # hunting through the user's project instead of ~/.config/opencode.
+            target = Path(arg).expanduser()
+            if not target.is_absolute():
+                target = base_dir / target
+            text = target.read_text(encoding="utf-8")
         except OSError as exc:
             warnings.append(f"{ctx}: could not read {arg} for {{file:...}}; using '': {exc}")
             return ""

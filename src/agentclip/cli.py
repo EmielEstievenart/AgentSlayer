@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import getpass
 import platform
+import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from agentclip import __version__
 from agentclip.app.types import EngineRequest
@@ -30,6 +32,9 @@ from agentclip.tools.sandbox import Workspace
 from agentclip.tools.skills import Skill, discover_skills
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.graphics import probe_terminal
+
+if TYPE_CHECKING:  # paramiko rides in with SshHost, so the real import stays lazy
+    from agentclip.hosts.ssh import SshHost
 
 # -- MCP catalog sizing (docs/design/mcp.md section 5: the budget rule) --------
 
@@ -414,6 +419,55 @@ def confirm_host_key(hostname: str, keytype: str, fingerprint: str) -> bool:
     return answer.strip().lower() in ("yes", "y")
 
 
+# A `printenv` line that is unmistakably one variable: a POSIX name, an "=",
+# and everything after it. Anything else is dropped - see _parse_environment.
+_ENV_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
+
+
+def _parse_environment(text: str) -> dict[str, str]:
+    """``printenv`` output as a mapping, conservatively.
+
+    Only lines that ARE a name=value pair count. printenv writes each value
+    raw, newlines and all, with nothing marking where one ends - so from this
+    side a multi-line value's continuation lines are indistinguishable from
+    junk (a shell notice, a login banner, the stderr of a profile script). A
+    guess either way is worse than a miss: stapling a stray line onto a token,
+    or splitting one, hands a corrupted secret to a server that will fail
+    somewhere far from here. Dropping the unreadable costs at most a rare
+    multi-line variable, and an absent one already substitutes empty.
+    """
+    return {
+        match.group(1): match.group(2)
+        for line in text.splitlines()
+        if (match := _ENV_LINE_RE.match(line))
+    }
+
+
+def _remote_environment(host: SshHost) -> dict[str, str]:
+    """The target's login-shell environment, read once, at connect.
+
+    It is what ``{env:...}`` in that machine's MCP config means: whoever wrote
+    ``{env:API_TOKEN}`` into a file over there exported it over there
+    (docs/design/remote-ssh.md, "the target owns its policy"). A launch-time
+    probe like ``probe_os``, and for the same reason - the answer cannot change
+    under a session, and every later reader wants it already there.
+
+    Unlike probe_os this is not fatal: an unusable answer means empty, which is
+    exactly what an unset variable already substitutes to. `spawn` already runs
+    everything through ``bash -lc``, so the bare command IS the login shell's
+    own view; prefixing it again would nest a second shell.
+    """
+    code, out = host.run_blocking("printenv")
+    environment = _parse_environment(out) if code == 0 else {}
+    if not environment:
+        print(
+            f"agentclip: {host.target} did not answer 'printenv' usefully (exit {code});"
+            " {env:...} in its MCP config will be empty",
+            file=sys.stderr,
+        )
+    return environment
+
+
 def remote_launch(args: argparse.Namespace) -> Launch | int:
     """Connect, authenticate and probe BEFORE the TUI starts (design 7).
 
@@ -473,6 +527,12 @@ def remote_launch(args: argparse.Namespace) -> Launch | int:
         return 2
 
     print(f"agentclip: {host.target} is {os_name}, working in {remote_root.as_posix()}")
+    # Resolved before the config load, not after it: the remote home is what
+    # ``~`` means for the rest of this session, and the permission ruleset the
+    # load reads lives under it (docs/design/remote-ssh.md, "the target owns its
+    # policy"). Skills take the same pair further down.
+    home = host.home_dir()
+    environment = _remote_environment(host)
     return Launch(
         project_root=remote_root,
         config=load_config(
@@ -481,11 +541,13 @@ def remote_launch(args: argparse.Namespace) -> Launch | int:
             remote_target=args.ssh,
             remote_root=args.remote_root,
             host=host,
+            home=home,
+            environ=environment,
         ),
         host=host,
         os_name=os_name,
         data_root=default_remote_state_dir(host.target, remote_root.as_posix()),
-        home=host.home_dir(),
+        home=home,
     )
 
 
@@ -528,7 +590,14 @@ def main(argv: list[str] | None = None) -> int:
     # existed.
     mcp_manager: McpManager | None = None
     if config.mcp.enabled and config.mcp_servers.servers:
-        mcp_manager = McpManager(config.mcp_servers.servers, launch.project_root)
+        # The host's name, not a bare flag: in a remote session it is what the
+        # refused stdio servers and the "dialed from this PC" note are ABOUT,
+        # and a status line that names the box beats one that says "remote".
+        mcp_manager = McpManager(
+            config.mcp_servers.servers,
+            launch.project_root,
+            remote_target=launch.host.name if config.remote.is_remote() else "",
+        )
         # Kick the connects off NOW, not at the first session build: they
         # overlap the terminal probe, the TUI mount and the user typing their
         # task, so the first bootstrap usually lists real tools instead of the

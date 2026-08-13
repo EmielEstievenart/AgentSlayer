@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from agentclip.mcp.config import load_mcp_servers
+from agentclip.mcp.config import McpTarget, load_mcp_servers
 from agentclip.mcp.types import DEFAULT_TIMEOUT_MS, McpLocalServer, McpRemoteServer
 
 
@@ -700,3 +700,103 @@ def test_a_file_with_an_empty_mcp_table_contributes_no_source(tmp_path: Path) ->
 
     assert servers.source == str(real)
     assert warnings == []
+
+
+# -- McpTarget: which machine the files are on ---------------------------------
+
+
+def test_the_default_target_is_this_pc(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test above passes no target, so the default IS the local reader;
+    this one just says so out loud, next to the seam that could change it."""
+    monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "s3cret")
+    target = McpTarget()
+
+    assert target.read_bytes(write(tmp_path / "x.json", {"mcp": {}})) == b'{"mcp": {}}'
+    assert target.environ["AGENTCLIP_TEST_TOKEN"] == "s3cret"
+    assert target.expanduser("~").is_absolute()
+
+
+def test_files_are_read_through_the_targets_reader(tmp_path: Path) -> None:
+    """The path never reaches the filesystem: a config only the other machine
+    has must be readable, and a same-named local file must not stand in."""
+    write(tmp_path / "opencode.json", {"mcp": {"local": {"type": "remote", "url": "https://no"}}})
+    elsewhere = {
+        tmp_path / "opencode.json": b'{"mcp": {"api": {"type": "remote", "url": "https://box"}}}'
+    }
+    warnings: list[str] = []
+
+    servers = load_mcp_servers(
+        [tmp_path / "opencode.json"],
+        warnings,
+        McpTarget(read_bytes=lambda path: elsewhere[path]),
+    )
+
+    assert [s.name for s in servers.servers] == ["api"]
+    assert warnings == []
+
+
+def test_a_file_placeholder_uses_the_targets_reader_and_home(tmp_path: Path) -> None:
+    """`{file:~/token}` is a path on that machine: its ~ is that machine's home
+    and its bytes come back through the same reader as the config itself."""
+    files = {
+        Path("/etc/opencode.json"): b'{"mcp": {"gh": {"type": "remote", "url": "https://x",'
+        b' "headers": {"Authorization": "Bearer {file:~/token}"}}}}',
+        Path("/home/dev/token"): b"from-the-box\n",
+    }
+    warnings: list[str] = []
+
+    (server,) = load_mcp_servers(
+        [Path("/etc/opencode.json")],
+        warnings,
+        McpTarget(
+            read_bytes=lambda path: files[path],
+            expanduser=lambda raw: Path(raw.replace("~", "/home/dev", 1)),
+        ),
+    ).servers
+
+    assert isinstance(server, McpRemoteServer)
+    assert server.headers == (("Authorization", "Bearer from-the-box"),)
+    assert warnings == []
+
+
+def test_env_placeholders_read_the_targets_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "this-pcs-secret")
+    path = write(
+        tmp_path / "opencode.json",
+        {
+            "mcp": {
+                "gh": {
+                    "type": "remote",
+                    "url": "https://x",
+                    "headers": {"Authorization": "Bearer {env:AGENTCLIP_TEST_TOKEN}"},
+                }
+            }
+        },
+    )
+
+    (server,) = load_mcp_servers(
+        [path], [], McpTarget(environ={"AGENTCLIP_TEST_TOKEN": "the-boxs-secret"})
+    ).servers
+
+    assert isinstance(server, McpRemoteServer)
+    assert server.headers == (("Authorization", "Bearer the-boxs-secret"),)
+
+
+def test_a_file_that_is_not_utf8_warns_instead_of_raising(tmp_path: Path) -> None:
+    """The reader promises never to raise, and a secret file full of bytes is
+    as unusable as a missing one."""
+    path = write(
+        tmp_path / "opencode.json",
+        {"mcp": {"gh": {"type": "remote", "url": "https://x", "headers": {"k": "{file:blob}"}}}},
+    )
+    (tmp_path / "blob").write_bytes(b"\xff\xfe\x00garbage")
+    warnings: list[str] = []
+
+    (server,) = load_mcp_servers([path], warnings).servers
+
+    assert isinstance(server, McpRemoteServer)
+    assert server.headers == (("k", ""),)
+    assert len(warnings) == 1
+    assert "could not read blob" in warnings[0]

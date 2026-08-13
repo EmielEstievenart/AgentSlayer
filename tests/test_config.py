@@ -1317,6 +1317,39 @@ def test_opencode_rules_load_with_the_defaults_prepended(
     assert evaluate("list", ".", cfg.permission_rules).action == "ask"
 
 
+def test_the_projects_own_opencode_json_layers_over_the_global_one(
+    project: Path, global_path: Path, tmp_path: Path
+) -> None:
+    """OpenCode's own precedence, which AgentClip did not honour before: the
+    project's opencode.json is read after the global one, and rules are ordered
+    with the last match winning, so the project tightens or loosens what the
+    machine-wide file said."""
+    oc = tmp_path / "opencode.json"
+    oc.write_text('{"permission": {"bash": "allow", "read": "allow"}}', encoding="utf-8")
+    _point_at(project, oc)
+    (project / "opencode.json").write_text(
+        '{"permission": {"bash": "deny"}}', encoding="utf-8"
+    )
+
+    cfg = load_config(project, global_config_path=global_path)
+    assert evaluate("bash", "ls", cfg.permission_rules).action == "deny"
+    assert evaluate("read", "a.txt", cfg.permission_rules).action == "allow"
+    assert cfg.permission_source == f"{oc}, {project / 'opencode.json'}"
+
+
+def test_a_project_opencode_json_alone_is_enough_to_leave_legacy_mode(
+    project: Path, global_path: Path
+) -> None:
+    """No global file at all (the everyday machine): the project's own ruleset
+    still counts, since both layers are the same one user's answer."""
+    (project / "opencode.json").write_text(
+        '{"permission": {"bash": "deny"}}', encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert evaluate("bash", "ls", cfg.permission_rules).action == "deny"
+    assert cfg.permission_source == str(project / "opencode.json")
+
+
 def test_missing_opencode_file_is_not_a_problem(project: Path, global_path: Path, tmp_path: Path) -> None:
     """Most machines have no opencode.json; that is legacy mode, not an error."""
     _point_at(project, tmp_path / "nope.json")

@@ -1,5 +1,7 @@
-"""The [remote] table, the --ssh/--remote-root flags, and where a project's
-own config is read from in a remote session (docs/design/remote-ssh.md 4, 6)."""
+"""The [remote] table, the --ssh/--remote-root flags, and which machine each
+piece of a remote session's config comes from (docs/design/remote-ssh.md 4, and
+its revision "the target owns its policy": the target owns the rules, this PC
+owns the gate)."""
 
 from __future__ import annotations
 
@@ -9,6 +11,12 @@ import pytest
 
 from agentclip.config import RemoteTarget, load_config
 from agentclip.hosts import FakeHost
+from agentclip.permissions import PermissionRule, evaluate
+
+# The remote user's home, and the ruleset OpenCode keeps under it on every
+# platform - which in a remote session is resolved from `home`, not this PC's.
+REMOTE_HOME = Path("/home/dev")
+REMOTE_OPENCODE = "/home/dev/.config/opencode/opencode.json"
 
 SAVED = """\
 [remote.pi]
@@ -37,6 +45,14 @@ def global_path(tmp_path: Path) -> Path:
 
 def _load(project: Path, global_path: Path, **kwargs: object):
     return load_config(project, global_config_path=global_path, **kwargs)  # type: ignore[arg-type]
+
+
+def _remote(global_path: Path, host: FakeHost):
+    """A session on ``host``, loaded the way cli.remote_launch loads one: the
+    project root and the home directory both belong to the target."""
+    return load_config(
+        Path("/srv/app"), global_config_path=global_path, host=host, home=REMOTE_HOME
+    )
 
 
 # -- the table -----------------------------------------------------------------
@@ -152,19 +168,118 @@ def test_the_global_file_stays_local_in_a_remote_session(global_path: Path) -> N
     assert cfg.general.chars_per_token == 4
 
 
-def test_permissions_are_never_read_through_the_host(
+def test_permissions_are_read_through_the_host(
     global_path: Path, tmp_path: Path
 ) -> None:
-    """The user's policy must not weaken because of a remote file (design 6)."""
+    """The tripwire, inverted: the ruleset now comes off the TARGET.
+
+    Every file a rule can save is over there, so the machine whose files are at
+    risk is the one that says what may happen to them ("the target owns its
+    policy"). A local file at the very same path must not be what answers.
+    """
     opencode = tmp_path / "opencode.json"
     opencode.write_text('{"permission": {"bash": "deny"}}', encoding="utf-8")
     global_path.write_text(
         f'[permission]\nopencode_config = "{opencode.as_posix()}"\n', encoding="utf-8"
     )
     host = FakeHost("/srv/app")
-    # A remote file at the same path would be a policy the operator never chose.
     host.add_file(opencode.as_posix(), '{"permission": {"bash": "allow"}}')
 
     cfg = load_config(Path("/srv/app"), global_config_path=global_path, host=host)
-    assert cfg.permission_source == str(opencode)
-    assert cfg.permission_rules[-1].action == "deny"
+    assert cfg.permission_source == f"fake:{opencode.as_posix()}"
+    assert cfg.permission_rules[-1].action == "allow"  # the REMOTE file's answer
+
+
+def test_the_remote_global_ruleset_comes_from_the_remote_home(global_path: Path) -> None:
+    """With no [permission] opencode_config, ~ is the TARGET user's home."""
+    host = FakeHost("/srv/app")
+    host.add_file(REMOTE_OPENCODE, '{"permission": {"bash": "deny"}}')
+
+    cfg = _remote(global_path, host)
+    assert cfg.permission_rules[-1] == PermissionRule("bash", "*", "deny")
+    assert cfg.permission_source == f"fake:{REMOTE_OPENCODE}"
+
+
+def test_a_tilde_in_opencode_config_expands_on_the_target(global_path: Path) -> None:
+    """The setting names which file holds the ruleset, and the ruleset is over
+    there - so its ~ is the remote home, not the operator's."""
+    global_path.write_text('[permission]\nopencode_config = "~/rules.json"\n', encoding="utf-8")
+    host = FakeHost("/srv/app")
+    host.add_file("/home/dev/rules.json", '{"permission": {"bash": "deny"}}')
+
+    cfg = _remote(global_path, host)
+    assert cfg.permission_source == "fake:/home/dev/rules.json"
+
+
+def test_the_projects_opencode_json_outranks_the_remote_global_one(
+    global_path: Path,
+) -> None:
+    host = FakeHost("/srv/app")
+    host.add_file(REMOTE_OPENCODE, '{"permission": {"bash": "deny"}}')
+    host.add_file("/srv/app/opencode.json", '{"permission": {"bash": "allow"}}')
+
+    cfg = _remote(global_path, host)
+    # Ordered rules, last match wins: both layers are present, the project's
+    # answers.
+    assert evaluate("bash", "ls", cfg.permission_rules).action == "allow"
+    assert cfg.permission_source == f"fake:{REMOTE_OPENCODE}, fake:/srv/app/opencode.json"
+
+
+def test_a_target_with_no_opencode_json_stays_in_legacy_mode(global_path: Path) -> None:
+    """Exactly what a local machine with no ruleset gets: the defaults are NOT
+    returned on their own, because empty is the signal for the allowlist gate."""
+    cfg = _remote(global_path, FakeHost("/srv/app"))
+    assert cfg.permission_rules == ()
+    assert cfg.permission_source == ""
+    assert cfg.warnings == ()
+
+
+# -- [approval]: the gate stays on the machine with the human ------------------
+
+
+def test_the_remote_projects_approval_table_is_ignored(global_path: Path) -> None:
+    """The target owns the rules; the host owns the gate. A remote file must not
+    arm the operator's session into yolo."""
+    global_path.write_text('[approval]\nmode = "plan"\n', encoding="utf-8")
+    host = FakeHost("/srv/app")
+    host.add_file(
+        "/srv/app/.agentclip.toml",
+        '[approval]\nyolo = true\nmode = "unattended"\n[general]\nservice = "claude"\n',
+    )
+
+    cfg = _remote(global_path, host)
+    assert cfg.approval.yolo is False
+    assert cfg.approval.mode == "plan"  # this PC's config.toml, not the target's
+    assert cfg.general.service == "claude"  # every other table still merges
+    assert any("[approval] in the remote project" in w for w in cfg.warnings)
+
+
+def test_a_remote_project_without_an_approval_table_is_not_warned_about(
+    global_path: Path,
+) -> None:
+    host = FakeHost("/srv/app")
+    host.add_file("/srv/app/.agentclip.toml", '[general]\nservice = "claude"\n')
+    assert _remote(global_path, host).warnings == ()
+
+
+def test_the_hosts_approval_table_still_arms_a_remote_session(global_path: Path) -> None:
+    global_path.write_text(
+        '[approval]\nyolo = true\ncommand_allowlist = ["ls*"]\n', encoding="utf-8"
+    )
+    cfg = _remote(global_path, FakeHost("/srv/app"))
+    assert cfg.approval.yolo is True
+    assert cfg.approval.command_allowlist == ("ls*",)
+
+
+def test_a_local_project_still_supplies_its_own_approval_table(
+    project: Path, global_path: Path
+) -> None:
+    """Nothing changes without a host: the gate and the project are on the same
+    machine, so there is no second machine to protect it from."""
+    (project / ".agentclip.toml").write_text(
+        '[approval]\nyolo = true\nmode = "unattended"\n', encoding="utf-8"
+    )
+    cfg = _load(project, global_path)
+    assert cfg.approval.yolo is True
+    assert cfg.approval.mode == "unattended"
+    assert cfg.warnings == ()

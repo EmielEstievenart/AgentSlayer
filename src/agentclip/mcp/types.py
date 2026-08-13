@@ -38,9 +38,10 @@ class McpLocalServer:
     """A `"type": "local"` entry: a stdio server THIS PC spawns.
 
     `command` is OpenCode's shape - argv[0] plus args in one list. `cwd`
-    is kept verbatim (resolved against the project root at spawn time, and
-    only for local sessions - the config loader never even reads a remote
-    project's file, docs/design/mcp.md section 1).
+    is kept verbatim, resolved against the project root at spawn time. A
+    remote session parses these entries like any other but never spawns one:
+    the argv and cwd describe the target, and McpManager only ever spawns here
+    (docs/design/remote-ssh.md, "the target owns its policy").
     """
 
     name: str

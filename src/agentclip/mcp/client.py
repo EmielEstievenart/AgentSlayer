@@ -136,6 +136,17 @@ def _one_line(exc: BaseException) -> str:
     return text
 
 
+def _awaiting_connect(rec: _Record) -> bool:
+    """Whether this record is still a candidate for a connection attempt.
+
+    Every verdict that precedes the first attempt is recorded in __init__, so
+    "still pending" IS "may be connected" - one question, asked here, instead
+    of the same exclusion list re-derived at each of the three places that walk
+    the records (the missing-SDK sweep, the pending count, the task spawn).
+    """
+    return rec.state == "pending"
+
+
 async def _quiet_aclose(stack: AsyncExitStack) -> None:
     """Unwind a connection's exit stack, swallowing whatever it throws.
 
@@ -164,9 +175,18 @@ class McpManager:
         servers: Sequence[McpServerConfig],
         project_root: Path,
         *,
+        remote_target: str = "",
         _inproc_targets: Mapping[str, object] | None = None,
     ) -> None:
-        """`_inproc_targets` is a TEST SEAM and nothing else
+        """`remote_target` names the machine the project (and this config) is
+        on when the session is remote, and is "" for a local one. It buys two
+        things, both from docs/design/remote-ssh.md's "the target owns its
+        policy": stdio servers are refused below, because their argv and cwd
+        describe that machine and the only machine this manager can spawn on is
+        this one; and an HTTP server that fails to connect says who dialed it,
+        because the config came from over there while the socket did not.
+
+        `_inproc_targets` is a TEST SEAM and nothing else
         (docs/design/mcp.md section 7): it maps a server *name* to an object
         handed straight to `mcp.Client(...)` in place of a stdio or HTTP
         transport, which is how the suite connects to in-process `MCPServer`
@@ -175,14 +195,31 @@ class McpManager:
         production caller passes it.
         """
         self._project_root = project_root
+        self._remote_target = remote_target
         self._inproc_targets: Mapping[str, object] = dict(_inproc_targets or {})
         self._lock = threading.Lock()
         self._records: tuple[_Record, ...] = tuple(_Record(entry=s) for s in servers)
-        # A disabled entry never becomes a connection attempt, so it gets its
-        # terminal state here rather than pending->...->disabled.
+        # The two verdicts that are already in before anything is attempted: a
+        # disabled entry, and - in a remote session - a stdio one. Both get
+        # their terminal state here rather than pending->...->it, and both are
+        # then skipped by every stage below (`_awaiting_connect`).
         for rec in self._records:
             if not rec.entry.enabled:
                 rec.state = "disabled"
+            elif remote_target and isinstance(rec.entry, McpLocalServer):
+                # Failed and named, never quietly dropped: the entry is real
+                # config the user wrote, and a server that vanishes from the
+                # pane is a bug hunt. The state is set here rather than at
+                # connect time because nothing about it can change - this
+                # process spawns on this PC only, and that command belongs to
+                # another machine (docs/design/remote-ssh.md, "MCP stdio
+                # servers are not supported in a remote session").
+                rec.state = "failed"
+                rec.detail = (
+                    "stdio servers are not supported in a remote session: this entry's "
+                    f"command and cwd describe {remote_target}, and AgentClip spawns "
+                    "processes on this PC only"
+                )
 
         self._status_hook: Callable[[McpServerStatus], None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -206,9 +243,10 @@ class McpManager:
         """Register the one listener told about every state change.
 
         Called from the loop thread for connect transitions, and from the
-        *calling* thread for the two that never reach the loop (`missing_sdk`
-        during ensure_started, `disabled` at construction - which precedes any
-        hook and so is never delivered at all). The listener must be
+        *calling* thread for `missing_sdk` during ensure_started. The states
+        decided in __init__ (`disabled`, and a refused stdio server in a remote
+        session) precede any hook and so are never delivered at all - they are
+        seen by the listener's first `statuses()` instead. The listener must be
         non-blocking and marshal onto its own loop, exactly as the TUI does with
         `call_from_thread` (docs/design/mcp.md section 6).
         """
@@ -256,11 +294,11 @@ class McpManager:
         except ImportError:
             self._sdk_missing = True
             for rec in self._records:
-                if rec.entry.enabled:
+                if _awaiting_connect(rec):
                     self._set_state(rec, "missing_sdk", MISSING_SDK_HINT)
             return
 
-        enabled = [rec for rec in self._records if rec.entry.enabled]
+        enabled = [rec for rec in self._records if _awaiting_connect(rec)]
         if not enabled:
             return  # nothing to connect; _settled stays set
 
@@ -302,7 +340,7 @@ class McpManager:
         """On the loop: one long-lived task per enabled server, all at once."""
         self._closing = asyncio.Event()
         for rec in self._records:
-            if rec.entry.enabled:
+            if _awaiting_connect(rec):
                 self._tasks.append(asyncio.create_task(self._serve(rec)))
 
     def close(self) -> None:
@@ -370,11 +408,17 @@ class McpManager:
                 async with asyncio.timeout(timeout_s):
                     client, tools = await self._connect(rec, stack)
             except TimeoutError:
-                self._set_state(rec, "failed", f"connect timed out after {rec.entry.timeout_ms} ms")
+                self._set_state(
+                    rec,
+                    "failed",
+                    self._dialed_here(
+                        rec.entry, f"connect timed out after {rec.entry.timeout_ms} ms"
+                    ),
+                )
             except _NeedsAuth as exc:
                 self._set_state(rec, "needs_auth", str(exc))
             except Exception as exc:  # noqa: BLE001 - any connect failure is one status line
-                self._set_state(rec, "failed", _one_line(exc))
+                self._set_state(rec, "failed", self._dialed_here(rec.entry, _one_line(exc)))
             else:
                 connected = True
                 self._set_connected(rec, client, tools)
@@ -561,6 +605,25 @@ class McpManager:
                 read_timeout_seconds=timeout_s,
             )
         )
+
+    def _dialed_here(self, entry: McpServerConfig, detail: str) -> str:
+        """Name the machine that opened the socket, when that is the surprise.
+
+        In a remote session the config is read off the target but the
+        connection is made from THIS PC (docs/design/remote-ssh.md, "MCP
+        transport stays on the host"), which is exactly why a URL that works
+        over there can fail here: `http://localhost:8080` reaches this PC's
+        localhost, a VPN-only endpoint reaches nothing. A bare timeout would
+        send the user looking on the wrong box.
+
+        Only failures to reach the server say it. A 401 is the server
+        answering - the dial plainly worked - and stapling "from this PC" onto
+        a credential problem would be a red herring rather than the one fact
+        the split makes surprising.
+        """
+        if not self._remote_target or not isinstance(entry, McpRemoteServer):
+            return detail
+        return f"{detail} (dialed from this PC, not from {self._remote_target})"
 
     def _needs_auth(self, entry: McpRemoteServer) -> _NeedsAuth:
         hint = "server rejected the request (401/403); add credentials to this server's headers"

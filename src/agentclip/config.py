@@ -10,15 +10,26 @@ never concatenate (so a project can tighten the allowlist):
     -> <project root>/.agentclip.toml
     -> CLI flags
 
-The global file is always LOCAL; the project file belongs to the project, so in
-a remote session it is read from the remote machine through the Host (hence the
-``host`` parameter on :func:`load_config`). Permissions are the deliberate
-exception: opencode.json is read from this PC whatever the session is, because
-the user's policy must not weaken because of a remote file
-(docs/design/remote-ssh.md decision 6). The mcp block of the same file goes one
-step further: its project layer is read with plain local I/O and skipped
-outright in remote sessions - a `local` MCP server is a command this PC will
-spawn (docs/design/mcp.md section 1).
+The global file is always LOCAL. Everything that describes the PROJECT is read
+from the machine the project is on, through the Host (hence the ``host`` and
+``home`` parameters on :func:`load_config`): its ``.agentclip.toml``, and the
+permission ruleset, which is that machine's
+``~/.config/opencode/opencode.json`` and then its ``<project>/opencode.json``,
+in that order so the project layer outranks the global one. The target owns the
+rules because every file a rule can save is over there
+(docs/design/remote-ssh.md, "the target owns its policy").
+
+``[approval]`` goes the other way: it is the gate, and the gate belongs to the
+machine with the human answering it, so in a remote session it comes from this
+PC's config.toml alone and the remote layer's table is ignored with a warning.
+
+The mcp block of the same opencode.json travels with the permission block: both
+layers are read off that machine, and so are the ``{file:...}`` secrets and
+``{env:...}`` variables they name (hence ``environ``, the target's login-shell
+environment). What does NOT move is the spawning - a `local` MCP server is a
+command, and this PC is the only machine that runs one, so McpManager refuses
+those in a remote session rather than reading around them (docs/design/mcp.md
+section 1).
 """
 
 from __future__ import annotations
@@ -29,7 +40,7 @@ import os
 import re
 import tempfile
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -38,7 +49,7 @@ import platformdirs
 import tomli_w
 
 from agentclip.hosts.base import Host
-from agentclip.mcp.config import load_mcp_servers
+from agentclip.mcp.config import McpTarget, load_mcp_servers
 from agentclip.mcp.types import McpConfig, McpServers
 from agentclip.permissions import (
     PERMISSION_MODES,
@@ -669,45 +680,146 @@ def _take_matcher(table: dict, default: str, ctx: str, warnings: list[str]) -> s
     return value
 
 
-def _load_permission_rules(
-    settings: PermissionConfig, warnings: list[str]
-) -> tuple[tuple[PermissionRule, ...], str]:
-    """Read opencode.json's top-level ``permission`` block into the effective
-    ruleset, defaults first.
+def _expand_home(raw: str, home: Path | None) -> Path:
+    """Expand a leading ``~`` in a user-written path against ``home``.
+
+    With no ``home`` this is :meth:`Path.expanduser`, warts and all. With one -
+    a remote session - only a bare ``~`` is expanded: ``~someone-else`` would
+    otherwise be answered by the local password database about a machine this
+    process cannot see, and a path left alone is at least a path the user can
+    recognize in the warning it produces.
+    """
+    path = Path(raw)
+    if home is None:
+        return path.expanduser()
+    if path.parts and path.parts[0] == "~":
+        return home.joinpath(*path.parts[1:])
+    return path
+
+
+def _opencode_config_path(home: Path | None) -> Path:
+    """OpenCode's own config file on the machine the project is on.
+
+    ``home`` is the remote user's home directory in a remote session, and None
+    locally - which keeps :func:`default_opencode_config_path` a zero-argument
+    function, the shape the test suite patches to keep the developer's real
+    ruleset out of the run (tests/conftest.py).
+    """
+    if home is None:
+        return default_opencode_config_path()
+    return home / ".config" / "opencode" / "opencode.json"
+
+
+def _permission_block(path: Path, warnings: list[str], host: Host | None) -> object | None:
+    """The top-level ``permission`` block of one opencode.json, or None when the
+    file has nothing to say about permissions.
 
     Only that one key is read. OpenCode's ``agent``/``plugin`` blocks describe
     OpenCode agents, which AgentClip has no equivalent of - guessing a mapping
     would silently grant or refuse things the user never decided.
 
-    A missing file is not a problem (most machines have none): it returns an
-    empty ruleset, which is the signal for legacy mode. Only a file that EXISTS
-    and cannot be understood warns."""
-    if not settings.enabled:
-        return (), ""
-    path = (
-        Path(settings.opencode_config).expanduser()
-        if settings.opencode_config
-        else default_opencode_config_path()
-    )
+    Triage as :func:`_read_toml` models it: a missing file is normal (most
+    machines have none) and silent, anything else unreadable warns once.
+    """
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = host.read_bytes(path) if host is not None else path.read_bytes()
     except FileNotFoundError:
-        return (), ""
+        return None
     except OSError as exc:
         warnings.append(f"config: could not read {path}: {exc}")
-        return (), ""
+        return None
     try:
-        data = json.loads(raw)
-    except ValueError as exc:
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
         warnings.append(f"config: {path} is not valid JSON: {exc}")
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data.get("permission")
+
+
+def _describe_path(path: Path, host: Host | None) -> str:
+    """How a config file is named to the user. In a remote session that has to
+    include the machine: two boxes' ``~/.config/opencode/opencode.json`` are
+    indistinguishable in a screenshot otherwise. Spelled POSIX-style over
+    there, because that is the flavour of the paths the target deals in - the
+    Path arithmetic above ran on whatever this PC's separator is."""
+    return f"{host.name}:{path.as_posix()}" if host is not None else str(path)
+
+
+def _load_permission_rules(
+    settings: PermissionConfig,
+    project_root: Path,
+    warnings: list[str],
+    host: Host | None = None,
+    home: Path | None = None,
+) -> tuple[tuple[PermissionRule, ...], str]:
+    """Read the effective permission ruleset off the machine the project is on:
+    built-in defaults, then that machine's global opencode.json, then the
+    project's own. Rules are ordered and the last match wins, so the project
+    layer outranks the global one - OpenCode's own precedence, and the same two
+    layers :func:`load_mcp_servers` reads.
+
+    An empty result is not "no opinion", it is the signal for legacy allowlist
+    mode (engine/approval.py), so a target with no opencode.json anywhere gets
+    exactly what a local machine with none gets: ``((), "")`` - the defaults
+    alone are never returned, because on their own they would silently replace
+    the allowlist gate with a ruleset nobody wrote.
+    """
+    if not settings.enabled:
         return (), ""
-    if not isinstance(data, dict) or "permission" not in data:
-        return (), ""
-    rules, rule_warnings = rules_from_config(data["permission"])
-    warnings.extend(f"config: {path}: {w}" for w in rule_warnings)
+    paths = [
+        _expand_home(settings.opencode_config, home)
+        if settings.opencode_config
+        else _opencode_config_path(home)
+    ]
+    # Skipped when [permission] opencode_config already names it: reading one
+    # file as both layers would double every rule it holds and name it twice.
+    if project_root / "opencode.json" != paths[0]:
+        paths.append(project_root / "opencode.json")
+
+    rules: list[PermissionRule] = []
+    sources: list[str] = []
+    for path in paths:
+        block = _permission_block(path, warnings, host)
+        if block is None:
+            continue
+        layer, rule_warnings = rules_from_config(block)
+        warnings.extend(f"config: {_describe_path(path, host)}: {w}" for w in rule_warnings)
+        if not layer:
+            continue
+        rules.extend(layer)
+        sources.append(_describe_path(path, host))
     if not rules:
         return (), ""
-    return default_rules() + rules, str(path)
+    return default_rules() + tuple(rules), ", ".join(sources)
+
+
+def _mcp_target(
+    host: Host | None, home: Path | None, environ: Mapping[str, str] | None
+) -> McpTarget:
+    """The machine :func:`load_mcp_servers` reads its files from.
+
+    Spelled as capabilities rather than as the Host itself because that module
+    is a stdlib-only leaf below this one (tests/test_layering.py): it may not
+    import agentclip.hosts, so it is handed the three things it does with a
+    machine. ``_expand_home`` goes along as one of them, which is what keeps
+    ``~`` meaning the same thing for an MCP ``{file:~/token}`` as it does for
+    the permission ruleset read out of the very same file.
+
+    A local session gets the reader's own defaults - untouched, so nothing
+    about the pre-remote path is re-expressed here and able to drift from it. A
+    remote one with no environment gets an EMPTY mapping rather than this PC's:
+    an unset ``{env:VAR}`` already substitutes empty, and the operator's own
+    variables are a different machine's secrets.
+    """
+    if host is None:
+        return McpTarget()
+    return McpTarget(
+        read_bytes=host.read_bytes,
+        environ=environ if environ is not None else {},
+        expanduser=lambda raw: _expand_home(raw, home),
+    )
 
 
 def _load_remote(
@@ -746,23 +858,47 @@ def load_config(
     remote_target: str | None = None,
     remote_root: str | None = None,
     host: Host | None = None,
+    home: Path | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> Config:
     """Load, merge, and validate configuration. Never raises on bad user config;
     problems become Config.warnings and defaults win.
 
-    ``host`` is the machine the PROJECT is on: its ``.agentclip.toml`` is read
-    through it, so a remote session honors the remote project's settings. The
-    global file is read from this PC either way.
+    ``host`` is the machine the PROJECT is on: its ``.agentclip.toml``, its
+    permission ruleset and its MCP servers are read through it, so a remote
+    session honors the remote project's settings and the remote machine's
+    rules. ``home`` is that machine's home directory, which is what turns ``~``
+    into a path over there - the pair travels together, exactly as
+    :func:`discover_skills` takes them. ``environ`` is that machine's
+    login-shell environment, the only thing ``{env:...}`` in its MCP config can
+    honestly mean; cli.py reads it once at connect. The global config.toml is
+    read from this PC either way.
     """
     warnings: list[str] = []
     global_path = global_config_path if global_config_path is not None else default_global_config_path()
 
-    merged: dict = _read_toml(global_path, warnings)
-    merged = _deep_merge(merged, _read_toml(project_root / ".agentclip.toml", warnings, host))
+    global_layer: dict = _read_toml(global_path, warnings)
+    project_layer = _read_toml(project_root / ".agentclip.toml", warnings, host)
+    merged: dict = _deep_merge(global_layer, project_layer)
 
     general_t = merged.get("general", {})
     clipboard_t = merged.get("clipboard", {})
+    # The one table a remote project does not get a say in: [approval] is the
+    # gate, and the gate belongs to the machine with the human answering it -
+    # `mode` is cycled with shift+tab and `yolo` is a chat command, so the file
+    # only supplies a starting value for live session state the operator drives
+    # (docs/design/remote-ssh.md, "the target owns its policy"). Selected here
+    # rather than filtered out of the merge, so every other table still merges
+    # exactly as it always did.
     approval_t = merged.get("approval", {})
+    if host is not None:
+        approval_t = global_layer.get("approval", {})
+        if "approval" in project_layer:
+            warnings.append(
+                "config: [approval] in the remote project's .agentclip.toml is ignored; "
+                "the approval gate is read from this PC's config.toml, because this is "
+                "the machine that answers its questions"
+            )
     limits_t = merged.get("limits", {})
     notify_t = merged.get("notify", {})
     backup_t = merged.get("backup", {})
@@ -895,7 +1031,9 @@ def load_config(
         enabled=_take_bool(permission_t, "enabled", True, "permission", warnings),
         opencode_config=_take_str(permission_t, "opencode_config", "", "permission", warnings),
     )
-    permission_rules, permission_source = _load_permission_rules(permission, warnings)
+    permission_rules, permission_source = _load_permission_rules(
+        permission, project_root, warnings, host, home
+    )
 
     # MCP servers ride the same opencode.json, parsed by agentclip.mcp.config
     # (stdlib-only, so this import is unconditional). The paths are resolved
@@ -910,21 +1048,21 @@ def load_config(
     if mcp.enabled:
         # Ascending precedence: global first, then the project file, whose
         # same-name entries merge per field over the global ones (OpenCode's
-        # deep merge). Both are plain LOCAL reads, never through the Host, and
-        # the project file only exists as a source when ``host is None`` - i.e.
-        # when project_root is a directory on THIS PC. In a remote session the
-        # project belongs to the remote machine, and a `local` MCP server is a
-        # command this PC will run: the remote end must not get to decide what
-        # the operator's PC executes (docs/design/mcp.md section 1, the same
-        # rationale that pins permissions local - remote-ssh.md decision 6).
+        # deep merge). The same two layers, off the same machine, as the
+        # permission ruleset above: a server declared beside a project on the
+        # target is a server that project's author chose, and the file the
+        # entry names is next to it over there (docs/design/remote-ssh.md, "the
+        # target owns its policy"). Reading a `local` entry is safe because
+        # nothing reading it will spawn it - McpManager refuses stdio servers
+        # outright in a remote session, and refusing them by name beats
+        # dropping them silently, which is what skipping this layer did.
         mcp_paths = [
-            Path(mcp.opencode_config).expanduser()
+            _expand_home(mcp.opencode_config, home)
             if mcp.opencode_config
-            else default_opencode_config_path()
+            else _opencode_config_path(home)
         ]
-        if host is None:
-            mcp_paths.append(project_root / "opencode.json")
-        mcp_servers = load_mcp_servers(mcp_paths, warnings)
+        mcp_paths.append(project_root / "opencode.json")
+        mcp_servers = load_mcp_servers(mcp_paths, warnings, _mcp_target(host, home, environ))
     else:
         # Disabled means DISABLED: no file is opened, so a broken opencode.json
         # cannot even warn its way into a session the user switched MCP off for.

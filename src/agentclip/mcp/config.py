@@ -11,10 +11,8 @@ have (docs/design/mcp.md 2). Only ``mcp/client.py`` may touch the SDK.
 
 It also does NOT import :mod:`agentclip.config` - that would be circular, since
 config.py imports this - which is why :func:`load_mcp_servers` takes the files
-to read as an argument. *Deciding* which files those are (the global one
-always, a project one only for local sessions, because a `local` server is a
-command THIS PC will run and a remote machine must not choose it) belongs to
-the caller.
+to read as an argument. *Deciding* which files those are, and which machine
+they are on (:class:`McpTarget`), belongs to the caller.
 
 Like :func:`agentclip.config._load_permission_rules`, nothing here raises: a
 missing file is silent (most machines have none), a file that exists but
@@ -27,8 +25,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import Sequence
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from agentclip.mcp.types import (
@@ -46,7 +44,42 @@ from agentclip.mcp.types import (
 _PLACEHOLDER_RE = re.compile(r"\{(env|file):([^}]*)\}")
 
 
-def load_mcp_servers(paths: Sequence[Path], warnings: list[str]) -> McpServers:
+def _read_local(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def _expand_local(raw: str) -> Path:
+    return Path(raw).expanduser()
+
+
+@dataclass(frozen=True, slots=True)
+class McpTarget:
+    """The machine the config files are on, as the three things reading them
+    needs: how to read a file over there, what its environment holds, and what
+    ``~`` means there.
+
+    Three plain callables and a mapping rather than the Host object that has
+    them, because this module is a stdlib-only leaf allowed to import nothing
+    but its own package (tests/test_layering.py): it takes the capabilities it
+    uses instead of the seam that supplies them. ``expanduser`` travels as one
+    of them so ``~`` means the same thing here as it does for the permission
+    ruleset read off the same file - config.py hands both the same rule rather
+    than keeping two copies of it.
+
+    The defaults are THIS PC, and they are what every local session gets: the
+    reader behaves exactly as it did before remote sessions could reach it.
+    """
+
+    read_bytes: Callable[[Path], bytes] = _read_local
+    # os.environ itself, not a copy: a caller that exports a variable after
+    # load time (and the test suite's monkeypatch.setenv) must still be read.
+    environ: Mapping[str, str] = field(default_factory=lambda: os.environ)
+    expanduser: Callable[[str], Path] = _expand_local
+
+
+def load_mcp_servers(
+    paths: Sequence[Path], warnings: list[str], target: McpTarget | None = None
+) -> McpServers:
     """Read ``mcp`` from each of ``paths`` and return the merged server list.
 
     ``paths`` are in ASCENDING precedence (global first, project second), and
@@ -61,7 +94,11 @@ def load_mcp_servers(paths: Sequence[Path], warnings: list[str]) -> McpServers:
     before parsing, but doing it post-parse covers every real use (secrets in
     ``headers``/``environment``/``url``) without letting the contents of an
     environment variable or a file rewrite the config's *structure*.
+
+    ``target`` says which machine ``paths`` (and the files and variables they
+    point at) live on; omitted, it is this PC.
     """
+    target = target if target is not None else McpTarget()
     merged: dict[str, dict] = {}
     # Which file last had a say about each name, so a parse warning can blame a
     # file the user can actually open. Per name, not per file: after the merge
@@ -71,7 +108,7 @@ def load_mcp_servers(paths: Sequence[Path], warnings: list[str]) -> McpServers:
     sources: list[str] = []
 
     for path in paths:
-        block = _read_mcp_block(path, warnings)
+        block = _read_mcp_block(path, warnings, target)
         if block is None:
             continue
         contributed = False
@@ -97,23 +134,27 @@ def load_mcp_servers(paths: Sequence[Path], warnings: list[str]) -> McpServers:
             # that implies. (When two layers both touched a server, the LAST
             # file anchors: per-field origins are gone after the raw merge,
             # and the later file is the one whose author saw the final shape.)
-            servers.append(_substitute(server, ctx, blame[name].parent, warnings))
+            servers.append(_substitute(server, ctx, blame[name].parent, warnings, target))
     return McpServers(servers=tuple(servers), source=", ".join(sources))
 
 
 # -- reading ------------------------------------------------------------------
 
 
-def _read_mcp_block(path: Path, warnings: list[str]) -> dict | None:
+def _read_mcp_block(path: Path, warnings: list[str], target: McpTarget) -> dict | None:
     """The ``mcp`` table of one file, or None when it has nothing to give.
 
     Triage copied from ``_load_permission_rules``: absent is normal and silent,
     unreadable or unparseable warns once, and a file without the key we care
     about is simply not about us. Only a present-but-wrong ``mcp`` warns, since
     that is a user who meant to configure servers and got nothing.
+
+    Bytes rather than text because the Host seam speaks bytes; json.loads does
+    its own UTF-8 decoding and raises a ValueError subclass when that fails, so
+    a mojibake config becomes the same one warning as any other unreadable one.
     """
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = target.read_bytes(path)
     except FileNotFoundError:
         return None
     except OSError as exc:
@@ -293,7 +334,7 @@ def _take_timeout(entry: dict, ctx: str, warnings: list[str]) -> int:
 
 
 def _substitute(
-    server: McpServerConfig, ctx: str, base_dir: Path, warnings: list[str]
+    server: McpServerConfig, ctx: str, base_dir: Path, warnings: list[str], target: McpTarget
 ) -> McpServerConfig:
     """Expand ``{env:VAR}`` / ``{file:path}`` on every string leaf of a parsed
     server: command elements, cwd, environment values, url, header values.
@@ -305,23 +346,25 @@ def _substitute(
     if isinstance(server, McpLocalServer):
         return replace(
             server,
-            command=tuple(_expand(part, ctx, base_dir, warnings) for part in server.command),
-            cwd=_expand(server.cwd, ctx, base_dir, warnings),
+            command=tuple(
+                _expand(part, ctx, base_dir, warnings, target) for part in server.command
+            ),
+            cwd=_expand(server.cwd, ctx, base_dir, warnings, target),
             environment=tuple(
-                (key, _expand(value, ctx, base_dir, warnings))
+                (key, _expand(value, ctx, base_dir, warnings, target))
                 for key, value in server.environment
             ),
         )
     return replace(
         server,
-        url=_expand(server.url, ctx, base_dir, warnings),
+        url=_expand(server.url, ctx, base_dir, warnings, target),
         headers=tuple(
-            (key, _expand(value, ctx, base_dir, warnings)) for key, value in server.headers
+            (key, _expand(value, ctx, base_dir, warnings, target)) for key, value in server.headers
         ),
     )
 
 
-def _expand(value: str, ctx: str, base_dir: Path, warnings: list[str]) -> str:
+def _expand(value: str, ctx: str, base_dir: Path, warnings: list[str], target: McpTarget) -> str:
     if "{" not in value:  # the overwhelmingly common case; skip the regex
         return value
 
@@ -332,17 +375,25 @@ def _expand(value: str, ctx: str, base_dir: Path, warnings: list[str]) -> str:
             # placeholder in place, matching OpenCode: the server then fails to
             # authenticate with a message from the server itself, which is a
             # better story than a literal "{env:TOKEN}" travelling as a token.
-            return os.environ.get(arg, "")
+            #
+            # The environment is the TARGET's in a remote session: the person
+            # who wrote {env:API_TOKEN} into a file on that box exported it on
+            # that box, and this PC's variable of the same name is a different
+            # secret (docs/design/remote-ssh.md, "the target owns its policy").
+            return target.environ.get(arg, "")
         try:
             # Relative paths anchor to the CONFIG FILE's directory, as OpenCode
             # resolves them - never to this process's cwd, which is wherever
             # AgentClip was launched from and would send "{file:./token.txt}"
             # hunting through the user's project instead of ~/.config/opencode.
-            target = Path(arg).expanduser()
-            if not target.is_absolute():
-                target = base_dir / target
-            text = target.read_text(encoding="utf-8")
-        except OSError as exc:
+            secret = target.expanduser(arg)
+            if not secret.is_absolute():
+                secret = base_dir / secret
+            text = target.read_bytes(secret).decode("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            # A file that is not text is as unusable as one that is not there,
+            # and both are the author's mistake to see rather than a traceback
+            # out of a config load that promises never to raise.
             warnings.append(f"{ctx}: could not read {arg} for {{file:...}}; using '': {exc}")
             return ""
         # Stripped because secret files end in a newline, and a newline inside

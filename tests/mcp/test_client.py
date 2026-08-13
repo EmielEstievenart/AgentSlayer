@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from agentclip.mcp.client import McpCallError, McpManager
-from agentclip.mcp.types import McpLocalServer, McpServerStatus, tool_id
+from agentclip.mcp.types import McpLocalServer, McpRemoteServer, McpServerStatus, tool_id
 
 # Generous enough that a slow CI machine does not flake, short enough that a
 # genuinely stuck connect fails the test instead of hanging it.
@@ -365,6 +365,83 @@ def test_ensure_started_after_close_does_nothing(tmp_path: Path) -> None:
     manager.ensure_started()
     assert manager.tools() == ()
     assert manager.statuses()[0].state == "pending"
+
+
+# -- a remote session ----------------------------------------------------------
+
+
+def test_a_stdio_server_in_a_remote_session_is_refused_by_name(
+    managers: list[McpManager], tmp_path: Path
+) -> None:
+    """Reported, never spawned (docs/design/remote-ssh.md, "the target owns its
+    policy"): the entry's argv and cwd describe the target, and this process
+    only spawns here. The in-process target is deliberately supplied - it would
+    connect happily in a local session, so a connected state here would prove
+    the refusal happens too late to matter.
+    """
+    manager = McpManager(
+        [entry("fs"), McpRemoteServer(name="api", url="https://example.invalid/mcp")],
+        tmp_path,
+        remote_target="ssh:box",
+        _inproc_targets={"fs": demo_server("fs")},
+    )
+    managers.append(manager)
+    manager.ensure_started()
+
+    fs, _api = manager.statuses()
+    assert fs.state == "failed"
+    assert "stdio servers are not supported in a remote session" in fs.detail
+    assert "ssh:box" in fs.detail  # which machine that command belongs to
+    assert fs.tool_count == 0
+    assert manager.tools() == ()  # nothing of its was listed, so nothing is callable
+    with pytest.raises(McpCallError) as excinfo:
+        manager.call("fs_echo", {"text": "hi"})
+    assert excinfo.value.code == "mcp_unavailable"
+
+
+def test_a_local_session_still_spawns_its_stdio_servers(
+    managers: list[McpManager], tmp_path: Path
+) -> None:
+    """The contrast: the same entry, no remote target, connects as ever."""
+    manager = start(managers, [entry("fs")], {"fs": demo_server("fs")}, root=tmp_path)
+    assert manager.wait_ready(READY_S) is True
+    (fs,) = manager.statuses()
+    assert fs.state == "connected"
+
+
+def test_a_remote_sessions_http_failure_names_the_machine_that_dialed(
+    managers: list[McpManager], tmp_path: Path
+) -> None:
+    """The URL came off the target; the socket did not (design: "MCP transport
+    stays on the host"). `localhost` fails by reaching the WRONG machine, so a
+    bare connection error would send the user looking on the wrong box."""
+    manager = McpManager(
+        [McpRemoteServer(name="api", url="http://localhost:1/mcp", timeout_ms=5000)],
+        tmp_path,
+        remote_target="ssh:box",
+    )
+    managers.append(manager)
+    manager.ensure_started()
+    assert manager.wait_ready(READY_S) is True
+
+    (api,) = manager.statuses()
+    assert api.state == "failed"
+    assert "dialed from this PC, not from ssh:box" in api.detail
+
+
+def test_a_local_sessions_http_failure_says_nothing_about_machines(
+    managers: list[McpManager], tmp_path: Path
+) -> None:
+    manager = McpManager(
+        [McpRemoteServer(name="api", url="http://localhost:1/mcp", timeout_ms=5000)], tmp_path
+    )
+    managers.append(manager)
+    manager.ensure_started()
+    assert manager.wait_ready(READY_S) is True
+
+    (api,) = manager.statuses()
+    assert api.state == "failed"
+    assert "dialed from this PC" not in api.detail
 
 
 # -- the SDK-less install ------------------------------------------------------

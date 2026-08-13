@@ -33,6 +33,13 @@ class FakeSshHost(FakeHost):
         self.connected = False
         self.closed = False
         self._fail = fail  # "connect" | "probe" | ""
+        # What `printenv` answers. A box with a plausible login environment by
+        # default, so every launch test exercises the probe the way a real one
+        # does; the tests about the probe itself replace it.
+        self.blocking: dict[str, tuple[int, str]] = {"printenv": (0, "HOME=/home/dev\n")}
+
+    def run_blocking(self, command: str, *, timeout: float = 60.0) -> tuple[int, str]:
+        return self.blocking.get(command, (0, ""))
 
     def connect(self) -> None:
         if self._fail == "connect":
@@ -135,6 +142,84 @@ def test_a_saved_target_supplies_the_root(args, host: FakeSshHost, tmp_path: Pat
         launch = cli.remote_launch(args)
     assert not isinstance(launch, int)
     assert launch.project_root.as_posix() == REMOTE_ROOT
+
+
+# -- the target's environment ($env: in ITS mcp config) ------------------------
+
+
+def test_the_environment_is_the_targets_and_reaches_the_mcp_config(
+    args, host: FakeSshHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`{env:...}` in the target's opencode.json means the TARGET's variable.
+
+    The operator's own environment holds a different secret under the same
+    name, and reading it here would send it to the wrong server.
+    """
+    monkeypatch.setenv("AGENTCLIP_LAUNCH_TOKEN", "this-pcs-secret")
+    host.blocking["printenv"] = (0, "AGENTCLIP_LAUNCH_TOKEN=the-boxs-secret\n")
+    host.add_file(
+        f"{REMOTE_ROOT}/opencode.json",
+        '{"mcp": {"api": {"type": "remote", "url": "https://x",'
+        ' "headers": {"Authorization": "Bearer {env:AGENTCLIP_LAUNCH_TOKEN}"}}}}',
+    )
+
+    launch = cli.remote_launch(args)
+
+    assert not isinstance(launch, int)
+    (server,) = launch.config.mcp_servers.servers
+    assert server.headers == (("Authorization", "Bearer the-boxs-secret"),)
+
+
+def test_printenv_output_becomes_a_mapping() -> None:
+    assert cli._parse_environment("HOME=/home/dev\nPATH=/usr/bin:/bin\n") == {
+        "HOME": "/home/dev",
+        "PATH": "/usr/bin:/bin",
+    }
+
+
+def test_a_line_that_is_not_a_variable_is_dropped() -> None:
+    """A continuation line of a multi-line value looks exactly like a login
+    banner from here, so neither is guessed at: only real pairs survive."""
+    parsed = cli._parse_environment(
+        "Welcome to box!\n"
+        "GREETING=hello\n"
+        "  and the rest of a multi-line value\n"
+        "2BAD=no\n"  # not a POSIX name
+        "PATH=/usr/bin\n"
+    )
+    assert parsed == {"GREETING": "hello", "PATH": "/usr/bin"}
+
+
+def test_an_empty_value_is_still_a_variable() -> None:
+    assert cli._parse_environment("EMPTY=\n") == {"EMPTY": ""}
+
+
+def test_a_failed_printenv_is_a_warning_and_an_empty_environment(
+    host: FakeSshHost, capsys
+) -> None:
+    """Not fatal: an unset `{env:...}` already substitutes empty, so the worst
+    case is the state the user's own config file describes as acceptable."""
+    host.blocking["printenv"] = (127, "bash: printenv: command not found\n")
+
+    assert cli._remote_environment(host) == {}
+    assert "did not answer 'printenv'" in capsys.readouterr().err
+
+
+def test_a_remote_session_never_falls_back_to_this_pcs_environment(
+    args, host: FakeSshHost, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTCLIP_LAUNCH_TOKEN", "this-pcs-secret")
+    host.blocking["printenv"] = (1, "")
+    host.add_file(
+        f"{REMOTE_ROOT}/opencode.json",
+        '{"mcp": {"api": {"type": "remote", "url": "https://x/{env:AGENTCLIP_LAUNCH_TOKEN}"}}}',
+    )
+
+    launch = cli.remote_launch(args)
+
+    assert not isinstance(launch, int)
+    (server,) = launch.config.mcp_servers.servers
+    assert server.url == "https://x/"  # empty, not the operator's secret
 
 
 # -- failing fast, before the TUI ----------------------------------------------

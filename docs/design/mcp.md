@@ -28,18 +28,23 @@ OpenCode's docs claim: their runtime constants say 30s (mcp/index.ts:38,
 catalog.ts:11) and behaviour beats documentation when the point is
 compatibility.
 
-Files read, both from **this PC** (never through the Host):
+Files read, both from the machine the PROJECT is on - this PC locally, the
+target through the Host in a remote session:
 
-    ~/.config/opencode/opencode.json          always
-    <project root>/opencode.json              LOCAL sessions only
+    ~/.config/opencode/opencode.json          always (~ = that machine's home)
+    <project root>/opencode.json              always
 
 Same-name entries merge per-field, project over global, mirroring OpenCode's
-deep merge. The project file is skipped in remote sessions for the same
-reason permissions are pinned local (config.py header, remote-ssh.md
-decision 6), with the stakes raised: a `local` server is a *command this PC
-will run*, and a remote machine must not get to decide what the operator's
-PC executes. `opencode.jsonc` is out of scope for phase 1 (JSON with
-comments needs a real stripper; a wrong one corrupts strings).
+deep merge. Both layers travel with the permission block of the very same
+file, and for the same reason: the servers a project declares are described
+on the machine the project is on (remote-ssh.md, "the target owns its
+policy", which supersedes decision 6). What does *not* travel is the
+spawning - a `local` server is a **command**, and this PC is the only machine
+AgentClip spawns on, so a remote session reports those as failed with the
+reason and never runs them (§3). Reading them is what makes reporting them
+possible; skipping the layer, as an earlier draft did, made a configured
+server vanish without a word. `opencode.jsonc` is out of scope for phase 1
+(JSON with comments needs a real stripper; a wrong one corrupts strings).
 
 `{env:VAR}` and `{file:path}` placeholders are substituted on every string
 leaf after parsing. OpenCode substitutes over the raw text before parsing;
@@ -52,6 +57,14 @@ to the directory of the config file that declared the server, as OpenCode
 resolves it - "the token sits next to the config that names it" - never to
 the process's cwd.
 
+Both placeholders resolve on the machine the config was read from: the file
+over SFTP, the variable out of the target's login-shell environment, which
+`cli.remote_launch` fetches once with `printenv` and threads through
+`load_config`. Whoever wrote `{env:API_TOKEN}` into a file on that box
+exported it on that box, and this PC's variable of the same name is a
+different secret. An unreadable `printenv` is a warning and an empty
+mapping - i.e. the unset behaviour the file already allows for.
+
 The loader lives in `agentclip/mcp/config.py`, follows
 `_load_permission_rules`'s triage exactly (silent when the file is absent,
 one warning when it exists but cannot be understood, never fatal), and is
@@ -59,6 +72,11 @@ called from `load_config` next to the permission loader, gated by a new
 `[mcp]` table: `enabled` (default true) and `opencode_config` (blank = the
 same `default_opencode_config_path()` the permission reader uses - one
 function, not a copy). Parsed servers land on `Config.mcp_servers`.
+
+The reader stays a stdlib-only leaf that knows nothing of the Host: which
+machine it is reading arrives as `McpTarget` - a byte reader, an environment
+mapping and a `~` expander, defaulting to this PC - so `load_config` supplies
+the seam and the reader keeps its one job (tests/test_layering.py).
 
 ## 2. Dependency: an extra, like cv
 
@@ -104,6 +122,17 @@ line of status - never an exception that reaches a session. A remote server
 answering 401/403 maps to `needs_auth` (phase 1 has no OAuth; the status
 tells the user to authenticate via headers or OpenCode - §9). Tool lists are
 cached at connect; `tools/list_changed` refresh is out of scope.
+
+**In a remote session** (`McpManager(..., remote_target=...)`) two things
+change, both from remote-ssh.md's "the target owns its policy". A `local`
+entry never reaches a connect at all: it is `failed` from construction, with
+a detail naming the machine its command belongs to - the same
+never-connects shape as `disabled`, and like `disabled` it is seen through
+the mount paint rather than announced, since it precedes any status hook.
+And a `remote` entry that cannot be reached says who dialed it - the socket
+is opened from this PC while the URL came off the target, which is exactly
+how `http://localhost:8080` fails by reaching the wrong machine. A 401 does
+not get that note: the server answered, so the dial plainly worked.
 
 Teardown: `McpManager.close()` joins the loop thread after closing every
 client, wired into `cli.py:main()`'s existing `finally` beside
@@ -237,8 +266,11 @@ timeout named in ms.
   cover API-key servers; reusing OpenCode's `mcp-auth.json` tokens is the
   planned phase 2, full OAuth only if that proves insufficient.
 - MCP resources and prompts (OpenCode's synthetic `list_mcp_resources`
-  family), `tools/list_changed` live refresh, `opencode.jsonc`, nested
-  `.opencode/opencode.json` discovery, and remote-project config files.
+  family), `tools/list_changed` live refresh, `opencode.jsonc`, and nested
+  `.opencode/opencode.json` discovery. (Remote-project config files were on
+  this list; they are now §1, and the stdio servers such a file declares are
+  reported rather than spawned - running them on the target over an exec
+  channel is the wave after this one.)
 - The REST of OpenCode's discovery surface, named honestly: it also walks
   parent directories for plain `opencode.json` (monorepos), reads the
   legacy `~/.config/opencode/config.json` and TOML files, and honours the

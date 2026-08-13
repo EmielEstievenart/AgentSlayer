@@ -50,8 +50,7 @@ local.
    Session/chat/workspace state survive.
 
 6. **Policy local, project remote.** — **SUPERSEDED, see "Revision: the target owns
-   its policy" below.** Kept for the record because the code still reads this way
-   until phase 3 lands.
+   its policy" below.** Kept for the record only; the code no longer reads this way.
    - Permissions (`opencode.json` ruleset + deny-token backstop): **always local** —
      the user's policy must not weaken because of remote config.
    - Skills (SKILL.md discovery): **remote** in a remote session — via Host reads.
@@ -99,8 +98,10 @@ local.
 - **Phase 2 — done:** `SshHost` (Paramiko), `[remote]` config + CLI flags, launch/auth
   flow, reconnect, remote bootstrap facts, remote skills/project-config reads, gated
   integration tests.
-- **Phase 3 — agreed, not started:** move policy to the target. See the revision
-  section below.
+- **Phase 3 — done:** policy moves to the target. The permission ruleset and both
+  MCP layers are read off the target through the Host, `{file:}`/`{env:}` resolve
+  over there, stdio MCP servers are refused and reported, and `[approval]` is
+  pinned to this PC. See the revision section below.
 
 ## As built (phase 2)
 
@@ -174,7 +175,11 @@ ask.
 
 ## Revision: the target owns its policy
 
-Status: **agreed** (2026-08-13). Supersedes decision 6. Not yet implemented.
+Status: **implemented** (2026-08-13). Supersedes decision 6. The permission
+ruleset, `[approval]`, both MCP layers, `{file:}`/`{env:}` resolution and the
+stdio refusal are all as described below; the one thing built differently is
+noted where it is described (the refused stdio server reaches the status pane
+through the mount paint, so it gets a row and the statusbar count but no toast).
 
 Decision 6 got the rule backwards. "The user's policy must not weaken because of
 remote config" reads well until you notice which machine the policy is protecting:
@@ -240,6 +245,14 @@ in the target's config is reported as an unsupported-here server in the MCP stat
 pane, with its name. It is not spawned on the host PC (its argv and `cwd` describe
 the target) and not silently dropped. Spawning stdio servers on the target over an
 exec channel is a plausible later wave; it is not this one.
+
+As built, the refusal is a `failed` state set in `McpManager.__init__` - the same
+never-connects shape `disabled` has, because it is the same kind of fact: known
+from the config, before anything is attempted. That places it before the TUI
+registers its status hook, so it is painted (sidebar row, statusbar count, `/mcp`)
+rather than announced (transcript note, toast). Announcing the terminal states a
+manager is *born* with would be a change to the screen's mount path, not to MCP,
+and `missing_sdk` has the same gap today.
 
 ### What stays on the host PC
 

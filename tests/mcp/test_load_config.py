@@ -1,8 +1,9 @@
 """load_config's MCP wiring (docs/design/mcp.md section 1): the ``[mcp]`` table,
-which files the loader is pointed at, and - the part with teeth - which files it
-is NOT pointed at: nothing at all when ``enabled = false``, and never the
-project's opencode.json in a remote session, because a ``local`` MCP server is a
-command THIS PC will run and the remote machine must not get to pick it.
+which files the loader is pointed at, and which MACHINE it reads them from -
+both layers off the target in a remote session, along with the files and
+variables they name (docs/design/remote-ssh.md, "the target owns its policy").
+The one file it opens in no session at all is any of them when
+``enabled = false``.
 
 Pure loader behaviour (entry parsing, merge semantics, placeholder substitution)
 lives in tests/mcp/test_config.py; here every test goes through load_config.
@@ -17,7 +18,14 @@ import pytest
 
 import agentclip.config
 from agentclip.config import load_config
+from agentclip.hosts import FakeHost
 from agentclip.mcp.types import McpLocalServer, McpRemoteServer
+
+# The remote user's home, and where OpenCode keeps its config under it - which
+# in a remote session is resolved from `home`, never from this PC's ~.
+REMOTE_HOME = Path("/home/dev")
+REMOTE_OPENCODE = "/home/dev/.config/opencode/opencode.json"
+REMOTE_ROOT = "/srv/app"
 
 
 @pytest.fixture
@@ -36,17 +44,20 @@ def _write_opencode(path: Path, mcp: dict) -> None:
     path.write_text(json.dumps({"mcp": mcp}), encoding="utf-8")
 
 
-class _RemoteHost:
-    """The least Host a remote session needs here: load_config only ever calls
-    ``read_bytes`` (for the project's .agentclip.toml), and a remote machine
-    without one answers FileNotFoundError. Everything else may not be touched -
-    the whole point under test is that the MCP reader never goes through it."""
+def _opencode_json(mcp: dict) -> str:
+    return json.dumps({"mcp": mcp})
 
-    name = "fake-remote"
-    case_sensitive = True
 
-    def read_bytes(self, path: Path, *, max_bytes: int | None = None) -> bytes:
-        raise FileNotFoundError(path)
+def _remote(global_path: Path, host: FakeHost, **kwargs: object):
+    """A session on ``host``, loaded the way cli.remote_launch loads one: the
+    project root, the home directory and the environment are the target's."""
+    return load_config(
+        Path(REMOTE_ROOT),
+        global_config_path=global_path,
+        host=host,
+        home=REMOTE_HOME,
+        **kwargs,  # type: ignore[arg-type]
+    )
 
 
 # -- the [mcp] table and its defaults -----------------------------------------
@@ -132,7 +143,7 @@ def test_disabled_means_no_file_is_opened(project: Path, global_path: Path, tmp_
     assert not any(str(ocjson) in w for w in config.warnings)
 
 
-# -- the project layer: local sessions only -----------------------------------
+# -- the project layer, in both kinds of session -------------------------------
 
 
 def test_local_session_reads_project_opencode_json(project: Path, global_path: Path) -> None:
@@ -142,21 +153,6 @@ def test_local_session_reads_project_opencode_json(project: Path, global_path: P
 
     assert [s.name for s in config.mcp_servers.servers] == ["fs"]
     assert config.mcp_servers.source == str(project / "opencode.json")
-
-
-def test_remote_session_skips_project_opencode_json(project: Path, global_path: Path) -> None:
-    """The same project file that feeds a local session contributes NOTHING when
-    the config is loaded for a remote host (docs/design/mcp.md section 1): in a
-    remote session project_root belongs to the other machine, and its
-    opencode.json could name any command for this PC to spawn."""
-    _write_opencode(project / "opencode.json", {"evil": {"type": "local", "command": ["evil"]}})
-
-    local = load_config(project, global_config_path=global_path)
-    remote = load_config(project, global_config_path=global_path, host=_RemoteHost())
-
-    assert [s.name for s in local.mcp_servers.servers] == ["evil"]  # the contrast
-    assert remote.mcp_servers.servers == ()
-    assert remote.mcp_servers.source == ""
 
 
 def test_project_layer_merges_per_field_over_global(
@@ -181,3 +177,162 @@ def test_project_layer_merges_per_field_over_global(
     assert server.headers == (("a", "1"),)
     assert server.timeout_ms == 1234  # the project's one overridden field
     assert config.mcp_servers.source == f"{ocjson}, {project / 'opencode.json'}"
+
+
+# -- a remote session: both layers, off the target -----------------------------
+
+
+def test_both_layers_are_read_off_the_target(global_path: Path, tmp_path: Path) -> None:
+    """The tripwire, inverted: the servers now come off the machine the project
+    is on, project layer included.
+
+    The entries describe that machine - the URL its author could reach, the
+    token beside the file that names it - so the file over there is the one
+    that answers, and a file at the same path on this PC must not be.
+    """
+    (tmp_path / "opencode.json").write_text(
+        _opencode_json({"api": {"type": "remote", "url": "https://this-pc.example"}}),
+        encoding="utf-8",
+    )
+    host = FakeHost(REMOTE_ROOT)
+    host.add_file(REMOTE_OPENCODE, _opencode_json({"api": {"type": "remote", "url": "https://box"}}))
+    host.add_file(
+        f"{REMOTE_ROOT}/opencode.json", _opencode_json({"api": {"headers": {"a": "1"}}})
+    )
+
+    config = _remote(global_path, host)
+
+    (server,) = config.mcp_servers.servers
+    assert isinstance(server, McpRemoteServer)
+    assert server.url == "https://box"  # the remote global layer
+    assert server.headers == (("a", "1"),)  # ...retuned by the remote project layer
+    # str(Path), not the posix spelling: McpServers.source is not shown anywhere
+    # yet, so it is still the plain path join every local test asserts.
+    assert config.mcp_servers.source == (
+        f"{Path(REMOTE_OPENCODE)}, {Path(REMOTE_ROOT) / 'opencode.json'}"
+    )
+
+
+def test_the_remote_global_layer_comes_from_the_remote_home(global_path: Path) -> None:
+    """With no [mcp] opencode_config, ~ is the TARGET user's home - the same
+    resolution the permission ruleset in that very file gets."""
+    host = FakeHost(REMOTE_ROOT)
+    host.add_file(REMOTE_OPENCODE, _opencode_json({"fs": {"type": "local", "command": ["fs"]}}))
+
+    config = _remote(global_path, host)
+
+    assert [s.name for s in config.mcp_servers.servers] == ["fs"]
+    assert config.mcp_servers.source == str(Path(REMOTE_OPENCODE))
+
+
+def test_a_tilde_in_mcp_opencode_config_expands_on_the_target(global_path: Path) -> None:
+    global_path.write_text('[mcp]\nopencode_config = "~/servers.json"\n', encoding="utf-8")
+    host = FakeHost(REMOTE_ROOT)
+    host.add_file(
+        "/home/dev/servers.json", _opencode_json({"fs": {"type": "local", "command": ["fs"]}})
+    )
+
+    config = _remote(global_path, host)
+
+    assert [s.name for s in config.mcp_servers.servers] == ["fs"]
+    assert config.mcp_servers.source == str(Path("/home/dev/servers.json"))
+
+
+def test_a_stdio_entry_on_the_target_is_read_not_dropped(global_path: Path) -> None:
+    """Reading it is what lets McpManager REFUSE it by name (mcp/client.py):
+    dropping it here is how a server the user configured disappears without a
+    word, which is the failure this replaced."""
+    host = FakeHost(REMOTE_ROOT)
+    host.add_file(
+        f"{REMOTE_ROOT}/opencode.json",
+        _opencode_json({"fs": {"type": "local", "command": ["fs-mcp"]}}),
+    )
+
+    config = _remote(global_path, host)
+
+    (server,) = config.mcp_servers.servers
+    assert isinstance(server, McpLocalServer)
+    assert server.command == ("fs-mcp",)
+
+
+def test_a_file_placeholder_is_read_through_the_host(global_path: Path, tmp_path: Path) -> None:
+    """`{file:token}` is a path on the TARGET, anchored to the directory of the
+    config that named it - the token sits next to the file that names it, and
+    that file is over there."""
+    (tmp_path / "token").write_text("this-pcs-secret", encoding="utf-8")
+    host = FakeHost(REMOTE_ROOT)
+    host.add_file(REMOTE_OPENCODE, _opencode_json({
+        "api": {
+            "type": "remote",
+            "url": "https://box",
+            "headers": {"Authorization": "Bearer {file:token}"},
+        }
+    }))
+    host.add_file("/home/dev/.config/opencode/token", "the-boxs-secret\n")
+
+    config = _remote(global_path, host)
+
+    (server,) = config.mcp_servers.servers
+    assert isinstance(server, McpRemoteServer)
+    assert server.headers == (("Authorization", "Bearer the-boxs-secret"),)
+
+
+def test_a_file_placeholder_with_a_tilde_expands_on_the_target(global_path: Path) -> None:
+    host = FakeHost(REMOTE_ROOT)
+    host.add_file(REMOTE_OPENCODE, _opencode_json({
+        "api": {"type": "remote", "url": "https://box", "headers": {"k": "{file:~/token}"}}
+    }))
+    host.add_file("/home/dev/token", "from-the-remote-home")
+
+    config = _remote(global_path, host)
+
+    (server,) = config.mcp_servers.servers
+    assert isinstance(server, McpRemoteServer)
+    assert server.headers == (("k", "from-the-remote-home"),)
+
+
+def test_env_placeholders_come_from_the_supplied_environment(
+    global_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The environment is the target's, passed in by cli.remote_launch. This
+    PC's variable of the same name is a different machine's secret."""
+    monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "this-pcs-secret")
+    host = FakeHost(REMOTE_ROOT)
+    host.add_file(REMOTE_OPENCODE, _opencode_json({
+        "api": {
+            "type": "remote",
+            "url": "https://box",
+            "headers": {"Authorization": "Bearer {env:AGENTCLIP_TEST_TOKEN}"},
+        }
+    }))
+
+    config = _remote(global_path, host, environ={"AGENTCLIP_TEST_TOKEN": "the-boxs-secret"})
+
+    (server,) = config.mcp_servers.servers
+    assert isinstance(server, McpRemoteServer)
+    assert server.headers == (("Authorization", "Bearer the-boxs-secret"),)
+
+
+def test_without_a_remote_environment_env_placeholders_are_empty(
+    global_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unreadable printenv (cli warns and passes nothing) substitutes empty -
+    exactly what an unset variable does - and never this PC's value."""
+    monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "this-pcs-secret")
+    host = FakeHost(REMOTE_ROOT)
+    host.add_file(REMOTE_OPENCODE, _opencode_json({
+        "api": {"type": "remote", "url": "https://box/{env:AGENTCLIP_TEST_TOKEN}"}
+    }))
+
+    config = _remote(global_path, host)
+
+    (server,) = config.mcp_servers.servers
+    assert isinstance(server, McpRemoteServer)
+    assert server.url == "https://box/"
+
+
+def test_a_target_with_no_opencode_json_is_silent(global_path: Path) -> None:
+    config = _remote(global_path, FakeHost(REMOTE_ROOT))
+    assert config.mcp_servers.servers == ()
+    assert config.mcp_servers.source == ""
+    assert config.warnings == ()

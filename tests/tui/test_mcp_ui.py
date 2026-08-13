@@ -7,7 +7,9 @@ shape (``statuses()`` + ``set_status_hook`` - no SDK, no loop thread):
 * an app built WITHOUT a manager grows no MCP chrome at all - no sidebar block,
   a hidden statusbar segment;
 * an app built WITH one paints the configured servers at mount, so the
-  pending/disabled states show before any transition fires (connects are lazy);
+  pending/disabled states show before any transition fires (connects are lazy),
+  which is also the ONLY surface a stdio server refused in a remote session
+  gets - it is decided before any hook exists;
 * a status-hook transition fired from a FOREIGN thread - the manager's loop
   thread in production - repaints both surfaces, which proves the post_message
   marshal rather than the painting;
@@ -139,6 +141,40 @@ async def test_mount_paints_the_configured_servers_before_any_transition(
         assert str(seg.render()) == "mcp 0/1"
         assert _row_text(main, 0) == "alpha · pending"
         assert _row_text(main, 1) == "beta · disabled"
+
+
+async def test_a_refused_stdio_server_is_visible_without_any_transition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stdio server refused in a remote session (mcp/client.py) reaches the
+    screen through the mount paint, exactly as `disabled` does: it is decided
+    in the manager's __init__, so no hook exists yet to announce it.
+
+    That is the whole of its reporting, and this test is where that is written
+    down: the sidebar row and the statusbar denominator carry it (and `/mcp`
+    reads the same statuses()), while the transcript note and the warning toast
+    - which only `_on_mcp_status_changed` writes - never fire for it.
+    """
+    toasts: list[str] = []
+    monkeypatch.setattr(
+        MainScreen,
+        "notify",
+        lambda self, message, *args, **kwargs: toasts.append(message),
+    )
+    detail = (
+        "stdio servers are not supported in a remote session: this entry's command "
+        "and cwd describe ssh:box, and AgentClip spawns processes on this PC only"
+    )
+    manager = FakeMcpManager(McpServerStatus("fs", "failed", detail=detail))
+    app = _make_app(tmp_path, manager)
+    async with app.run_test(size=(110, 55)) as pilot:
+        main = await _ready(app, pilot)
+
+        assert _row_text(main, 0).startswith("fs · failed · stdio servers are not supported")
+        assert str(_seg(main).render()) == "mcp 0/1"  # counted, not hidden
+        await pilot.pause(0.2)
+        assert not any("fs" in entry for entry in main.transcript.entries)
+        assert toasts == []
 
 
 async def test_a_transition_fired_from_a_foreign_thread_repaints_both_surfaces(

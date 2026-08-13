@@ -49,7 +49,9 @@ local.
    re-dials + re-authenticates on the next command (interactive prompt if needed).
    Session/chat/workspace state survive.
 
-6. **Policy local, project remote.**
+6. **Policy local, project remote.** — **SUPERSEDED, see "Revision: the target owns
+   its policy" below.** Kept for the record because the code still reads this way
+   until phase 3 lands.
    - Permissions (`opencode.json` ruleset + deny-token backstop): **always local** —
      the user's policy must not weaken because of remote config.
    - Skills (SKILL.md discovery): **remote** in a remote session — via Host reads.
@@ -97,6 +99,8 @@ local.
 - **Phase 2 — done:** `SshHost` (Paramiko), `[remote]` config + CLI flags, launch/auth
   flow, reconnect, remote bootstrap facts, remote skills/project-config reads, gated
   integration tests.
+- **Phase 3 — agreed, not started:** move policy to the target. See the revision
+  section below.
 
 ## As built (phase 2)
 
@@ -167,3 +171,92 @@ own fallback does; a dedicated prompt path for it was not built and is untested.
 `known_hosts` is honored and an unknown key is offered with its SHA256
 fingerprint — never auto-added, and never trusted when there is no callback to
 ask.
+
+## Revision: the target owns its policy
+
+Status: **agreed** (2026-08-13). Supersedes decision 6. Not yet implemented.
+
+Decision 6 got the rule backwards. "The user's policy must not weaken because of
+remote config" reads well until you notice which machine the policy is protecting:
+every file a rule can save is on the *target*. A ruleset written on the host PC
+describes paths that do not exist over there, so in practice it either matched
+nothing or matched by accident. The machine whose files are at risk is the machine
+that should say what may happen to them.
+
+**New rule of thumb.** Everything describing *the work* — the project, its skills,
+its permissions, its MCP servers — lives on the target. Everything describing *the
+tool's own operation* — clipboard relay, screen matching, service profiles, session
+storage, how to dial the target — stays on the host PC, because that is where those
+things physically happen. One deliberate exception, below.
+
+### What moves
+
+**The permission ruleset (`opencode.json` → `permission`).** Read from the target
+via the Host seam: the remote user's `~/.config/opencode/opencode.json` (remote home
+from `host.home_dir()`, as skills already resolve it) and, newly, the remote
+project's `opencode.json`. The host PC's `opencode.json` is **not consulted at all**
+in a remote session — not as a fallback, not as an overlay. Two rulesets in play
+would mean every future permission question has to be answered twice.
+
+This is a real code change, not a flag: `_load_permission_rules` takes no `host`
+parameter today, and that absence *is* the current enforcement.
+
+`[permission] opencode_config`, when set, now names a path **on the target**. A
+host-side `config.toml` may still set it, but the string is resolved remotely — the
+setting says "which file holds the ruleset", and the ruleset is over there.
+
+**A target with no `opencode.json`** behaves exactly like a local machine with none:
+empty ruleset, legacy allowlist mode. No new concept, and no fallback to the host
+PC's file — the whole point is that host file no longer participates.
+
+**MCP configuration.** Both layers read from the target via the Host seam, which
+also un-skips the project layer that `config.py:925` drops today. `{file:...}`
+placeholders resolve against the remote config file's directory, over SFTP, so a
+token sitting beside `opencode.json` on the box is found where its author put it.
+`{env:VAR}` resolves from the **target's** login-shell environment — fetched once at
+connect (`bash -lc printenv`) and cached for the session — for the same reason: the
+person who wrote `{env:API_TOKEN}` into a file on that box exported it on that box.
+
+**MCP transport.** HTTP servers are dialed **through an SSH tunnel** (paramiko
+`direct-tcpip`), so the connection originates from the target. Dialing straight from
+the host PC would have been less work and would have covered public web APIs, but it
+silently fails for exactly the endpoints a remote box is interesting for —
+`localhost:<port>` on the target, internal services, IP-allowlisted APIs — and fails
+by timeout, which teaches the user nothing.
+
+**MCP stdio servers are not supported in a remote session.** A `type: "local"` entry
+in the target's config is reported as an unsupported-here server in the MCP status
+pane, with its name. It is not spawned on the host PC (its argv and `cwd` describe
+the target) and not silently dropped. Spawning stdio servers on the target over an
+exec channel is a plausible later wave; it is not this one.
+
+### What stays on the host PC
+
+Global `config.toml`, CLI flags, `~/.ssh/*`, service appearance profiles, and the
+`.agentclip` session/transcript/backup tree — all as built in phase 2.
+
+**The one exception: `command_deny_tokens`.** The host PC's `[approval]
+command_deny_tokens` are always applied, and no remote layer can drop one. The rest
+of `[approval]` — `mode`, `yolo`, `command_allowlist` — follows the target, which is
+already what happens, since the remote `.agentclip.toml` merges over the host's.
+
+Deny tokens are the exception because they are the only setting whose entire job is
+to be unreachable: a brake that a config file can release is not a brake. A remote
+layer may still *add* tokens (tightening is always safe); the effective set is the
+union, and removal is not expressible. This costs one asymmetry in an otherwise
+clean rule, and buys a guarantee that survives cloning an unfamiliar repo onto the
+box.
+
+### Consequences to handle when implementing
+
+- `McpManager` currently spawns servers on this PC and defaults `cwd` to
+  `project_root` — a remote path handed to a local `subprocess`. Dropping stdio
+  support in remote sessions removes that hazard rather than papering over it.
+- Config load order gains a step: the ruleset and MCP blocks can only be read
+  *after* connect, alongside the existing remote `.agentclip.toml` read
+  (`cli.py:478`), not during the boot load that selects the target.
+- The permission-source string shown in the TUI must name the machine, not just the
+  path — `dev-box:~/.config/opencode/opencode.json` — or two identical-looking
+  paths become indistinguishable in a screenshot.
+- Tests: `FakeHost` gains the ruleset/MCP fixtures; the tunnel and remote `printenv`
+  belong behind the existing `AGENTCLIP_SSH_TESTS=1` gate.

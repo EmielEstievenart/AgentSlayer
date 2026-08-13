@@ -321,6 +321,13 @@ ARITY: dict[str, int] = {
 }
 
 
+# The composite-id alphabet, mirrored from agentclip.mcp.types.sanitize: this
+# module is a stdlib-only leaf (it cannot import agentclip.mcp), so the one
+# regex is duplicated with its source named - the two must stay identical for
+# the always_pattern neutering below to be sound.
+_MCP_ID_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
 def always_pattern(key: str, resource: str) -> str:
     """The resource pattern an "always allow" decision should remember.
 
@@ -331,10 +338,17 @@ def always_pattern(key: str, resource: str) -> str:
     if key == "mcp":
         # Per TOOL, not per server, and never the whole key: the user approved
         # ONE tool's behaviour at the gate, not a server's entire surface
-        # (docs/design/mcp.md section 4). Composite ids are sanitized to
-        # [a-zA-Z0-9_-], so they can contain no `*` or `?` - the id is literal
-        # when read back as a wildcard pattern, and matches only itself.
-        return resource
+        # (docs/design/mcp.md section 4). REAL composite ids are sanitized to
+        # [a-zA-Z0-9_-] and so read back as literal patterns - but the resource
+        # here is the model's raw `tool:` param, not a cache id. A model that
+        # sends `tool: github_*` would otherwise mint a remembered ALLOW rule
+        # with a live wildcard - one gate press away from auto-approving every
+        # github tool, and (because session rules evaluate last) from outranking
+        # the user's own file-written denies. Re-sanitizing with the id
+        # alphabet's own rule closes it: a resource that needed rewriting can
+        # never equal a real id, so the remembered rule is inert; one that
+        # didn't is the exact id, matching only itself.
+        return _MCP_ID_RE.sub("_", resource)
     if key != "bash":
         return "*"
     try:

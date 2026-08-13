@@ -34,6 +34,29 @@ from agentclip.tools.shell import reason_line
 def preview_renderable(action: PendingAction) -> RenderableType:
     """The Rich renderable for one gated call's preview."""
     if action.kind == "command":
+        # ONLY run_command's own preview comes from its `command` param. Any
+        # other command-kind tool (mcp today) must render the engine-computed
+        # preview: params are model-authored, and a decoy `command: git status`
+        # riding an mcp call would otherwise repaint the gate as a harmless
+        # shell line. The verdict path already ignores the decoy
+        # (approval.py resolves the key via target()); the display has to tell
+        # the same story.
+        if action.call.tool != "run_command":
+            text = Text()
+            text.append(f"{action.preview}\n", style="bold")
+            reason = reason_line(action.call)
+            if reason:
+                text.append(f"{reason}\n", style="italic")
+            # The one-line preview clips args at 120 chars, and for mcp the
+            # args ARE the semantics - show them in full here, where the
+            # drawer body scrolls, so nothing rides below the fold of a "…".
+            args = action.call.params.get("args", "")
+            if args:
+                text.append("\nargs:\n", style="bold")
+                text.append(f"{args}\n")
+            text.append("\n")
+            text.append("no rule allows this - approve to run it once", style="dim")
+            return text
         command = action.call.params.get("command") or action.preview
         text = Text()
         text.append(f"$ {command}\n", style="bold")
@@ -109,7 +132,17 @@ class ActionPanel(Vertical):
         is asking. It is the title line's job because the diff below it looks
         identical either way."""
         self.current_action = action
-        target = action.call.params.get("path") or action.call.params.get("command", "")
+        # The title's target must be the param the VERDICT was computed from,
+        # per tool - not "whatever params exist": an mcp call carrying a decoy
+        # `command:` or `path:` param must not retitle the gate (same decoy the
+        # preview body guards against, see preview_renderable).
+        params = action.call.params
+        if action.call.tool == "run_command":
+            target = params.get("command", "")
+        elif action.call.tool == "mcp":
+            target = params.get("tool", "")
+        else:
+            target = params.get("path", "")
         title = f"{prefix}APPROVE  ·  call {position}  ·  {action.call.tool} {target}".rstrip()
         self.query_one("#action-title", Static).update(Text(title))
         self.query_one("#action-queue", Static).update(Text(queue))

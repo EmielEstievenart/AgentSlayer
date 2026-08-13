@@ -37,15 +37,15 @@ from agentclip.tui.graphics import probe_terminal
 # sections 1-5, and composer.bootstrap then appends section 6 - its fixed
 # scaffolding ("SECTION 6 - THE TASK", the ===CLIP:TASK=== marker, the
 # newline joins and the ===CLIP:EOM turn=1 chat=...=== line come to ~85 chars
-# with a generous chat name) plus the user's typed task, which does not exist
-# yet when the registry is sized. 500 = that scaffolding plus ~400 chars (a
-# few typed lines) of task allowance. An allowance, not a guarantee: a longer
-# task was already gambling against the budget without MCP (the smallest
-# presets run ~67 chars under it with a saturated skills listing -
-# protocol.md section 2, "Budget headroom"), and the failure this reserve
-# exists to prevent is the NEW one: a preset that bootstrapped yesterday
-# raising BudgetExceeded today only because MCP appeared.
-_MCP_BOOTSTRAP_RESERVE = 500
+# with a generous chat name). The task itself is NOT an allowance any more:
+# both controller flows now pass the real task length on the request
+# (EngineRequest.task_chars), because an allowance was exactly how the rule
+# broke - a four-sentence task on a 12k preset measured fine at build time
+# and raised BudgetExceeded at bootstrap. The fallback below covers only
+# callers that cannot know their task yet (tests building registries
+# directly); it errs large for the same reason the old reserve erred small.
+_MCP_SECTION6_SCAFFOLD = 120
+_MCP_TASK_FALLBACK = 1_000
 
 # The MCP listing never takes more than this, however huge the preset's
 # budget: past a couple thousand chars a bigger bootstrap teaser stops earning
@@ -219,10 +219,16 @@ def _sized_registry(
     # add no catalog text (design section 5, degradation step 1).
     if manager is None or all(s.state == "disabled" for s in manager.statuses()):
         return base, ()
-    # Lazy but eager-on-arm (design section 3): the first session build kicks
-    # off every connect and does NOT wait - a tool not live yet is simply not
-    # listed, and mcp_schema serves the live cache later.
+    # Eager-on-arm (design section 3): main() already kicked the connects off
+    # at construction; this covers factories built without that path (tests,
+    # embedders). The bounded wait is a catch-up, not a gate: when servers are
+    # still settling - the first build of an app run, typically - half a second
+    # buys the catalog its real tool listing instead of "(none connected
+    # yet)", and once everything has settled it returns immediately, so every
+    # later build pays nothing.
     manager.ensure_started()
+    if any(s.state in ("pending", "connecting") for s in manager.statuses()):
+        manager.wait_ready(0.5)
 
     preset = cfg.preset()
     spec_free = render_spec(
@@ -234,7 +240,12 @@ def _sized_registry(
         session_chat_name,
         role=req.role,
     )
-    room = preset.max_paste_chars - len(spec_free) - _MCP_BOOTSTRAP_RESERVE
+    # The bootstrap this sizing protects is spec + section-6 scaffold + the
+    # TASK - so the task is subtracted at its real length whenever the caller
+    # knew it (both controller flows do), and at a deliberately fat fallback
+    # when it did not.
+    task_chars = req.task_chars if req.task_chars > 0 else _MCP_TASK_FALLBACK
+    room = preset.max_paste_chars - len(spec_free) - task_chars - _MCP_SECTION6_SCAFFOLD
     # The same budget/6 discipline the skills listing follows, with a hard cap
     # on top and never more than the measured room. The listing budget bounds
     # only the LISTING, and the docs' fixed prose rides on top - so the fit is
@@ -518,6 +529,13 @@ def main(argv: list[str] | None = None) -> int:
     mcp_manager: McpManager | None = None
     if config.mcp.enabled and config.mcp_servers.servers:
         mcp_manager = McpManager(config.mcp_servers.servers, launch.project_root)
+        # Kick the connects off NOW, not at the first session build: they
+        # overlap the terminal probe, the TUI mount and the user typing their
+        # task, so the first bootstrap usually lists real tools instead of the
+        # guaranteed-empty listing a build-time kick-off produced (the connect
+        # has not begun when the catalog snapshot is taken microseconds later).
+        # Still non-blocking - a slow server delays nothing.
+        mcp_manager.ensure_started()
     app = AgentClipApp(
         config=config,
         provider=provider,

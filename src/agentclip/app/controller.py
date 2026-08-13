@@ -1258,7 +1258,13 @@ class SessionController:
             delegation = self._view.delegation_available()
             engine = await asyncio.to_thread(
                 self._engine_factory,
-                EngineRequest(service=spec.service, allow_delegate=delegation),
+                EngineRequest(
+                    service=spec.service,
+                    allow_delegate=delegation,
+                    # The factory sizes the MCP catalog against the REAL task
+                    # (it is part of the bootstrap the sizing protects).
+                    task_chars=len(spec.task),
+                ),
             )
             self._watch_engine(engine)
             # The permission mode the user dialled in BEFORE this session existed
@@ -1743,6 +1749,11 @@ class SessionController:
         pasted into the master's chat would corrupt that conversation
         irrecoverably.
         """
+        # Composed BEFORE the engine is built: the sub-task (the model's task
+        # plus the delegating context) is exactly what start_task will paste,
+        # and the factory needs its real length to size the MCP catalog -
+        # model-written delegations routinely dwarf a typed master task.
+        task_text = _compose_sub_task(req)
         engine = await asyncio.to_thread(
             self._engine_factory,
             EngineRequest(
@@ -1758,6 +1769,7 @@ class SessionController:
                 role="subagent",
                 allow_delegate=False,  # nesting is excluded by construction
                 parent_chat_name=master.ref.chat_name,
+                task_chars=len(task_text),
             ),
         )
         self._watch_engine(engine)  # a sub-agent's calls are watched like the master's
@@ -1770,7 +1782,6 @@ class SessionController:
         # so the sub-agent's very first verdict already obeys plan/unattended and
         # nothing is announced to a conversation that has not started.
         await self._engine_call(engine.set_permission_mode, self._mode)
-        task_text = _compose_sub_task(req)
         await self._view.add_note(
             f"sub-agent chat: {engine.chat_name} - a fresh chat with its own context; "
             "it sees nothing of the conversation that delegated to it"

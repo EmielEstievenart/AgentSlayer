@@ -53,6 +53,14 @@ class EngineRequest:
     allow_delegate: bool = False
     chat_name: str | None = None  # None -> the factory draws a fresh one
     parent_chat_name: str | None = None  # the delegating chat, for the audit log
+    # len() of the exact task text start_task will be given, when the caller
+    # already holds it - both controller flows do. The factory sizes the MCP
+    # catalog addition against the preset's paste budget (docs/design/mcp.md
+    # section 5), and the bootstrap = spec + THIS task: sizing against a guessed
+    # task allowance is how a four-sentence task on a 12k preset turned into
+    # BudgetExceeded. 0 means "unknown", which falls back to a conservative
+    # allowance in the factory.
+    task_chars: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from agentclip.app.types import EngineRequest
-from agentclip.cli import _MCP_BOOTSTRAP_RESERVE, make_engine_factory
+from agentclip.cli import _MCP_SECTION6_SCAFFOLD, _MCP_TASK_FALLBACK, make_engine_factory
 from agentclip.config import Config, load_config
 from agentclip.mcp.client import McpManager
 from agentclip.mcp.types import McpLocalServer
@@ -173,7 +173,9 @@ def _tuned_root(tmp_path: Path, room: int) -> Path:
     root.mkdir(exist_ok=True)
     _project_with_budget(root, 12_000)  # placeholder in the 8k..32k caps bucket
     spec_len = _mcp_free_spec_len(root)
-    budget = spec_len + _MCP_BOOTSTRAP_RESERVE + room
+    # These requests carry no task_chars, so the factory reserves the fat
+    # fallback + scaffold; adding both keeps `room` meaning what it says.
+    budget = spec_len + _MCP_TASK_FALLBACK + _MCP_SECTION6_SCAFFOLD + room
     assert 8_000 < budget <= 32_000  # stays in the placeholder's caps bucket
     _project_with_budget(root, budget)
     assert _mcp_free_spec_len(root) == spec_len  # the transfer actually held

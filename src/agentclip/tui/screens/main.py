@@ -112,19 +112,24 @@ session runs in, SUBAGENT the second window a delegated sub-agent gets. The slot
 is the storage key behind a window tab (``_WINDOW_SLOTS``) - that mapping is the
 seam an N-window bar plugs into, and it is why the readiness rules and the
 calibration dataclass never had to learn what a tab is. Two independent pointers
-say what happens to which slot - ``_calibrating`` is the selected tab, ``_live``
-is what the automation drives right now - because the user must be able to
+say what happens to which slot - *calibrating* is the selected tab, *live* is
+what the automation drives right now - because the user must be able to
 calibrate (and watch) the sub-agent window while the master chat is mid-turn.
-``start_browser_chat``/``end_browser_chat`` are the only things that move
-``_live``, and ``start_browser_chat`` is all-or-nothing on purpose: it retargets
-the automation *only* after a verified click landed, so a False return
-guarantees nothing was clicked and nothing was retargeted - a sub-agent
-bootstrap pasted into the master chat would corrupt that conversation
-irrecoverably.
+Both of them, and the calibrations they point at, are the
+:class:`~agentclip.automation.controller.AutomationController`'s (``_automation``
+below): they are shared automation state, not one shell's, and this screen
+reaches them through it. ``start_browser_chat``/``end_browser_chat`` are the
+only things that move the live pointer, and ``start_browser_chat`` is
+all-or-nothing on purpose: it retargets the automation *only* after a verified
+click landed, so a False return guarantees nothing was clicked and nothing was
+retargeted - a sub-agent bootstrap pasted into the master chat would corrupt
+that conversation irrecoverably.
 
-**A service per window, too.** Each tab carries its own service key
-(``_services``), so the conversation the user steers can run on a big-context
-chat while delegated sub-tasks go to a cheap fast one. Every "what does this
+**A service per window, too.** Each tab carries its own service key (also the
+controller's - ``_automation.service_of``), so the conversation the user steers
+can run on a big-context chat while delegated sub-tasks go to a cheap fast one.
+What that key RESOLVES to stays here: the preset comes off this screen's
+``Config`` and the profile out of its ``_profiles`` cache. Every "what does this
 look like / how long is stillness / may I hover-scan" question therefore has to
 name a slot: ``_slot_preset``/``_slot_profile`` answer it, ``_live_preset``/
 ``_live_profile`` are the automation's shorthand for the window it is driving,
@@ -158,6 +163,7 @@ from textual.worker import Worker, get_current_worker
 from agentclip.app import SessionController, SessionSpec, SessionView
 from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import RunCall, Severity
+from agentclip.automation.controller import AutomationController
 from agentclip.automation.harness_log import (
     HARNESS_LOG_MAX,
     KIND_ARMED,
@@ -213,7 +219,6 @@ from agentclip.screen.slot import (
     SlotCalibration,
     can_delegate,
     missing,
-    new_slots,
 )
 from agentclip.screen.stale import StaleProbe, StaleState, StaleTracker
 from agentclip.screen.template import (
@@ -865,39 +870,34 @@ class MainScreen(Screen[None]):
         # Every delegated run so far, in order, as slices of the sub-agent
         # window's transcript (see ``_SubRun``). Cleared with the session.
         self._sub_runs: list[_SubRun] = []
-        # The service each window tab is pointed at. Two windows, two services:
-        # a big-context chat for the conversation the user steers, something
-        # cheap and fast for delegated sub-tasks. The sidebar's picker edits
-        # whichever tab is selected; the automation reads whichever window it is
-        # driving (``_live_preset`` / ``_live_profile``).
-        self._services: dict[str, str] = self._initial_services(config)
-        # Every user-drawn calibration, one set per agent slot - which since the
-        # appearance model is exactly one thing: the chat window. That single
-        # box is where every appearance is searched for, the click target of
-        # last resort, and the whole calibration of the staleness detector.
-        # It describes where a service's window IS, not what one conversation
-        # said, so it survives /new; only the pointers below reset. What the
-        # service LOOKS like lives in ``_profiles`` instead - captured once,
-        # shared by both slots, persisted across runs.
+        # The screen-automation core, driven through the AutomationView port
+        # this screen implements structurally - the same arrangement as the
+        # SessionController/ChatView pair below (docs/design/gui.md §1). It owns
+        # the state the loop is read against and this screen no longer does:
         #
-        # ``_calibrating`` is the slot behind the SELECTED window tab - what the
-        # sidebar configures; ``_live`` is the slot the automation (paste click,
-        # detector poller, auto-copy) drives. They move independently: the
-        # sub-agent window is calibrated, and read, while the master chat is
-        # mid-session.
-        self._slots: dict[AgentSlot, SlotCalibration] = new_slots()
-        self._calibrating: AgentSlot = AgentSlot.MASTER
-        self._live: AgentSlot = AgentSlot.MASTER
+        # * the global ARMED switch (F5, `/armed`) - see ``set_os_armed``, whose
+        #   consequences (the watcher, the four chokepoints, the toasts) stay
+        #   here while the decision itself lives down there;
+        # * every user-drawn calibration, one per agent slot, plus the two
+        #   pointers into them - *calibrating* is the slot behind the SELECTED
+        #   window tab (what the sidebar configures), *live* is the slot the
+        #   automation (paste click, detector poller, auto-copy) drives. They
+        #   move independently: the sub-agent window is calibrated, and read,
+        #   while the master chat is mid-session;
+        # * the service each window tab is pointed at - the KEY only. What a
+        #   service LOOKS like lives in ``_profiles`` here instead, captured
+        #   once, shared by both slots and persisted across runs.
+        self._automation = AutomationController(
+            view=self,
+            services=self._initial_services(config),
+        )
         self._delegation_ready = False  # last-seen SUBAGENT can_delegate, for the one-shot toast
         self._region_click_warned = False
-        # The global ARMED switch (F5, `/armed`) - see ``set_os_armed``. True is
-        # every version of this app before it existed. The awkward name is
-        # deliberate: "armed" already means three unrelated things in this file
-        # (``_copy_armed``, the ``st-armed`` status style, ``SEND_READY_ARMED``),
-        # and this is the only one about whether the tool may touch the machine.
-        self._os_armed = True
         # What the clipboard watcher was doing when the disarm took it away, so
         # re-arming restores that rather than a guess (see ``set_os_armed``).
+        # Watcher control, not the armed decision: it is READ off
+        # ``_watch_worker`` and spent on ``_start_watcher``, both of which are
+        # this screen's until the watcher moves down.
         self._watch_before_disarm = False
         self._detector_worker: Worker[None] | None = None
         # Which poller RUN a verdict belongs to. Bumped by every
@@ -1071,7 +1071,7 @@ class MainScreen(Screen[None]):
     @property
     def calibrating(self) -> SlotCalibration:
         """The slot behind the selected window tab - what the sidebar edits."""
-        return self._slots[self._calibrating]
+        return self._automation.calibrating
 
     @property
     def selected_service(self) -> str:
@@ -1089,18 +1089,47 @@ class MainScreen(Screen[None]):
         """The slot the automation drives right now (paste click, finish
         detector, auto-copy). Only ``start_browser_chat``/``end_browser_chat``
         move it - everything else reads it."""
-        return self._slots[self._live]
+        return self._automation.live
+
+    # Compatibility proxies onto the state the AutomationController now owns.
+    # The underscored names predate the extraction and are what the Pilot suites
+    # poke (and what a monkeypatched ``_find_all`` stand-in reads); they are
+    # spelled once, here, so the screen's own code can go straight to the
+    # controller without a rewrite of every test that reaches in.
+    @property
+    def _slots(self) -> dict[AgentSlot, SlotCalibration]:
+        return self._automation.slots
+
+    @property
+    def _calibrating(self) -> AgentSlot:
+        return self._automation.calibrating_slot
+
+    @_calibrating.setter
+    def _calibrating(self, value: AgentSlot) -> None:
+        self._automation.select_calibrating_slot(value)
+
+    @property
+    def _live(self) -> AgentSlot:
+        return self._automation.live_slot
+
+    @_live.setter
+    def _live(self, value: AgentSlot) -> None:
+        self._automation.select_live_slot(value)
+
+    @property
+    def _os_armed(self) -> bool:
+        return self._automation.os_armed
 
     # The last compatibility proxy onto the MASTER slot. The single-window
     # vocabulary predates slots and is what the older Pilot suites poke; only
     # ``_chat_region`` is left, because it is the only thing a slot still holds.
     @property
     def _chat_region(self) -> ScreenRegion | None:
-        return self._slots[AgentSlot.MASTER].chat_region
+        return self._automation.calibration(AgentSlot.MASTER).chat_region
 
     @_chat_region.setter
     def _chat_region(self, value: ScreenRegion | None) -> None:
-        self._slots[AgentSlot.MASTER].chat_region = value
+        self._automation.set_calibration(AgentSlot.MASTER, value)
 
     # -- layout ---------------------------------------------------------------
 
@@ -1231,9 +1260,9 @@ class MainScreen(Screen[None]):
         # but the other tab has no widget to catch it, and a window pointed at a
         # preset that no longer exists would silently drive the automation off
         # ``Config.preset()``'s fallback.
-        for window, key in list(self._services.items()):
+        for window, key in self._automation.services().items():
             if key not in config.services:
-                self._services[window] = self._initial_services(config)[window]
+                self._automation.set_service(window, self._initial_services(config)[window])
                 self._relabel_window(window)
         self._paint_profile()
         self._after_calibration()
@@ -1337,7 +1366,7 @@ class MainScreen(Screen[None]):
             # mode: in both there is no state in which the watcher may run, so a
             # dimmed-but-present key would be advertising a lie. F5 is the way
             # back, and the DISARMED badge and banner are what say so.
-            if self._provider.name == "manual" or not self._os_armed:
+            if self._provider.name == "manual" or not self._automation.os_armed:
                 return False
             return True if self.session_active else None
         if action == "export_log":
@@ -1402,7 +1431,7 @@ class MainScreen(Screen[None]):
         # session starts by driving the master window) and the detector worker
         # restarts against it so the surviving baselines keep being polled.
         await self._remove_session_views()
-        self._live = AgentSlot.MASTER
+        self._automation.select_live_slot(AgentSlot.MASTER)
         self._select_window(MASTER_WINDOW)
         # Re-derive rather than clear: the sub-agent slot is still calibrated,
         # and _after_calibration's one-shot toast must not re-fire after /new.
@@ -1599,7 +1628,7 @@ class MainScreen(Screen[None]):
         if window not in _WINDOW_SLOTS or window == self._selected_window:
             return
         self._selected_window = window
-        self._calibrating = self._slot_of(window)
+        self._automation.select_calibrating_slot(self._slot_of(window))
         self._show_panel(window)
         with suppress(NoMatches):
             self.chat_tabs.select(window)
@@ -1628,7 +1657,7 @@ class MainScreen(Screen[None]):
         went; the earlier runs are still readable in the transcript below it.
         """
         name = _WINDOW_NAMES[window]
-        service = self._services.get(window, "")
+        service = self._automation.service_of(window)
         glyph = ""
         if window == SUBAGENT_WINDOW and self._sub_runs:
             if any(run.end is None for run in self._sub_runs):
@@ -2020,7 +2049,7 @@ class MainScreen(Screen[None]):
         seconds a streamed delivery takes, and two inserts racing into one chat
         box is exactly what the group exists to prevent.
         """
-        if not self._os_armed:
+        if not self._automation.os_armed:
             self.notify(
                 "disarmed - AgentClip may not click or type: press F5 to arm, or paste "
                 "the payload into the chat yourself",
@@ -2073,7 +2102,7 @@ class MainScreen(Screen[None]):
         # simply do not happen. Everything after this is the existing "the click
         # never landed" path (MANUAL_INSERT, the Ctrl+V nag), which is exactly
         # the disarmed UX and needs no second implementation.
-        if self._os_armed:
+        if self._automation.os_armed:
             clicked = await self._click_after_response()
         else:
             clicked = False
@@ -2128,7 +2157,7 @@ class MainScreen(Screen[None]):
                     if auto_sent
                     else "auto-submit could not type Enter - the send is yours",
                 )
-        elif not self._os_armed:
+        elif not self._automation.os_armed:
             self._set_loop_state(
                 LoopState.MANUAL_INSERT,
                 "auto-insert suppressed: disarmed - the payload is on your clipboard "
@@ -2201,7 +2230,7 @@ class MainScreen(Screen[None]):
         if text is None:
             self.notify("nothing to re-insert yet - no outbound payload has been copied")
             return
-        if not self._os_armed:
+        if not self._automation.os_armed:
             self.notify(
                 "disarmed - AgentClip may not click or type: press F5 to arm, or paste "
                 "into the chat yourself",
@@ -2317,8 +2346,8 @@ class MainScreen(Screen[None]):
         """
         if scene is not None and slot is not None:
             raise ValueError("_find_all takes a slot or a captured scene, never both")
-        target = slot if slot is not None else self._live
-        cal = self._slots[target]
+        target = slot if slot is not None else self._automation.live_slot
+        cal = self._automation.calibration(target)
         region = cal.chat_region
         if region is None:
             return []
@@ -2488,30 +2517,36 @@ class MainScreen(Screen[None]):
         The watcher half, in contrast, moves only on a real TRANSITION: a second
         `/armed off` that re-read the (already stopped) worker would remember
         "it was off" and quietly lose the watcher the first one took away.
+
+        The FLAG itself is the AutomationController's - one armed switch below
+        every shell rather than one per frontend (docs/design/gui.md §1) - and
+        the banner repaint rides down with it as ``paint_armed``. What is left
+        here is every consequence the screen owns: the watcher, the status
+        segment that has to be repainted after ``watch_paused`` moves, the
+        footer's bindings, and the toast.
         """
-        was_armed = self._os_armed
-        self._os_armed = (not self._os_armed) if target is None else target
-        if self._os_armed and not was_armed:
+        was_armed = self._automation.os_armed
+        armed = self._automation.set_os_armed(target)
+        if armed and not was_armed:
             if self._watch_before_disarm:
                 self._start_watcher()  # no-ops in manual mode, and if already up
             self._watch_before_disarm = False
-        elif was_armed and not self._os_armed:
+        elif was_armed and not armed:
             self._watch_before_disarm = self._watch_worker is not None
             self.stop_input()
             self.watch_paused = True  # truthful: nothing is polling the clipboard
         self._log_harness(
             KIND_ARMED,
             "ARMED - the tool may click, paste and watch the clipboard again"
-            if self._os_armed
+            if armed
             else "DISARMED - watching only: no clicks, no paste, no clipboard watch",
         )
-        self._paint_armed()
         self._paint_status()
         # The `w` binding's availability just changed and ``watch_paused`` may
         # not have (disarming an already-paused watcher moves no reactive), so
         # the footer is re-asked by hand.
         self.refresh_bindings()
-        if self._os_armed:
+        if armed:
             self.notify(
                 "ARMED - automation restored: the tool may click, paste and watch "
                 "the clipboard again",
@@ -2524,13 +2559,22 @@ class MainScreen(Screen[None]):
                 timeout=8,
             )
 
-    def _paint_armed(self) -> None:
-        """Put the standing DISARMED banner up or take it down (sidebar half)."""
+    # == AutomationView: the ARMED switch =====================================
+
+    def paint_armed(self, armed: bool) -> None:
+        """Put the standing DISARMED banner up or take it down (sidebar half).
+
+        The controller's half of ``set_os_armed``, called on every set and not
+        only on a change - which is why it may not do anything conditional on
+        state the transition has not reached yet. The status bar's DISARMED
+        segment is repainted by ``set_os_armed`` instead, because it also
+        reports the clipboard watcher and must run after the watcher moved.
+        """
         with suppress(NoMatches):
-            self.sidebar.show_armed_state(self._os_armed)
+            self.sidebar.show_armed_state(armed)
 
     def start_input(self) -> None:
-        if not self._os_armed:
+        if not self._automation.os_armed:
             # A session started while disarmed still WANTS the watcher, so the
             # re-arm turns it on: this is the one place the remembered state is
             # set from an intention rather than from an observation.
@@ -2756,7 +2800,7 @@ class MainScreen(Screen[None]):
 
     def _service_for(self, slot: AgentSlot) -> str:
         """The service key one window tab is pointed at."""
-        key = self._services.get(self._window_of(slot), "")
+        key = self._automation.service_of(self._window_of(slot))
         return key if key in self._config.services else self._config.general.service
 
     def _preset_for(self, slot: AgentSlot) -> ServicePreset:
@@ -2771,11 +2815,11 @@ class MainScreen(Screen[None]):
         flow its ``hover_scan``: streaming cadence and icon rendering are
         properties of the service in THAT window, not of AgentClip and not of
         whatever tab is on screen."""
-        return self._preset_for(self._live)
+        return self._preset_for(self._automation.live_slot)
 
     def _live_profile(self) -> ServiceProfile:
         """What the window the automation is driving looks like."""
-        return self._profile_for(self._live)
+        return self._profile_for(self._automation.live_slot)
 
     def _live_search(self) -> tuple[int, CandidateSource]:
         """How the live window's service wants its appearances hunted for.
@@ -2793,12 +2837,12 @@ class MainScreen(Screen[None]):
 
     def _selected_service(self) -> str:
         """The selected tab's service - what the sidebar's picker shows."""
-        return self._service_for(self._calibrating)
+        return self._service_for(self._automation.calibrating_slot)
 
     def _active_preset(self) -> ServicePreset:
         """The preset behind the sidebar's service picker: the SELECTED window
         tab's service, locked to it while a session runs."""
-        return self._preset_for(self._calibrating)
+        return self._preset_for(self._automation.calibrating_slot)
 
     # -- service profiles (what the service LOOKS like) ------------------------
 
@@ -2820,7 +2864,7 @@ class MainScreen(Screen[None]):
         """What the SELECTED window tab's service looks like - the sidebar's
         appearance summary and readiness note, and nothing the automation does.
         """
-        return self._profile_for(self._calibrating)
+        return self._profile_for(self._automation.calibrating_slot)
 
     # -- sidebar --------------------------------------------------------------
 
@@ -2916,7 +2960,9 @@ class MainScreen(Screen[None]):
         # The target slot is decided HERE, when the overlay opens, and travels
         # with the worker - see _pick_chat_region.
         self.run_worker(
-            self._pick_chat_region(self._calibrating), group="regionpick", exclusive=True
+            self._pick_chat_region(self._automation.calibrating_slot),
+            group="regionpick",
+            exclusive=True,
         )
 
     async def _pick_chat_region(self, slot: AgentSlot) -> None:
@@ -2957,13 +3003,13 @@ class MainScreen(Screen[None]):
             if region is None:
                 self.notify("chat region unchanged (selection cancelled)")
                 return
-            self._slots[slot].chat_region = region
+            self._automation.set_calibration(slot, region)
             self._region_click_warned = False
             # Only when the tab it belongs to is still the one on screen: the
             # sidebar shows ONE window's calibration, and writing this one's box
             # into a column describing the other is the same mix-up in the other
             # direction.
-            if slot is self._calibrating:
+            if slot is self._automation.calibrating_slot:
                 with suppress(NoMatches):
                     self.sidebar.update_region(region)
             self._after_calibration()
@@ -2973,7 +3019,7 @@ class MainScreen(Screen[None]):
             # the poller is watching. Drawing the sub-agent's window mid-session
             # is the normal way to reach delegation, and rebuilding *around it*
             # would re-aim a poller at a window the automation is not driving.
-            if slot is self._live:
+            if slot is self._automation.live_slot:
                 self._start_detector_worker()
             self.notify(
                 f"chat region set ({region.describe()}) - the chatbot window; "
@@ -3117,12 +3163,12 @@ class MainScreen(Screen[None]):
         last worked in rather than on whatever the file was first seeded with.
         """
         message.stop()
-        self._services[self._selected_window] = message.key
+        self._automation.set_service(self._selected_window, message.key)
         self._relabel_window(self._selected_window)
         self._persist_active_services()
         self._paint_profile()
         self._after_calibration()
-        if self._calibrating is self._live:
+        if self._automation.calibrating_slot is self._automation.live_slot:
             self._start_detector_worker()
 
     def _persist_active_services(self) -> None:
@@ -3149,8 +3195,8 @@ class MainScreen(Screen[None]):
             return
         try:
             save_active_services(
-                self._services[MASTER_WINDOW],
-                self._services[SUBAGENT_WINDOW],
+                self._automation.service_of(MASTER_WINDOW),
+                self._automation.service_of(SUBAGENT_WINDOW),
                 target,
             )
         except OSError as exc:
@@ -3360,7 +3406,7 @@ class MainScreen(Screen[None]):
         """
         signals = self._live_preset().finish_signals
         profile = self._live_profile()
-        window_name = _WINDOW_NAMES[self._window_of(self._live)]
+        window_name = _WINDOW_NAMES[self._window_of(self._automation.live_slot)]
         with suppress(NoMatches):
             panel = self.elements_panel
             panel.show_window(window_name)
@@ -3736,7 +3782,7 @@ class MainScreen(Screen[None]):
         self._copy_changed_streak += 1
         if self._copy_changed_streak < 2:
             return
-        if not self._os_armed:
+        if not self._automation.os_armed:
             # The finish is real and everything above it stays true - which is
             # the point: disarming stops the ACTING, so the rail still tracks
             # the turn and simply lands on the state where the harvest is the
@@ -4466,9 +4512,10 @@ class MainScreen(Screen[None]):
         appearance in the app, and a refusal that has already captured the
         screen and searched it would be answering a question nobody may act on.
         """
-        if not self._os_armed:
+        if not self._automation.os_armed:
             return ElementClick.DISARMED
-        if self._slots[slot].chat_region is None or not self._profile_for(slot).has(kind):
+        cal = self._automation.calibration(slot)
+        if cal.chat_region is None or not self._profile_for(slot).has(kind):
             return ElementClick.NOT_CALIBRATED
         found = await self._find_all(kind, slot)
         if not found:
@@ -4496,7 +4543,7 @@ class MainScreen(Screen[None]):
         # run. On the master tab there is nothing to refuse - the press ends the
         # session, and request_new_session aborts the turn in flight to do it
         # (§1.3).
-        if self._mid_turn() and self._calibrating is not AgentSlot.MASTER:
+        if self._mid_turn() and self._automation.calibrating_slot is not AgentSlot.MASTER:
             self.notify(
                 "the sub-agent window's chat belongs to the run in flight - /abort ends "
                 "it, or start the new chat from the master tab",
@@ -4509,7 +4556,11 @@ class MainScreen(Screen[None]):
         # a run whose composer was never used (calibrate, press, done) has no
         # window to come back to, and the click leaves the user in the browser.
         self._remember_own_window()
-        self.run_worker(self._new_browser_chat(self._calibrating), group="newchat", exclusive=True)
+        self.run_worker(
+            self._new_browser_chat(self._automation.calibrating_slot),
+            group="newchat",
+            exclusive=True,
+        )
 
     def _mid_turn(self) -> bool:
         """Is a turn actually in flight right now?
@@ -4656,7 +4707,8 @@ class MainScreen(Screen[None]):
         tab having captured its own says nothing about them.
         """
         return can_delegate(
-            self._slots[AgentSlot.SUBAGENT], self._profile_for(AgentSlot.SUBAGENT)
+            self._automation.calibration(AgentSlot.SUBAGENT),
+            self._profile_for(AgentSlot.SUBAGENT),
         )
 
     def delegation_missing(self) -> tuple[str, ...]:
@@ -4667,7 +4719,10 @@ class MainScreen(Screen[None]):
         the controller cannot import ``screen`` to ask, and should not have to
         know what a "new-chat button" is.
         """
-        return missing(self._slots[AgentSlot.SUBAGENT], self._profile_for(AgentSlot.SUBAGENT))
+        return missing(
+            self._automation.calibration(AgentSlot.SUBAGENT),
+            self._profile_for(AgentSlot.SUBAGENT),
+        )
 
     async def start_browser_chat(self, slot: AgentSlot) -> bool:
         """Open a fresh browser chat in ``slot`` and make it the live one.
@@ -4717,7 +4772,7 @@ class MainScreen(Screen[None]):
                 severity="error",
             )
             return False
-        self._live = slot
+        self._automation.select_live_slot(slot)
         self._reset_finish_trigger()
         # The master's outstanding reply is not this window's business: the
         # sub-agent's own bootstrap copy re-opens the gate a moment from now.
@@ -4734,7 +4789,7 @@ class MainScreen(Screen[None]):
         Unconditional and never fails: the master window is where the session
         lives, so returning to it must work even after the sub-run blew up.
         """
-        self._live = AgentSlot.MASTER
+        self._automation.select_live_slot(AgentSlot.MASTER)
         self._reset_finish_trigger()
         # Symmetrically: the sub-run's last reply is done with, and the
         # master's turn resumes by composing and copying its next outbound.
@@ -4831,7 +4886,7 @@ class MainScreen(Screen[None]):
     def action_toggle_watch(self) -> None:
         if self._provider.name == "manual" or not self.session_active:
             return
-        if not self._os_armed:
+        if not self._automation.os_armed:
             # check_action already hides the key; this is the palette/rebind door
             # into the same action, and a resumed watcher would be a hole in the
             # promise the switch makes.
@@ -5028,7 +5083,7 @@ class MainScreen(Screen[None]):
             # the app may do TO their machine - and the YOLO badge two along
             # cannot borrow the slot either, since a disarmed YOLO session is a
             # real and worth-seeing pair.
-            armed="" if self._os_armed else "⛔ DISARMED",
+            armed="" if self._automation.os_armed else "⛔ DISARMED",
             service=service,
             out=out,
             turn=turn,

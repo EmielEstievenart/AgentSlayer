@@ -19,11 +19,12 @@ window - :data:`AgentSlot.SUBAGENT`, the chat a delegated sub-agent gets -
 costs exactly one drag, because it inherits the master's captures for free.
 :data:`AgentSlot.MASTER` is the chat the main agent talks in.
 
-Two slot pointers ride on top of this data (owned by the TUI, not here):
-*calibrating* - which slot the sidebar's region picker writes into - and *live*
-- which slot the automation (paste click, finish detector, auto-copy) is
-driving right now. They are deliberately independent: the user must be able to
-draw the sub-agent window while the master chat is mid-turn.
+Two slot pointers ride on top of this data (owned by
+:class:`~agentclip.automation.controller.AutomationController`, not here):
+*calibrating* - which slot the region picker writes into - and *live* - which
+slot the automation (paste click, finish detector, auto-copy) is driving right
+now. They are deliberately independent: the user must be able to draw the
+sub-agent window while the master chat is mid-turn.
 
 Readiness is therefore a function of the *pair* (slot, profile) rather than a
 property of either, which is why :func:`can_delegate` and friends are

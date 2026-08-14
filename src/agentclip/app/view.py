@@ -204,11 +204,13 @@ class ChatView(Protocol):
     # focus stealing, no clipboard watching - while every read-only half
     # (capture, the finish detectors, the whole sidebar readout) stays live.
     #
-    # View-owned, unlike `/yolo`: every acting primitive is called from the view
-    # layer and the controller never touches the OS, so there is nothing here for
-    # the engine or a session to hold. Which is also why this takes a target and
-    # returns nothing - the controller does not mirror the flag and cannot get it
-    # out of step. ``None`` means toggle, and it is the bare `/armed` (and F5).
+    # Not the session's, unlike `/yolo`: the engine and the session have nothing
+    # to hold here, so this side of the port only ever FORWARDS the intent. The
+    # flag itself lives in ``AutomationController`` - one armed switch below
+    # every shell rather than one per frontend (docs/design/gui.md section 1) -
+    # which is why this still takes a target and returns nothing: the session
+    # controller does not mirror the flag and cannot get it out of step.
+    # ``None`` means toggle, and it is the bare `/armed` (and F5).
     def set_os_armed(self, target: bool | None) -> None: ...
 
     def start_input(self) -> None: ...

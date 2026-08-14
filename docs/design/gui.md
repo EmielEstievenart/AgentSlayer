@@ -87,8 +87,14 @@ Slices (each one commit, suite green, layering test run first):
 1. move `loop_state`/`harness_log` (pure vocabulary) + layering rules
 2. controller/view skeleton + slot-calibration pointers + `os_armed`
 3. clipboard watcher thread ownership
-4. detector poller threads + generation stamping + probe bridging
-5. send gate + finish-evaluation logic (pure decision block)
+4. detector poller threads + generation stamping — **producer only**: probes
+   still cross to the UI thread as today's messages, every handler untouched.
+   (Re-cut from the original plan: moving probe bookkeeping ahead of
+   `_evaluate_finish` would have split reader and writer across threads — a
+   race today's single-threaded handlers don't have.)
+5. the whole consumer, atomically: probe bookkeeping + painting + send gate +
+   finish-evaluation move as one unit onto the poller thread; the
+   `feed_probe` test seam replaces message injection in the same commit
 6. auto-copy flow + click/hover/scroll sequences + start/end browser chat
 7. delivery path (`deliver(...)` async; OSC-52 stays TUI-side)
 8. cleanup: dead code, doc sync (`architecture.md`, `tui.md` drift), module table

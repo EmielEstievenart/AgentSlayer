@@ -1,7 +1,8 @@
-/* The GUI shell's chrome. Dark, flat, and only as big as what exists: this is
-   slice 2, so it styles the transcript, the composer, the run panel, the
-   approval gate, the toasts and the modals - and invents no vocabulary the
-   later increments (sidebar, elements column, log pane) would argue with.
+/* The GUI shell's chrome. Dark, flat, and only as big as what exists: after
+   parity increment 2 that is the transcript, the composer, the run panel, the
+   approval gate, the toasts, the modals, the sidebar, the status bar and the
+   harness log pane - and it still invents no vocabulary the remaining
+   increments (elements column, service editor, tabs) would argue with.
    Only system fonts - nothing here may reach the network. */
 
 :root {
@@ -88,13 +89,56 @@ body {
 }
 
 /* The "your move" banner: as loud as the TUI's, for the same reason - the user
-   is looking at their browser, not at this window. */
+   is looking at their browser, not at this window. It blinks, which the TUI
+   does on a 0.4s timer; the cadence is not load-bearing, only "obnoxious enough
+   to notice", so this is one CSS animation and no JavaScript. Its quiet sibling
+   (.side-armed) deliberately never animates. */
 .flash {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
   padding: 8px 18px;
   background: var(--warn);
   color: #14161a;
   font-weight: 700;
   text-align: center;
+  white-space: pre-line;
+  animation: blink 0.8s steps(1, end) infinite;
+}
+
+@keyframes blink {
+  0%,
+  49% {
+    background: var(--warn);
+  }
+  50%,
+  100% {
+    background: #b98c22;
+  }
+}
+
+.flash button {
+  flex: none;
+  padding: 4px 12px;
+  border-color: #14161a;
+  color: #14161a;
+  font-weight: 700;
+}
+
+/* -- the two columns ------------------------------------------------------ */
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
 }
 
 /* -- transcript ----------------------------------------------------------- */
@@ -680,6 +724,244 @@ button:not(:disabled) {
   font-family: var(--mono);
   font-size: 12.5px;
   user-select: all;
+}
+
+/* -- sidebar (F3) --------------------------------------------------------- */
+/* Live status plus the two things you steer with, and nothing that has to be
+   configured (sidebar-status-log.md section 2.1). */
+
+.sidebar {
+  flex: none;
+  width: 300px;
+  overflow-y: auto;
+  padding: 14px 16px 18px;
+  border-left: 1px solid var(--line);
+  background: var(--bg-raised);
+  font-size: 12.5px;
+}
+
+.side-title {
+  margin: 14px 0 4px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.sidebar > .side-title:first-child {
+  margin-top: 0;
+}
+
+.side-status {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.side-hint {
+  margin-top: 16px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.sidebar select,
+.sidebar button {
+  width: 100%;
+  margin: 2px 0 6px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
+
+.sidebar select {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+}
+
+.sidebar select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* The STATE rail: the active row is marked and reversed, LOOP_TRANSITIONS's
+   legal next moves read at normal brightness, everything else is dim. Display
+   only - nothing reads it back to decide anything. */
+.rail {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.rail li {
+  padding: 0 4px;
+  color: var(--text-dim);
+  opacity: 0.55;
+  white-space: pre;
+}
+
+.rail li.legal {
+  color: var(--text);
+  opacity: 1;
+}
+
+.rail li.active {
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 700;
+  opacity: 1;
+}
+
+/* Never blinks: a standing fact meant to survive being looked at for an hour,
+   unlike the flash which is asking for a keystroke right now. */
+.side-armed {
+  margin-top: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--err);
+  border-radius: var(--radius);
+  background: rgba(240, 115, 106, 0.14);
+  color: var(--err);
+  font-weight: 700;
+  white-space: pre-line;
+}
+
+.mcp-row {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  /* One server, one row, whatever its detail says: a failed server's
+     explanation can run to a sentence, and wrapping it would walk every block
+     below it up and down the column as servers connect and fail. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-row.connected {
+  color: var(--ok);
+}
+
+.mcp-row.failed,
+.mcp-row.needs_auth {
+  color: var(--warn);
+}
+
+/* -- harness log pane (F8, /log) ------------------------------------------ */
+
+.logpane {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  height: 30%;
+  min-height: 90px;
+  max-height: 260px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+
+.logpane-head {
+  flex: none;
+  padding: 6px 18px 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.logpane-head .hint {
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+/* One entry is exactly one line: the printed form is a COLUMN layout (time,
+   kind, sentence) and a wrapped sentence would break the column the eye scans,
+   so a long line scrolls sideways rather than reflowing. */
+.log-lines {
+  flex: 1;
+  margin: 0;
+  padding: 0 18px 8px;
+  overflow: auto;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+/* -- status bar ----------------------------------------------------------- */
+
+.statusbar {
+  display: flex;
+  flex: none;
+  gap: 16px;
+  padding: 5px 18px;
+  border-top: 1px solid var(--line);
+  background: #101215;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.seg {
+  color: var(--text);
+}
+
+.st-dim {
+  color: var(--text-dim);
+}
+
+.st-plan {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.st-unattended,
+.st-instr {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.st-busy {
+  color: var(--warn);
+}
+
+.st-attn {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.st-done,
+.st-armed {
+  color: var(--ok);
+}
+
+.st-err {
+  color: var(--err);
+}
+
+/* Red is reserved for the two "something is off" badges, and they get their own
+   slots so a disarmed YOLO session is visible as the pair it is. */
+.st-yolo,
+.st-disarmed {
+  color: var(--err);
+  font-weight: 700;
+}
+
+.st-sub {
+  color: #d98fe0;
+  font-weight: 700;
+}
+
+/* The status bar's last segment (the project root) is the one that may be
+   sacrificed when the window is narrow. */
+#seg-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 [hidden] {

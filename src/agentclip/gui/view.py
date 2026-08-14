@@ -25,9 +25,10 @@ not parity, so a handful of ``ChatView`` methods are implemented smaller than
 the TUI's rather than left as a silent ``pass`` that would strand a controller
 flow. Each one says so at its own definition and they are listed together in
 ``docs/design/gui.md`` §2: window tabs (one transcript with dividers), the
-harness log pane, the ``/identify`` overlay, and the elements crops (kinds, not
-pictures). Everything a *turn* passes through - the transcript, the gate, the
-delivery, the watcher, the prompts - is the real thing.
+``/identify`` overlay, and the elements crops (kinds, not pictures). Everything
+a *turn* passes through - the transcript, the gate, the delivery, the watcher,
+the prompts - is the real thing, and so, since parity increment 2, are the
+sidebar, the status bar's ten segments and the harness log pane.
 """
 
 from __future__ import annotations
@@ -50,10 +51,10 @@ from agentclip.automation.harness_log import (
     KIND_SESSION,
     HarnessEntry,
 )
-from agentclip.automation.loop_state import LoopState
+from agentclip.automation.loop_state import LOOP_TRANSITIONS, LoopState
 from agentclip.automation.ops import ElementClick
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
-from agentclip.config import Config, ServicePreset, default_profile_dir
+from agentclip.config import Config, ServicePreset, default_profile_dir, save_active_services
 from agentclip.engine.engine import Decision, Engine, PendingAction
 from agentclip.gui.bridge import Bridge
 from agentclip.protocol.parser import looks_like_protocol
@@ -98,6 +99,131 @@ _WINDOW_SLOTS: dict[str, AgentSlot] = {
 }
 
 MASTER_VIEW = "master"
+
+# The two browser windows, as the DETECTION heading names them. The TUI's
+# ``_WINDOW_NAMES``; this shell has no tab bar yet, but the heading still has to
+# say which window the lines under it are about - the LIVE one, which parts
+# company with what the user is reading for the whole of a delegation.
+_WINDOW_NAMES = {MASTER_WINDOW: "MASTER", SUBAGENT_WINDOW: "SUB-AGENT"}
+
+# == the sidebar's words ======================================================
+# Everything from here to ``_service_options`` is ``tui/widgets/sidebar.py``'s,
+# spelled again for the reason ``_reason_line`` and ``_distinct_rects`` are: the
+# two shells may not import each other (tests/test_layering.py), and widening
+# that boundary so a frontend could reach another frontend's display strings
+# would be a worse trade than a block of literals with a comment saying where
+# the original lives. Three of them are deliberately NOT verbatim - the TUI's
+# say "F2", and this shell has no service editor behind that key until increment
+# 7, so they name the door instead of a key that would do nothing.
+
+# The STATE rail, in LOOP order rather than declaration order. A tuple rather
+# than ``list(LoopState)`` for the sidebar's reason: the rail is a picture of
+# the round trip, and the day the enum grows a value in the middle the picture
+# must not silently re-order itself.
+_LOOP_ORDER: tuple[LoopState, ...] = (
+    LoopState.IDLE,
+    LoopState.AUTO_INSERT,
+    LoopState.MANUAL_INSERT,
+    LoopState.WAIT_SEND,
+    LoopState.WAIT_GENERATE,
+    LoopState.AUTO_COPY,
+    LoopState.MANUAL_COPY,
+    LoopState.INTERPRETING,
+)
+_LOOP_LABEL: dict[LoopState, str] = {
+    LoopState.IDLE: "idle",
+    LoopState.AUTO_INSERT: "auto insert",
+    LoopState.MANUAL_INSERT: "manual insert",
+    LoopState.WAIT_SEND: "wait send",
+    LoopState.WAIT_GENERATE: "wait generate",
+    LoopState.AUTO_COPY: "auto copy",
+    LoopState.MANUAL_COPY: "manual copy",
+    LoopState.INTERPRETING: "interpreting",
+}
+
+# The standing banner, the paste flash's quiet sibling: same place in the column,
+# opposite temperament. It never blinks - it is a fact about the whole app that
+# has to survive being looked at for an hour.
+DISARMED_BANNER_TEXT = "⛔ DISARMED\nwatching only - F5 arms"
+
+# The DETECTION block. Four of the seven appearances have something to say while
+# the automation runs, and each gets one named line.
+DETECTOR_LABEL: dict[TemplateKind, str] = {
+    TemplateKind.SEND_READY: "send",
+    TemplateKind.BUSY: "busy",
+    TemplateKind.IDLE: "idle",
+    TemplateKind.COPY: "copy",
+}
+PROBE_RESTING = "no verdict yet"
+COPY_RESTING = "no click yet"
+# The one combination that will never produce a verdict at all: the checklist
+# ticks this signal and the service has no appearance to match it against, so
+# the detector is silently skipped and "no verdict yet" would be a lie of
+# omission for the rest of the run.
+PROBE_UNCAPTURED = "ticked but not captured"
+STALE_UNSET = "no chat region - staleness check disabled"
+STALE_CALIBRATED = "watching the chat region"
+STALE_UNTICKED = "stillness not watched for this service"
+STALE_OFF = "finish detection off - nothing can decide a reply finished"
+
+REGION_UNSET = "not set - alt-tab to the chat yourself"
+SLOT_NOTE_MASTER = "the main agent's chat window"
+
+# The MCP block: the state literal -> the words the column shows.
+_MCP_STATE_LABEL: dict[str, str] = {
+    "pending": "pending",
+    "connecting": "connecting",
+    "connected": "connected",
+    "disabled": "disabled",
+    "failed": "failed",
+    "needs_auth": "needs auth",
+    "missing_sdk": "no mcp sdk",
+}
+
+# Leading state glyphs the watch segment prefixes its text with; a sub-agent run
+# replaces them with its own, so they are stripped before rebadging.
+_STATE_GLYPHS = "●○■✓✗"
+
+
+def _strip_glyph(text: str) -> str:
+    return text.lstrip(_STATE_GLYPHS).lstrip()
+
+
+def _fmt_k(chars: int) -> str:
+    return f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
+
+
+def _budget(chars: int) -> str:
+    return f"{chars // 1000}k" if chars >= 1000 else str(chars)
+
+
+def _short_root(project_root: Path) -> str:
+    try:
+        return str(Path("~") / project_root.relative_to(Path.home()))
+    except ValueError:
+        # A root with no drive letter on Windows is a REMOTE, POSIX one: str()
+        # would spell /home/dev/app with backslashes, which is not its name.
+        return str(project_root) if project_root.drive else project_root.as_posix()
+
+
+def _service_options(config: Config) -> list[list[str]]:
+    """``key · 12k`` per row, with the key as the value - the picker's options."""
+    presets = sorted(config.services.values(), key=lambda p: p.key)
+    return [[preset.key, f"{preset.key} · {_budget(preset.max_paste_chars)}"] for preset in presets]
+
+
+def _mcp_line(status: Any) -> str:
+    """One server's row: name + human state (+ tools when connected, + the detail
+    on the two states that are questions until it is read)."""
+    state = str(getattr(status, "state", ""))
+    parts = [str(getattr(status, "name", "")), _MCP_STATE_LABEL.get(state, state)]
+    if state == "connected":
+        count = int(getattr(status, "tool_count", 0) or 0)
+        parts.append(f"{count} tool{'' if count == 1 else 's'}")
+    detail = str(getattr(status, "detail", "") or "")
+    if state in ("failed", "needs_auth") and detail:
+        parts.append(detail)
+    return " · ".join(parts)
 
 
 @dataclass(slots=True)
@@ -306,6 +432,10 @@ class GuiView:
         self._session_title = ""
         self._gate_kind: str | None = None
         self._gate_always: str | None = None
+        # The status bar's "paused" reading, and nothing else: it MIRRORS what
+        # the automation ended up doing with the watcher rather than deciding
+        # it (``MainScreen.watch_paused`` / ``_mirror_watcher``).
+        self._watch_paused = False
 
         # -- blocking prompts (confirm / prompt_text / show_summary) ---------
         self._prompts: dict[str, asyncio.Future[Any]] = {}
@@ -360,10 +490,17 @@ class GuiView:
         """
         self._push_status()
         self._push_state_event()
+        self._push_rail()
+        self._push_sidebar()
         self._remember_own_window()
+        # Nothing is drawn yet, so this starts no worker - but it is the only
+        # writer of the DETECTION block, and the block has to name the window it
+        # is about from the first frame rather than after the first calibration.
         self._start_detector_worker()
         if self._mcp_manager is not None:
+            # Hook first, paint second, so no transition can fall in the gap.
             self._mcp_manager.set_status_hook(self._mcp_status_hook)
+            self._push_mcp()
         for warning in self._config.warnings:
             self.notify(warning, severity="warning", timeout=8)
         self._controller.start()
@@ -384,9 +521,20 @@ class GuiView:
     # == what the page asks for (js_api, already on the loop) ==================
 
     def page_ready(self) -> None:
-        """The page installed its receiver: repaint everything it missed."""
+        """The page installed its receiver: repaint everything it missed.
+
+        Everything the page cannot rebuild for itself, which is every surface
+        composed on this side: the status bar's segments, the STATE rail, the
+        sidebar's blocks and the MCP rows. The harness log is the one exception -
+        the page keeps its own bounded tail of the ``harness`` events and a
+        reload has nothing to replay into, exactly as a reopened TUI pane refills
+        from the deque rather than from the widget.
+        """
         self._push_status()
         self._push_state_event()
+        self._push_rail()
+        self._push_sidebar()
+        self._push_mcp()
         self._bridge.send("armed", armed=self._automation.os_armed)
 
     def submit_text(self, text: str) -> None:
@@ -619,6 +767,11 @@ class GuiView:
                 else "the turn finished and the floor is back with you",
             )
         self._push_state_event()
+        # Every StatusSnapshot-derived segment is this push's (mode, service,
+        # out, turn, instr, edits) and so is the watch segment's whole
+        # precedence, so the bar is recomposed here rather than only when the
+        # automation moves - ``MainScreen.render_state`` -> ``_paint_status``.
+        self._push_status()
 
     def show_gate(self, action: PendingAction, position: str, queue: str) -> None:
         self._gate_kind = action.kind
@@ -828,17 +981,24 @@ class GuiView:
         )
 
     def toggle_harness_log(self) -> None:
-        """REDUCED SCOPE (gui.md §2): the decision log exists and is being
-        written (``AutomationController.harness_log``); the pane that shows it
-        is a later increment. Entries also reach the page as ``harness`` events,
-        so the pane is a renderer away."""
-        self.notify("the harness log pane is not in the GUI yet (/log lands with the rail)")
+        """``/log`` and F8: the same show/hide, two ways to ask for one thing.
+
+        The pane itself is the page's - it keeps the bounded tail of the
+        ``harness`` events, so a reveal shows *now* without anything having to
+        be replayed across the bridge - and this is the one call that flips it
+        from the Python side.
+        """
+        self._bridge.send("toggle", what="log")
 
     def set_os_armed(self, target: bool | None) -> None:
         """Arm or disarm everything that ACTS on the machine. The flag and the
         watcher are the controller's; what is left here is the chrome."""
         was_armed = self._automation.os_armed
         armed = self._automation.set_os_armed(target)
+        if armed and not was_armed:
+            self._mirror_watcher()
+        elif was_armed and not armed:
+            self._watch_paused = True  # truthful: nothing is polling the clipboard
         self._automation.log_harness(
             KIND_ARMED,
             "ARMED - the tool may click, paste and watch the clipboard again"
@@ -858,11 +1018,150 @@ class GuiView:
 
     def start_input(self) -> None:
         self._automation.start_input()
+        self._mirror_watcher()
         self._push_status()
 
     def stop_input(self) -> None:
         self._automation.stop_input()
         self._push_status()
+
+    def _mirror_watcher(self) -> None:
+        """Bring ``_watch_paused`` in line after something tried to START one.
+
+        Only the True->False direction lives here, because that is the only one
+        a start can cause; the pauses (the `w` key, the disarm) say so at their
+        own site - ``MainScreen._mirror_watcher``, for its reasons.
+        """
+        if self._automation.watching:
+            self._watch_paused = False
+
+    # == what the page's keys ask for (js_api, already on the loop) ============
+    # Every one of these is a MainScreen ``action_*`` with the Textual removed:
+    # the same controller call, the same refusals, the same order. What they do
+    # NOT carry over is ``check_action``'s three-way footer dimming - the page
+    # has no footer to dim, so a key that cannot fire says why in a toast
+    # instead of being quietly absent (docs/design/gui.md §3).
+
+    def cycle_permission_mode(self) -> None:
+        """shift+tab: ask -> plan -> unattended -> ask.
+
+        Ungated, exactly as on the TUI screen: the moment a user reaches for
+        this is the moment the app is busy doing the thing they want it to stop
+        doing, and it must work pre-session and mid-turn alike.
+        """
+        self._controller.cycle_permission_mode()
+
+    def recopy(self) -> None:
+        """`c`: the last outbound back on the clipboard - and, pressed twice
+        inside the double-tap window, delivered again.
+
+        The whole two-stage decision (including the 1.5s window and the arm a
+        fresh outbound drops) is ``SessionController.recopy``'s, so both shells
+        press the same key: this forwards and nothing more.
+        """
+        self._controller.recopy()
+
+    def reinstruct(self) -> None:
+        """`r`: arm/disarm this service's extra instructions for the next
+        payload. The engine owns the flag and both refusals."""
+        self._controller.reinstruct()
+
+    def force_ingest(self) -> None:
+        """`i`: the user says the reply is on the clipboard right now.
+
+        The one place a key press moves the STATE rail without going through
+        the detector machinery. If the parse then fails, the settled status push
+        walks it back to idle - ``MainScreen.action_force_ingest``.
+        """
+        self._automation.set_loop_state(
+            LoopState.INTERPRETING, "you pressed i: ingesting the clipboard by hand"
+        )
+        self._controller.force_ingest()
+
+    def toggle_watch(self) -> None:
+        """`w`: pause or resume the clipboard watcher.
+
+        Refused while disarmed - a resumed watcher would be a hole in the
+        promise the switch makes - and in manual-clipboard mode and with no
+        session, where the TUI hides the key outright rather than dimming it.
+        """
+        if self._provider.name == "manual":
+            self.notify(
+                "manual clipboard mode: nothing polls the clipboard - press i to ingest a reply",
+                severity="warning",
+            )
+            return
+        if not self._session_running():
+            self.notify("no session - the watcher starts with one", severity="warning")
+            return
+        if not self._automation.os_armed:
+            self.notify(
+                "disarmed - the clipboard watcher stays off until F5 arms the tool",
+                severity="warning",
+            )
+            return
+        if self._automation.watching:
+            self._automation.stop_input()
+            self._watch_paused = True
+            self._push_status()
+            self.notify("clipboard watcher paused - w resumes, i ingests manually")
+            return
+        self._automation.start_watching()
+        self._mirror_watcher()
+        self._push_status()
+        self.notify("clipboard watcher resumed")
+
+    def retry_insert(self) -> None:
+        """The paste flash's one button: run the click-settle-paste again.
+
+        Scheduled rather than awaited, exactly as the sidebar button's worker
+        is: the sequence clicks and settles for several seconds and the page is
+        holding no promise on it. The three refusals are the controller's.
+        """
+        self._schedule(self._automation.retry_insert())
+
+    def set_service(self, key: str) -> None:
+        """The SERVICE picker: point this window at a different service.
+
+        The same path ``MainScreen._on_service_changed`` takes - the key lands
+        in the window's slot of the automation's map, the pick is written back
+        to the global config so the next launch comes up on it, and the detector
+        worker is rebuilt because a different service is a different set of
+        captured appearances. What is missing next to the TUI's is the tab
+        relabel, because this shell has no tab bar yet (increment 5): the picker
+        edits the MASTER window, which is the only one it can show.
+        """
+        if key not in self._config.services:
+            return
+        if not self._awaiting_new_session:
+            # The budget is baked into the Engine at bootstrap, so the service
+            # is fixed for the life of a session. The page locks the control
+            # too; this is the door the lock cannot cover.
+            self.notify("the service is fixed while a session runs", severity="warning")
+            self._push_sidebar()
+            return
+        self._automation.set_service(MASTER_WINDOW, key)
+        self._persist_services()
+        self._start_detector_worker()
+        self._push_sidebar()
+        self._push_status()
+
+    def _persist_services(self) -> None:
+        """Write both windows' services to the global config.toml.
+
+        Remembering the pick is a convenience, never the point of the press, so
+        every way the write can fail degrades to a warning and a session that
+        carries on with the switch the user actually asked for.
+        """
+        try:
+            save_active_services(
+                self._automation.service_of(MASTER_WINDOW),
+                self._automation.service_of(SUBAGENT_WINDOW),
+            )
+        except OSError as exc:
+            self.notify(
+                f"could not remember the service for next launch: {exc}", severity="warning"
+            )
 
     # == ChatView: sub-agent transport =========================================
 
@@ -909,12 +1208,19 @@ class GuiView:
         self._new_session_future = future
         self._awaiting_new_session = True
         self._push_state_event()
+        # No render_state is coming to trigger them (the controller has nothing
+        # to push while parked here), so the bar and the picker's lock are
+        # repainted by hand - ``MainScreen.prompt_new_session``.
+        self._push_status()
+        self._push_sidebar()
         try:
             return await future
         finally:
             self._new_session_future = None
             self._awaiting_new_session = False
             self._push_state_event()
+            self._push_status()
+            self._push_sidebar()
 
     async def confirm(self, title: str, body: str = "") -> bool:
         return bool(await self._modal("confirm", title=title, body=body))
@@ -955,16 +1261,31 @@ class GuiView:
     # two things: build the event and queue it.
 
     def paint_loop_state(self, state: LoopState) -> None:
-        self._bridge.send("status", loop=self._automation.loop_state.name)
+        # Drawn from the CONTROLLER rather than from the payload: this may be
+        # raised on the poller thread, and the flag is re-readable while a state
+        # that crossed as data would be whatever was true when it was sent.
+        self._push_rail()
 
     def paint_harness_entry(self, entry: HarnessEntry) -> None:
-        self._bridge.send("harness", kind=entry.kind, time=entry.time, text=entry.text)
+        # ``line`` is the entry as the pane prints it - the fixed-width kind
+        # column is ``HarnessEntry.line``'s decision, taken once below both
+        # shells, so the page renders a row instead of re-deriving a layout.
+        self._bridge.send(
+            "harness", kind=entry.kind, time=entry.time, text=entry.text, line=entry.line
+        )
 
     def paint_detection(self, kind: TemplateKind, text: str) -> None:
-        self._bridge.send("detection", kind=kind.name, text=text)
+        # Only the four kinds a verdict is DECIDED from have a line; the two
+        # chat boxes and the new-chat button are searched every tick like the
+        # rest and decide nothing, so they are dropped here rather than given a
+        # row the user would read as a verdict (``Sidebar.update_template``).
+        label = DETECTOR_LABEL.get(kind)
+        if label is None:
+            return
+        self._bridge.send("detection", kind=kind.name, label=label, text=text)
 
     def paint_stale(self, text: str) -> None:
-        self._bridge.send("detection", kind="STALE", text=text)
+        self._bridge.send("detection", kind="STALE", label="", text=text)
 
     def paint_elements(self, crops: Mapping[TemplateKind, object]) -> None:
         """REDUCED SCOPE (gui.md §2): the kinds this tick recognised, not their
@@ -1144,6 +1465,7 @@ class GuiView:
         self._detector = None
         region = self._automation.live.chat_region
         if region is None:
+            self._paint_detection(STALE_UNSET)
             return
         preset = self.live_preset()
         detector = build_detector(
@@ -1159,6 +1481,20 @@ class GuiView:
         self._automation.idle_tracker = detector.idle
         self._automation.stale_tracker = detector.stale
         self._automation.active_detectors = detector.active_detectors
+        if not detector.active_detectors:
+            # The service's checklist is empty, or asks only for appearances it
+            # has none of. Say so where the stale verdict would go: the
+            # consequence (auto-copy will never fire) is otherwise invisible
+            # until the user waits for a copy that never comes.
+            self._paint_detection(STALE_OFF)
+        else:
+            # Whether the stale line is a live verdict or an explanation of its
+            # own silence: it is the one detector with no appearance behind it.
+            self._paint_detection(
+                STALE_CALIBRATED
+                if "stale" in detector.active_detectors
+                else STALE_UNTICKED
+            )
         if not detector.watching:
             return
         self._detector_worker = self._automation.start_detectors(
@@ -1173,6 +1509,31 @@ class GuiView:
             self._detector_worker = None
         self._automation.stop_detectors()
 
+    def _paint_detection(self, stale_line: str) -> None:
+        """Repaint the DETECTION block for the LIVE window - the only writer.
+
+        ``MainScreen._paint_detection``, minus its paint-epoch stamp. That
+        filter exists because Textual routes a cross-thread ``post_message``
+        through ``call_soon_threadsafe`` and can therefore deliver an outgoing
+        run's last paint AFTER the rebuild that replaced it; this shell's bridge
+        is one FIFO with one drainer, so ordering is structural and a reset
+        queued here cannot be overtaken (``gui/bridge.py``). The generation
+        filter still does its own half: a ghost probe is dropped inside
+        ``consume_*`` on the poller thread and never becomes a paint at all.
+
+        The send-gate line is deliberately re-derived rather than reset: a
+        rebuild does not un-paste the outbound the gate is holding for.
+        """
+        signals = self.live_preset().finish_signals
+        profile = self.profile_for(self._automation.live_slot)
+        self.paint_detection(TemplateKind.SEND_READY, self._automation.send_gate_line())
+        for name, kind in (("busy", TemplateKind.BUSY), ("idle", TemplateKind.IDLE)):
+            ticked_but_blind = name in signals and not profile.has(kind)
+            self.paint_detection(kind, PROBE_UNCAPTURED if ticked_but_blind else PROBE_RESTING)
+        self.paint_detection(TemplateKind.COPY, COPY_RESTING)
+        self.paint_stale(stale_line)
+        self._push_sidebar()  # the heading names the window these lines are about
+
     def _live_has(self, kind: TemplateKind) -> bool:
         """Has the LIVE window's service a capture of ``kind``? Called on the
         POLLER thread, so it reads immutable state and nothing else."""
@@ -1186,11 +1547,16 @@ class GuiView:
         """
         self._schedule(self._automation.run_auto_copy_flow(self._automation.auto_copy_flow))
 
-    # == MCP (a toast per transition; the readout is a later increment) ========
+    # == MCP: the sidebar block, the status segment, and a toast per transition =
 
     def _mcp_status_hook(self, status: Any) -> None:
         """Called from the manager's loop thread. Non-blocking, never raises -
         the manager drops a listener that does, once, for good."""
+        # The repaint reads ``statuses()`` rather than patching one row in: the
+        # hook is a tick, and a connect can change a NEIGHBOUR's line too
+        # (shadowed tool ids) - ``MainScreen._on_mcp_status_changed``.
+        self._push_mcp()
+        self._push_status()
         name = getattr(status, "name", "")
         state = getattr(status, "state", "")
         if state not in ("failed", "needs_auth", "connected"):
@@ -1271,14 +1637,205 @@ class GuiView:
         return "idle", "working - the chat box is paused", False
 
     def _push_status(self) -> None:
-        """The status strip: where the automation loop is, and what it may do."""
+        """The status bar: ten segments, composed here, in order.
+
+        Composed on this side for parity increment 1's reason - the DECISIONS
+        cross with the data - and because every one of them is a rule rather
+        than a style: the watch segment's nine-branch precedence, YOLO winning
+        the edits slot over auto, ARMED keeping its own slot so a disarmed YOLO
+        session is visible, the sub-agent rebadge. A segment that must hide is
+        simply ABSENT from the list, which is how the TUI hides them too: by not
+        being drawn, leaving no padding behind (``StatusBar.update_segments``).
+        """
         self._bridge.send(
             "status",
-            loop=self._automation.loop_state.name,
+            segments=self._status_segments(),
             armed=self._automation.os_armed,
             watching=self._automation.watching,
             provider=self._provider.name,
-            project=str(self._project_root),
+            project=_short_root(self._project_root),
+        )
+
+    def _status_segments(self) -> list[dict[str, str]]:
+        view = self._last_view
+        snap = view.snapshot if view is not None else None
+        watch_text, watch_class = self._watch_segment()
+        # The snapshot is the authority once there is a session (and during a
+        # delegation it is the SUB-AGENT's, like every other field here); before
+        # one, the controller's mirror of the configured default is what
+        # shift+tab would be changing.
+        mode = snap.mode if snap else self._controller.permission_mode
+        mode_class = {"plan": "st-plan", "unattended": "st-unattended"}.get(mode, "st-dim")
+        if snap and snap.yolo:
+            edits, edits_class = "⚡ YOLO", "st-yolo"
+        elif snap and snap.auto_accept_edits:
+            edits, edits_class = "EDITS:auto", ""
+        else:
+            edits, edits_class = "EDITS:ask", ""
+        segments: list[dict[str, str]] = [
+            {"id": "mode", "text": f"MODE:{mode}", "cls": mode_class},
+            {"id": "watch", "text": watch_text, "cls": watch_class},
+        ]
+        if not self._automation.os_armed:
+            segments.append({"id": "armed", "text": "⛔ DISARMED", "cls": "st-disarmed"})
+        segments += [
+            {
+                "id": "service",
+                "text": f"{snap.service_key} {_fmt_k(snap.budget_chars)}" if snap else "no session",
+                "cls": "",
+            },
+            {
+                "id": "out",
+                "text": f"out {_fmt_k(snap.last_outbound_chars)}/{_fmt_k(snap.budget_chars)} (1/1)"
+                if snap
+                else "out -",
+                "cls": "",
+            },
+            {"id": "turn", "text": f"turn {snap.turn}" if snap else "turn -", "cls": ""},
+        ]
+        if snap and snap.instructions_armed:
+            # Lit only between the `r` press and the payload that spends it.
+            segments.append({"id": "instr", "text": "✎ INSTR", "cls": "st-instr"})
+        segments.append({"id": "edits", "text": edits, "cls": edits_class})
+        connected, enabled = self._mcp_counts()
+        if enabled is not None:
+            segments.append({"id": "mcp", "text": f"mcp {connected}/{enabled}", "cls": ""})
+        segments.append({"id": "root", "text": _short_root(self._project_root), "cls": ""})
+        return segments
+
+    def _watch_segment(self) -> tuple[str, str]:
+        """The "what does the app want from me" segment.
+
+        While a delegated run is live the whole segment is rebadged and prefixed
+        ``◆ SUB-AGENT``, because everything it reports - the phase, the
+        approval, the question - is that sub-agent's, not the conversation the
+        user is watching.
+        """
+        text, style = self._base_watch_segment()
+        if self._session_role == "subagent":
+            return f"◆ SUB-AGENT · {_strip_glyph(text)}", "st-sub"
+        return text, style
+
+    def _base_watch_segment(self) -> tuple[str, str]:
+        view = self._last_view
+        snap = view.snapshot if view is not None else None
+        phase = snap.phase.name if snap else "IDLE"
+        if phase == "DONE":
+            return "✓ done - reply to continue", "st-done"
+        if view is not None and view.pending_approval:
+            return "■ APPROVE NEEDED", "st-attn"
+        if view is not None and view.awaiting_answer:
+            return "■ ANSWER NEEDED", "st-attn"
+        if self._awaiting_new_session:
+            # The session worker is technically busy here too (parked on the
+            # inline prompt) but there is no turn in flight - nothing for the
+            # user to wait on - so the bar must not say "working".
+            return "○ idle", "st-dim"
+        if view is not None and view.busy:
+            return "● working...", "st-busy"
+        if self._provider.name == "manual":
+            return "✗ manual paste", "st-err"
+        if self._watch_paused:
+            return "○ paused", "st-dim"
+        if view is not None and view.session_active and phase == "AWAITING_REPLY":
+            return "● ready - paste the reply", "st-armed"
+        return "○ idle", "st-dim"
+
+    def _push_rail(self) -> None:
+        """The STATE rail: eight rows, one per LoopState, in loop order.
+
+        The brightness table is computed here because ``LOOP_TRANSITIONS`` is
+        the automation's own vocabulary and the rule reading it is one line -
+        the active row is marked, everything it can legally move to next reads
+        at normal brightness, the rest is dim. Display only, as it is in the
+        TUI: nothing consults the table to DECIDE anything, and a road that
+        skips a state simply never lights that row.
+        """
+        active = self._automation.loop_state
+        legal = LOOP_TRANSITIONS.get(active, frozenset())
+        self._bridge.send(
+            "rail",
+            loop=active.name,
+            rows=[
+                {
+                    "state": state.name,
+                    "label": _LOOP_LABEL[state],
+                    "mark": "active"
+                    if state is active
+                    else ("legal" if state in legal else "dim"),
+                }
+                for state in _LOOP_ORDER
+            ],
+        )
+
+    def _push_sidebar(self) -> None:
+        """The sidebar's blocks that are not a rail, a banner or a verdict.
+
+        One event rather than five because they are repainted by the same few
+        moments (a service pick, a detector rebuild, a session boundary) and a
+        page that reassembles a column out of five partial writes has five ways
+        to be half-painted.
+        """
+        service = self._service_for(AgentSlot.MASTER)
+        preset = self._config.services.get(service)
+        cal = self._automation.calibration(AgentSlot.MASTER)
+        region = cal.chat_region
+        live_window = _WINDOW_NAMES[
+            SUBAGENT_WINDOW if self._automation.live_slot is AgentSlot.SUBAGENT else MASTER_WINDOW
+        ]
+        self._bridge.send(
+            "sidebar",
+            project=_short_root(self._project_root),
+            services=_service_options(self._config),
+            service=service,
+            service_label=(
+                f"{preset.label} · {preset.max_paste_chars:,} chars per paste "
+                f"· {preset.total_context_chars:,} chars context"
+            )
+            if preset
+            else "",
+            # The TUI's line names F2 as the door to the captures; this shell
+            # has no service editor yet (increment 7), so it reports the count
+            # and stops rather than naming a key that would do nothing.
+            profile_note=f"appearance: {self.profile_for(AgentSlot.MASTER).describe()}",
+            # The picker is locked while a session owns the services: the
+            # master's budget is baked into its Engine at bootstrap.
+            locked=not self._awaiting_new_session,
+            region=f"{region.describe()} · chatbot window" if region is not None else REGION_UNSET,
+            slot_note=SLOT_NOTE_MASTER,
+            detection_title=f"DETECTION · {live_window}",
+        )
+
+    def _mcp_counts(self) -> tuple[int, int | None]:
+        """``connected`` over ``enabled`` - or ``None`` when there is no manager.
+
+        Disabled entries are a config statement rather than a runtime hope, so
+        they are out of both numbers' way. ``None`` hides the segment and the
+        whole sidebar block: an install with no MCP servers gets exactly the bar
+        it always had.
+        """
+        if self._mcp_manager is None:
+            return 0, None
+        statuses = list(self._mcp_manager.statuses())
+        if not statuses:
+            return 0, None
+        connected = sum(1 for s in statuses if getattr(s, "state", "") == "connected")
+        enabled = sum(1 for s in statuses if getattr(s, "state", "") != "disabled")
+        return connected, enabled
+
+    def _push_mcp(self) -> None:
+        """The sidebar's MCP block: one row per configured server, in config
+        order. Absent - heading included - when there is no manager."""
+        if self._mcp_manager is None:
+            return
+        statuses = list(self._mcp_manager.statuses())
+        self._bridge.send(
+            "mcp",
+            rows=[
+                {"name": str(getattr(s, "name", "")), "state": str(getattr(s, "state", "")),
+                 "line": _mcp_line(s)}
+                for s in statuses
+            ],
         )
 
     # == services and profiles =================================================

@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from agentclip.cli import make_engine_factory
@@ -209,6 +210,64 @@ def test_the_js_api_reaches_the_view_through_the_loop(
         caller.join()
         wait_for(lambda: len(seen) == 2, "both js_api calls to land")
         assert seen == [("submit", "hello"), ("cancel", "")]
+    finally:
+        runner.stop()
+
+
+def test_every_key_action_marshals_onto_the_loop_too(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """Parity increment 2's keys take the same hop: pywebview runs each of them
+    on a thread of its own, and a key that reached the controller from there
+    would be racing the flow it is about to change."""
+    recorder = Recorder()
+    runner = build(project, app_config, tmp_path)
+    runner.attach(recorder)
+    runner.start()
+    seen: list[str] = []
+
+    def spy(name: str) -> Callable[..., None]:
+        # A closure rather than a default argument: half of these take a
+        # positional (``set_os_armed(None)``), which would shadow it.
+        return lambda *args: seen.append(name)
+
+    for name in (
+        "set_os_armed",
+        "cycle_permission_mode",
+        "toggle_watch",
+        "recopy",
+        "force_ingest",
+        "reinstruct",
+        "retry_insert",
+        "set_service",
+    ):
+        setattr(runner.view, name, spy(name))
+    try:
+        caller = threading.Thread(
+            target=lambda: (
+                runner.js_api.armed(None),
+                runner.js_api.mode(),
+                runner.js_api.watch(),
+                runner.js_api.recopy(),
+                runner.js_api.ingest(),
+                runner.js_api.reinstruct(),
+                runner.js_api.retry_insert(),
+                runner.js_api.service("chatgpt"),
+            )
+        )
+        caller.start()
+        caller.join()
+        wait_for(lambda: len(seen) == 8, "every key action to land on the loop")
+        assert seen == [
+            "set_os_armed",
+            "cycle_permission_mode",
+            "toggle_watch",
+            "recopy",
+            "force_ingest",
+            "reinstruct",
+            "retry_insert",
+            "set_service",
+        ]
     finally:
         runner.stop()
 

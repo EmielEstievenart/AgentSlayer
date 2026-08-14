@@ -3,8 +3,13 @@
    The Python side is agentclip/gui/bridge.py, which calls exactly one function
    here - window.agentclip.receive(event) - from a single drainer thread, so
    events arrive in the order they were raised and this file never has to think
-   about ordering. Going the other way, everything the user does ends in one of
-   the five window.pywebview.api calls at the bottom.
+   about ordering. Going the other way, everything the user does ends in a
+   window.pywebview.api call, and every one of those lands on the same
+   controller method the TUI's key binding does.
+
+   Two toggles never leave this file: F3 (the sidebar) and F8 (the log pane) are
+   pure show/hide of a page element. /log comes back the other way as a `toggle`
+   event, so the command and the key stay one implementation.
 
    Installed at PARSE time, not on DOMContentLoaded: the bridge can be draining
    before the DOM exists (evaluate_js waits for the page, but the first state
@@ -32,6 +37,23 @@
   var gateAlwaysOffered = false;
   var rejectOpen = false;
   var modalId = null;
+  // The harness decision log, page-side. The deque below is the source of
+  // truth; this is a view of it that happens to keep its own copy, because the
+  // bridge is one-way and a pane revealed after an hour must show the whole
+  // tail rather than whatever arrived since. Bounded at the deque's own number
+  // (agentclip/automation/harness_log.py, HARNESS_LOG_MAX): a debugging tail,
+  // not an archive.
+  var LOG_MAX = 500;
+  var logEntries = [];
+  var logOpen = false;
+  // agentclip.automation.harness_log.EMPTY_LOG_LINE - a log that explains its
+  // own silence, so "nothing has happened" is never read as "nothing works".
+  var EMPTY_LOG_LINE =
+    "nothing logged yet - the harness writes here as it moves through the loop " +
+    "(paste, send, generate, copy).";
+  // What the picker's <option> list currently says, so a repaint that changes
+  // nothing does not rebuild a <select> the user may have open.
+  var serviceOptions = "";
 
   // The run panel's two depths, both of them tui/widgets/run_panel.py's:
   // RUN_TAIL_LINES is what the pane SHOWS (a compiler's last error plus its
@@ -593,6 +615,128 @@
     el.scrim.hidden = false;
   }
 
+  /* == sidebar ==============================================================
+     Everything below RENDERS; nothing decides. The STATE rail's brightness came
+     out of LOOP_TRANSITIONS on the Python side, the status bar's segments came
+     composed and in order, and the detection lines came worded - which is what
+     keeps the two shells from growing two ideas of what any of them mean
+     (docs/design/ui-briefs/sidebar-status-log.md section 3). */
+
+  function paintRail(event) {
+    el.loop.textContent = event.loop;
+    el.rail.innerHTML = "";
+    (event.rows || []).forEach(function (row) {
+      var li = document.createElement("li");
+      li.className = row.mark === "dim" ? "" : row.mark;
+      li.textContent = (row.mark === "active" ? "▶ " : "  ") + row.label;
+      el.rail.appendChild(li);
+    });
+  }
+
+  function paintSidebar(event) {
+    el.sideRoot.textContent = event.project || "";
+    el.sideServiceLabel.textContent = event.service_label || "";
+    el.sideProfileNote.textContent = event.profile_note || "";
+    el.sideRegion.textContent = event.region || "";
+    el.sideSlotNote.textContent = event.slot_note || "";
+    el.sideDetectionTitle.textContent = event.detection_title || "DETECTION";
+    var options = JSON.stringify(event.services || []);
+    if (options !== serviceOptions) {
+      serviceOptions = options;
+      el.serviceSelect.innerHTML = "";
+      (event.services || []).forEach(function (pair) {
+        var option = document.createElement("option");
+        option.value = pair[0];
+        option.textContent = pair[1];
+        el.serviceSelect.appendChild(option);
+      });
+    }
+    if (event.service) el.serviceSelect.value = event.service;
+    // Locked while a session owns the services: the master's budget is baked
+    // into its Engine at bootstrap, so the preset may not move mid-session.
+    el.serviceSelect.disabled = Boolean(event.locked);
+  }
+
+  function paintMcp(event) {
+    var rows = event.rows || [];
+    // Absent - heading included - rather than an empty block: a standing
+    // question with no answer is worse than no block at all.
+    el.mcpBlock.hidden = rows.length === 0;
+    el.mcpRows.innerHTML = "";
+    rows.forEach(function (row) {
+      var node = document.createElement("div");
+      node.className = "mcp-row " + (row.state || "");
+      node.textContent = row.line;
+      node.title = row.line; // the column ellipses; /mcp prints the whole thing
+      el.mcpRows.appendChild(node);
+    });
+  }
+
+  function paintDetection(event) {
+    var line = id("det-" + event.kind);
+    if (!line) return;
+    line.textContent = event.label ? event.label + " · " + event.text : event.text;
+  }
+
+  function paintStatus(event) {
+    el.statusbar.innerHTML = "";
+    (event.segments || []).forEach(function (segment) {
+      var node = document.createElement("span");
+      node.className = "seg " + (segment.cls || "");
+      node.id = "seg-" + segment.id;
+      node.textContent = segment.text;
+      el.statusbar.appendChild(node);
+    });
+  }
+
+  function paintArmed(armed) {
+    el.sideArmed.hidden = Boolean(armed);
+    // The wording is the TUI's DISARMED_BANNER_TEXT; it says what stopped,
+    // because "disarmed" alone leaves the user wondering whether detection died
+    // too (it did not).
+    el.sideArmed.textContent = "⛔ DISARMED\nwatching only - F5 arms";
+  }
+
+  function toggleSidebar() {
+    el.sidebar.hidden = !el.sidebar.hidden;
+  }
+
+  /* == harness log ==========================================================
+     Follow/freeze is a PROPERTY, not a mode: "am I at the tail" is read fresh
+     on every append, so there is no flag that can disagree with where the
+     scroll actually is. At the tail a new entry scrolls the view; scrolled up
+     it lands below the fold and the view does not move; scrolling back down
+     resumes following with nothing having to notice. */
+
+  function following() {
+    var box = el.logLines;
+    return box.scrollHeight - box.scrollTop - box.clientHeight < 4;
+  }
+
+  function paintLog(stick) {
+    var box = el.logLines;
+    var was = box.scrollTop;
+    box.textContent = logEntries.length ? logEntries.join("\n") : EMPTY_LOG_LINE;
+    box.scrollTop = stick ? box.scrollHeight : was;
+  }
+
+  function appendLog(event) {
+    logEntries.push(event.line);
+    if (logEntries.length > LOG_MAX) logEntries = logEntries.slice(-LOG_MAX);
+    // Hidden, this costs one array push and no render at all - the reveal is
+    // one full refill from the buffer anyway.
+    if (!logOpen) return;
+    paintLog(following());
+  }
+
+  function toggleLog() {
+    logOpen = !logOpen;
+    el.logpane.hidden = !logOpen;
+    // A pane that came back showing where it left off would be lying about a
+    // log whose whole purpose is to say what just happened.
+    if (logOpen) paintLog(true);
+  }
+
   /* == chrome ============================================================== */
 
   function paintState(event) {
@@ -628,11 +772,20 @@
         paintState(event);
         return;
       case "status":
-        if (event.loop !== undefined) el.loop.textContent = event.loop;
-        if (event.armed !== undefined) el.armed.hidden = Boolean(event.armed);
+        paintStatus(event);
+        paintArmed(event.armed);
+        return;
+      case "rail":
+        paintRail(event);
+        return;
+      case "sidebar":
+        paintSidebar(event);
+        return;
+      case "mcp":
+        paintMcp(event);
         return;
       case "armed":
-        el.armed.hidden = Boolean(event.armed);
+        paintArmed(event.armed);
         return;
       case "gate":
         if (event.open) showGate(event);
@@ -704,7 +857,11 @@
         return;
       case "flash":
         el.flash.hidden = !event.show;
-        if (event.show) el.flash.textContent = event.text;
+        if (event.show) el.flashText.textContent = event.text;
+        // The button's visibility is coupled to WHICH flash is showing, not to
+        // "was there ever a failure": only the Ctrl+V variant has something to
+        // retry, and hiding the flash hides it unconditionally.
+        el.retryInsert.hidden = !(event.show && event.retry);
         return;
       case "modal":
         showModal(event);
@@ -719,12 +876,20 @@
         showPayload(event);
         return;
       case "detection":
-      case "elements":
+        paintDetection(event);
+        return;
       case "harness":
-        // Nothing draws these yet - the sidebar, the ELEMENTS column and the
-        // log pane are later increments. They are dispatched (rather than
-        // dropped upstream) so the renderer is the only thing those increments
-        // have to grow.
+        appendLog(event);
+        return;
+      case "toggle":
+        // /log's way in. The same call F8 makes, deliberately: two ways to ask
+        // for one thing, one implementation of it.
+        if (event.what === "log") toggleLog();
+        return;
+      case "elements":
+        // Nothing draws these yet - the ELEMENTS column is increment 6. It is
+        // dispatched (rather than dropped upstream) so the renderer is the only
+        // thing that increment has to grow.
         return;
       default:
         return;
@@ -749,8 +914,25 @@
       phase: id("phase"),
       loop: id("loop"),
       service: id("service"),
-      armed: id("armed"),
       flash: id("flash"),
+      flashText: id("flash-text"),
+      retryInsert: id("retry-insert"),
+      sidebar: id("sidebar"),
+      rail: id("rail"),
+      sideArmed: id("side-armed"),
+      sideRoot: id("side-root"),
+      mcpBlock: id("mcp-block"),
+      mcpRows: id("mcp-rows"),
+      serviceSelect: id("service-select"),
+      sideServiceLabel: id("side-service-label"),
+      sideProfileNote: id("side-profile-note"),
+      setRegion: id("set-region"),
+      sideRegion: id("side-region"),
+      sideSlotNote: id("side-slot-note"),
+      sideDetectionTitle: id("side-detection-title"),
+      logpane: id("logpane"),
+      logLines: id("log-lines"),
+      statusbar: id("statusbar"),
       run: id("run"),
       runLabel: id("run-label"),
       runRows: id("run-rows"),
@@ -792,6 +974,25 @@
       if (ev.key === "Enter" && !ev.shiftKey) {
         ev.preventDefault();
         send();
+        return;
+      }
+      // Esc's two composer stages (modals-keys-esc.md section 3.3): text
+      // present clears the box and KEEPS focus so the rewrite can start
+      // immediately; an empty box blurs, which is what makes the single-key
+      // shortcuts (w/c/i/r/x, y/n/a) reachable at all - the inert-while-typing
+      // rule is only safe because there is a way to stop typing. The clear goes
+      // through execCommand so the browser's own undo stack survives it;
+      // assigning .value would throw the paragraph away for good.
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        if (!el.composer.value) {
+          el.composer.blur();
+          return;
+        }
+        el.composer.select();
+        if (!document.execCommand || !document.execCommand("delete")) {
+          el.composer.value = "";
+        }
       }
     });
     el.send.addEventListener("click", send);
@@ -825,13 +1026,67 @@
       }
     });
 
+    el.retryInsert.addEventListener("click", function (ev) {
+      ev.stopPropagation();
+      api("retry_insert");
+    });
+    // A genuine user pick only: nothing here writes the value back into the
+    // picker except paintSidebar, and setting .value programmatically fires no
+    // change event - which is the whole of the TUI's _reported_service dance,
+    // for free (Sidebar.show_service).
+    el.serviceSelect.addEventListener("change", function () {
+      api("service", el.serviceSelect.value);
+    });
+    el.setRegion.addEventListener("click", function () {
+      toast({
+        message:
+          "drawing the chat region lands with the elements panel increment - " +
+          "until then the payload goes to the clipboard and the paste is yours",
+        severity: "warning"
+      });
+    });
+    // The log pane never scrolls its own way: reading the scroll position is
+    // how "following" is decided, so the listener exists only to make the pane
+    // focusable-by-wheel behave like any other scroll box.
+    el.logLines.addEventListener("wheel", function () {}, { passive: true });
+
     document.addEventListener("keydown", function (ev) {
       // The inert-letters rule (main-chat.md section 6): a focused text box
       // swallows every bare letter, and it is the ONLY thing keeping y/n/a/x
-      // from firing into a sentence someone is typing. The ctrl-chords are the
-      // TUI's priority bindings and fire regardless of focus.
+      // and the five session keys from firing into a sentence someone is
+      // typing. The function keys, shift+tab and the ctrl-chords are the TUI's
+      // priority bindings and fire regardless of focus.
+      // SELECT counts as typing: a focused <select> uses bare letters to jump
+      // to an option, and the service picker is one keystroke away from every
+      // session key on this list.
       var tag = ev.target && ev.target.tagName;
-      var typing = tag === "INPUT" || tag === "TEXTAREA";
+      var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+      if (!ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+        if (ev.key === "F3") {
+          ev.preventDefault();
+          toggleSidebar();
+          return;
+        }
+        if (ev.key === "F5") {
+          // preventDefault first: F5 is the browser's reload, and a WebView2
+          // window that reloaded here would drop the whole session's chrome.
+          ev.preventDefault();
+          api("armed", null); // null = toggle, the bare /armed and F5
+          return;
+        }
+        if (ev.key === "F8") {
+          ev.preventDefault();
+          toggleLog();
+          return;
+        }
+      }
+      if (ev.key === "Tab" && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+        // Never gated - it must work pre-session and mid-turn, which are the
+        // two moments the feature exists for (modals-keys-esc.md section 6.3).
+        ev.preventDefault();
+        api("mode");
+        return;
+      }
       if (ev.ctrlKey && !ev.altKey && !ev.metaKey) {
         if (ev.key === "x" || ev.key === "X") {
           ev.preventDefault();
@@ -845,6 +1100,25 @@
       if (typing || ev.ctrlKey || ev.altKey || ev.metaKey) return;
       if (ev.key === "x") {
         toggleLastBlock();
+        return;
+      }
+      // The session keys. Each one is a single controller call on the far side
+      // and every refusal lives there, so a press that cannot do anything comes
+      // back as a toast rather than being swallowed here.
+      if (ev.key === "w") {
+        api("watch");
+        return;
+      }
+      if (ev.key === "c") {
+        api("recopy");
+        return;
+      }
+      if (ev.key === "i") {
+        api("ingest");
+        return;
+      }
+      if (ev.key === "r") {
+        api("reinstruct");
         return;
       }
       if (!gateOpen) return;

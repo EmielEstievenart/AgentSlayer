@@ -190,6 +190,30 @@ class Calls:
     def answer_prompt(self, prompt_id: str, value: object) -> None:
         self._note(("answer_prompt", prompt_id, value))
 
+    def set_os_armed(self, target: bool | None) -> None:
+        self._note(("set_os_armed", target))
+
+    def cycle_permission_mode(self) -> None:
+        self._note(("cycle_permission_mode",))
+
+    def toggle_watch(self) -> None:
+        self._note(("toggle_watch",))
+
+    def recopy(self) -> None:
+        self._note(("recopy",))
+
+    def force_ingest(self) -> None:
+        self._note(("force_ingest",))
+
+    def reinstruct(self) -> None:
+        self._note(("reinstruct",))
+
+    def retry_insert(self) -> None:
+        self._note(("retry_insert",))
+
+    def set_service(self, key: str) -> None:
+        self._note(("set_service", key))
+
     def _note(self, entry: tuple[object, ...]) -> None:
         if self.explode:
             raise RuntimeError("controller blew up")
@@ -213,6 +237,44 @@ def test_every_js_api_method_reaches_the_call_the_tui_makes() -> None:
         ("cancel_execution",),
         ("answer_prompt", "p1", True),
     ]
+
+
+def test_every_key_action_reaches_the_binding_the_tui_makes() -> None:
+    """Parity increment 2's keys, each one method rather than a ``key(name)``
+    door: the marshal stays typed, and a page asking for something this shell
+    does not do fails at the bridge instead of inside a controller."""
+    calls = Calls()
+    api = JsApi(calls)
+    api.armed(None)
+    api.armed(False)
+    api.mode()
+    api.watch()
+    api.recopy()
+    api.ingest()
+    api.reinstruct()
+    api.retry_insert()
+    api.service("chatgpt")
+    assert calls.trace == [
+        ("set_os_armed", None),
+        ("set_os_armed", False),
+        ("cycle_permission_mode",),
+        ("toggle_watch",),
+        ("recopy",),
+        ("force_ingest",),
+        ("reinstruct",),
+        ("retry_insert",),
+        ("set_service", "chatgpt"),
+    ]
+
+
+def test_a_bare_armed_toggles_and_a_bare_service_is_a_no_key() -> None:
+    """``armed``'s default is the bare ``/armed`` and F5 - toggle - and every
+    other parameter defaults to "the user said nothing"."""
+    calls = Calls()
+    api = JsApi(calls)
+    api.armed()
+    api.service()
+    assert calls.trace == [("set_os_armed", None), ("set_service", "")]
 
 
 def test_the_js_api_methods_take_the_page_s_defaults() -> None:

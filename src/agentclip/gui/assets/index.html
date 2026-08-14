@@ -23,60 +23,132 @@
         <span class="pill" id="loop">IDLE</span>
         <span class="pill" id="service"></span>
         <span class="spacer"></span>
-        <span class="pill warn" id="armed" hidden>DISARMED</span>
         <span class="version" id="version"></span>
       </header>
 
       <!-- The "your move" banner the automation raises when a payload is
-           waiting on the user's Ctrl+V or Enter. -->
-      <div class="flash" id="flash" hidden></div>
+           waiting on the user's Ctrl+V or Enter. It blinks, deliberately: the
+           user is looking at their browser, not at this window. Full width
+           rather than inside the sidebar (where the TUI puts it) because a
+           300px column in a 1200px window is the quietest place on screen and
+           this banner's whole job is to be seen - and because F3 must not be
+           able to hide the thing asking for a keystroke. Its one button rides
+           with it, shown only under the Ctrl+V variant (retry=true). -->
+      <div class="flash" id="flash" hidden>
+        <span id="flash-text"></span>
+        <button id="retry-insert" type="button" hidden>Retry insert</button>
+      </div>
 
-      <main class="transcript" id="transcript">
-        <p class="empty">Describe a task below to start a session.</p>
-      </main>
+      <div class="body">
+        <div class="chat">
+          <main class="transcript" id="transcript">
+            <p class="empty">Describe a task below to start a session.</p>
+          </main>
 
-      <!-- The run panel: one row per planned call while a turn executes, the
-           spinner that says the turn is alive, and the running command's tail
-           behind ctrl+o (main-chat.md section 3, "Run panel"). The spinner is a
-           CSS animation rather than the TUI's braille frames - a shell idiom,
-           and one less thing painted per 100ms. -->
-      <section class="run" id="run" hidden>
-        <div class="run-head">
-          <span class="spinner" id="run-spinner"></span>
-          <span id="run-label"></span>
-          <span class="hint" id="run-cancel">ctrl+x to cancel</span>
+          <!-- The run panel: one row per planned call while a turn executes,
+               the spinner that says the turn is alive, and the running
+               command's tail behind ctrl+o (main-chat.md section 3, "Run
+               panel"). The spinner is a CSS animation rather than the TUI's
+               braille frames - a shell idiom, and one less thing painted per
+               100ms. -->
+          <section class="run" id="run" hidden>
+            <div class="run-head">
+              <span class="spinner" id="run-spinner"></span>
+              <span id="run-label"></span>
+              <span class="hint" id="run-cancel">ctrl+x to cancel</span>
+            </div>
+            <ol class="run-rows" id="run-rows"></ol>
+            <div class="run-tail-wrap" id="run-tail-wrap" hidden>
+              <div class="run-tail-head">
+                OUTPUT <span class="hint">live · ctrl+o hides</span>
+              </div>
+              <pre class="run-tail" id="run-tail"></pre>
+            </div>
+          </section>
+
+          <!-- The approval gate. A panel, never a modal: the user needs the
+               transcript visible behind the diff (main-chat.md section 6). -->
+          <section class="gate" id="gate" hidden>
+            <div class="gate-title" id="gate-title"></div>
+            <div class="gate-queue" id="gate-queue"></div>
+            <div class="gate-preview" id="gate-preview"></div>
+            <div class="gate-actions">
+              <button id="gate-approve" type="button">Approve (y)</button>
+              <button id="gate-always" type="button" hidden></button>
+              <button id="gate-reject" type="button">Reject (n)</button>
+              <span class="hint" id="gate-hint"></span>
+            </div>
+            <div class="gate-reject" id="gate-reject-row" hidden>
+              <input id="gate-note" type="text" placeholder="why? (optional) - Enter confirms, Esc cancels" />
+              <button id="gate-note-send" type="button">Send rejection</button>
+            </div>
+          </section>
+
+          <footer class="composer">
+            <textarea id="composer" rows="3" disabled placeholder="no session"></textarea>
+            <button id="send" type="button" disabled>Send</button>
+          </footer>
         </div>
-        <ol class="run-rows" id="run-rows"></ol>
-        <div class="run-tail-wrap" id="run-tail-wrap" hidden>
-          <div class="run-tail-head">
-            OUTPUT <span class="hint">live · ctrl+o hides</span>
+
+        <!-- The right-hand column (F3): live status plus the two things you
+             steer with, and nothing that has to be configured
+             (docs/design/ui-briefs/sidebar-status-log.md section 2.1). -->
+        <aside class="sidebar" id="sidebar">
+          <div class="side-title">STATE</div>
+          <ol class="rail" id="rail"></ol>
+
+          <!-- The paste flash's structural sibling with the opposite
+               temperament: a standing fact that must survive being looked at
+               for an hour, so it never blinks. -->
+          <div class="side-armed" id="side-armed" hidden></div>
+
+          <div class="side-title">PROJECT</div>
+          <div class="side-status" id="side-root"></div>
+
+          <!-- Absent - heading included - when the app has no MCP manager,
+               which is most installs. -->
+          <div id="mcp-block" hidden>
+            <div class="side-title">MCP</div>
+            <div id="mcp-rows"></div>
           </div>
-          <pre class="run-tail" id="run-tail"></pre>
+
+          <div class="side-title">SERVICE</div>
+          <select id="service-select"></select>
+          <div class="side-status" id="side-service-label"></div>
+          <div class="side-status" id="side-profile-note"></div>
+
+          <div class="side-title">CHAT WINDOW</div>
+          <button id="set-region" type="button">Set chat region...</button>
+          <div class="side-status" id="side-region"></div>
+          <div class="side-status" id="side-slot-note"></div>
+
+          <!-- The heading names the LIVE window, which parts company with what
+               the user is reading for the whole of a delegation. Only the
+               detector machinery writes the five lines under it. -->
+          <div class="side-title" id="side-detection-title">DETECTION</div>
+          <div class="side-status" id="det-SEND_READY"></div>
+          <div class="side-status" id="det-BUSY"></div>
+          <div class="side-status" id="det-IDLE"></div>
+          <div class="side-status" id="det-STALE"></div>
+          <div class="side-status" id="det-COPY"></div>
+
+          <div class="side-hint">F3 hides this column · F5 armed · F8 log</div>
+        </aside>
+      </div>
+
+      <!-- The decision log: the STATE rail says WHERE the loop is, this says
+           how it got there. Full width between the columns and the status bar,
+           because one entry is a timestamp, a kind and a whole sentence. -->
+      <section class="logpane" id="logpane" hidden>
+        <div class="logpane-head">
+          HARNESS DECISION LOG <span class="hint">newest last · F8 hides</span>
         </div>
+        <pre class="log-lines" id="log-lines"></pre>
       </section>
 
-      <!-- The approval gate. A panel, never a modal: the user needs the
-           transcript visible behind the diff (main-chat.md section 6). -->
-      <section class="gate" id="gate" hidden>
-        <div class="gate-title" id="gate-title"></div>
-        <div class="gate-queue" id="gate-queue"></div>
-        <div class="gate-preview" id="gate-preview"></div>
-        <div class="gate-actions">
-          <button id="gate-approve" type="button">Approve (y)</button>
-          <button id="gate-always" type="button" hidden></button>
-          <button id="gate-reject" type="button">Reject (n)</button>
-          <span class="hint" id="gate-hint"></span>
-        </div>
-        <div class="gate-reject" id="gate-reject-row" hidden>
-          <input id="gate-note" type="text" placeholder="why? (optional) - Enter confirms, Esc cancels" />
-          <button id="gate-note-send" type="button">Send rejection</button>
-        </div>
-      </section>
-
-      <footer class="composer">
-        <textarea id="composer" rows="3" disabled placeholder="no session"></textarea>
-        <button id="send" type="button" disabled>Send</button>
-      </footer>
+      <!-- Ten segments, composed in Python and rendered in order. A segment
+           that must hide is simply not in the list. -->
+      <div class="statusbar" id="statusbar"></div>
     </div>
 
     <!-- Toasts stack here and expire on their own. -->

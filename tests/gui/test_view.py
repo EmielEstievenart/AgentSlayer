@@ -564,10 +564,15 @@ def test_the_automation_paints_all_reach_the_page(harness: Harness) -> None:
     view.paint_armed(False)
 
     recorder = harness.flush()
-    assert recorder.of_type("status")[-1]["loop"] == "IDLE"  # painted from the controller
+    assert recorder.of_type("rail")[-1]["loop"] == "IDLE"  # painted from the controller
     assert recorder.of_type("detection") == [
-        {"type": "detection", "kind": "COPY", "text": "copy button: not on screen"},
-        {"type": "detection", "kind": "STALE", "text": "stale: unchanged for 2.0s"},
+        {
+            "type": "detection",
+            "kind": "COPY",
+            "label": "copy",
+            "text": "copy button: not on screen",
+        },
+        {"type": "detection", "kind": "STALE", "label": "", "text": "stale: unchanged for 2.0s"},
     ]
     assert recorder.last("elements")["kinds"] == ["COPY"]
     assert recorder.of_type("flash") == [
@@ -731,12 +736,16 @@ def test_exit_app_closes_the_window(harness: Harness) -> None:
     assert harness.exits == 1
 
 
-@pytest.mark.parametrize("method", ["show_identify_overlay", "toggle_harness_log"])
+@pytest.mark.parametrize("method", ["show_identify_overlay"])
 def test_the_reduced_scope_methods_say_so_instead_of_going_quiet(
     harness: Harness, method: str
 ) -> None:
     """A silent ``pass`` on this port is a user staring at a screen where
-    nothing happened - the controller has already told them it asked."""
+    nothing happened - the controller has already told them it asked.
+
+    ``toggle_harness_log`` used to be on this list and is not any more: the pane
+    it needed landed with parity increment 2 (see tests/gui/test_chrome.py).
+    """
     getattr(harness.view, method)()
     assert harness.flush().of_type("toast"), f"{method} said nothing at all"
 

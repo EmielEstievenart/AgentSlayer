@@ -43,12 +43,12 @@ exercised - ordering included - by a test with a list in it.
 whatever that type carries; ``json.dumps`` runs with ``ensure_ascii``, so every
 payload is ASCII on the wire no matter what the model wrote. The producer is
 always :class:`~agentclip.gui.view.GuiView` and the consumer is always
-``app.js``'s ``dispatch``. Two families are pinned here because they are the
+``app.js``'s ``dispatch``. Four families are pinned here because they are the
 ones a renderer has to get exactly right; the rest (``transcript``, ``state``,
-``status``, ``toast``, ``modal``, ``flash``, ``detection``, ``elements``,
-``harness``, ``payload``, ``armed``, ``focus_session``, ``composer_reset``,
-``transcript_clear``, ``modal_close``) are each raised at one place in
-``gui/view.py``, next to the port method they answer.
+``toast``, ``modal``, ``flash``, ``elements``, ``payload``, ``armed``,
+``focus_session``, ``composer_reset``, ``transcript_clear``, ``modal_close``,
+``toggle``) are each raised at one place in ``gui/view.py``, next to the port
+method they answer.
 
 The approval gate - ``show_gate`` / ``hide_gate``::
 
@@ -85,6 +85,37 @@ WORKER-THREAD methods (``docs/design/ui-briefs/main-chat.md`` §4)::
 may re-resolve one that is already finished, so the page treats both as upserts;
 ``run_output`` chunks are deltas and the page owns the accumulation, bounded per
 call, exactly as ``tui/widgets/run_panel.py`` says.
+
+The status bar and the STATE rail - both composed on the Python side, for the
+gate's reason: what is in them is a rule, not a style
+(``docs/design/ui-briefs/sidebar-status-log.md`` §3)::
+
+    {type: "status",
+     segments: [{id: str, text: str, cls: str}, ...],  # IN ORDER, ten at most
+     armed: bool, watching: bool, provider: str, project: str}
+    {type: "rail", loop: str,                          # the active LoopState
+     rows: [{state: str, label: str, mark: "active"|"legal"|"dim"}, ...]}
+
+A segment that must hide is ABSENT from ``segments`` rather than present and
+empty - that is how the TUI hides ``armed``/``instr``/``mcp`` too, by not being
+drawn, leaving no padding behind. ``mark`` is ``LOOP_TRANSITIONS`` already
+applied: display only, and the reason it is applied here is that the table is
+the automation's vocabulary and the page has no business holding a copy.
+
+The sidebar's remaining blocks and the log::
+
+    {type: "sidebar", project: str, services: [[key, label], ...], service: str,
+     service_label: str, profile_note: str, locked: bool, region: str,
+     slot_note: str, detection_title: str}
+    {type: "detection", kind: str, label: str, text: str}   # kind "STALE" too
+    {type: "mcp", rows: [{name: str, state: str, line: str}, ...]}
+    {type: "harness", kind: str, time: str, text: str, line: str}
+    {type: "toggle", what: "log"}                           # /log, from Python
+
+``harness`` carries the rendered ``line`` as well as its parts because the
+fixed-width kind column is ``HarnessEntry.line``'s decision, taken once below
+both shells. The page keeps its own tail of these, bounded at the deque's own
+``HARNESS_LOG_MAX``, so revealing the pane costs no replay across the bridge.
 """
 
 from __future__ import annotations
@@ -251,6 +282,18 @@ class JsCalls(Protocol):
     def submit_decision(self, choice: str, note: str) -> None: ...
     def cancel_execution(self) -> None: ...
     def answer_prompt(self, prompt_id: str, value: Any) -> None: ...
+    # The keys whose state the sidebar and the status bar show. One method per
+    # intent rather than a single ``key(name)`` door, so the marshal is typed
+    # and a page that asks for something this shell does not do fails at the
+    # bridge instead of inside a controller.
+    def set_os_armed(self, target: bool | None) -> None: ...
+    def cycle_permission_mode(self) -> None: ...
+    def toggle_watch(self) -> None: ...
+    def recopy(self) -> None: ...
+    def force_ingest(self) -> None: ...
+    def reinstruct(self) -> None: ...
+    def retry_insert(self) -> None: ...
+    def set_service(self, key: str) -> None: ...
 
 
 class JsApi:
@@ -297,6 +340,49 @@ class JsApi:
         """One blocking prompt's answer, keyed by the id the modal was opened
         with (confirm / prompt_text / show_summary)."""
         self._safely(lambda: self._calls.answer_prompt(prompt_id, value))
+
+    # -- the keys the sidebar and the status bar report on --------------------
+    # F3 (sidebar) and F8 (log pane) are absent on purpose: both are pure
+    # show/hide of a page element, so they never leave the page. ``/log`` comes
+    # back the other way, as a ``toggle`` event, which is what keeps the command
+    # and the key one implementation.
+
+    def armed(self, target: bool | None = None) -> None:
+        """F5 and ``/armed [on|off]``. ``None`` toggles, which is the bare form
+        of both. No session gate, in any state, ever."""
+        self._safely(lambda: self._calls.set_os_armed(target))
+
+    def mode(self) -> None:
+        """shift+tab: cycle ask -> plan -> unattended -> ask. Never gated -
+        it must work pre-session and mid-turn, which are the two moments the
+        feature exists for."""
+        self._safely(self._calls.cycle_permission_mode)
+
+    def watch(self) -> None:
+        """`w`: pause or resume the clipboard watcher."""
+        self._safely(self._calls.toggle_watch)
+
+    def recopy(self) -> None:
+        """`c`: re-copy the last outbound; a second press inside the controller's
+        double-tap window re-delivers it."""
+        self._safely(self._calls.recopy)
+
+    def ingest(self) -> None:
+        """`i`: parse whatever is on the clipboard right now."""
+        self._safely(self._calls.force_ingest)
+
+    def reinstruct(self) -> None:
+        """`r`: arm the service's extra instructions for the next payload."""
+        self._safely(self._calls.reinstruct)
+
+    def retry_insert(self) -> None:
+        """The paste flash's button: run the click-and-paste that did not land
+        again."""
+        self._safely(self._calls.retry_insert)
+
+    def service(self, key: str = "") -> None:
+        """The sidebar's service picker."""
+        self._safely(lambda: self._calls.set_service(key))
 
     @staticmethod
     def _safely(call: Callable[[], None]) -> None:

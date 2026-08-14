@@ -237,6 +237,30 @@ class GuiRunner:
     def answer_prompt(self, prompt_id: str, value: Any) -> None:
         self.schedule_call(self.view.answer_prompt, prompt_id, value)
 
+    def set_os_armed(self, target: bool | None) -> None:
+        self.schedule_call(self.view.set_os_armed, target)
+
+    def cycle_permission_mode(self) -> None:
+        self.schedule_call(self.view.cycle_permission_mode)
+
+    def toggle_watch(self) -> None:
+        self.schedule_call(self.view.toggle_watch)
+
+    def recopy(self) -> None:
+        self.schedule_call(self.view.recopy)
+
+    def force_ingest(self) -> None:
+        self.schedule_call(self.view.force_ingest)
+
+    def reinstruct(self) -> None:
+        self.schedule_call(self.view.reinstruct)
+
+    def retry_insert(self) -> None:
+        self.schedule_call(self.view.retry_insert)
+
+    def set_service(self, key: str) -> None:
+        self.schedule_call(self.view.set_service, key)
+
 
 def _no_close() -> None:
     """The close a runner with no window behind it gets (tests)."""

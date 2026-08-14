@@ -300,9 +300,8 @@ a toast where a user could otherwise be left staring at nothing:
    divider and a `· sub-agent ‹title›` label rather than minting a tab. The
    controller's contract (open → focus → … → finish, single-flight) is satisfied
    as written; the tab bar is a later increment.
-2. **`toggle_harness_log`.** The decision log is written (it is the
-   AutomationController's deque) and each entry reaches the page as a `harness`
-   event; the pane that draws it lands with the state rail. Toasts meanwhile.
+2. ~~**`toggle_harness_log`.**~~ **Done in parity increment 2** — the pane
+   landed with the state rail, exactly as this line said it would.
 3. **`show_identify_overlay`.** The tkinter child-process mechanism carries over
    unchanged, but `/identify` needs a *drawn* chat window and this shell has no
    calibration surface yet. Toasts rather than putting an empty overlay up.
@@ -333,7 +332,8 @@ step:
 1. ✅ shell + transcript/composer (proves the bridge) — slices 1 and 2 below.
 2. ✅ approval gate — **parity increment 1**, with (3).
 3. ✅ run panel — **parity increment 1**, with (2).
-4. ⬜ sidebar / status / state rail
+4. ✅ sidebar / status / state rail — **parity increment 2**, with the harness
+   log pane and the keys those surfaces report on.
 5. ⬜ window tabs / delegation / summary
 6. ⬜ elements panel
 7. ⬜ service editor
@@ -381,10 +381,73 @@ renders instead of sniffing:
   one safety mechanism — and `ctrl+x`/`ctrl+o` fire regardless, which is what
   the TUI buys with `priority=True`.
 
-Still deferred, and named so nobody reads them as done: the composer's
-slash-command popup, the transcript's 500-event prune, and every `MainScreen`
-binding that is not on this surface (`u`/`i`/`c`/`e`/`l`/`t`, `shift+tab`) —
-they land with increment 4, which is where the rail that shows their state is.
+Still deferred after increment 1, and named so nobody reads them as done: the
+composer's slash-command popup, the transcript's 500-event prune, and every
+`MainScreen` binding that is not on this surface (`u`/`i`/`c`/`e`/`l`/`t`,
+`shift+tab`) — they land with increment 4, which is where the rail that shows
+their state is.
+
+**Parity increment 2** — the SIDEBAR, the STATUS BAR and the HARNESS LOG, against
+`docs/design/ui-briefs/sidebar-status-log.md`, plus the keys whose state those
+three surfaces display (`modals-keys-esc.md` §5.1). Nothing new crossed the
+ports and no core change was needed; what changed is that four more families of
+*decision* cross with the data:
+
+- `{type: "rail"}` carries the eight `LoopState` rows with `LOOP_TRANSITIONS`
+  already applied (`active` / `legal` / `dim`). The table is the automation's
+  vocabulary and the page has no business holding a copy of it; it stays
+  display-only on both sides, as `loop_state.py`'s header requires.
+- `{type: "status"}` carries the ten segments **composed and in order**, because
+  every one of them is a rule rather than a style: the watch segment's
+  nine-branch precedence (including `awaiting_new_session` masking `busy`), YOLO
+  winning the `edits` slot over `auto`, `armed` keeping its own slot so a
+  disarmed YOLO session is visible as the pair it is, and the `◆ SUB-AGENT`
+  rebadge. A segment that must hide is **absent from the list**, which is how
+  the TUI hides `armed`/`instr`/`mcp` too — by not being drawn.
+- `{type: "sidebar"}` / `{type: "mcp"}` / `{type: "detection"}` carry the PROJECT,
+  SERVICE, CHAT WINDOW, MCP and DETECTION blocks already worded. The DETECTION
+  block keeps its exclusive owner: `GuiView._paint_detection` is the only writer
+  and every exit of `_start_detector_worker` — including the two that start
+  nothing — leaves the five lines saying what just became true.
+- `{type: "harness"}` gained the rendered `line`, so the fixed-width kind column
+  is `HarnessEntry.line`'s decision on both sides. The pane keeps its own tail
+  bounded at `HARNESS_LOG_MAX`, follows the bottom only while it is already
+  there, survives `/new`, and is flipped by F8 or by `/log` (which arrives as
+  `{type: "toggle", what: "log"}` — one implementation, two doors).
+
+Keys: F3 (sidebar) and F8 (log) never leave the page; F5/`/armed`, `shift+tab`,
+`w`, `c`, `i`, `r`, the service picker and the retry button each get one typed
+`js_api` method that marshals onto the loop and lands on the same controller
+call the TUI's binding makes. `c`'s double tap needed nothing here —
+`SessionController.recopy` owns the 1.5s window on both sides.
+
+Three deliberate divergences, recorded rather than smuggled:
+
+- **The paste flash stays a full-width banner** instead of moving into the
+  sidebar where the TUI keeps it. A 300px column in a 1200px window is the
+  quietest place on screen and this banner's whole job is to be seen — and F3
+  must not be able to hide the thing asking for a keystroke. It blinks (a CSS
+  animation, not a 0.4s timer) and the `Retry insert` button rides with it,
+  shown only under the Ctrl+V variant, exactly as `retry=True` says.
+- **Three sidebar lines drop their "F2"** (the appearance summary, `STALE_OFF`,
+  `PROBE_UNCAPTURED`). The diagnosis is verbatim; the key is not, because this
+  shell has no service editor behind F2 until increment 7 and naming a key that
+  does nothing is worse than naming none.
+- **`w`/`i`/`r` refuse out loud.** `check_action`'s three-way footer dimming
+  (§6.6 of the keys brief) has no equivalent here — there is no footer to hide a
+  binding from — so a key that cannot fire toasts why instead of being silently
+  absent. The three states are preserved as *messages*, not as a collapsed
+  "disabled".
+
+Two things landed alongside because the increment is unusable without them: the
+composer's **two-stage Esc** (clear-with-undo, then blur — stages 2 and 3 of the
+Esc machine), since the bare-letter keys are unreachable while the composer holds
+focus; and the **service picker driving the real config path**
+(`AutomationController.set_service` + `save_active_services` + a detector
+rebuild), locked while a session owns the preset. The picker edits the MASTER
+window only — there is no tab bar to select another one until increment 5, which
+is also where the CHAT WINDOW block grows the sub-agent's readiness note. The
+"Set chat region..." button toasts: calibration lands with the elements panel.
 
 ## 4. SSH connect dialog (GUI-only surface)
 

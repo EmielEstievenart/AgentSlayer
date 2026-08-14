@@ -18,7 +18,13 @@ answers are made of state a shell owns and this layer does not:
 * the verified copy click, which is here rather than inlined for one reason
   only: it is the seam the Textual suites stub to skip a clipboard round-trip.
   :meth:`AutomationController.verified_copy_click` is the implementation a shell
-  delegates back to.
+  delegates back to;
+* where an outbound payload goes when the clipboard PROVIDER refuses it. The
+  write itself is this layer's (the controller holds the provider and the
+  self-write set), but the fallback is not: the TUI's is the terminal's OSC-52
+  escape, which is a Textual call and exists in no other shell (docs/design/gui.md
+  §0). So the controller writes, and hands a shell the payload it could not
+  place - which is the same seam ``deliver``'s ``clipboard_ok`` reports on.
 
 Same thread contract as everything else this layer hands out, with one
 difference worth naming: unlike ``AutomationView``, these are called from the
@@ -69,6 +75,13 @@ class AutomationHost(Protocol):
 
     def rebuild_detectors(self) -> None: ...
 
+    # -- where a payload goes when the clipboard will not take it --------------
+    # Called only after the provider has raised, and only to PARK the text
+    # somewhere a human can still reach it. A shell with no second channel does
+    # nothing; the delivery carries on either way, because the branch that
+    # follows is the existing "the paste is yours to do" one.
+    def park_off_clipboard(self, text: str) -> None: ...
+
 
 class NullHost:
     """The answers a controller with no shell behind it gives: nothing is
@@ -100,3 +113,6 @@ class NullHost:
 
     def rebuild_detectors(self) -> None:
         """No detector set to rebuild."""
+
+    def park_off_clipboard(self, text: str) -> None:
+        """No second channel: the payload stays wherever the session wrote it."""

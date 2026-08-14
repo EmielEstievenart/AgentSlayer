@@ -3,8 +3,9 @@
 :class:`ScreenOps` is the handful of :mod:`agentclip.screen` calls the OS-acting
 sequences in :class:`~agentclip.automation.controller.AutomationController` make
 - capture a rectangle, click one, move the pointer, turn the wheel, tap a
-scroll key, bring a window back, search a frame - plus the two beats those
-sequences pause for. It is emphatically **not** part of the ``AutomationView``
+scroll key, bring a window back, search a frame, drop a synthetic Ctrl+V or
+Enter into whatever has focus - plus the beats and the one size those sequences
+pace themselves by. It is emphatically **not** part of the ``AutomationView``
 port: OS primitives do not cross to a shell (docs/design/gui.md §1), and the
 default implementation below simply calls ``agentclip.screen`` directly, which
 is what "the controller imports the screen layer" means in practice.
@@ -27,12 +28,20 @@ from __future__ import annotations
 
 from enum import Enum
 
+from agentclip.automation.delivery import (
+    PASTE_SETTLE_DELAY,
+    STREAM_CHUNK_SETTLE_S,
+    SUBMIT_SETTLE_S,
+)
+from agentclip.clip.chunking import STREAM_CHUNK_CHARS
 from agentclip.screen.capture import RegionImage, capture_region
 from agentclip.screen.focus import (
     click_region,
     focus_window_verified,
     move_cursor,
     scroll_region,
+    send_enter,
+    send_paste,
     send_scroll_key,
 )
 from agentclip.screen.hover import STEP_DELAY_S
@@ -100,6 +109,16 @@ class ScreenOps:
         """Bring a window back, verified and retried (``focus_window_verified``)."""
         return focus_window_verified(handle)
 
+    def send_paste(self) -> bool:
+        """A synthetic Ctrl+V into whatever has focus. Un-aimed on purpose - the
+        caller has just clicked the chat box and waited out the activation."""
+        return send_paste()
+
+    def send_enter(self) -> bool:
+        """A synthetic Enter, the opt-in auto-submit tap
+        (``ServicePreset.auto_submit``). Un-aimed for the same reason."""
+        return send_enter()
+
     def lowest_match(
         self,
         template: Template,
@@ -127,3 +146,25 @@ class ScreenOps:
         the automation treats it as the live window. A call for the same reason
         as ``hover_step_delay``."""
         return NEW_CHAT_SETTLE_S
+
+    # -- the delivery's own cadence -------------------------------------------
+    # Calls for the same reason as the two above and no other: the suites shrink
+    # them, because a file full of paste tests that each waited out a real focus
+    # activation would be a file nobody runs. What each one is FOR is documented
+    # where its default lives (agentclip.automation.delivery).
+
+    def paste_settle(self) -> float:
+        """How long the focus click is given to take effect before the Ctrl+V."""
+        return PASTE_SETTLE_DELAY
+
+    def submit_settle(self) -> float:
+        """How long the pasted box is given to re-measure before the Enter tap."""
+        return SUBMIT_SETTLE_S
+
+    def stream_chunk_settle(self) -> float:
+        """How long a streamed delivery waits between two bursts."""
+        return STREAM_CHUNK_SETTLE_S
+
+    def stream_chunk_chars(self) -> int:
+        """How big one burst of a streamed delivery is."""
+        return STREAM_CHUNK_CHARS

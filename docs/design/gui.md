@@ -49,8 +49,13 @@ as it always has been.
     dialog (§4) is GUI-only. This is a deliberate exception, not a smell — the
     TUI *cannot* prompt before Textual owns the terminal.
   - OSC-52 clipboard fallback is TUI-only (a terminal escape); the GUI uses the real
-    clipboard provider. `AutomationController.deliver` takes `clipboard_ok: bool`
-    from the shell for exactly this reason.
+    clipboard provider. Two things follow, and both shipped in slice 7:
+    `AutomationHost.park_off_clipboard(text)` is where a payload the provider
+    refused crosses back to a shell (the TUI writes the escape; the GUI does
+    nothing), and `AutomationController.deliver` takes `clipboard_ok: bool` so
+    the delivery is TOLD how the payload got parked rather than re-reading a
+    clipboard that may not be where it went - which is what makes the streamed
+    mode fall back to a single burst.
 
 ## 1. The automation package (phase 0)
 
@@ -141,7 +146,27 @@ Slices (each one commit, suite green, layering test run first):
    both now carry the paint epoch. `_own_window` became `set_own_window` on the
    controller (OS state, both shells snap back to it) with a read-only
    compatibility property on `MainScreen`.
-7. delivery path (`deliver(...)` async; OSC-52 stays TUI-side)
+7. delivery path (`deliver(...)` async; OSC-52 stays TUI-side). **Shipped, with
+   one seam the plan did not name and one clarification of the carve-out.**
+   `deliver(text, *, clipboard_ok)` is the OS half exactly as designed, and the
+   whole flow around it came with it: `copy_outbound`, `park_outbound`,
+   `retry_insert`, the `_pending_insert` bookkeeping, the burst-or-stream choice
+   and the banner's four words. The clipboard WRITE moved down too - the
+   controller holds the provider *and* the self-write set now, so one object is
+   both the watcher's filter and the writer's register - which left the OSC-52
+   fallback needing a way back up from *inside* the delivery (the partial-stream
+   restore is below `deliver`, not above it). So `AutomationHost` grew one
+   method, `park_off_clipboard(text)`: the controller writes, and hands a shell
+   the payload it could not place. `clipboard_ok` stays exactly what §0 carved
+   out - the answer to "how did this get parked", which only the STREAM path
+   reads. The banner's words moved into `automation/delivery.py` with the beats,
+   for the port's own "text, not decisions" rule; the sidebar re-exports them.
+   The two synthetic keystrokes and the delivery's three beats and one chunk
+   size joined `ScreenOps`, which is what keeps the Pilot suites' patches biting
+   at `main.py`'s scope. Only the SCHEDULING stayed in the shell (`run_worker`
+   for the retry button and for `c`'s second tap), the slice-6 arrangement
+   unchanged; `redeliver_outbound`'s two refusals are the controller's
+   `may_redeliver`.
 8. cleanup: dead code, doc sync (`architecture.md`, `tui.md` drift), module table
 
 ## 2. The GUI shell

@@ -195,6 +195,7 @@ from textual.widgets import Button, Collapsible, Footer, Input
 from agentclip.app import SessionController, SessionSpec, SessionView
 from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import RunCall, Severity
+from agentclip.automation import delivery as _delivery
 from agentclip.automation import flow as _flow
 from agentclip.automation.controller import AutomationController, DetectorPoller
 from agentclip.automation.finish import (
@@ -208,17 +209,15 @@ from agentclip.automation.harness_log import (
     HARNESS_LOG_MAX,
     KIND_ARMED,
     KIND_CLIPBOARD,
-    KIND_GATE,
     KIND_SESSION,
     HarnessEntry,
 )
 from agentclip.automation.loop_state import LoopState
 from agentclip.automation.ops import ElementClick, ScreenOps
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
-from agentclip.clip.chunking import STREAM_CHUNK_CHARS, split_for_stream
-from agentclip.clip.watcher import SelfWriteSet, write_via
+from agentclip.clip.chunking import STREAM_CHUNK_CHARS
+from agentclip.clip.watcher import SelfWriteSet
 from agentclip.config import (
-    DELIVERY_STREAM,
     Config,
     ServicePreset,
     save_active_services,
@@ -295,10 +294,7 @@ from agentclip.tui.widgets.log_pane import HarnessLogPane
 from agentclip.tui.widgets.run_panel import RUN_OUTPUT_LINES, RunPanel
 from agentclip.tui.widgets.running_bar import RunningBar
 from agentclip.tui.widgets.sidebar import (
-    AUTO_SEND_FLASH_TEXT,
     COPY_RESTING,
-    ENTER_FLASH_TEXT,
-    PASTE_FLASH_TEXT,
     PROBE_RESTING,
     PROBE_UNCAPTURED,
     STALE_CALIBRATED,
@@ -307,7 +303,6 @@ from agentclip.tui.widgets.sidebar import (
     STALE_UNTICKED,
     Sidebar,
     slot_note,
-    stream_flash_text,
 )
 from agentclip.tui.widgets.statusbar import StatusBar
 from agentclip.tui.widgets.transcript import TranscriptPanel
@@ -329,28 +324,19 @@ _BUSY_POLL_S = 0.5
 # the page still has to render its (centred) input box. Tests shrink this, which
 # is why ``_MainScreenOps`` reads it per call rather than at import.
 _NEW_CHAT_SETTLE_S = 0.4
-# Beat between the focus click landing on the chat's input box and the synthetic
-# Ctrl+V that follows it (``_insert_outbound``).
+# The delivery's beats moved down with the sequence that paces itself by them
+# (agentclip.automation.delivery, which documents what each one is FOR). They
+# stay reachable - and PATCHABLE - under this module's names, because that is
+# where the Pilot suites shrink them: ``_MainScreenOps`` reads all three per
+# call, so a monkeypatch here still bites exactly as it did when the paste path
+# lived on this screen.
 #
-# The click is what gives the browser window the OS focus, and focus is granted
-# ASYNCHRONOUSLY: the window is still activating itself while our next SendInput
-# burst goes out, and a paste that arrives before the caret is really in the
-# input field is delivered to whatever held focus a moment ago - which is to say
-# nowhere the user can see, and the reply silently fails to insert. This is the
-# same race ``focus_window_verified`` documents from the other direction; here
-# there is nothing to verify against (the chat box is a browser widget, not a
-# window handle), so the answer is a beat that comfortably outlasts the
-# activation on a busy machine. 200ms is under human notice next to a click the
-# user is not watching anyway. Tests shrink it.
-PASTE_SETTLE_DELAY = 0.2
-# Beat between the paste and the opt-in auto-submit Enter, for the box to render
-# and re-measure what was just dropped into it before it is sent.
-_SUBMIT_SETTLE_S = 0.15
-# Beat between the bursts of a streamed delivery (ServicePreset.delivery), so a
-# chat box that reflows and re-measures after every paste is not handed the next
-# one mid-repaint. Only between chunks: the last one is followed by the settle
-# the user's own Enter provides.
-_STREAM_CHUNK_SETTLE_S = 0.12
+# The first is the one worth naming here too: the click is what gives the browser
+# window the OS focus, focus is granted ASYNCHRONOUSLY, and a Ctrl+V that
+# overtakes the activation is delivered to whatever held focus a moment ago.
+PASTE_SETTLE_DELAY = _delivery.PASTE_SETTLE_DELAY
+_SUBMIT_SETTLE_S = _delivery.SUBMIT_SETTLE_S
+_STREAM_CHUNK_SETTLE_S = _delivery.STREAM_CHUNK_SETTLE_S
 # The auto-copy harvest's own tuning numbers moved down with the sequence that
 # reads them (agentclip.automation.flow). They stay reachable under this
 # module's names because the Pilot suites size their assertions off them - how
@@ -527,6 +513,12 @@ class _MainScreenOps(ScreenOps):
     def focus_window(self, handle: int) -> bool:
         return focus_window_verified(handle)
 
+    def send_paste(self) -> bool:
+        return send_paste()
+
+    def send_enter(self) -> bool:
+        return send_enter()
+
     def lowest_match(
         self,
         template: Template,
@@ -545,6 +537,18 @@ class _MainScreenOps(ScreenOps):
 
     def new_chat_settle(self) -> float:
         return _NEW_CHAT_SETTLE_S
+
+    def paste_settle(self) -> float:
+        return PASTE_SETTLE_DELAY
+
+    def submit_settle(self) -> float:
+        return _SUBMIT_SETTLE_S
+
+    def stream_chunk_settle(self) -> float:
+        return _STREAM_CHUNK_SETTLE_S
+
+    def stream_chunk_chars(self) -> int:
+        return STREAM_CHUNK_CHARS
 
 
 def _fmt_k(chars: int) -> str:
@@ -687,7 +691,6 @@ class MainScreen(Screen[None]):
         # per-run cache of the ones already read back (see ``_profile``).
         self._profile_root = profile_root
         self._profiles: dict[str, ServiceProfile] = {}
-        self._self_writes = SelfWriteSet()
         self._snap: StatusSnapshot | None = None  # mirrors SessionView.snapshot (read by tests)
         self._gate_kind: str | None = None  # the in-flight gate's kind, for a/check_action
         # The pattern `a` would remember at the in-flight gate, or None in legacy
@@ -753,7 +756,6 @@ class MainScreen(Screen[None]):
             ops=_MainScreenOps(),
             services=self._initial_services(config),
             clipboard=provider,
-            self_writes=self._self_writes,
             poll_interval_ms=config.clipboard.poll_interval_ms,
             accepts=looks_like_protocol,
             on_clipboard_captured=self._clipboard_captured,
@@ -823,15 +825,6 @@ class MainScreen(Screen[None]):
         # worker cannot kill the blocking child overlay process it spawned, so
         # extra button presses are refused up front instead.
         self._picker_open = False
-        # The last payload an insert was attempted with, kept so the sidebar's
-        # "Retry insert" button can re-run the click-and-paste against exactly
-        # that text (``retry_insert``). The clipboard is where the payload
-        # already is, but it is the USER's clipboard: between a failed insert and
-        # the press that retries it they may well have copied something else, and
-        # a retry that pasted whatever happens to be on the clipboard now would
-        # drop a stray copy into the chat. Session-scoped - cleared by /new,
-        # which is where "the last outbound" stops meaning anything.
-        self._pending_insert: str | None = None
         self._controller = SessionController(
             config,
             engine_factory,
@@ -1062,6 +1055,19 @@ class MainScreen(Screen[None]):
     @property
     def _awaiting_pasted_reply(self) -> bool:
         return self._automation.awaiting_pasted_reply
+
+    @property
+    def _self_writes(self) -> SelfWriteSet:
+        """Every clipboard write the automation made, so the watcher cannot read
+        our own outbound back as a reply. The controller's since the delivery
+        path came down with it (slice 7) - both ends are one object."""
+        return self._automation.self_writes
+
+    @property
+    def _pending_insert(self) -> str | None:
+        """What the sidebar's retry button would re-deliver (the controller's -
+        see ``AutomationController.pending_insert``)."""
+        return self._automation.pending_insert
 
     @property
     def _flow_running(self) -> bool:
@@ -1420,7 +1426,7 @@ class MainScreen(Screen[None]):
         self._close_reply_gate()  # whatever was pasted, no reply to it is due now
         # ...and the last outbound belongs to the session being torn down, so
         # there is nothing left for the retry button to re-deliver.
-        self._pending_insert = None
+        self._automation.forget_pending_insert()
         # A reset, not a transition - and the log says so in those words, because
         # every other road to IDLE is the loop finishing something. This entry is
         # also the boundary marker that lets the log survive /new intact: the
@@ -2003,37 +2009,18 @@ class MainScreen(Screen[None]):
         self.run_worker(self._new_browser_chat(AgentSlot.MASTER), group="newchat", exclusive=True)
 
     async def copy_outbound(self, text: str) -> None:
-        # The loop leaves IDLE (or INTERPRETING - the turn's next payload) here:
-        # there is an outbound, and the first move is to insert it ourselves.
-        self._set_loop_state(
-            LoopState.AUTO_INSERT, "an outbound payload is ready to go into the chat box"
-        )
-        # The WHOLE payload goes on the clipboard first, whichever way it is
-        # about to be delivered: a stream leaves its last chunk there, and this
-        # is the write every manual recovery (the user's own Ctrl+V, /copy) is
-        # aimed at.
-        clipboard_ok = await self._park_on_clipboard(text)
-        # What a retry would re-deliver, recorded before the first attempt so it
-        # is right whichever way that attempt ends (see ``retry_insert``).
-        self._pending_insert = text
-        await self._insert_outbound(text, clipboard_ok=clipboard_ok)
+        """ChatView: deliver one outbound payload (the controller's - see
+        ``AutomationController.copy_outbound``). Park it, click the chat box,
+        settle, paste or stream, and tap Enter for a service that opted in."""
+        await self._automation.copy_outbound(text)
 
     async def park_outbound(self, text: str) -> None:
         """ChatView: put the last outbound back on the clipboard and stop there.
 
-        Stage one of the `c` re-copy (tui.md 3.4a). It is exactly the clipboard
-        half of ``copy_outbound`` and none of the rest - no focus click, no
-        synthetic Ctrl+V, and no ``_set_loop_state``, because nothing about the
-        browser round trip has moved: the payload is simply back where the user
-        can paste it. It goes through ``_park_on_clipboard`` like every other
-        write, so this copy is registered as a self-write and the watcher cannot
-        ingest our own outbound back as if it were a reply.
-
-        ``_pending_insert`` is deliberately left alone: it is what the sidebar's
-        retry button would re-deliver, and re-copying the payload that is
-        already the pending one changes nothing about that.
+        Stage one of the `c` re-copy (tui.md 3.4a) - the clipboard half of
+        ``copy_outbound`` and none of the rest. The controller's.
         """
-        await self._park_on_clipboard(text)
+        await self._automation.park_outbound(text)
 
     def redeliver_outbound(self, text: str) -> None:
         """ChatView: send the last outbound again, the way a normal send sends.
@@ -2042,162 +2029,30 @@ class MainScreen(Screen[None]):
         ``copy_outbound`` and nothing else, so the re-delivery cannot drift from
         the delivery it repeats: the same park, the same verified focus click,
         the same burst-or-stream choice and the same opt-in Enter tap, chosen by
-        the same live preset. The two refusals are the view-only half of
-        ``SessionController.recopy``'s guards, and they are the retry button's -
-        the same act, so the same three reasons it may not happen (the third,
-        "nothing has been copied yet", is the controller's ``_last_outbound``
-        and never reaches here).
+        the same live preset. The two refusals (and their wording) are the
+        controller's ``may_redeliver``; what is left here is the SCHEDULING,
+        which is the one thing a UI framework really owns.
 
         Scheduled rather than awaited, in the retry button's exclusive worker
-        group: the controller is on the event loop and must not park for the
-        seconds a streamed delivery takes, and two inserts racing into one chat
-        box is exactly what the group exists to prevent.
+        group: the session controller is on the event loop and must not park for
+        the seconds a streamed delivery takes, and two inserts racing into one
+        chat box is exactly what the group exists to prevent.
         """
-        if not self._automation.os_armed:
-            self.notify(
-                "disarmed - AgentClip may not click or type: press F5 to arm, or paste "
-                "the payload into the chat yourself",
-                severity="warning",
-            )
-            return
-        if self._flow_running:
-            self.notify("the auto-copy flow is driving the mouse - let it finish first")
+        if not self._automation.may_redeliver():
             return
         self.run_worker(self.copy_outbound(text), group="insert", exclusive=True)
 
-    async def _park_on_clipboard(self, text: str) -> bool:
-        """Put the whole outbound on the clipboard, as a self-write. False = no
-        real clipboard backend, so it went out over OSC-52 (write-only) instead
-        and a synthetic Ctrl+V has nothing here to paste.
+    def park_off_clipboard(self, text: str) -> None:
+        """AutomationHost: the clipboard provider refused the payload, so send it
+        out over the terminal's OSC-52 escape instead (write-only).
 
-        Every delivery starts here, whichever way it is about to be delivered: a
-        stream leaves its last chunk on the clipboard, and this is the write
-        every manual recovery (the user's own Ctrl+V, /copy, the retry button) is
-        aimed at.
+        The one delivery step that could not come down with the rest of the paste
+        path: it is ``App.copy_to_clipboard``, a Textual terminal escape, and no
+        other shell has anything like it (docs/design/gui.md §0). The controller
+        reports what it means for the delivery through ``deliver``'s
+        ``clipboard_ok`` - a stream has no clipboard to walk chunks through.
         """
-        try:
-            await asyncio.to_thread(write_via, self._provider, self._self_writes, text)
-        except ClipboardUnavailable:
-            self.app.copy_to_clipboard(text)  # OSC-52, write-only
-            self.notify(
-                "no clipboard backend - sent via the terminal's OSC-52 escape; if pasting "
-                "fails, copy from .agentclip/sessions/<id>/outbound/",
-                severity="warning",
-            )
-            return False
-        return True
-
-    async def _insert_outbound(self, text: str, *, clipboard_ok: bool) -> bool:
-        """Click the chat's input box, let the focus settle, paste, and - for a
-        service that opted in - tap Enter. True only when the payload really
-        landed in the box.
-
-        The payload is already on the clipboard when this runs (``copy_outbound``
-        and ``retry_insert`` both park it there first): this half is the OS work
-        on top of that write, and it is a method of its own precisely so the
-        retry button re-runs *this* sequence rather than a second, drifting copy
-        of it. Everything the auto flow does after the click - the settle, the
-        stream-or-burst choice, the auto-submit tap, the loop state, the reply
-        gate and the sidebar's nag - is therefore one thing, done once.
-        """
-        # DISARMED stops here, one line below the clipboard write and above
-        # every OS call - which is the whole shape of the feature: the payload
-        # is where the user can paste it, and the click and the synthetic Ctrl+V
-        # simply do not happen. Everything after this is the existing "the click
-        # never landed" path (MANUAL_INSERT, the Ctrl+V nag), which is exactly
-        # the disarmed UX and needs no second implementation.
-        if self._automation.os_armed:
-            clicked = await self._click_after_response()
-        else:
-            clicked = False
-            self.notify(
-                "disarmed - the payload is on your clipboard: click the chat box and "
-                "press Ctrl+V yourself (F5 arms)",
-                severity="warning",
-            )
-        # Only paste when the click actually landed - focus could be on any
-        # window otherwise, and pasting into an unknown app is the one
-        # unforgivable failure mode here.
-        pasted = False
-        if clicked:
-            # THE seam between the click and the paste, and the one place it
-            # exists: the click above only tells us the OS accepted the input,
-            # never that the chat box has finished taking focus. See
-            # ``PASTE_SETTLE_DELAY``. Non-blocking, so the TUI keeps painting
-            # (the STATE rail and the flash are what the user has to look at
-            # while this happens) - and it covers the streamed delivery below
-            # too, since that is the same first Ctrl+V into the same fresh focus.
-            await asyncio.sleep(PASTE_SETTLE_DELAY)
-            # Streaming needs a clipboard to write each chunk through, so a
-            # service that asks for it still falls back to the single burst when
-            # there is no backend - the OSC-52 payload above is all there is.
-            if self._live_preset().delivery == DELIVERY_STREAM and clipboard_ok:
-                pasted = await self._stream_outbound(text)
-            else:
-                pasted = await asyncio.to_thread(send_paste)
-        # The auto-insert resolved: the payload is in the box awaiting the
-        # user's Enter, or it never landed and the Ctrl+V is theirs to do. Three
-        # reasons, not two, because "the Ctrl+V is yours" has two very different
-        # causes and only one of them is a failure - the switch the user threw
-        # themselves reads as a fault otherwise.
-        auto_sent = False
-        if pasted:
-            self._set_loop_state(
-                LoopState.WAIT_SEND, "the payload was pasted into the chat box"
-            )
-            if self._live_preset().auto_submit:
-                # Opt-in per service: tap Enter ourselves instead of waiting
-                # for the user's. Still WAIT_SEND, and deliberately so - the
-                # tap is an attempt, not a fact, and the send gate's evidence
-                # (the ready button vanishing, the busy icon appearing) stays
-                # the only thing that moves the loop to WAIT_GENERATE, exactly
-                # as for a human Enter. If the tap did not take, the gate times
-                # out as ever, and the flash below says whose Enter it is now.
-                await asyncio.sleep(_SUBMIT_SETTLE_S)
-                auto_sent = await asyncio.to_thread(send_enter)
-                self._log_harness(
-                    KIND_GATE,
-                    "auto-submit tapped Enter after the paste"
-                    if auto_sent
-                    else "auto-submit could not type Enter - the send is yours",
-                )
-        elif not self._automation.os_armed:
-            self._set_loop_state(
-                LoopState.MANUAL_INSERT,
-                "auto-insert suppressed: disarmed - the payload is on your clipboard "
-                "to paste yourself",
-            )
-        elif not clicked:
-            self._set_loop_state(
-                LoopState.MANUAL_INSERT,
-                "the focus click did not land, so nothing was pasted - "
-                "no chat box is drawn, or the click was refused",
-            )
-        else:
-            self._set_loop_state(
-                LoopState.MANUAL_INSERT,
-                "the chat box was focused but the synthetic Ctrl+V did not go through",
-            )
-        # This is the moment a reply becomes something to wait for, so it is
-        # the moment the finish detectors are allowed to act - see
-        # ``_open_reply_gate``. Unconditional: whether the Ctrl+V landed or the
-        # user still has to send it themselves, the payload is out and the next
-        # thing to happen in that chat is the answer to it.
-        self._open_reply_gate()
-        # The payload now waits on the user's Enter (pasted), Ctrl+V+Enter (not
-        # pasted), or on the send gate confirming the Enter auto-submit already
-        # tapped - nag until the busy region reports the model chewing (or a
-        # new capture/reset happens).
-        self.show_paste_flash(
-            AUTO_SEND_FLASH_TEXT if auto_sent else ENTER_FLASH_TEXT if pasted else PASTE_FLASH_TEXT,
-            # ...and offer the one-press re-run beside that nag, exactly
-            # when the nag is the "you paste it yourself" one. An insert
-            # that landed has nothing to retry, and a button offering to
-            # click into the chat and paste a second payload on top of the
-            # first is worse than no button at all.
-            retry=not pasted,
-        )
-        return pasted
+        self.app.copy_to_clipboard(text)
 
     # -- re-running an insert that did not land ---------------------------------
 
@@ -2207,102 +2062,16 @@ class MainScreen(Screen[None]):
         self.run_worker(self.retry_insert(), group="insert", exclusive=True)
 
     async def retry_insert(self) -> None:
-        """Do the insert again: park the last payload back on the clipboard,
-        click the chat box, settle, paste, and auto-submit if the service does.
+        """Do the insert again (the controller's - see
+        ``AutomationController.retry_insert``): park the last payload back on the
+        clipboard, click the chat box, settle, paste, and auto-submit if the
+        service does.
 
-        The recovery for the failure this whole delay exists to make rarer - the
-        click landed but the paste went nowhere, and the reply is sitting on the
-        clipboard with the sidebar asking the user to Ctrl+V it into the browser
-        by hand. One press does that for them, through the SAME
-        ``_insert_outbound`` the auto flow uses, so the retry cannot deliver a
-        different thing (or skip the auto-submit) than the attempt it replaces.
-
-        Three refusals, none of them harmful to press into:
-
-        * nothing has been copied yet (a press before the first outbound);
-        * the app is DISARMED, where clicking and typing are exactly what is
-          promised not to happen - the toast names the switch;
-        * the auto-copy flow is mid-sequence, whose clicks and hover scans this
-          would shove the mouse through the middle of.
+        The name stays here because it is what the sidebar's button runs and what
+        the suites drive; the three refusals and the sequence itself are one
+        thing, done once, below both shells.
         """
-        text = self._pending_insert
-        if text is None:
-            self.notify("nothing to re-insert yet - no outbound payload has been copied")
-            return
-        if not self._automation.os_armed:
-            self.notify(
-                "disarmed - AgentClip may not click or type: press F5 to arm, or paste "
-                "into the chat yourself",
-                severity="warning",
-            )
-            return
-        if self._flow_running:
-            self.notify("the auto-copy flow is driving the mouse - let it finish first")
-            return
-        # Back to AUTO_INSERT even though the user asked for this by hand: the
-        # rail says what the automation is DOING, and what it is about to do is
-        # the auto insert over again.
-        self._set_loop_state(LoopState.AUTO_INSERT, "the insert is being retried from the sidebar")
-        clipboard_ok = await self._park_on_clipboard(text)
-        await self._insert_outbound(text, clipboard_ok=clipboard_ok)
-
-    async def _stream_outbound(self, text: str) -> bool:
-        """Walk ``text`` into the focused chat box a chunk at a time (opt-in per
-        service, ``ServicePreset.delivery``). True only if every chunk landed.
-
-        Chunked CLIPBOARD PASTES rather than synthetic typing: a typed newline
-        is Enter in most chat boxes, which would submit half a payload - the
-        exact accident this whole flow exists to avoid. So each chunk is a
-        clipboard write plus the same single Ctrl+V burst the paste mode sends,
-        with a beat between them for the page to keep up. Every chunk goes
-        through ``write_via``, so each is registered as a self-write and the
-        watcher can never ingest our own outbound back as a reply.
-
-        The stream stays inside ``LoopState.AUTO_INSERT`` - it is one insert
-        that takes a while, not a state of its own - and reports itself on the
-        sidebar's banner, which is the only thing on screen while the user is
-        looking at the browser.
-
-        A chunk that fails to paste ends the stream: the box then holds a
-        partial payload the user has to clear, so the FULL text goes back on the
-        clipboard and the caller's existing MANUAL_INSERT path takes over, with
-        a toast that says both halves of that.
-        """
-        # The size is passed rather than defaulted so the whole cadence - chunk
-        # size and inter-chunk beat - is one pair of module globals a test can
-        # shrink without pasting a real payload's worth of bursts.
-        chunks = split_for_stream(text, STREAM_CHUNK_CHARS)
-        total = len(chunks)
-        for index, chunk in enumerate(chunks, start=1):
-            self.show_paste_flash(stream_flash_text(index, total))
-            try:
-                await asyncio.to_thread(write_via, self._provider, self._self_writes, chunk)
-            except ClipboardUnavailable:
-                landed = False
-            else:
-                landed = await asyncio.to_thread(send_paste)
-            if not landed:
-                await self._restore_after_partial_stream(text, index, total)
-                return False
-            if index < total:
-                await asyncio.sleep(_STREAM_CHUNK_SETTLE_S)
-        return True
-
-    async def _restore_after_partial_stream(self, text: str, index: int, total: int) -> None:
-        """Undo what a half-delivered stream left behind, as far as it can be
-        undone from here: the clipboard gets the whole payload back (the last
-        thing on it is a chunk, and the manual Ctrl+V the caller is about to ask
-        for must paste the message, not a fragment of it), and the toast says
-        the chat box is the part only the user can fix."""
-        try:
-            await asyncio.to_thread(write_via, self._provider, self._self_writes, text)
-        except ClipboardUnavailable:
-            self.app.copy_to_clipboard(text)  # OSC-52, write-only
-        self.notify(
-            f"streaming stopped at chunk {index}/{total} - the chat box holds a partial "
-            "message: clear it, then press Ctrl+V for the whole payload",
-            severity="warning",
-        )
+        await self._automation.retry_insert()
 
     async def _find_all(
         self,
@@ -2382,16 +2151,6 @@ class MainScreen(Screen[None]):
         (the controller's - see ``chatbox_region``)."""
         return await self._automation.chatbox_region()
 
-    async def _click_after_response(self) -> bool:
-        """The payload is on the clipboard - poke the chat (when something is
-        calibrated) so the browser has focus and the paste lands without
-        alt-tab. Returns True only when a target was known AND the click landed
-        - the signal callers use to decide whether it is safe to send Ctrl+V."""
-        region = await self._chatbox_region()
-        if region is None:
-            return False
-        return await self._focus_click(region)
-
     async def _focus_click(self, target: ScreenRegion) -> bool:
         """Click ``target``'s centre to put the chat's window in front (the
         controller's - see ``focus_click``). WHERE to click stays the caller's
@@ -2425,14 +2184,13 @@ class MainScreen(Screen[None]):
         callers, because the acting primitives are five screen-layer functions
         (``click_region``, ``scroll_region``, ``move_cursor``, ``send_paste``,
         ``focus_window_verified``) and every one of them is reached through
-        exactly one of these doors - only the first of which is still this
-        screen's:
+        exactly one of these doors - none of which is still this screen's:
 
-        1. the paste path (``_insert_outbound``, reached by ``copy_outbound``
-           and by the sidebar's retry button alike), which stops clicking and
-           pasting but still WRITES the payload to the clipboard, so the user can
-           paste it by hand - that is the existing MANUAL_INSERT fallback, and
-           disarmed mode simply routes into it;
+        1. the paste path (``AutomationController.deliver``, reached by
+           ``copy_outbound`` and by the sidebar's retry button alike), which
+           stops clicking and pasting but still WRITES the payload to the
+           clipboard, so the user can paste it by hand - that is the existing
+           MANUAL_INSERT fallback, and disarmed mode simply routes into it;
         2. ``AutomationController.click_profile_element``, the one find-then-click
            primitive, which refuses with ``ElementClick.DISARMED`` before it
            touches anything - covering /new's new-chat click and a delegation's

@@ -88,6 +88,7 @@ from textual.message import Message
 from textual.timer import Timer
 from textual.widgets import Button, Select, Static
 
+from agentclip.automation import delivery as _delivery
 from agentclip.automation.finish import SEND_READY_ARMED as SEND_READY_ARMED
 from agentclip.automation.finish import SEND_READY_HOLDING as SEND_READY_HOLDING
 from agentclip.automation.finish import SEND_READY_OVERRIDDEN as SEND_READY_OVERRIDDEN
@@ -145,20 +146,16 @@ def state_row_id(state: LoopState) -> str:
     return f"side-state-{state.name.lower()}"
 
 
-PASTE_FLASH_TEXT = ">>> PRESS CTRL+V <<<\nin the chat, then send"
-ENTER_FLASH_TEXT = ">>> PRESS ENTER <<<\nreply pasted - just send it"
-# auto_submit tapped Enter itself; the flash stays up until the send gate sees
-# the send land, so the second line covers the tap not taking.
-AUTO_SEND_FLASH_TEXT = ">>> AUTO-SENT <<<\nEnter was tapped for you"
-# The third thing the same banner can say, and the only one that is not asking
-# for a keystroke: a streamed delivery is pasting the payload in a chunk at a
-# time, and the count is the whole point - a big message takes seconds, and
-# without it the user is watching a chat box fill from nowhere.
-STREAM_FLASH_TEXT = ">>> STREAMING <<<\nchunk {index}/{total} - don't type"
-
-
-def stream_flash_text(index: int, total: int) -> str:
-    return STREAM_FLASH_TEXT.format(index=index, total=total)
+# The four things this banner can say moved down with the delivery that CHOOSES
+# between them (agentclip.automation.delivery): the automation port takes finished
+# words and is told where to put them, so the wording is decided once below both
+# shells rather than twice above them. They stay reachable under this widget's
+# names, which is where it and the suites already reach for them.
+PASTE_FLASH_TEXT = _delivery.PASTE_FLASH_TEXT
+ENTER_FLASH_TEXT = _delivery.ENTER_FLASH_TEXT
+AUTO_SEND_FLASH_TEXT = _delivery.AUTO_SEND_FLASH_TEXT
+STREAM_FLASH_TEXT = _delivery.STREAM_FLASH_TEXT
+stream_flash_text = _delivery.stream_flash_text
 
 
 # The flash's companion button (MainScreen.retry_insert): "the click and the

@@ -32,7 +32,7 @@ from agentclip.screen.busy import BusyProbe, BusyState
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.stale import StaleProbe, StaleState
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed, ClipboardCaptured, StaleProbed
+from agentclip.tui.messages import ClipboardCaptured
 from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import ENTER_FLASH_TEXT, PASTE_FLASH_TEXT
 
@@ -151,13 +151,11 @@ async def test_busy_match_turns_the_flash_off(tmp_path: Path) -> None:
         # A MATCH the tracker actually SAW (``generating_now``): the settling
         # ticks after the paste's reset carry the same state on no evidence, and
         # those may not take the banner down - see test_finish_signal_ui.py.
-        main.post_message(
-            BusyProbed(BusyProbe(BusyState.MATCH, 0.01, True), main._detector_generation)
-        )
+        main._automation.feed_probe("busy", BusyProbe(BusyState.MATCH, 0.01, True))
         await _wait_for(pilot, lambda: _flash(app).display is False, "flash hidden on MATCH")
 
         # CHANGED probes (idle screen) must NOT re-show or re-hide anything.
-        main.post_message(BusyProbed(BusyProbe(BusyState.CHANGED, 0.4), main._detector_generation))
+        main._automation.feed_probe("busy", BusyProbe(BusyState.CHANGED, 0.4))
         await pilot.pause()
         assert _flash(app).display is False
 
@@ -176,9 +174,7 @@ async def test_a_caret_sized_stale_change_leaves_the_flash_up(tmp_path: Path) ->
 
         main._active_detectors = ("stale",)
         for _ in range(main_mod.SEND_ARM_TICKS + 2):
-            main.post_message(
-                StaleProbed(StaleProbe(StaleState.CHANGING, 0.001, 0), main._detector_generation)
-            )
+            main._automation.feed_probe("stale", StaleProbe(StaleState.CHANGING, 0.001, 0))
             await pilot.pause()
         assert _flash(app).display is True
         assert main._copy_armed is False
@@ -196,9 +192,7 @@ async def test_a_sustained_stale_change_turns_the_flash_off(tmp_path: Path) -> N
 
         main._active_detectors = ("stale",)
         for _ in range(main_mod.SEND_ARM_TICKS):
-            main.post_message(
-                StaleProbed(StaleProbe(StaleState.CHANGING, 0.5, 0), main._detector_generation)
-            )
+            main._automation.feed_probe("stale", StaleProbe(StaleState.CHANGING, 0.5, 0))
             await pilot.pause()
         await _wait_for(pilot, lambda: _flash(app).display is False, "flash hidden on arm")
         assert main._copy_armed is True

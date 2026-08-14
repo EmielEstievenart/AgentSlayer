@@ -12,8 +12,9 @@ The shape of a scenario, three lines every time: say which detectors the poller
 would be reporting (``active_detectors`` - the fixed busy -> idle -> stale build
 order, whose LAST entry closes a tick), open the reply gate (nothing may arm or
 fire unless an outbound is actually waiting for an answer), then feed probes.
-``consume_*`` is what the poll loop pushes and what the shell's message handlers
-hand down, so feeding them IS a tick completing.
+``feed_probe`` is the seam the poll loop's own ``consume_*`` calls sit behind -
+same call, same thread rules, stamped with the live run unless a test says
+otherwise - so feeding a probe IS a tick completing.
 
 Covered: the two ways the trigger arms (a busy/idle icon on the frame just
 probed - proof; a sustained large delta - inference), the two-consecutive-ticks
@@ -74,25 +75,19 @@ class Harness:
         """
         if evidence is None:
             evidence = state is BusyState.MATCH
-        self.controller.consume_busy_probe(
-            BusyProbe(state, 0.2, evidence), self.controller.detector_generation
-        )
+        self.controller.feed_probe("busy", BusyProbe(state, 0.2, evidence))
 
     def idle(self, state: BusyState, *, evidence: bool | None = None) -> None:
         """The same, inverted: for an idle appearance CHANGED is "generating"."""
         if evidence is None:
             evidence = state is BusyState.CHANGED
-        self.controller.consume_idle_probe(
-            BusyProbe(state, 0.2, evidence), self.controller.detector_generation
-        )
+        self.controller.feed_probe("idle", BusyProbe(state, 0.2, evidence))
 
     def stale(self, state: StaleState, *, diff: float = 0.001, ticks: int = 0) -> None:
-        self.controller.consume_stale_probe(
-            StaleProbe(state, diff, ticks), self.controller.detector_generation
-        )
+        self.controller.feed_probe("stale", StaleProbe(state, diff, ticks))
 
     def send_ready(self, found: bool | None) -> None:
-        self.controller.consume_send_ready(found, self.controller.detector_generation)
+        self.controller.feed_probe("send_ready", found)
 
     # -- the sequences the rules are made of ----------------------------------
 
@@ -262,6 +257,11 @@ def test_the_fire_happens_exactly_once_even_on_a_second_finished_tick(
     whose detectors have been saying "finished" for two ticks running. Without
     the flag being up by the time this method returns, that tick fires a second
     harvest: two clicks on one copy button, and the reply ingested twice.
+
+    Slice 5b widened that window rather than closing it: the decision is taken
+    on the poller thread now, so a shell's ``on_fire`` cannot even start its
+    work - it hands the fire to its UI thread and returns, and the poller ticks
+    on meanwhile. Which is exactly the callback this test hands in.
     """
     h = build(view)
 
@@ -609,7 +609,7 @@ def test_a_send_probe_from_a_dead_run_cannot_release_the_new_windows_gate(
     dead = h.controller.detector_generation
     h.controller.retarget_detectors()
 
-    h.controller.consume_send_ready(False, dead)
+    h.controller.feed_probe("send_ready", False, dead)
 
     assert h.controller.send_gate is SendGate.SEEN
 
@@ -733,8 +733,8 @@ def test_recognised_crops_are_routed_through_but_never_read(view: FakeAutomation
     h = build(view)
     crops: dict[TemplateKind, object] = {TemplateKind.COPY: object()}
 
-    h.controller.consume_elements(crops, h.controller.detector_generation)
+    h.controller.feed_probe("elements", crops)
     assert h.view.element_paints == [crops]
 
-    h.controller.consume_elements(crops, h.controller.detector_generation - 1)
+    h.controller.feed_probe("elements", crops, h.controller.detector_generation - 1)
     assert len(h.view.element_paints) == 1  # a dead run's pictures are not this window's

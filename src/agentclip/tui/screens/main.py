@@ -44,17 +44,23 @@ detectors are the same shape as the watcher: ONE poll loop takes a single
 capture of the live chat region per tick and hands it to one
 ``screen.detector.ScreenDetector`` - a plain, Textual-free object that searches
 for every appearance the live window's service is CALIBRATED for and answers
-with a snapshot - and this screen's five ``_post_*`` callbacks turn each answer
-into ``BusyProbed`` / ``IdleProbed`` / ``StaleProbed`` / ``SendReadyProbed`` /
-``ElementsMatched`` on the way back to the UI. What a probe MEANS is the
-controller's too now: each handler below stops its message and hands the reading
-straight down to a ``consume_*`` call, still on this thread and still in the
-order the messages arrive, so the whole state machine (the bookkeeping, both
-gates, the loop's narration, the combined verdict) is one object below both
-shells. What comes back up is paint - ``paint_detection``/``paint_stale``/
-``paint_elements``/``paint_loop_state`` and the two banner calls, which this
-screen implements as direct widget writes because every one of them is made from
-this thread.
+with a snapshot - and the loop feeds that snapshot straight into the
+controller's own ``consume_*`` calls, on the poller thread, in the busy -> idle
+-> stale -> send-ready -> elements order, all in one call stack per tick. What a
+probe MEANS never reaches this screen at all: the bookkeeping, both gates, the
+loop's narration and the combined verdict are one object below both shells.
+
+What comes back up is paint, and ONLY paint. Every ``AutomationView`` method
+this screen implements - ``paint_detection``/``paint_stale``/``paint_elements``/
+``paint_loop_state``/``paint_harness_entry``/``paint_armed``, the two banner
+calls, ``notify`` - is now two lines: build the typed message that says what to
+draw and ``post_message`` it, because the caller is usually the poller thread and
+a widget may only be touched on this one. The handlers underneath do the writes.
+``on_fire`` crosses the same way (``AutoCopyRequested``), since starting a
+Textual worker is this thread's alone. The one thing still asked of this screen
+DURING a tick is ``_crop_elements`` - cutting the matched pixels down to panel
+size, which happens on the poller thread so the queue carries an icon rather
+than a chat window - and ``_live_has``, which reads immutable state only.
 
 That split is deliberate and load-bearing: **the detector detects, the state
 machine consumes**. Nothing about the send gate, the auto-copy flow or the
@@ -169,6 +175,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
+from textual.notifications import SeverityLevel
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Button, Collapsible, Footer, Input
@@ -185,6 +192,7 @@ from agentclip.automation.finish import (
     SendGate,
 )
 from agentclip.automation.harness_log import (
+    HARNESS_LOG_MAX,
     KIND_ARMED,
     KIND_CLIPBOARD,
     KIND_COPY,
@@ -208,7 +216,6 @@ from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnaps
 from agentclip.mcp.types import McpServerStatus
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
-from agentclip.screen.busy import BusyProbe
 from agentclip.screen.capture import CaptureError, RegionImage, capture_region
 from agentclip.screen.detector import ScreenDetector, Sighting, build_detector
 from agentclip.screen.focus import (
@@ -236,7 +243,7 @@ from agentclip.screen.slot import (
     can_delegate,
     missing,
 )
-from agentclip.screen.stale import StaleProbe, StaleTracker
+from agentclip.screen.stale import StaleTracker
 from agentclip.screen.template import (
     DEFAULT_TOLERANCE,
     CandidateSource,
@@ -248,17 +255,22 @@ from agentclip.screen.template import (
     same_element,
 )
 from agentclip.tui.messages import (
-    BusyProbed,
+    AutoCopyRequested,
     CallFinished,
     CallOutput,
     CallStarted,
     ClipboardCaptured,
     ElementCrop,
-    ElementsMatched,
-    IdleProbed,
+    HidePasteFlash,
     McpStatusChanged,
-    SendReadyProbed,
-    StaleProbed,
+    NotifyRequested,
+    PaintArmed,
+    PaintDetection,
+    PaintElements,
+    PaintHarnessEntry,
+    PaintLoopState,
+    PaintStale,
+    ShowPasteFlash,
 )
 from agentclip.tui.pixels import crop
 from agentclip.tui.screens.confirm import ConfirmScreen
@@ -806,20 +818,20 @@ class MainScreen(Screen[None]):
             poll_interval_ms=config.clipboard.poll_interval_ms,
             accepts=looks_like_protocol,
             on_clipboard_captured=self._clipboard_captured,
-            # ...and the poll loop's five ways out, each turned into the message
-            # its handler below already answers (``_post_*``, called on the
-            # poller thread). The probes themselves are unchanged: only the
-            # thread that produces them moved.
-            on_busy_probe=self._post_busy_probe,
-            on_idle_probe=self._post_idle_probe,
-            on_stale_probe=self._post_stale_probe,
-            on_send_ready_probe=self._post_send_ready_probe,
-            on_elements=self._post_element_crops,
+            # The one thing a tick still asks this screen for on its way into the
+            # consumer: cut this tick's matches down to panel-sized pictures.
+            # Sizing one depends on which renderer this terminal can drive, so
+            # the CUT is the shell's - and it runs on the poller thread that
+            # captured the frame, because what then crosses to the UI is an icon
+            # rather than a chat window.
+            crop_elements=self._crop_elements,
             # What the fold cannot work out for itself. The profile cache is
             # this screen's (a service key resolves against its Config), and
             # launching a coroutine is Textual's - so "does the live window's
             # service have a capture of X?" and "start the auto-copy flow" cross
             # back as callbacks, and everything between them is decided below.
+            # BOTH are called on the poller thread now: ``_live_has`` answers
+            # from an immutable snapshot and ``_fire_auto_copy`` posts.
             has_appearance=self._live_has,
             on_fire=self._fire_auto_copy,
             # The tunables are read off THIS module rather than the automation
@@ -832,6 +844,16 @@ class MainScreen(Screen[None]):
         )
         self._delegation_ready = False  # last-seen SUBAGENT can_delegate, for the one-shot toast
         self._region_click_warned = False
+        # Which detector RUN the DETECTION block and the ELEMENTS column are
+        # currently showing. Bumped by ``_paint_detection`` (the rebuild's
+        # reset), stamped into every run-scoped paint the controller asks for,
+        # and compared by the handlers - the ghost filter on the paint side, now
+        # that the probe it used to ride on never leaves the poller thread.
+        self._paint_epoch = 0
+        # Harness-log entries waiting for the pane, in the order the controller
+        # logged them - see ``paint_harness_entry``. Bounded like the log
+        # itself, because before the pane exists there is nowhere to drain to.
+        self._log_pending: deque[HarnessEntry] = deque(maxlen=HARNESS_LOG_MAX)
         # This screen's mirror of the controller's poller: set by
         # ``_spawn_detector_worker``, dropped by ``_stop_detector_worker``, and
         # the thing ``resume_detectors`` asks "is one already up?". A mirror
@@ -1719,22 +1741,54 @@ class MainScreen(Screen[None]):
         """Repaint the sidebar's STATE rail (``AutomationView``).
 
         Called on every loop-state change, plus once on mount so the rail is
-        never blank before the first one.
+        never blank before the first one - and, since the consumer moved onto
+        the poller thread, usually from there.
         """
+        self.post_message(PaintLoopState(state))
+
+    @on(PaintLoopState)
+    def _on_paint_loop_state(self, message: PaintLoopState) -> None:
+        """The message is a TICK; the controller is the state.
+
+        Deliberately painting ``loop_state`` rather than ``message.state``, on
+        the ``McpStatusChanged`` precedent: two threads move the loop now, and
+        Textual delivers a cross-thread post through ``call_soon_threadsafe``,
+        so two transitions taken in one order can be delivered in the other. The
+        rail would then rest on the older one for good. Reading the controller
+        here makes the LAST message painted the CURRENT truth whatever order
+        they arrive in - and the payload stays on the message so the pump still
+        says which transition asked.
+        """
+        message.stop()
         with suppress(NoMatches):
-            self.sidebar.show_loop(state)
+            self.sidebar.show_loop(self._automation.loop_state)
 
     def paint_harness_entry(self, entry: HarnessEntry) -> None:
         """Mirror one appended decision into the log pane (``AutomationView``).
 
-        The deque is the log and the controller owns it; the pane is a view of
-        it, fed one entry at a time so an open pane shows a decision as it is
-        taken (§3.3b). A hidden pane paints nothing and refills itself from the
-        deque when it is next revealed, and before the screen is mounted there
-        is no pane at all - which is why the query is suppressed.
+        The deque in the controller is the log; the pane is a view of it, fed
+        one entry at a time so an open pane shows a decision as it is taken
+        (§3.3b). The entry is queued HERE, in append order, and the message only
+        says "there is something to mirror" - because order is the whole meaning
+        of a log and the message queue cannot promise it across threads
+        (``call_soon_threadsafe`` again). ``log_harness`` appends under the
+        controller's tick lock, so this queue is filled in exactly the order the
+        deque was, and the handler drains it in that order.
         """
+        self._log_pending.append(entry)
+        self.post_message(PaintHarnessEntry(entry))
+
+    @on(PaintHarnessEntry)
+    def _on_paint_harness_entry(self, message: PaintHarnessEntry) -> None:
+        """A hidden pane paints nothing and refills itself from the deque when it
+        is next revealed, and before the screen is mounted there is no pane at
+        all - which is why the query is suppressed, and why the pending queue is
+        bounded like the log itself."""
+        message.stop()
         with suppress(NoMatches):
-            self.harness_log_pane.append(entry)
+            pane = self.harness_log_pane
+            while self._log_pending:
+                pane.append(self._log_pending.popleft())
 
     def _paint_state_rail(self) -> None:
         """The mount-time paint of the STATE rail, from wherever it rests."""
@@ -2583,8 +2637,67 @@ class MainScreen(Screen[None]):
         segment is repainted by ``set_os_armed`` instead, because it also
         reports the clipboard watcher and must run after the watcher moved.
         """
+        self.post_message(PaintArmed(armed))
+
+    @on(PaintArmed)
+    def _on_paint_armed(self, message: PaintArmed) -> None:
+        """Painted from the controller rather than the payload, for the reason
+        ``_on_paint_loop_state`` gives: the flag is the truth and the message is
+        only the ask, so a delivery order the switch was not toggled in cannot
+        leave the banner disagreeing with ``os_armed``."""
+        message.stop()
         with suppress(NoMatches):
-            self.sidebar.show_armed_state(armed)
+            self.sidebar.show_armed_state(self._automation.os_armed)
+
+    # == ChatView + AutomationView: notifications =============================
+
+    def notify(
+        self,
+        message: str,
+        *,
+        title: str = "",
+        severity: SeverityLevel = "information",
+        timeout: float | None = None,
+        markup: bool = True,
+    ) -> None:
+        """A transient toast, from whichever thread asked for it.
+
+        Textual's own ``notify`` already ends in a ``post_message``, so it is
+        thread-safe as it stands and this override buys no safety. What it buys
+        is UNIFORMITY: every other thing this screen is asked for from the poller
+        thread is a typed message with a handler, and a toast that took a
+        different road would be the one call nobody could find in the pump. It
+        also keeps a toast behind the paints of the same decision when both were
+        asked for on the same thread - the gate timing out paints its DETECTION
+        line, appends its log entry and toasts about it in one call stack.
+
+        The signature is Textual's, unchanged, because everything that already
+        called ``self.notify`` on the UI thread still does.
+        """
+        self.post_message(
+            NotifyRequested(
+                message, title=title, severity=severity, timeout=timeout, markup=markup
+            )
+        )
+
+    @on(NotifyRequested)
+    def _on_notify_requested(self, message: NotifyRequested) -> None:
+        message.stop()
+        if message.timeout is None:
+            super().notify(
+                message.message,
+                title=message.title,
+                severity=message.severity,
+                markup=message.markup,
+            )
+            return
+        super().notify(
+            message.message,
+            title=message.title,
+            severity=message.severity,
+            timeout=message.timeout,
+            markup=message.markup,
+        )
 
     def start_input(self) -> None:
         """ChatView: the session wants the clipboard watched.
@@ -2844,6 +2957,26 @@ class MainScreen(Screen[None]):
         against a Config and a cache of profiles read off disk is this screen's,
         and re-read on every call rather than snapshotted because the service
         editor can forget an appearance mid-session.
+
+        **Called on the POLLER thread** since slice 5b, so everything it touches
+        has to be answerable without the UI loop:
+
+        * no widget, at any depth - it reads pointers and dicts and nothing else;
+        * ``Config`` and ``ServicePreset`` are frozen dataclasses, and
+          ``update_config`` REBINDS ``self._config`` rather than editing it, so a
+          reader either sees the whole old config or the whole new one;
+        * a cached ``ServiceProfile`` is never edited in place. The service
+          editor loads its OWN copy off disk, writes PNGs to the store, and the
+          cache here is DROPPED afterwards rather than patched - so an entry a
+          reader is holding stays exactly as it was read;
+        * ``self._profiles`` is a plain dict used as a cache of exactly that.
+          The UI thread clears it (``update_config``) while this thread may be
+          reading it, and both are single bytecode-level dict operations, so the
+          worst case is a redundant ``load_profile`` off disk - which is what a
+          cache miss already costs and which ``load_profile`` never raises for.
+          A lock here would buy consistency nobody can use: the question is
+          "what did the service look like when this tick was taken", and a
+          capture forgotten one microsecond ago is not a wrong answer to it.
         """
         return self._live_profile().has(kind)
 
@@ -3336,10 +3469,10 @@ class MainScreen(Screen[None]):
             return
 
         # ONE search pass over the frame per tick, for everything the live
-        # window's service is calibrated for, pushed back out through the
-        # ``_post_*`` callbacks below in the fixed busy -> idle -> stale order
-        # the tick-closing rule reads. The loop belongs to the controller; what
-        # it watches, how fast, and with what capture are decided here.
+        # window's service is calibrated for, folded by the controller's own
+        # consumer in the same call stack, in the fixed busy -> idle -> stale
+        # order the tick-closing rule reads. The loop belongs to the controller;
+        # what it watches, how fast, and with what capture are decided here.
         self._spawn_detector_worker(
             self._automation.detector_loop(
                 detector,
@@ -3388,7 +3521,21 @@ class MainScreen(Screen[None]):
         and a rebuild that leaves the old window's send button under the new
         window's name is a straightforward lie. It refills itself on the new
         run's first tick.
+
+        **It opens a new paint epoch**, which is what keeps the reset from being
+        undone a moment after it lands. The poller thread's verdicts reach these
+        same widgets through the message queue now, and Textual routes a
+        cross-thread ``post_message`` through ``call_soon_threadsafe`` - so a
+        paint the outgoing run asked for BEFORE this rebuild can still be sitting
+        in flight and be delivered AFTER it. The last tick of a cancelled run is
+        exactly that paint: a live verdict about a window this block no longer
+        describes, which used to be dropped by the ghost filter because the
+        PROBE crossed the thread boundary and got filtered on arrival. Now the
+        probe never crosses and the paint does, so the same filter has to sit
+        here: every ``paint_*`` below stamps the epoch it was asked in, and a
+        handler ignores anything older than the current one (``_paint_epoch``).
         """
+        self._paint_epoch += 1
         signals = self._live_preset().finish_signals
         profile = self._live_profile()
         window_name = _WINDOW_NAMES[self._window_of(self._automation.live_slot)]
@@ -3444,50 +3591,29 @@ class MainScreen(Screen[None]):
         if self._detector_worker is None:
             self._start_detector_worker()
 
-    # -- the poller thread's way back in ---------------------------------------
-    # Five callbacks the AutomationController's poll loop pushes each tick's
-    # readings through, and the whole of what they do is what
-    # ``_clipboard_captured`` does for the watcher thread: turn the reading into
-    # the message its handler already answers and return. ``post_message`` is
-    # Textual's thread-safe bridge, so nothing here touches a widget, reads a
-    # verdict or decides anything - the deciding happens on the UI thread, in
-    # the handlers below, exactly as it did when the loop was a worker of this
-    # screen's. Each carries the generation of the run that produced it (see
-    # ``AutomationController.is_ghost``).
+    # -- the poller thread's one question --------------------------------------
 
-    def _post_busy_probe(self, probe: BusyProbe, generation: int) -> None:
-        self.post_message(BusyProbed(probe, generation))
-
-    def _post_idle_probe(self, probe: BusyProbe, generation: int) -> None:
-        self.post_message(IdleProbed(probe, generation))
-
-    def _post_stale_probe(self, probe: StaleProbe, generation: int) -> None:
-        self.post_message(StaleProbed(probe, generation))
-
-    def _post_send_ready_probe(self, found: bool | None, generation: int) -> None:
-        self.post_message(SendReadyProbed(found, generation))
-
-    def _post_element_crops(
+    def _crop_elements(
         self,
         scene: RegionImage,
         sightings: Mapping[TemplateKind, Sighting | None],
-        generation: int,
-    ) -> None:
+    ) -> Mapping[TemplateKind, object]:
         """One tick's recognitions, cut down to pictures before they cross.
 
-        The one callback that does work rather than only wrapping: the crop runs
-        HERE, on the poller thread that captured the frame, because the message
-        queue should carry an icon and not a chat window (see ``_element_crop``).
-        That is why the loop pushes the raw frame and its sightings instead of
-        crops - sizing a crop is a question about which renderer this terminal
-        can drive, and that is the shell's to answer.
+        The only thing the poll loop still asks this screen for on its way into
+        the consumer, and it does work rather than routing: the crop runs HERE,
+        on the poller thread that captured the frame, because the message queue
+        should carry an icon and not a chat window (see ``_element_crop``). That
+        is why the controller hands over the raw frame and its sightings instead
+        of crops - sizing a crop is a question about which renderer this
+        terminal can drive, and that is the shell's to answer.
+
+        Touches no widget and reads nothing mutable, which is what makes it safe
+        off the UI thread: ``_element_crop`` is a module function over the frame
+        it is handed, and the renderer choice inside ``element_crop_image`` is
+        settled at import.
         """
-        self.post_message(
-            ElementsMatched(
-                {kind: _element_crop(scene, sighting) for kind, sighting in sightings.items()},
-                generation,
-            )
-        )
+        return {kind: _element_crop(scene, sighting) for kind, sighting in sightings.items()}
 
     def _finish_tick_closed_by(self, detector: str) -> bool:
         """Is ``detector``'s message the tick's LAST, given what is running?
@@ -3498,77 +3624,91 @@ class MainScreen(Screen[None]):
         """
         return self._automation.finish_tick_closed_by(detector)
 
-    # -- the five handlers -----------------------------------------------------
-    # Each one stops its message and hands the reading straight down. Every rule
-    # about what a probe MEANS - the ghost filter, the readout, the bookkeeping,
-    # the send gate, the combined verdict - is the AutomationController's, and
-    # these run on the UI thread exactly where they always did: the messages are
-    # still the injectable path tests drive the state machine through
-    # (``tui.messages``), and the transport is what the next slice changes.
-
-    def on_busy_probed(self, message: BusyProbed) -> None:
-        message.stop()
-        self._automation.consume_busy_probe(message.probe, message.generation)
-
-    def on_idle_probed(self, message: IdleProbed) -> None:
-        message.stop()
-        self._automation.consume_idle_probe(message.probe, message.generation)
-
-    def on_stale_probed(self, message: StaleProbed) -> None:
-        message.stop()
-        self._automation.consume_stale_probe(message.probe, message.generation)
-
-    def on_elements_matched(self, message: ElementsMatched) -> None:
-        message.stop()
-        self._automation.consume_elements(message.crops, message.generation)
-
-    def on_send_ready_probed(self, message: SendReadyProbed) -> None:
-        message.stop()
-        self._automation.consume_send_ready(message.found, message.generation)
-
     # -- AutomationView: what the detectors are seeing -------------------------
+    # Every method below is called from the POLLER thread (the consumer runs
+    # there since slice 5b), so every one of them does the same two things and
+    # nothing else: build the typed message that says what to paint, and post
+    # it. The handler underneath does the widget writes - including the
+    # ``NoMatches`` guards, which are the pre-mount case: a probe can be
+    # consumed before the sidebar exists.
+    #
+    # The three below carry the PAINT EPOCH they were asked in, because they
+    # are the run-scoped ones: a rebuild resets this whole block, and a verdict
+    # the outgoing run asked for can still be in flight when it does (Textual
+    # routes a cross-thread post through ``call_soon_threadsafe``, so it can be
+    # overtaken by anything the UI thread posts - or writes - afterwards). The
+    # stamp is the ghost filter, moved to the paint side because the probe no
+    # longer crosses; see ``_paint_detection``.
 
     def paint_detection(self, kind: TemplateKind, text: str) -> None:
-        """One appearance's line in the sidebar's DETECTION block.
+        """One appearance's line in the sidebar's DETECTION block."""
+        self.post_message(PaintDetection(kind, text, self._paint_epoch))
 
-        Direct and synchronous, which is exactly right while the consumer runs
-        on this thread: every caller is a message handler of this screen's. The
-        ``NoMatches`` guard is the pre-mount case - a probe can land before the
-        sidebar exists - and it is the same guard the inline paints carried.
-        """
+    @on(PaintDetection)
+    def _on_paint_detection(self, message: PaintDetection) -> None:
+        message.stop()
+        if message.epoch != self._paint_epoch:
+            return
         with suppress(NoMatches):
-            self.sidebar.update_template(kind, text)
+            self.sidebar.update_template(message.kind, message.text)
 
     def paint_stale(self, text: str) -> None:
         """The stale detector's line, which has no appearance behind it."""
+        self.post_message(PaintStale(text, self._paint_epoch))
+
+    @on(PaintStale)
+    def _on_paint_stale(self, message: PaintStale) -> None:
+        message.stop()
+        if message.epoch != self._paint_epoch:
+            return
         with suppress(NoMatches):
-            self.sidebar.update_stale(text)
+            self.sidebar.update_stale(message.text)
 
     def paint_elements(self, crops: Mapping[TemplateKind, object]) -> None:
         """Paint one tick's recognised crops into the ELEMENTS column.
 
-        Together with ``_paint_detection`` and the auto-copy flow's one-shot,
-        the only writer of that column - which keeps it inside the DETECTION
-        block's ownership rule (tui.md 3.4e): the crops are cut from the LIVE
-        window, so a tab click - which may be showing the OTHER window's
-        transcript for the whole of a delegation - must never repaint them.
-
         The cast is the port's opacity being cashed in: a crop is sized for
         whatever renderer will draw it, so the automation layer routes the
-        mapping without a type for it and this end knows what it cut.
+        mapping without a type for it and this end knows what it cut - it cut
+        them itself, in ``_crop_elements``, on the thread now calling this.
         """
-        with suppress(NoMatches):
-            self.elements_panel.show_matches(
-                cast("Mapping[TemplateKind, ElementCrop | None]", crops)
+        self.post_message(
+            PaintElements(
+                cast("Mapping[TemplateKind, ElementCrop | None]", crops), self._paint_epoch
             )
+        )
+
+    @on(PaintElements)
+    def _on_paint_elements(self, message: PaintElements) -> None:
+        """Together with ``_paint_detection`` and the auto-copy flow's one-shot,
+        the only writer of the ELEMENTS column - which keeps it inside the
+        DETECTION block's ownership rule (tui.md 3.4e): the crops are cut from
+        the LIVE window, so a tab click - which may be showing the OTHER
+        window's transcript for the whole of a delegation - must never repaint
+        them."""
+        message.stop()
+        if message.epoch != self._paint_epoch:
+            return
+        with suppress(NoMatches):
+            self.elements_panel.show_matches(message.crops)
 
     def show_paste_flash(self, text: str, *, retry: bool = False) -> None:
         """Put the ">>> PRESS ... <<<" banner up (``AutomationView``)."""
+        self.post_message(ShowPasteFlash(text, retry))
+
+    @on(ShowPasteFlash)
+    def _on_show_paste_flash(self, message: ShowPasteFlash) -> None:
+        message.stop()
         with suppress(NoMatches):
-            self.sidebar.show_paste_flash(text, retry=retry)
+            self.sidebar.show_paste_flash(message.text, retry=message.retry)
 
     def hide_paste_flash(self) -> None:
         """Take it down - the send is proven, so the nag is over."""
+        self.post_message(HidePasteFlash())
+
+    @on(HidePasteFlash)
+    def _on_hide_paste_flash(self, message: HidePasteFlash) -> None:
+        message.stop()
         with suppress(NoMatches):
             self.sidebar.hide_paste_flash()
 
@@ -3577,11 +3717,20 @@ class MainScreen(Screen[None]):
 
         The one action the finish decision still hands back, because launching a
         coroutine is Textual's and the flow itself is (until the next slice) all
-        this screen's OS choreography. Called SYNCHRONOUSLY from inside
-        ``evaluate_finish``, after it has already set ``flow_running`` - so the
-        tick that arrives while this worker is starting cannot fire a second
-        harvest at the same chat.
+        this screen's OS choreography - and since 5b the decision is taken on the
+        POLLER thread, where ``run_worker`` may not be called at all. So this
+        posts, and the handler launches.
+
+        The deferral costs nothing the fire-once rule needed: ``evaluate_finish``
+        sets ``flow_running`` synchronously *before* asking, so every tick that
+        lands in the hop between this post and its handler is suspended and
+        cannot ask again.
         """
+        self.post_message(AutoCopyRequested())
+
+    @on(AutoCopyRequested)
+    def _on_auto_copy_requested(self, message: AutoCopyRequested) -> None:
+        message.stop()
         self.run_worker(self._run_auto_copy_flow(), group="copyflow", exclusive=True)
 
     async def _run_auto_copy_flow(self) -> None:

@@ -16,9 +16,10 @@ editor's subject, covered once in test_profile_capture_ui.py. Seeding writes
 the same PNGs a real capture leaves behind, so the app simply loads them.
 
 Capture, matcher and focus calls are monkeypatched at their use site
-(agentclip.tui.screens.main). ``BusyProbed`` is the documented injectable path
-for the poller (tui/messages.py); posting it is equivalent to a poll
-completing, so these tests drive the arm/fire trigger without the real thread.
+(agentclip.tui.screens.main). ``AutomationController.feed_probe`` is the
+documented injectable path for the poller; feeding a probe is equivalent to a
+poll completing, so these tests drive the arm/fire trigger without the real
+thread.
 
 The terminal has to be tall enough for the sidebar's buttons to be on screen -
 Pilot refuses to click a widget outside the visible region.
@@ -44,7 +45,6 @@ from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.template import RegionMatch
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed
 from agentclip.tui.screens.main import MainScreen
 
 from .conftest import send_composer
@@ -136,16 +136,15 @@ async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
 
 
 async def _post_probe(main: MainScreen, pilot: Pilot, state: BusyState, diff: float | None) -> None:
-    """Inject one busy-poller verdict - the documented path (tui/messages.py).
+    """Feed one busy-poller verdict in - the documented path (``feed_probe``).
 
     A MATCH here is a frame that genuinely found the busy appearance
     (``BusyProbe.generating_now``), which is what arms the trigger; the settling
     default that shares the state carries no evidence and is
-    test_finish_signal_ui.py's subject.
+    test_finish_signal_ui.py's subject. The ``pause`` is what lets the paints
+    the consumption asked for reach the sidebar: they cross as messages now.
     """
-    main.post_message(
-        BusyProbed(BusyProbe(state, diff, state is BusyState.MATCH), main._detector_generation)
-    )
+    main._automation.feed_probe("busy", BusyProbe(state, diff, state is BusyState.MATCH))
     await pilot.pause()
 
 

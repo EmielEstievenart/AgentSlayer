@@ -16,9 +16,11 @@ themselves), the finish detectors still reach their verdict and still move the
 STATE rail, and `i` still ingests a reply the user copied by hand. A switch that
 quietly blinded the tool would be a different, worse feature.
 
-``BusyProbed`` is the documented injectable path for the detector poller
-(tui/messages.py), used here to drive a genuine finish - a frame that really
-saw the busy appearance (``BusyProbe.generating_now``), then two that did not.
+``AutomationController.feed_probe`` is the documented injectable path for the
+detector poller, used here to drive a genuine finish - a frame that really saw
+the busy appearance (``BusyProbe.generating_now``), then two that did not. The
+consumption is synchronous; the ``pilot.pause`` after each probe is what lets
+the paints it asked for cross back to the sidebar.
 """
 
 from __future__ import annotations
@@ -41,7 +43,6 @@ from agentclip.screen.capture import RegionImage
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed
 from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import PASTE_FLASH_TEXT
 
@@ -236,11 +237,7 @@ async def _fire(main: MainScreen, pilot: Pilot) -> None:
     main._active_detectors = ("busy",)
     main._open_reply_gate()
     for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
-        main.post_message(
-            BusyProbed(
-                BusyProbe(state, 0.2, state is BusyState.MATCH), main._detector_generation
-            )
-        )
+        main._automation.feed_probe("busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
         await pilot.pause()
 
 
@@ -355,6 +352,7 @@ async def test_a_disarmed_outbound_still_reaches_the_clipboard_but_nothing_is_cl
         calls.clicks.clear()
 
         await main.copy_outbound("PAYLOAD-FOR-THE-USER")
+        await pilot.pause()  # the banner goes up through the paint queue now
 
         assert fake.read_text() == "PAYLOAD-FOR-THE-USER"  # the write still happened
         assert calls.nothing(), calls.summary()
@@ -545,9 +543,7 @@ async def test_disarming_mid_turn_leaves_the_detectors_bookkeeping_alone(
         _calibrate(main)
         main._active_detectors = ("busy",)
         main._open_reply_gate()
-        main.post_message(
-            BusyProbed(BusyProbe(BusyState.MATCH, 0.2, True), main._detector_generation)
-        )
+        main._automation.feed_probe("busy", BusyProbe(BusyState.MATCH, 0.2, True))
         await pilot.pause()
         assert main._copy_armed is True
         assert main._awaiting_pasted_reply is True
@@ -749,9 +745,7 @@ async def test_detection_and_the_state_rail_stay_live_while_disarmed(
         main._active_detectors = ("busy",)
         main._open_reply_gate()
 
-        main.post_message(
-            BusyProbed(BusyProbe(BusyState.MATCH, 0.2, True), main._detector_generation)
-        )
+        main._automation.feed_probe("busy", BusyProbe(BusyState.MATCH, 0.2, True))
         await pilot.pause()
 
         # The verdict reached the sidebar's DETECTION block...

@@ -62,7 +62,7 @@ from agentclip.tui.graphics import (
     crop_rows,
     set_terminal_graphics,
 )
-from agentclip.tui.messages import ElementCrop, ElementsMatched
+from agentclip.tui.messages import ElementCrop
 from agentclip.tui.pixels import HALF_BLOCK, thumbnail
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.tui.widgets.elements import (
@@ -197,11 +197,11 @@ async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
 
 
 def _post(app: AgentClipApp, crops: dict[TemplateKind, ElementCrop | None], *, ahead: int = 0) -> None:
-    """Post one tick's recognitions as the poll worker would - the documented
-    injection point, exactly like posting a BusyProbed."""
+    """Feed one tick's recognitions in as the poll loop would - the documented
+    injection point (``AutomationController.feed_probe``)."""
     assert app.main_screen is not None
     main = app.main_screen
-    main.post_message(ElementsMatched(crops, main._detector_generation + ahead))
+    main._automation.feed_probe("elements", crops, main._detector_generation + ahead)
 
 
 async def _polling(app: AgentClipApp, pilot: Pilot) -> MainScreen:

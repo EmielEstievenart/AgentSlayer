@@ -40,7 +40,6 @@ from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, can_finish
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.tui.widgets.sidebar import (
     PROBE_RESTING,
@@ -469,9 +468,7 @@ async def test_reselecting_the_same_tab_never_wipes_a_live_verdict(
         _with_signals(main, "busy", "stale")
         await pilot.pause()
 
-        main.post_message(
-            BusyProbed(BusyProbe(BusyState.MATCH, 0.42), main._detector_generation)
-        )
+        main._automation.feed_probe("busy", BusyProbe(BusyState.MATCH, 0.42))
         await _wait_for(pilot, lambda: "GENERATING" in _label(app, "#side-tpl-busy"), "a verdict")
 
         main._on_window_selected(WindowTabs.WindowSelected(main._selected_window))

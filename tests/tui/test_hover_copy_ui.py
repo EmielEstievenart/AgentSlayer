@@ -14,9 +14,9 @@ the stubbed searches below count those rounds off before the scan begins.
 
 Everything that touches the OS - picker, capture, cursor move, click, focus -
 is monkeypatched at its use site (agentclip.tui.screens.main), including the
-per-step settle so the tests do not sleep their way up a region. ``BusyProbed``
-is the documented injectable path for the poller (tui/messages.py), used here
-to fire the flow.
+per-step settle so the tests do not sleep their way up a region.
+``AutomationController.feed_probe`` is the documented injectable path for the
+poller, used here to fire the flow.
 """
 
 from __future__ import annotations
@@ -41,7 +41,6 @@ from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.template import RegionMatch, Template
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed
 from agentclip.tui.screens.main import MainScreen
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
@@ -132,11 +131,7 @@ async def _fire(main: MainScreen, pilot: Pilot) -> None:
     # The MATCH is a frame that really found the busy appearance - the third
     # field - because only a sighting arms the trigger (test_finish_signal_ui).
     for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
-        main.post_message(
-            BusyProbed(
-                BusyProbe(state, 0.2, state is BusyState.MATCH), main._detector_generation
-            )
-        )
+        main._automation.feed_probe("busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
         await pilot.pause()
 
 

@@ -10,13 +10,15 @@ only as part of a sustained large delta (``SEND_ARM_MIN_DIFF`` for
 ``SEND_ARM_TICKS`` consecutive probes), and it fires only once EVERY live
 detector says "finished" on two consecutive polls.
 
-``BusyProbed`` / ``IdleProbed`` / ``StaleProbed`` are the documented
-injectable path for the poller (tui/messages.py); posting them is equivalent
-to a poll completing, so these tests drive the state machine without the real
-poller thread. A tick is *closed* by the LAST entry in ``_active_detectors``
-(the fixed busy -> idle -> stale build order), so a multi-detector tick is
-several posts, in that order - and ``_detectors`` is how each test says which
-subset the poller would have been built with.
+``AutomationController.feed_probe`` is the documented injectable path for the
+poller; feeding a probe is equivalent to a poll completing, so these tests drive
+the state machine without the real poller thread. A tick is *closed* by the LAST
+entry in ``_active_detectors`` (the fixed busy -> idle -> stale build order), so
+a multi-detector tick is several calls, in that order - and ``_detectors`` is how
+each test says which subset the poller would have been built with. The
+consumption itself is synchronous, but what it PAINTS crosses back as a message,
+which is why every helper here pauses the pilot before anything is read off the
+sidebar.
 
 All of that sits UNDER a session gate: none of it may arm or fire unless an
 outbound is actually waiting for a reply (``copy_outbound`` opens it, the
@@ -31,7 +33,7 @@ the trigger, plus the session gate itself - a fully calibrated but idle tab
 arming nothing, the outbound copy opening it, and firing / /new shutting it.
 
 The last section covers the READY-TO-SEND gate that rides on top of that one
-(``SendReadyProbed``, same injectable shape): a service with that appearance
+(``feed_probe("send_ready", ...)``, same shape): a service with that appearance
 captured holds finish detection back from the paste until the send button is
 seen and then seen to go, which is the user's Enter. Without the capture there
 is no gate and nothing above it changed - which is what the rest of this file,
@@ -68,7 +70,6 @@ from agentclip.screen.slot import AgentSlot
 from agentclip.screen.stale import StaleProbe, StaleState
 from agentclip.screen.template import Template
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed, IdleProbed, SendReadyProbed, StaleProbed
 from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import (
     SEND_READY_ARMED,
@@ -198,7 +199,7 @@ def _detectors(main: MainScreen, *names: str) -> None:
 async def _busy(
     main: MainScreen, pilot: Pilot, state: BusyState, *, evidence: bool | None = None
 ) -> None:
-    """One busy-appearance probe, as ``PresenceTracker.observe`` would post it.
+    """One busy-appearance probe, as ``PresenceTracker.observe`` would make it.
 
     A probe carries two things, and conflating them was a shipped bug (see
     ``test_the_pastes_tracker_reset_arms_nothing_on_its_own``): ``state`` is the
@@ -210,7 +211,7 @@ async def _busy(
     """
     if evidence is None:
         evidence = state is BusyState.MATCH
-    main.post_message(BusyProbed(BusyProbe(state, 0.2, evidence), main._detector_generation))
+    main._automation.feed_probe("busy", BusyProbe(state, 0.2, evidence))
     await pilot.pause()
 
 
@@ -221,14 +222,14 @@ async def _idle(
     the evidence behind it is the appearance having been watched to GO."""
     if evidence is None:
         evidence = state is BusyState.CHANGED
-    main.post_message(IdleProbed(BusyProbe(state, 0.2, evidence), main._detector_generation))
+    main._automation.feed_probe("idle", BusyProbe(state, 0.2, evidence))
     await pilot.pause()
 
 
 async def _stale(
     main: MainScreen, pilot: Pilot, state: StaleState, ticks: int = 0, diff: float = 0.001
 ) -> None:
-    main.post_message(StaleProbed(StaleProbe(state, diff, ticks), main._detector_generation))
+    main._automation.feed_probe("stale", StaleProbe(state, diff, ticks))
     await pilot.pause()
 
 
@@ -505,7 +506,7 @@ async def test_stale_saying_changing_vetoes_the_other_detectors(
 ) -> None:
     """With busy + stale running, the busy indicator going away while the chat
     region is still moving is not a finish - and with stale running,
-    ``StaleProbed`` (not ``BusyProbed``) closes the tick."""
+    the STALE probe (not the busy one) closes the tick."""
     calls = _patch_flow(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
@@ -546,6 +547,39 @@ async def test_a_busy_probe_alone_never_closes_a_tick_with_stale_calibrated(
             await _busy(main, pilot, BusyState.MATCH)
         assert main._copy_armed is False  # never evaluated
         assert calls == []
+
+
+async def test_the_ticks_that_land_during_the_fires_thread_hop_cannot_refire(
+    tmp_path: Path, seed_templates: Callable[..., None], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The window slice 5b opened, and the guard that was already closing it.
+
+    The fire is taken on the poller thread now and reaches this screen as a
+    message, so ``run_worker`` does not even start until the pump gets round to
+    it - a whole extra hop during which the poller goes on ticking at a chat the
+    first harvest has not touched yet, and every one of those ticks is a
+    finished streak. ``evaluate_finish`` sets ``flow_running`` SYNCHRONOUSLY
+    before asking, which is what makes them all no-ops. Here the probes are fed
+    with no pause at all between them, so they all land before the handler runs.
+    """
+    calls = _patch_flow(monkeypatch)
+    app, _ = _make_app(tmp_path)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _arm_with_template(app, pilot, seed_templates)
+        _detectors(main, "busy")
+
+        # No ``pilot.pause`` anywhere in here: the whole burst is consumed while
+        # the ``AutoCopyRequested`` from the third probe is still in the queue.
+        for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
+            main._automation.feed_probe("busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
+        assert main._flow_running is True  # up before the fire ever left the fold
+        assert calls == []  # ...and the worker has not started yet
+        for _ in range(4):
+            main._automation.feed_probe("busy", BusyProbe(BusyState.CHANGED, 0.2, False))
+
+        await _wait_for(pilot, lambda: len(calls) == 1, "flow fired")
+        await pilot.pause(0.1)
+        assert len(calls) == 1
 
 
 async def test_evaluation_is_suspended_while_the_flow_runs(
@@ -714,7 +748,7 @@ async def test_a_ghost_verdict_from_a_dropped_detector_cannot_wedge_the_trigger(
         main._busy_finished = None
         _detectors(main, "stale")
 
-        # ...and now the cancelled loop's last BusyProbed lands anyway.
+        # ...and now the cancelled loop's last busy probe lands anyway.
         await _busy(main, pilot, BusyState.MATCH)
         assert main._busy_seen is False  # the ghost recorded nothing
 
@@ -764,8 +798,8 @@ async def test_a_late_probe_from_the_previous_live_window_arms_nothing(
         # ...and now the sub window's last tick lands: a sustained large delta,
         # which on the live window would arm the trigger outright.
         for _ in range(main_mod.SEND_ARM_TICKS + 1):
-            main.post_message(
-                StaleProbed(StaleProbe(StaleState.CHANGING, 0.5, 0), sub_generation)
+            main._automation.feed_probe(
+                "stale", StaleProbe(StaleState.CHANGING, 0.5, 0), sub_generation
             )
             await pilot.pause()
         assert main._copy_armed is False
@@ -1017,7 +1051,7 @@ def _record_notifications(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 async def _send_ready(main: MainScreen, pilot: Pilot, found: bool | None) -> None:
     """One look for the ready-to-send button (None = the tick's capture failed)."""
-    main.post_message(SendReadyProbed(found, main._detector_generation))
+    main._automation.feed_probe("send_ready", found)
     await pilot.pause()
 
 
@@ -1153,7 +1187,7 @@ async def test_a_real_tracker_across_the_paste_holds_the_gate_until_the_icon_sho
 
         async def tick(scene: RegionImage) -> None:
             """One poller tick: one capture, through the tracker, onto the screen."""
-            main.post_message(BusyProbed(tracker.observe(scene), main._detector_generation))
+            main._automation.feed_probe("busy", tracker.observe(scene))
             await pilot.pause()
 
         # The chat before the paste: settled, no icon, tracker long since sure.
@@ -1563,6 +1597,6 @@ async def test_a_probe_from_a_dead_poller_run_cannot_release_the_gate(
         await pilot.pause()
         await _send_ready(main, pilot, True)
 
-        main.post_message(SendReadyProbed(False, main._detector_generation - 1))
+        main._automation.feed_probe("send_ready", False, main._detector_generation - 1)
         await pilot.pause()
         assert main._send_gate is main_mod.SendGate.SEEN

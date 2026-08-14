@@ -105,7 +105,20 @@ Slices (each one commit, suite green, layering test run first):
      question the fold cannot answer itself (`has_appearance`).
    - **5b (thread)**: the poller calls `consume_*` directly, the paint
      implementations become `post_message`, and the `feed_probe` test seam
-     replaces message injection in the same commit
+     replaces message injection in the same commit. **Shipped, plus two things
+     the plan did not name.** (a) Two threads now write the consumer's state, so
+     `AutomationController._tick_lock` (an `RLock`) is held for exactly one
+     probe's consumption and by the UI-thread callers that mutate the same
+     bookkeeping — the grain the message pump used to give this code for free.
+     (b) `post_message` does **not** preserve order across threads: Textual
+     routes a cross-thread post through `call_soon_threadsafe`, so an outgoing
+     run's last paint can be delivered after the UI thread's rebuild reset the
+     block. The generation ghost filter therefore gains a paint-side twin —
+     `MainScreen._paint_epoch`, stamped into `PaintDetection`/`PaintStale`/
+     `PaintElements` — and the two paints with a re-readable truth
+     (`PaintLoopState`, `PaintArmed`) are drawn from the controller rather than
+     from their payload, while the harness-log entries ride an ordered queue on
+     the screen with the message as the nudge that drains it.
 6. auto-copy flow + click/hover/scroll sequences + start/end browser chat
 7. delivery path (`deliver(...)` async; OSC-52 stays TUI-side)
 8. cleanup: dead code, doc sync (`architecture.md`, `tui.md` drift), module table

@@ -10,10 +10,13 @@ ends it - the last one with a genuine ``join``, because a poller that only
 *looks* stopped is exactly the bug this slice could introduce and the one a
 mocked thread would hide. So the threads are real and every test joins its own.
 
-Nothing here consumes: the controller pushes probes out through the five sinks
-and never looks at them again. The generation stamp is the visible half of that
-split - the counter is here because the threads are, and every comparison
-against it is somebody else's.
+Since slice 5b the loop feeds its own consumer, so "what a tick pushes" is
+observed by SPYING on the five ``consume_*`` calls rather than by handing in
+sinks: the spies record and then call through, which keeps every assertion here
+about the PRODUCER (which readings, in what order, stamped with which run) while
+the consumption underneath happens for real. With nothing calibrated and no
+reply outstanding - the state every controller in this file is in - that
+consumption is a no-op, which is exactly why it can stay out of the way.
 """
 
 from __future__ import annotations
@@ -127,9 +130,11 @@ class Wiring:
         captured: list[ScreenRegion],
     ) -> None:
         self.automation = automation
-        # Every push, in the order the loop made it: (what, payload, generation).
-        # One list rather than five, because the ORDER across the five sinks is
-        # itself part of the contract (busy -> idle -> stale -> send -> crops).
+        # Every reading, in the order the loop fed it in: (what, payload,
+        # generation). One list rather than five, because the ORDER across the
+        # five is itself part of the contract - and now that they all happen in
+        # one call stack per tick, it is the ONLY thing that keeps the
+        # tick-closing rule honest (busy -> idle -> stale -> send -> crops).
         self.pushed = pushed
         self.captured = captured
 
@@ -162,16 +167,25 @@ def wire(view: FakeAutomationView) -> Iterator[Callable[[], Wiring]]:
 
     def build() -> Wiring:
         pushed: list[tuple[str, Any, int]] = []
-        automation = AutomationController(
-            view=view,
-            on_busy_probe=lambda probe, gen: pushed.append(("busy", probe, gen)),
-            on_idle_probe=lambda probe, gen: pushed.append(("idle", probe, gen)),
-            on_stale_probe=lambda probe, gen: pushed.append(("stale", probe, gen)),
-            on_send_ready_probe=lambda found, gen: pushed.append(("send", found, gen)),
-            on_elements=lambda scene, sightings, gen: pushed.append(
-                ("elements", dict(sightings), gen)
-            ),
-        )
+        automation = AutomationController(view=view)
+
+        def spy(name: str, consume: Callable[[Any, int], None]) -> Callable[[Any, int], None]:
+            """Record the call the loop made, then let it happen for real."""
+
+            def wrapped(payload: Any, generation: int) -> None:
+                pushed.append((name, payload, generation))
+                consume(payload, generation)
+
+            return wrapped
+
+        # Installed on the INSTANCE, before any loop is composed, because the
+        # loop calls these through ``self`` on every tick - which is the whole
+        # difference this slice made and the thing worth pinning.
+        automation.consume_busy_probe = spy("busy", automation.consume_busy_probe)  # type: ignore[method-assign]
+        automation.consume_idle_probe = spy("idle", automation.consume_idle_probe)  # type: ignore[method-assign]
+        automation.consume_stale_probe = spy("stale", automation.consume_stale_probe)  # type: ignore[method-assign]
+        automation.consume_send_ready = spy("send", automation.consume_send_ready)  # type: ignore[method-assign]
+        automation.consume_elements = spy("elements", automation.consume_elements)  # type: ignore[method-assign]
         built.append(automation)
         return Wiring(automation, pushed, [])
 
@@ -201,7 +215,7 @@ def _start(wiring: Wiring, detector: Any, region: ScreenRegion = REGION) -> None
 
 
 def test_nothing_polls_until_a_shell_starts_one(wire: Callable[[], Wiring]) -> None:
-    """Construction wires the sinks up; it does not watch anything. Nothing is
+    """Construction builds the object; it does not watch anything. Nothing is
     calibrated yet, and a poller with no window to watch is pure cost."""
     wiring = wire()
     assert wiring.automation.detectors_running is False
@@ -243,11 +257,11 @@ def test_the_poller_runs_on_its_own_named_daemon_thread(wire: Callable[[], Wirin
 # == what a tick pushes ========================================================
 
 
-def test_a_probe_reaches_the_callback_with_the_window_it_was_taken_from(
+def test_a_probe_reaches_the_consumer_with_the_window_it_was_taken_from(
     wire: Callable[[], Wiring],
 ) -> None:
     """The whole point of the thread: the live window was looked at, and the
-    shell hears the verdict on the callback it handed in."""
+    verdict is folded in the same call stack that took it."""
     wiring = wire()
     _start(wiring, _stale_detector())
 
@@ -265,12 +279,14 @@ def test_it_keeps_polling_until_it_is_stopped(wire: Callable[[], Wiring]) -> Non
     _wait_until(lambda: len(wiring.stamps("stale")) >= 3, "three ticks")
 
 
-def test_the_whole_tick_is_pushed_in_the_reading_order(wire: Callable[[], Wiring]) -> None:
+def test_the_whole_tick_is_consumed_in_the_reading_order(wire: Callable[[], Wiring]) -> None:
     """busy -> idle -> stale, then the send button, then the pictures.
 
-    The first three are the order the tick-closing rule downstream reads (the
-    LAST calibrated one closes the tick); the last two close nothing and fold
-    into no verdict, which is why they come after the verdicts they illustrate.
+    The first three are the order the tick-closing rule reads (the LAST
+    calibrated one closes the tick); the last two close nothing and fold into no
+    verdict, which is why they come after the verdicts they illustrate. One call
+    stack, so this order IS the fold's order - there is no queue in between that
+    could deliver them differently.
     """
     wiring = wire()
     detector = _ScriptedDetector(
@@ -335,12 +351,14 @@ def test_a_failed_capture_reaches_the_detector_as_a_missing_frame(
     assert found is None
 
 
-def test_the_crops_cross_as_the_frame_they_were_verified_against(
+def test_the_crops_are_cut_from_the_frame_they_were_verified_against(
     wire: Callable[[], Wiring],
 ) -> None:
-    """The loop pushes the frame and its sightings, never a picture: cutting one
-    down to panel size depends on the renderer, which is the shell's business -
-    it just happens on this thread (see ``MainScreen._post_element_crops``)."""
+    """The loop hands the frame and its sightings to the shell's cutter and the
+    consumer gets what comes back: sizing a crop depends on the renderer, which
+    is the shell's business - it just happens on this thread (see
+    ``MainScreen._crop_elements``). A controller nobody handed a cutter routes
+    the sightings uncut, which is what this wiring sees."""
     wiring = wire()
     detector = _ScriptedDetector(
         _snapshot(sightings={TemplateKind.COPY: None, TemplateKind.SEND_READY: None}),
@@ -470,3 +488,65 @@ def test_a_retarget_replaces_the_poller_rather_than_adding_one(
     assert not first.thread.is_alive()
 
     _wait_until(lambda: OTHER_REGION in wiring.captured, "the new window being watched")
+
+
+# == two threads, one bookkeeping ==============================================
+
+
+class _BlockingView(FakeAutomationView):
+    """A view that stops dead inside one paint, so a test can hold the poller
+    thread in the middle of consuming a probe and see what the UI thread can do
+    to it meanwhile."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.inside = threading.Event()
+        self.release = threading.Event()
+
+    def paint_stale(self, text: str) -> None:
+        super().paint_stale(text)
+        self.inside.set()
+        self.release.wait(TIMEOUT_S)
+
+
+def test_a_retarget_cannot_land_in_the_middle_of_a_probe() -> None:
+    """The guarantee the message pump used to give this code for free.
+
+    While the consumer ran on the UI thread, a probe's ghost check and the
+    bookkeeping it guards could not be interrupted by a retarget: both were
+    handled on the same loop, so a retarget either happened before the probe
+    (which was then dropped whole) or after it (which was then kept whole).
+    Now the consumer is on the poller thread and the retarget is still the UI
+    thread's, so ``_tick_lock`` is what preserves it - and this is what would
+    fail without it: the counter moving while a probe that has already passed
+    the ghost check goes on writing verdicts about the window it was taken from.
+    """
+    view = _BlockingView()
+    controller = AutomationController(view=view)
+    controller.active_detectors = ("stale",)
+    generation = controller.retarget_detectors()
+
+    def tick() -> None:
+        controller.consume_stale_probe(StaleProbe(StaleState.CHANGING, 0.5, 0), generation)
+
+    poller = threading.Thread(target=tick, name="fake-tick", daemon=True)
+    poller.start()
+    assert view.inside.wait(TIMEOUT_S), "the probe never reached its paint"
+
+    # ...and now the user starts a delegation, mid-probe.
+    ui = threading.Thread(target=controller.retarget_detectors, name="fake-ui", daemon=True)
+    ui.start()
+    ui.join(timeout=0.2)
+    assert ui.is_alive(), "the retarget walked straight into a probe mid-flight"
+    assert controller.detector_generation == generation
+
+    view.release.set()
+    poller.join(TIMEOUT_S)
+    ui.join(TIMEOUT_S)
+    assert not poller.is_alive() and not ui.is_alive()
+    # The probe was consumed WHOLE - it passed the ghost check, so it counts...
+    assert controller.stale_seen is True
+    # ...and only then did the run move on. The next tick's probes are ghosts,
+    # which is the half ``test_a_retarget_leaves_the_in_flight_tick_speaking_for
+    # _the_old_window`` above already pins.
+    assert controller.detector_generation == generation + 1

@@ -18,10 +18,10 @@ bar that `/log` and `F8` flip - and what it owes the reader: a live tail while
 it is open, a frozen one while they are scrolled up in it, and everything they
 missed the moment it is revealed.
 
-``BusyProbed`` / ``SendReadyProbed`` are the documented injectable path for the
-poller (tui/messages.py, and test_finish_signal_ui.py drives them at length);
-posting them is equivalent to a poll completing. Nothing here touches a real
-screen, a real clipboard or a real mouse.
+``AutomationController.feed_probe`` is the documented injectable path for the
+poller (test_finish_signal_ui.py drives it at length); feeding a probe is
+equivalent to a poll completing. Nothing here touches a real screen, a real
+clipboard or a real mouse.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ from agentclip.screen.detector import build_detector
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.messages import BusyProbed, ClipboardCaptured, SendReadyProbed
+from agentclip.tui.messages import ClipboardCaptured
 from agentclip.tui.screens.main import MainScreen
 
 from .conftest import send_composer
@@ -150,17 +150,15 @@ def _detectors(main: MainScreen, *names: str) -> None:
 
 
 async def _busy(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
-    """One busy-appearance probe, as ``PresenceTracker.observe`` would post it.
+    """One busy-appearance probe, as ``PresenceTracker.observe`` would make it.
     MATCH is the reasoning icon on screen; ``generating_now`` is the honest
     per-frame reading of that."""
-    main.post_message(
-        BusyProbed(BusyProbe(state, 0.2, state is BusyState.MATCH), main._detector_generation)
-    )
+    main._automation.feed_probe("busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
     await pilot.pause()
 
 
 async def _send_ready(main: MainScreen, pilot: Pilot, found: bool | None) -> None:
-    main.post_message(SendReadyProbed(found, main._detector_generation))
+    main._automation.feed_probe("send_ready", found)
     await pilot.pause()
 
 
@@ -296,6 +294,7 @@ async def test_scrolling_up_freezes_the_tail_and_going_back_down_resumes_it(
         pane = main.harness_log_pane
         for index in range(120):
             main._log_harness("state", f"filler entry {index}")
+        await pilot.pause()  # the appends reach the pane as messages now
         await _wait_for(pilot, lambda: pane.following, "the pane pinned to the newest entry")
         assert pane.max_scroll_y > 0  # there is more log than pane
 

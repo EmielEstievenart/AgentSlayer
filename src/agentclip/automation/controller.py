@@ -32,16 +32,17 @@ method has.
 
 **The detector poller.** The second thread: the loop that captures the live
 chat window once per tick, hands that one frame to one
-:class:`~agentclip.screen.detector.ScreenDetector`, and pushes the answers out
-through the five probe callbacks handed in at construction.
+:class:`~agentclip.screen.detector.ScreenDetector`, and - since slice 5b - feeds
+the answers straight into its own consumer, in the same call stack.
 
 **The probe consumer**, which is what those answers MEAN. The per-detector
 bookkeeping, the readout, the ready-to-send gate, the loop's narration and the
 combined finish verdict are the five ``consume_*`` methods and everything under
-them. They are still CALLED from the UI thread - the shell's message handlers
-hand each probe straight down - because a decision split across two threads is a
-race the single-threaded handlers do not have today; the transport flips in the
-next slice, and nothing above changes when it does (docs/design/gui.md §1).
+them, and the poll loop calls them itself: probe, bookkeeping, gates,
+evaluation, fire - one call stack per tick, in the busy -> idle -> stale ->
+send-ready -> elements order the message pump used to serialize. The tick-closing
+rule is trivially true now, because there is no queue between the producer and
+the consumer to reorder anything (docs/design/gui.md §1).
 
 Two things the fold cannot answer for itself stay the shell's, and cross as
 callbacks handed in at construction: ``has_appearance`` (what the LIVE window's
@@ -50,14 +51,12 @@ shell's Config) and ``on_fire`` (what to launch when the verdict says
 "finished"). Everything else it needs it owns, which is why the trigger, both
 gates, ``LoopState`` and the harness log all live here now.
 
-Which is why the run's ``generation`` stamp is here rather than there. Stopping
-a poller is a flag, not a join: the loop it interrupts still finishes the tick
-it was in and pushes those probes, so they arrive after the automation may
-already have been retargeted at another browser window. The stamp is what makes
-that decidable - ``retarget_detectors`` opens a new run, every probe carries the
-run it was taken in, and a consumer compares. Nothing here filters: the counter
-belongs to whoever starts the threads, the judgement to whoever reads the
-probes.
+Which is why the run's ``generation`` stamp is here. Stopping a poller is a
+flag, not a join: the loop it interrupts still finishes the tick it was in and
+consumes those probes, so they are read after the automation may already have
+been retargeted at another browser window. The stamp is what makes that
+decidable - ``retarget_detectors`` opens a new run, every probe carries the run
+it was taken in, and ``is_ghost`` compares.
 
 The composition is deliberately split in three calls, because the shell has
 paints to interleave: ``retarget_detectors`` (stop, and bump the counter - even
@@ -80,12 +79,27 @@ this object holds the service KEY per window and nothing about what that key
 resolves to. Same rule for the calibration: the controller owns which slot is
 which, the shell owns what it does with the rectangle.
 
-Threading, as of this slice: every method here is called from the UI thread, and
-the watcher and poller threads only ever call *out* (through the callbacks) - the
-shell turns each of those calls into a message and hands the probe back down
-here on its own loop. The one piece of state each thread shares with the loop it
-started is a ``threading.Event``, which is what makes "stop" a flag rather than a
-lock.
+**Threading, as of this slice.** Two threads now write the state below: the UI
+thread (a paste, a slot move, a modal, ``/new``) and the poller thread (a tick).
+``_tick_lock`` is what keeps them from interleaving. It is a ``RLock`` because
+consumption is re-entrant - ``consume_stale_probe`` reaches ``evaluate_finish``
+reaches ``close_reply_gate`` - and it is held for exactly one probe's
+consumption, which is the same grain the message pump gave this code when each
+probe was a message of its own: a retarget landing mid-tick could always drop the
+REST of that tick, and still can. What it may not do, and what the lock forbids,
+is land in the MIDDLE of one probe's bookkeeping, between the ghost check and the
+verdict it guards.
+
+Held across bookkeeping, not across work. Every paint leaves through the view
+port, which is non-blocking by contract, and the two expensive halves of a tick
+- ``capture`` and ``detector.observe`` - happen OUTSIDE it: a UI thread waiting
+on a template search would be the stall this whole split exists to remove. The
+one call under it that can touch a disk is ``has_appearance`` on a cold profile
+cache, which is the shell's own read of its own file and is why the port's
+contract asks for it to be cheap.
+
+The other piece of state each thread shares with the loop it started is a
+``threading.Event``, which is what makes "stop" a flag rather than a lock.
 """
 
 from __future__ import annotations
@@ -94,6 +108,7 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable, Mapping
+from typing import cast
 
 from agentclip.automation.finish import (
     SEND_ARM_MIN_DIFF,
@@ -137,19 +152,21 @@ from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, SlotCalibration, new_slots
 from agentclip.screen.stale import StaleProbe, StaleTracker
 
-# What a poll tick pushes out, and the one thing it needs pushed in. Every sink
-# is called FROM the poller thread with the generation of the run that produced
-# the reading, so an implementation must be non-blocking and thread-safe - the
-# same contract the ``AutomationView`` port carries.
+# The two things one poll tick needs handed in. Both are called FROM the poller
+# thread, so an implementation must be non-blocking and thread-safe - the same
+# contract the ``AutomationView`` port carries.
 CaptureFn = Callable[[ScreenRegion], RegionImage]
-BusySink = Callable[[BusyProbe, int], None]
-StaleSink = Callable[[StaleProbe, int], None]
-SendReadySink = Callable[[bool | None, int], None]
-# The tick's recognitions, raw: the frame they were verified against and the
-# sightings inside it. Cutting the crops out is the shell's (a crop is sized for
-# whatever renderer will draw it), and it happens on this thread - the UI thread
-# gets one small picture per appearance, never the frame.
-ElementsSink = Callable[[RegionImage, Mapping[TemplateKind, Sighting | None], int], None]
+# The tick's recognitions, cut down to pictures. Sizing a crop depends on which
+# renderer the shell can drive, so the CUT is the shell's - but it happens here,
+# on the thread that captured the frame, because what crosses to a UI is then one
+# small picture per appearance rather than a whole chat window. What comes back
+# is opaque (``AutomationView.paint_elements`` takes ``object``), and a shell
+# that hands nothing in gets the sightings themselves, uncut.
+CropFn = Callable[
+    [RegionImage, Mapping[TemplateKind, Sighting | None]], Mapping[TemplateKind, object]
+]
+# What one probe can be, for the ``feed_probe`` test seam's single door.
+Probe = BusyProbe | StaleProbe | bool | Mapping[TemplateKind, object] | None
 
 
 def _accept_all(_text: str) -> bool:
@@ -161,24 +178,14 @@ def _drop_capture(_text: str) -> None:
     """Capture sink for a controller nobody handed one to."""
 
 
-def _drop_busy(_probe: BusyProbe, _generation: int) -> None:
-    """Busy/idle probe sink for a controller nobody handed one to."""
-
-
-def _drop_stale(_probe: StaleProbe, _generation: int) -> None:
-    """Stale probe sink for a controller nobody handed one to."""
-
-
-def _drop_send_ready(_found: bool | None, _generation: int) -> None:
-    """Send-ready probe sink for a controller nobody handed one to."""
-
-
-def _drop_elements(
-    _scene: RegionImage,
-    _sightings: Mapping[TemplateKind, Sighting | None],
-    _generation: int,
-) -> None:
-    """Recognition sink for a controller nobody handed one to."""
+def _uncut(
+    _scene: RegionImage, sightings: Mapping[TemplateKind, Sighting | None]
+) -> Mapping[TemplateKind, object]:
+    """Crop function for a controller nobody handed one to: the sightings
+    themselves. ``paint_elements`` routes an opaque mapping, so a view with no
+    renderer behind it (a test's, the headless case) still sees which
+    appearances the tick recognised - it simply gets no pixels."""
+    return dict(sightings)
 
 
 def _nothing_captured(_kind: TemplateKind) -> bool:
@@ -232,11 +239,7 @@ class AutomationController:
         poll_interval_ms: int = 300,
         accepts: Callable[[str], bool] | None = None,
         on_clipboard_captured: Callable[[str], None] | None = None,
-        on_busy_probe: BusySink | None = None,
-        on_idle_probe: BusySink | None = None,
-        on_stale_probe: StaleSink | None = None,
-        on_send_ready_probe: SendReadySink | None = None,
-        on_elements: ElementsSink | None = None,
+        crop_elements: CropFn | None = None,
         has_appearance: Callable[[TemplateKind], bool] | None = None,
         on_fire: Callable[[], None] | None = None,
         send_arm_ticks: int = SEND_ARM_TICKS,
@@ -294,19 +297,15 @@ class AutomationController:
         # off. Written on transitions only - see ``set_os_armed``.
         self._watch_before_disarm = False
         # -- the detector poller ------------------------------------------------
-        # Where every tick's readings go, one sink per thing a tick can say, in
-        # the order the loop pushes them. Handed in at construction like the
-        # capture sink above and for the same reason: they are the shell's way
-        # across the thread boundary, and they do not change for its lifetime.
-        self._on_busy_probe: BusySink = on_busy_probe if on_busy_probe is not None else _drop_busy
-        self._on_idle_probe: BusySink = on_idle_probe if on_idle_probe is not None else _drop_busy
-        self._on_stale_probe: StaleSink = (
-            on_stale_probe if on_stale_probe is not None else _drop_stale
-        )
-        self._on_send_ready_probe: SendReadySink = (
-            on_send_ready_probe if on_send_ready_probe is not None else _drop_send_ready
-        )
-        self._on_elements: ElementsSink = on_elements if on_elements is not None else _drop_elements
+        # The one thing a tick still asks the shell for on its way to the
+        # consumer: cut this tick's matches down to panel-sized pictures. Handed
+        # in at construction like the clipboard sink above and for the same
+        # reason - it is the shell's, and it does not change for this lifetime.
+        self._crop_elements: CropFn = crop_elements if crop_elements is not None else _uncut
+        # What keeps the poller thread's consumption from interleaving with the
+        # UI thread's writes to the very same bookkeeping. See the module
+        # docstring for the grain: one probe, never a whole tick.
+        self._tick_lock = threading.RLock()
         # Which poller RUN a probe belongs to: bumped by every
         # ``retarget_detectors``, stamped into everything the loop pushes, and
         # compared by whoever consumes it. The module docstring says why the
@@ -321,7 +320,11 @@ class AutomationController:
         # nothing else, because those are the only two questions the fold cannot
         # answer for itself: what the LIVE window's service has a capture of
         # (which lives in the shell's profile cache, keyed off its Config) and
-        # what to actually launch when the verdict says "finished".
+        # what to actually launch when the verdict says "finished". Since 5b
+        # either can be called on the POLLER thread, under ``_tick_lock``
+        # (``has_appearance`` from the UI thread too, when a paste opens the send
+        # gate), so both carry the port's contract: cheap, thread-safe, no
+        # widgets - and ``on_fire`` schedules rather than does.
         self._has_appearance: Callable[[TemplateKind], bool] = (
             has_appearance if has_appearance is not None else _nothing_captured
         )
@@ -442,19 +445,25 @@ class AutomationController:
         The rule the transition implements, of the two on offer: disarming
         forces the watcher off and remembers what it was; re-arming puts *that*
         back. Re-arming undoes the disarm, nothing more.
+
+        Under ``_tick_lock``, because ``evaluate_finish`` reads the flag on the
+        poller thread to decide whether a finish may launch anything: a
+        transition landing in the middle of a fold would let the same tick be
+        judged armed and then act disarmed.
         """
-        was_armed = self._os_armed
-        self._os_armed = (not was_armed) if target is None else target
-        armed = self._os_armed
-        if armed and not was_armed:
-            if self._watch_before_disarm:
-                self.start_watching()  # no-ops in manual mode, and if already up
-            self._watch_before_disarm = False
-        elif was_armed and not armed:
-            self._watch_before_disarm = self.watching
-            self.stop_input()
-        self._view.paint_armed(armed)
-        return armed
+        with self._tick_lock:
+            was_armed = self._os_armed
+            self._os_armed = (not was_armed) if target is None else target
+            armed = self._os_armed
+            if armed and not was_armed:
+                if self._watch_before_disarm:
+                    self.start_watching()  # no-ops in manual mode, and if already up
+                self._watch_before_disarm = False
+            elif was_armed and not armed:
+                self._watch_before_disarm = self.watching
+                self.stop_input()
+            self._view.paint_armed(armed)
+            return armed
 
     # == the clipboard watcher =================================================
 
@@ -571,13 +580,19 @@ class AutomationController:
 
         The stop is the same flag-not-join as ``stop_input``'s, for the same
         reason: the caller is the UI thread. So the loop this ends is still free
-        to finish the tick it was in, and the probes it pushes carry the OLD
+        to finish the tick it was in, and the probes it consumes carry the OLD
         stamp - which is the whole point.
+
+        Under ``_tick_lock``, because the counter this bumps is the one the
+        poller thread is reading in ``is_ghost``: without it a retarget could
+        land between a probe's ghost check and the bookkeeping that check
+        guards, and the tick would half-belong to each run.
         """
-        self.stop_detectors()
-        self._detector_generation += 1
-        self._detector_stop = threading.Event()
-        return self._detector_generation
+        with self._tick_lock:
+            self.stop_detectors()
+            self._detector_generation += 1
+            self._detector_stop = threading.Event()
+            return self._detector_generation
 
     def detector_loop(
         self,
@@ -596,10 +611,12 @@ class AutomationController:
 
         What the detector searches for was decided when the SHELL built it (from
         one window's calibration - ``screen.detector.build_detector``), and the
-        loop only carries the answers out, in the fixed busy -> idle -> stale
-        order the tick-closing rule downstream reads. It is a bridge, not a
-        policy: nothing here knows which appearances exist or what a verdict
-        means.
+        loop hands the answers straight to this object's own consumer, in the
+        fixed busy -> idle -> stale order the tick-closing rule reads, then the
+        send button and the pictures. One call stack per tick: the probe, its
+        bookkeeping, the gates, the fold and - if it comes to that - the fire all
+        happen before the next capture, which is what makes "the LAST detector
+        closes the tick" a fact about the code rather than about a queue.
 
         Everything is read once, here: the region, the detector, the cadence and
         the stamp all describe the window this run was started for, and a run
@@ -610,11 +627,6 @@ class AutomationController:
         """
         stop = self._detector_stop
         generation = self._detector_generation
-        on_busy = self._on_busy_probe
-        on_idle = self._on_idle_probe
-        on_stale = self._on_stale_probe
-        on_send_ready = self._on_send_ready_probe
-        on_elements = self._on_elements
 
         def loop() -> None:
             while not stop.is_set():
@@ -624,24 +636,25 @@ class AutomationController:
                     scene = None  # every detector hears about it the same way
                 tick = detector.observe(scene)
                 if tick.busy is not None:
-                    on_busy(tick.busy, generation)
+                    self.consume_busy_probe(tick.busy, generation)
                 if tick.idle is not None:
-                    on_idle(tick.idle, generation)
+                    self.consume_idle_probe(tick.idle, generation)
                 if tick.stale is not None:
-                    on_stale(tick.stale, generation)
+                    self.consume_stale_probe(tick.stale, generation)
                 # The send button, every tick it is captured - it closes no tick
                 # and folds into no verdict, and the gate that consumes it
                 # ignores it whenever it is not holding. Three-valued: on
                 # screen, not on screen, or no answer because the capture failed.
                 if detector.searches(TemplateKind.SEND_READY):
-                    on_send_ready(tick.present(TemplateKind.SEND_READY), generation)
-                # One push for the whole tick's pictures, after the verdicts they
+                    self.consume_send_ready(tick.present(TemplateKind.SEND_READY), generation)
+                # One pass for the whole tick's pictures, after the verdicts they
                 # illustrate, out of the very frame the matches were verified
-                # against. A failed capture recognised nothing and says nothing:
-                # an empty map would blank rows a dropped frame is no evidence
-                # about, so the tick simply pushes nothing.
+                # against - and cut HERE, on the thread that captured it. A failed
+                # capture recognised nothing and says nothing: an empty map would
+                # blank rows a dropped frame is no evidence about, so the tick
+                # simply says nothing.
                 if scene is not None and tick.sightings:
-                    on_elements(scene, tick.sightings, generation)
+                    self.consume_elements(self._crop_elements(scene, tick.sightings), generation)
                 # Sleep in short increments so cancellation lands promptly.
                 remaining = poll_seconds
                 while remaining > 0 and not stop.is_set():
@@ -727,13 +740,19 @@ class AutomationController:
         afterwards. It is logged (``automation.harness_log``) only when the state
         actually changes, so the same evidence arriving twice does not fill the
         log with a repeated non-event.
+
+        Under ``_tick_lock`` because both threads move the loop - a tick's
+        verdict and the user's paste alike - and the transition, its log entry
+        and its repaint are one act: two states landing at once must not
+        interleave into a rail that says one thing and a log that says the other.
         """
-        if state is self._loop_state:
-            return
-        before = self._loop_state
-        self._loop_state = state
-        self.log_harness(KIND_STATE, state_text(before.name, state.name, reason))
-        self._view.paint_loop_state(state)
+        with self._tick_lock:
+            if state is self._loop_state:
+                return
+            before = self._loop_state
+            self._loop_state = state
+            self.log_harness(KIND_STATE, state_text(before.name, state.name, reason))
+            self._view.paint_loop_state(state)
 
     def log_harness(self, kind: str, text: str) -> None:
         """Append one decision to the harness log (`/log`).
@@ -741,10 +760,17 @@ class AutomationController:
         The single append site, so the bound and the timestamp are decided once.
         The deque is the log; the shell's pane is a view of it, mirrored one
         entry at a time so an open pane shows a decision as it is taken (§3.3b).
+
+        Under ``_tick_lock`` so the append and the mirror stay in step: the deque
+        is the log and the pane is fed one entry at a time, so two threads
+        appending unsynchronised could hand the pane a different order than the
+        deque holds - and the pane refills itself FROM the deque when it is next
+        revealed, which would make the same log read two ways.
         """
-        entry = HarnessEntry(kind, text)
-        self._harness_log.append(entry)
-        self._view.paint_harness_entry(entry)
+        with self._tick_lock:
+            entry = HarnessEntry(kind, text)
+            self._harness_log.append(entry)
+            self._view.paint_harness_entry(entry)
 
     # == the probe consumer ====================================================
     # What a tick MEANS. The five ``consume_*`` calls below are the other end of
@@ -797,9 +823,10 @@ class AutomationController:
         the auto-copy flow) has just PRODUCED the frames behind that streak
         itself.
         """
-        for tracker in (self._busy_tracker, self._idle_tracker, self._stale_tracker):
-            if tracker is not None:
-                tracker.reset()
+        with self._tick_lock:
+            for tracker in (self._busy_tracker, self._idle_tracker, self._stale_tracker):
+                if tracker is not None:
+                    tracker.reset()
 
     def forget_verdicts(self) -> None:
         """Drop everything a rebuilt detector set makes obsolete.
@@ -810,15 +837,16 @@ class AutomationController:
         model was generating, which recapturing a button does not un-observe -
         which is why this is not ``reset_finish_trigger``.
         """
-        self._busy_seen = self._idle_seen = self._stale_seen = False
-        self._busy_finished = self._idle_finished = self._stale_finished = None
-        # A half-built large-delta run belongs to the tracker that produced it.
-        self._stale_diff = None
-        self._stale_arm_streak = 0
-        self._busy_tracker = None
-        self._idle_tracker = None
-        self._stale_tracker = None
-        self._active_detectors = ()
+        with self._tick_lock:
+            self._busy_seen = self._idle_seen = self._stale_seen = False
+            self._busy_finished = self._idle_finished = self._stale_finished = None
+            # A half-built large-delta run belongs to the tracker that produced it.
+            self._stale_diff = None
+            self._stale_arm_streak = 0
+            self._busy_tracker = None
+            self._idle_tracker = None
+            self._stale_tracker = None
+            self._active_detectors = ()
 
     def reset_finish_trigger(self) -> None:
         """Forget every detector verdict and the auto-copy arm.
@@ -829,18 +857,19 @@ class AutomationController:
         ``flow_running`` is deliberately NOT cleared here - only the flow's
         own finally lifts the suspension, so a slot move while the flow still
         runs cannot let the trigger fire against its in-flight mouse work."""
-        self._busy_seen = False
-        self._idle_seen = False
-        self._stale_seen = False
-        self._busy_finished = None
-        self._idle_finished = None
-        self._stale_finished = None
-        self._busy_generating_now = False
-        self._idle_generating_now = False
-        self._stale_diff = None
-        self._stale_arm_streak = 0
-        self._copy_armed = False
-        self._copy_changed_streak = 0
+        with self._tick_lock:
+            self._busy_seen = False
+            self._idle_seen = False
+            self._stale_seen = False
+            self._busy_finished = None
+            self._idle_finished = None
+            self._stale_finished = None
+            self._busy_generating_now = False
+            self._idle_generating_now = False
+            self._stale_diff = None
+            self._stale_arm_streak = 0
+            self._copy_armed = False
+            self._copy_changed_streak = 0
 
     # -- the trigger's own state, for shells and tests that mirror it ----------
 
@@ -964,10 +993,11 @@ class AutomationController:
         own mouse work rather than the model's - including the send-arming run,
         whose large deltas were the flow's own scrolling.
         """
-        self._flow_running = False
-        self.reset_trackers()
-        self._stale_diff = None
-        self._stale_arm_streak = 0
+        with self._tick_lock:
+            self._flow_running = False
+            self.reset_trackers()
+            self._stale_diff = None
+            self._stale_arm_streak = 0
 
     # -- which probes count ----------------------------------------------------
 
@@ -1015,41 +1045,52 @@ class AutomationController:
         return detector not in self._active_detectors
 
     # -- one tick's readings ---------------------------------------------------
+    # Called on the POLLER thread, straight out of the loop above (and, in the
+    # suites, straight off ``feed_probe``). Each one takes ``_tick_lock`` for its
+    # whole body, so the ghost check and the bookkeeping it guards are one
+    # indivisible act against anything the UI thread does to the same state - a
+    # paste opening the reply gate, a delegation retargeting the run, a modal
+    # forgetting the verdicts. The grain is one probe, deliberately: that is
+    # exactly what the message pump gave this code when each probe was a message,
+    # and a retarget mid-tick could always drop the rest of that tick.
 
     def consume_busy_probe(self, probe: BusyProbe, generation: int) -> None:
         """One look for the busy appearance: show it, record it, maybe fold."""
-        if self.is_ghost("busy", generation):
-            return
-        self._view.paint_detection(TemplateKind.BUSY, format_busy_probe(probe))
-        self._busy_seen = True
-        self._busy_finished = busy_verdict(probe)
-        self._busy_generating_now = probe.generating_now
-        if self.finish_tick_closed_by("busy"):
-            self.evaluate_finish()
+        with self._tick_lock:
+            if self.is_ghost("busy", generation):
+                return
+            self._view.paint_detection(TemplateKind.BUSY, format_busy_probe(probe))
+            self._busy_seen = True
+            self._busy_finished = busy_verdict(probe)
+            self._busy_generating_now = probe.generating_now
+            if self.finish_tick_closed_by("busy"):
+                self.evaluate_finish()
 
     def consume_idle_probe(self, probe: BusyProbe, generation: int) -> None:
         """The same for the idle appearance, whose polarity is the inverse."""
-        if self.is_ghost("idle", generation):
-            return
-        self._view.paint_detection(TemplateKind.IDLE, format_idle_probe(probe))
-        self._idle_seen = True
-        self._idle_finished = idle_verdict(probe)
-        self._idle_generating_now = probe.generating_now
-        if self.finish_tick_closed_by("idle"):
-            self.evaluate_finish()
+        with self._tick_lock:
+            if self.is_ghost("idle", generation):
+                return
+            self._view.paint_detection(TemplateKind.IDLE, format_idle_probe(probe))
+            self._idle_seen = True
+            self._idle_finished = idle_verdict(probe)
+            self._idle_generating_now = probe.generating_now
+            if self.finish_tick_closed_by("idle"):
+                self.evaluate_finish()
 
     def consume_stale_probe(self, probe: StaleProbe, generation: int) -> None:
         """The same for the staleness of the drawn region, which needs no
         appearance at all - and whose ``diff`` is what the send-arming run is
         built out of."""
-        if self.is_ghost("stale", generation):
-            return
-        self._view.paint_stale(format_stale_probe(probe))
-        self._stale_seen = True
-        self._stale_finished = stale_verdict(probe)
-        self._stale_diff = probe.diff
-        if self.finish_tick_closed_by("stale"):
-            self.evaluate_finish()
+        with self._tick_lock:
+            if self.is_ghost("stale", generation):
+                return
+            self._view.paint_stale(format_stale_probe(probe))
+            self._stale_seen = True
+            self._stale_finished = stale_verdict(probe)
+            self._stale_diff = probe.diff
+            if self.finish_tick_closed_by("stale"):
+                self.evaluate_finish()
 
     def consume_elements(self, crops: Mapping[TemplateKind, object], generation: int) -> None:
         """Show one tick's recognised crops.
@@ -1062,9 +1103,10 @@ class AutomationController:
         repointed - showing them would caption the master's send button as the
         sub-agent's.
         """
-        if generation != self._detector_generation:
-            return
-        self._view.paint_elements(crops)
+        with self._tick_lock:
+            if generation != self._detector_generation:
+                return
+            self._view.paint_elements(crops)
 
     def consume_send_ready(self, found: bool | None, generation: int) -> None:
         """Fold one look for the ready-to-send button into the send gate.
@@ -1095,46 +1137,76 @@ class AutomationController:
         this gate existed, while one dropped frame in the other direction would
         mean holding a session open on a button that is already gone.
         """
-        if generation != self._detector_generation:
-            return
-        gate = self._send_gate
-        if gate is None:
-            return  # the gate let go (or was closed) while this probe flew
-        if found and gate is SendGate.HOLD:
-            # The one productive tick in the whole gate: the phase changes, so
-            # the clock restarts rather than counting on into the next budget.
-            self._send_gate = SendGate.SEEN
-            self._send_gate_ticks = 0
-            self.log_harness(
-                KIND_GATE,
-                "the ready-to-send button is on screen: there is unsent text in the "
-                "chat box, so the send has not happened yet",
-            )
-            # The button only renders over a non-empty composer, so a manual
-            # insert is now proven to have landed.
-            if self._loop_state is LoopState.MANUAL_INSERT:
-                self.set_loop_state(
-                    LoopState.WAIT_SEND,
-                    "the ready-to-send button appeared, which proves your paste landed",
+        with self._tick_lock:
+            if generation != self._detector_generation:
+                return
+            gate = self._send_gate
+            if gate is None:
+                return  # the gate let go (or was closed) while this probe flew
+            if found and gate is SendGate.HOLD:
+                # The one productive tick in the whole gate: the phase changes, so
+                # the clock restarts rather than counting on into the next budget.
+                self._send_gate = SendGate.SEEN
+                self._send_gate_ticks = 0
+                self.log_harness(
+                    KIND_GATE,
+                    "the ready-to-send button is on screen: there is unsent text in the "
+                    "chat box, so the send has not happened yet",
                 )
-            self.paint_send_gate()
-            return
-        self._send_gate_ticks += 1
-        if found is False and gate is SendGate.SEEN:
-            self.release_send_gate()
-            return
-        # Nothing was learned this tick: the button has not shown up yet, the
-        # capture failed, or it is STILL on screen after a sighting. All three
-        # count against the phase's budget, or a browser that cannot be captured
-        # - or a capture that stopped matching the composer's post-send state -
-        # would hold the session open for ever.
-        budget = (
-            self._send_gate_seen_timeout_ticks
-            if gate is SendGate.SEEN
-            else self._send_gate_timeout_ticks
-        )
-        if self._send_gate_ticks >= budget:
-            self.time_out_send_gate(seen=gate is SendGate.SEEN)
+                # The button only renders over a non-empty composer, so a manual
+                # insert is now proven to have landed.
+                if self._loop_state is LoopState.MANUAL_INSERT:
+                    self.set_loop_state(
+                        LoopState.WAIT_SEND,
+                        "the ready-to-send button appeared, which proves your paste landed",
+                    )
+                self.paint_send_gate()
+                return
+            self._send_gate_ticks += 1
+            if found is False and gate is SendGate.SEEN:
+                self.release_send_gate()
+                return
+            # Nothing was learned this tick: the button has not shown up yet, the
+            # capture failed, or it is STILL on screen after a sighting. All three
+            # count against the phase's budget, or a browser that cannot be captured
+            # - or a capture that stopped matching the composer's post-send state -
+            # would hold the session open for ever.
+            budget = (
+                self._send_gate_seen_timeout_ticks
+                if gate is SendGate.SEEN
+                else self._send_gate_timeout_ticks
+            )
+            if self._send_gate_ticks >= budget:
+                self.time_out_send_gate(seen=gate is SendGate.SEEN)
+
+    # -- the test seam ---------------------------------------------------------
+
+    def feed_probe(self, detector: str, probe: Probe = None, generation: int | None = None) -> None:
+        """Consume one probe as the poll loop would have. The suites' one door.
+
+        There is no message to inject any more - the loop calls the consumer in
+        its own call stack - so this is what a test posted ``BusyProbed(...)``
+        for: one named reading, stamped with the run it belongs to. The stamp
+        defaults to the LIVE one, because "speak as the current poller" is what
+        nearly every caller wants; pass it explicitly to speak as a run that has
+        been retargeted away (a ghost) or as one that does not exist yet.
+
+        ``detector`` is the same vocabulary ``active_detectors`` and ``is_ghost``
+        use, plus the two readings that are not finish detectors at all.
+        """
+        stamp = self._detector_generation if generation is None else generation
+        if detector == "busy":
+            self.consume_busy_probe(cast("BusyProbe", probe), stamp)
+        elif detector == "idle":
+            self.consume_idle_probe(cast("BusyProbe", probe), stamp)
+        elif detector == "stale":
+            self.consume_stale_probe(cast("StaleProbe", probe), stamp)
+        elif detector == "send_ready":
+            self.consume_send_ready(cast("bool | None", probe), stamp)
+        elif detector == "elements":
+            self.consume_elements(cast("Mapping[TemplateKind, object]", probe), stamp)
+        else:
+            raise ValueError(f"no such detector: {detector!r}")
 
     # -- the reply gate --------------------------------------------------------
 
@@ -1151,10 +1223,11 @@ class AutomationController:
         auto-copy flow resets them: the frames behind those streaks describe a
         screen we produced.
         """
-        self.reset_finish_trigger()
-        self.reset_trackers()
-        self._awaiting_pasted_reply = True
-        self.open_send_gate()
+        with self._tick_lock:
+            self.reset_finish_trigger()
+            self.reset_trackers()
+            self._awaiting_pasted_reply = True
+            self.open_send_gate()
 
     def close_reply_gate(self) -> None:
         """No reply is outstanding any more, so nothing may move the mouse.
@@ -1173,16 +1246,17 @@ class AutomationController:
         turn interrupted by an F2 visit must still be auto-copied when it
         finishes.
         """
-        self._awaiting_pasted_reply = False
-        # The send gate is a phase OF this gate - "the outbound is out but not
-        # sent yet" - so it can outlive neither the reply it is holding for nor
-        # the window that reply belongs to. Every closer above therefore drops
-        # it too, and that is also the reason it is not part of
-        # ``reset_finish_trigger``: an F2 visit forgets what the detectors saw
-        # without un-pasting anything, and a payload still sitting unsent in
-        # the chat box must still be waited for afterwards.
-        self.clear_send_gate()
-        self.paint_send_gate()
+        with self._tick_lock:
+            self._awaiting_pasted_reply = False
+            # The send gate is a phase OF this gate - "the outbound is out but
+            # not sent yet" - so it can outlive neither the reply it is holding
+            # for nor the window that reply belongs to. Every closer above
+            # therefore drops it too, and that is also the reason it is not part
+            # of ``reset_finish_trigger``: an F2 visit forgets what the detectors
+            # saw without un-pasting anything, and a payload still sitting unsent
+            # in the chat box must still be waited for afterwards.
+            self.clear_send_gate()
+            self.paint_send_gate()
 
     # -- the ready-to-send gate ------------------------------------------------
 
@@ -1217,17 +1291,18 @@ class AutomationController:
         ``send_gate_timeout_ticks`` for a button to appear at all,
         ``send_gate_seen_timeout_ticks`` for a human to read and press Enter.
         """
-        self._send_gate = (
-            SendGate.HOLD if self._has_appearance(TemplateKind.SEND_READY) else None
-        )
-        self._send_gate_ticks = 0
-        if self._send_gate is SendGate.HOLD:
-            self.log_harness(
-                KIND_GATE,
-                "holding finish detection until the send is seen - between the paste "
-                "and your Enter the chat is still, and a still chat reads as finished",
+        with self._tick_lock:
+            self._send_gate = (
+                SendGate.HOLD if self._has_appearance(TemplateKind.SEND_READY) else None
             )
-        self.paint_send_gate()
+            self._send_gate_ticks = 0
+            if self._send_gate is SendGate.HOLD:
+                self.log_harness(
+                    KIND_GATE,
+                    "holding finish detection until the send is seen - between the paste "
+                    "and your Enter the chat is still, and a still chat reads as finished",
+                )
+            self.paint_send_gate()
 
     def clear_send_gate(self) -> None:
         """Stop gating, without saying anything about why."""
@@ -1246,22 +1321,23 @@ class AutomationController:
         comes down for the same reason it comes down on an icon arm - the send
         is proven, so the nag is over.
         """
-        self.clear_send_gate()
-        self.reset_finish_trigger()
-        self.reset_trackers()
-        self.log_harness(
-            KIND_GATE,
-            "the ready-to-send button was seen and is now gone: finish detection is "
-            "released, and it starts from the send rather than from the paste",
-        )
-        # The disappearance IS the user's Enter: the message is away and the
-        # model's answer is what happens next.
-        self.set_loop_state(
-            LoopState.WAIT_GENERATE,
-            "the ready-to-send button went away, which is your Enter",
-        )
-        self._view.hide_paste_flash()
-        self.paint_send_gate(SEND_READY_RELEASED)
+        with self._tick_lock:
+            self.clear_send_gate()
+            self.reset_finish_trigger()
+            self.reset_trackers()
+            self.log_harness(
+                KIND_GATE,
+                "the ready-to-send button was seen and is now gone: finish detection is "
+                "released, and it starts from the send rather than from the paste",
+            )
+            # The disappearance IS the user's Enter: the message is away and the
+            # model's answer is what happens next.
+            self.set_loop_state(
+                LoopState.WAIT_GENERATE,
+                "the ready-to-send button went away, which is your Enter",
+            )
+            self._view.hide_paste_flash()
+            self.paint_send_gate(SEND_READY_RELEASED)
 
     def override_send_gate(self) -> None:
         """The model is generating, so the send already happened: let go.
@@ -1451,6 +1527,11 @@ class AutomationController:
         mid-flow would re-arm the trigger against the flow's own mouse work
         and re-fire it forever. ``end_flow`` lifts the suspension and resets the
         trackers.
+
+        Runs on the POLLER thread, inside the ``_tick_lock`` the closing
+        ``consume_*`` took - which is the only way it is ever reached. Everything
+        it reads and writes is therefore consistent with the probe that closed
+        the tick, and nothing the UI thread does can land halfway through.
         """
         if self._flow_running or not self._awaiting_pasted_reply:
             return
@@ -1544,10 +1625,12 @@ class AutomationController:
         self.close_reply_gate()
         # SYNCHRONOUSLY, and before anything below it can hand control back to a
         # caller: this is what makes the fire one-shot. ``on_fire`` schedules
-        # work rather than doing it, so between this line and the flow's first
-        # await the next tick can arrive - and a second fire against a chat the
-        # first one is already harvesting would double-click a copy button and
-        # ingest the reply twice.
+        # work rather than doing it - and since 5b it does not even reach the UI
+        # thread until this call stack has unwound, so between this line and the
+        # flow's first await there is a whole message hop the NEXT tick can
+        # arrive in. A second fire against a chat the first one is already
+        # harvesting would double-click a copy button and ingest the reply
+        # twice; this flag, set here rather than by the flow, is what forbids it.
         self._flow_running = True
         self.set_loop_state(
             LoopState.AUTO_COPY,

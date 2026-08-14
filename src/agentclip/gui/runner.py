@@ -64,8 +64,10 @@ class GuiRunner:
         engine_factory: Callable[[EngineRequest], Engine],
         project_root: Path,
         profile_root: Path | None = None,
+        global_config_path: Path | None = None,
         mcp_manager: McpStatusSource | None = None,
         on_close: Callable[[], None] | None = None,
+        on_config_change: Callable[[Config], None] | None = None,
     ) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread: threading.Thread | None = None
@@ -81,9 +83,11 @@ class GuiRunner:
             engine_factory=engine_factory,
             project_root=project_root,
             profile_root=profile_root,
+            global_config_path=global_config_path,
             mcp_manager=mcp_manager,
             schedule=self.schedule,
             on_exit=self.request_close,
+            on_config_change=on_config_change,
         )
         self.js_api = JsApi(self)
 
@@ -275,6 +279,52 @@ class GuiRunner:
 
     def end_session(self) -> None:
         self.schedule_call(self.view.end_session)
+
+    # The service editor (F2). Fourteen one-line marshals for the reason the
+    # rest are one-line marshals: pywebview runs each js_api method on a thread
+    # of its own, and the editor's model is loop-owned state like every other.
+
+    def open_service_editor(self) -> None:
+        self.schedule_call(self.view.open_service_editor)
+
+    def svc_select(self, key: str) -> None:
+        self.schedule_call(self.view.svc_select, key)
+
+    def svc_form(self, fields: dict[str, Any]) -> None:
+        self.schedule_call(self.view.svc_form, fields)
+
+    def svc_detection(self, state: dict[str, Any]) -> None:
+        self.schedule_call(self.view.svc_detection, state)
+
+    def svc_scroll(self, action: str) -> None:
+        self.schedule_call(self.view.svc_scroll, action)
+
+    def svc_matcher(self, matcher: str) -> None:
+        self.schedule_call(self.view.svc_matcher, matcher)
+
+    def svc_tolerance(self, value: int) -> None:
+        self.schedule_call(self.view.svc_tolerance, value)
+
+    def svc_add(self) -> None:
+        self.schedule_call(self.view.svc_add)
+
+    def svc_reset(self) -> None:
+        self.schedule_call(self.view.svc_reset)
+
+    def svc_delete(self) -> None:
+        self.schedule_call(self.view.svc_delete)
+
+    def svc_capture(self, kind: str) -> None:
+        self.schedule_call(self.view.svc_capture, kind)
+
+    def svc_clear(self, kind: str) -> None:
+        self.schedule_call(self.view.svc_clear, kind)
+
+    def svc_forget(self) -> None:
+        self.schedule_call(self.view.svc_forget)
+
+    def svc_close(self) -> None:
+        self.schedule_call(self.view.svc_close)
 
 
 def _no_close() -> None:

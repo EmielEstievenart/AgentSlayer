@@ -617,18 +617,27 @@ def main(argv: list[str] | None = None) -> int:
     # an install without the extra must still run.
     #
     # The engine factory is built the same way for both, with the same
-    # arguments; only the "read the live Config" closure differs, because the
-    # GUI has no service editor yet and so nothing that can rebind one
-    # mid-run (the TUI's reads app.app_config, which the editor reassigns).
+    # arguments; only the SHAPE of the "read the live Config" closure differs.
+    # The TUI's reads ``app.app_config``, an attribute its service editor
+    # reassigns. The GUI's window does not exist yet at this line, so the cell
+    # is here and the shell writes it back through ``on_config_change`` - both
+    # shells therefore build the next session's Engine from whatever the editor
+    # last saved, and neither touches a session already in flight.
     if args.gui:
         from agentclip.gui.shell import run_gui
+
+        live_config = [config]
+
+        def adopt_config(edited: Config) -> None:
+            live_config[0] = edited
 
         try:
             return run_gui(
                 launch,
                 provider=provider,
+                on_config_change=adopt_config,
                 engine_factory=make_engine_factory(
-                    lambda: config,
+                    lambda: live_config[0],
                     launch.project_root,
                     host=launch.host,
                     os_name=launch.os_name,

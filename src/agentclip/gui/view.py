@@ -27,22 +27,22 @@ definition; ``docs/design/gui.md`` §2 lists them and that list is now empty.
 Everything a *turn* passes through - the transcript, the gate, the delivery, the
 watcher, the prompts - is the real thing, and so are the sidebar, the status
 bar's ten segments and the harness log pane (increment 2), the window tabs, the
-per-window transcripts and the session summary (increment 3), and the ELEMENTS
-column, the chat-region picker and ``/identify`` (increment 4). What is left of
-the parity backlog is whole SURFACES this shell does not have yet - the service
-editor, settings/help/modals, the SSH connect dialog.
+per-window transcripts and the session summary (increment 3), the ELEMENTS
+column, the chat-region picker and ``/identify`` (increment 4), and the SERVICE
+EDITOR behind F2 (increment 5, whose model lives in ``gui/service_editor.py``).
+What is left of the parity backlog is whole SURFACES this shell does not have
+yet - settings/help/modals, the SSH connect dialog.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import itertools
 from collections.abc import Callable, Coroutine, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from agentclip.app import SessionController, SessionSpec, SessionView
 from agentclip.app.types import EngineRequest, SessionRef
@@ -57,9 +57,17 @@ from agentclip.automation.harness_log import (
 from agentclip.automation.loop_state import LOOP_TRANSITIONS, LoopState
 from agentclip.automation.ops import ElementClick
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
-from agentclip.config import Config, ServicePreset, default_profile_dir, save_active_services
+from agentclip.config import (
+    Config,
+    ServicePreset,
+    default_global_config_path,
+    default_profile_dir,
+    save_active_services,
+    save_services,
+)
 from agentclip.engine.engine import Decision, Engine, PendingAction
 from agentclip.gui.bridge import Bridge
+from agentclip.gui.service_editor import ServiceEditor, kind_of, png_data_uri
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.capture import CaptureError, RegionImage, capture_region, crop
@@ -67,7 +75,6 @@ from agentclip.screen.detector import RUNTIME_KINDS, ScreenDetector, Sighting, b
 from agentclip.screen.focus import foreground_window
 from agentclip.screen.identify import IdentifiedElement, identify_elements, summarise
 from agentclip.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
-from agentclip.screen.png import PngError, encode_png
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.profile_store import load_profile
 from agentclip.screen.region import ScreenRegion
@@ -138,9 +145,10 @@ WINDOW_STATE_GLYPH: dict[str, str] = {
 # two shells may not import each other (tests/test_layering.py), and widening
 # that boundary so a frontend could reach another frontend's display strings
 # would be a worse trade than a block of literals with a comment saying where
-# the original lives. Three of them are deliberately NOT verbatim - the TUI's
-# say "F2", and this shell has no service editor behind that key until increment
-# 7, so they name the door instead of a key that would do nothing.
+# the original lives. The four that name F2 are verbatim again as of parity
+# increment 5: this shell has a service editor behind that key now, so the
+# increment-2 divergence (name the door, not a key that does nothing) is
+# reversed - docs/design/gui.md §3.
 
 # The STATE rail, in LOOP order rather than declaration order. A tuple rather
 # than ``list(LoopState)`` for the sidebar's reason: the rail is a picture of
@@ -186,11 +194,14 @@ COPY_RESTING = "no click yet"
 # ticks this signal and the service has no appearance to match it against, so
 # the detector is silently skipped and "no verdict yet" would be a lie of
 # omission for the rest of the run.
-PROBE_UNCAPTURED = "ticked but not captured"
+PROBE_UNCAPTURED = "ticked but not captured - F2"
 STALE_UNSET = "no chat region - staleness check disabled"
 STALE_CALIBRATED = "watching the chat region"
-STALE_UNTICKED = "stillness not watched for this service"
-STALE_OFF = "finish detection off - nothing can decide a reply finished"
+STALE_UNTICKED = "stillness not watched for this service - F2"
+STALE_OFF = "finish detection off - F2 to configure"
+# What the SERVICE block's appearance count is followed by: the door to the
+# captures, which is the editor this key opens (``sidebar.PROFILE_HINT``).
+PROFILE_HINT = " · F2 for captures + detection"
 
 # == the ELEMENTS column ======================================================
 # The third column (F7): one row per appearance the tool can recognise, showing
@@ -546,11 +557,13 @@ def element_png(image: RegionImage) -> str:
     ``""`` for anything that cannot be encoded (a truncated buffer, a zero-area
     cut). The row still says ``found`` with its diff: the search DID match, and
     blanking the verdict because the picture failed would report the opposite.
+
+    One line, because the service editor's seven thumbnails want exactly the
+    same conversion under the same rule (parity increment 5): the encoder call
+    site is :func:`agentclip.gui.service_editor.png_data_uri` and this name is
+    kept because a crop is what this column is about.
     """
-    try:
-        return "data:image/png;base64," + base64.b64encode(encode_png(image)).decode("ascii")
-    except PngError:
-        return ""
+    return png_data_uri(image)
 
 
 def found_line(diff: float) -> str:
@@ -571,15 +584,31 @@ class GuiView:
         engine_factory: Callable[[EngineRequest], Engine],
         project_root: Path,
         profile_root: Path | None = None,
+        global_config_path: Path | None = None,
         mcp_manager: McpStatusSource | None = None,
         schedule: Callable[[Coroutine[Any, Any, Any]], None] | None = None,
         on_exit: Callable[[], None] | None = None,
+        on_config_change: Callable[[Config], None] | None = None,
     ) -> None:
         self._bridge = bridge
         self._config = config
         self._provider = provider
         self._project_root = project_root
         self._profile_root = profile_root if profile_root is not None else default_profile_dir()
+        # Where the service editor persists what it saved. Defaults to the real
+        # global config.toml; tests override it so no run ever writes into the
+        # user's actual config - the same shape (and the same reason) as
+        # ``profile_root`` above and as ``AgentClipApp._global_config_path``.
+        self._global_config_path = (
+            global_config_path if global_config_path is not None else default_global_config_path()
+        )
+        # How a saved Config reaches the ENGINE FACTORY. ``cli.py`` builds that
+        # factory before this object exists, over a closure that has to keep
+        # reading whatever config is current - the TUI's is ``lambda:
+        # app.app_config`` and the editor reassigns that attribute. This shell's
+        # equivalent is a hand-back: the factory reads a cell cli.py owns and
+        # this is what writes it (see ``_adopt_config``).
+        self._on_config_change = on_config_change if on_config_change is not None else _no_config
         self._profiles: dict[str, ServiceProfile] = {}
         self._mcp_manager = mcp_manager
         self._mcp_announced: set[tuple[str, str]] = set()
@@ -669,6 +698,12 @@ class GuiView:
         # does, because cancelling a task cannot take a blocking child process
         # down and two stacked overlays are unusable.
         self._picker_open = False
+        # The service editor's model while its modal is up, and None the rest of
+        # the time - the GUI's equivalent of "is ServiceEditorScreen the active
+        # screen". Everything it decides lives in gui/service_editor.py; what
+        # this object owns is the bracket around the visit (detectors suspended
+        # for its whole duration) and the apply path on the way out.
+        self._editor: ServiceEditor | None = None
         # The detector the current poller run watches through, and the run
         # itself. Mirrors ``MainScreen._detector`` / ``_detector_worker``.
         self._detector: ScreenDetector | None = None
@@ -758,6 +793,10 @@ class GuiView:
         # out - a reload is the one moment this flag can be stale.
         self._elements_open = False
         self._push_elements()
+        # The editor is a MODEL that outlives a reload, so a page that came back
+        # under an open one gets it back rather than a window with a suspended
+        # poller and no way to close it.
+        self._push_editor()
         self._bridge.send("armed", armed=self._automation.os_armed)
 
     def submit_text(self, text: str) -> None:
@@ -1786,6 +1825,271 @@ class GuiView:
                 f"could not remember the service for next launch: {exc}", severity="warning"
             )
 
+    # == the service editor (F2) ===============================================
+    # The GUI's ``AgentClipApp.action_settings`` / ``_open_service_editor``,
+    # minus Textual's ``push_screen_wait`` hand-off (a single-loop shell can just
+    # await a modal). What is kept is every bracket that dance existed to
+    # produce: F2 is refused while the editor is already up or while a capture
+    # overlay is open elsewhere in the app, the finish detectors are suspended
+    # for the WHOLE visit, and the propagation on the way out runs for either
+    # half of the answer - a preset edit or an appearance the editor already
+    # wrote to disk (ui-briefs/service-editor.md §5.10, §7).
+
+    def open_service_editor(self) -> None:
+        """F2 / the sidebar's door: open the per-service profile editor.
+
+        Refused out loud in the two cases two fullscreen overlays could
+        otherwise coexist: this editor's own capture buttons spawn the same
+        child process the chat-region picker does, and cancelling a task cannot
+        kill either of them.
+        """
+        if self._editor is not None:
+            return  # already open
+        if self._picker_open:
+            self.notify(
+                "a region picker is open - finish it or press Esc first", severity="warning"
+            )
+            return
+        # Capturing an appearance throws a fullscreen overlay over the very
+        # browser window the detectors watch, and an overlay appearing and
+        # vanishing is exactly the sustained large delta that arms the finish
+        # trigger on staleness alone. Suspended for the whole visit, resumed in
+        # the close path's finally.
+        self.suspend_detectors()
+        self._editor = ServiceEditor(
+            self._config,
+            self._profile_root,
+            # Re-read fresh on every open (never cached): the editor lands on
+            # whichever service the tab the user is looking at is pointed at.
+            self._service_for(_WINDOW_SLOTS[self._selected_window]),
+            notify=self._editor_notify,
+            confirm=self.confirm,
+        )
+        self._push_editor()
+
+    def _editor_notify(self, message: str, severity: str) -> None:
+        """The model's toast sink, widened to this view's ``notify`` shape."""
+        self.notify(message, severity=cast(Severity, severity))
+
+    def _push_editor(self) -> None:
+        """The whole editor as one event. Closed is one field, not a second type."""
+        editor = self._editor
+        if editor is None:
+            self._bridge.send("editor", open=False)
+            return
+        self._bridge.send("editor", **editor.state())
+
+    # -- what the modal asks for (js_api, already on the loop) ----------------
+    # Each one drives the model and repaints; the model owns every refusal, so
+    # a press that cannot do anything toasts from down there rather than being
+    # swallowed up here.
+
+    def svc_select(self, key: str) -> None:
+        if self._editor is None:
+            return
+        self._editor.select(key)
+        self._push_editor()
+
+    def svc_form(self, fields: dict[str, Any]) -> None:
+        """A keystroke in the form column: the WHOLE candidate, revalidated.
+
+        The page sends every field on any change because ``max <= total`` is a
+        cross-field rule - there is no per-field validity to send.
+        """
+        if self._editor is None:
+            return
+        self._editor.set_form({k: str(v) for k, v in dict(fields).items()})
+        self._push_editor()
+
+    def svc_detection(self, state: dict[str, Any]) -> None:
+        """Any toggle on the left column: all of them, folded in at once."""
+        if self._editor is None:
+            return
+        self._editor.set_detection(
+            signals=[str(name) for name in state.get("signals") or ()],
+            hover_scan=bool(state.get("hover_scan")),
+            capture_prose=bool(state.get("capture_prose")),
+            require_fenced=bool(state.get("require_fenced")),
+            stream=bool(state.get("stream")),
+            auto_submit=bool(state.get("auto_submit")),
+        )
+        self._push_editor()
+
+    def svc_scroll(self, action: str) -> None:
+        if self._editor is None:
+            return
+        self._editor.set_scroll(action)
+        self._push_editor()
+
+    def svc_matcher(self, matcher: str) -> None:
+        if self._editor is None:
+            return
+        self._editor.set_matcher(matcher)
+        self._push_editor()
+
+    def svc_tolerance(self, value: int) -> None:
+        if self._editor is None:
+            return
+        self._editor.set_tolerance(value)
+        self._push_editor()
+
+    def svc_add(self) -> None:
+        if self._editor is None:
+            return
+        self._editor.add()
+        self._push_editor()
+
+    def svc_reset(self) -> None:
+        if self._editor is None:
+            return
+        self._editor.reset()
+        self._push_editor()
+
+    def svc_delete(self) -> None:
+        if self._editor is None:
+            return
+        self._editor.delete()
+        self._push_editor()
+
+    def svc_clear(self, kind_name: str) -> None:
+        """One appearance's whole stack, gone from disk. No confirm, by design."""
+        editor, kind = self._editor, kind_of(kind_name)
+        if editor is None or kind is None:
+            return
+        editor.clear(kind)
+        self._push_editor()
+
+    def svc_forget(self) -> None:
+        if self._editor is None:
+            return
+        self._schedule(self._svc_forget())
+
+    async def _svc_forget(self) -> None:
+        editor = self._editor
+        if editor is None:
+            return
+        await editor.forget()
+        self._push_editor()
+
+    def svc_capture(self, kind_name: str) -> None:
+        """Draw a box around one appearance and file the pixels under this service.
+
+        The claim is synchronous and the work is scheduled: two presses both
+        marshal onto this loop as two callbacks, and if the flag were taken
+        inside the coroutine neither would have seen the other's.
+        """
+        editor, kind = self._editor, kind_of(kind_name)
+        if editor is None or kind is None:
+            return
+        if not editor.start_capture(kind):
+            self._push_editor()
+            return
+        # The app-wide overlay flag too, so nothing else in this shell can put a
+        # second child process up while this one is drawing.
+        self._picker_open = True
+        self._push_editor()
+        self._schedule(self._svc_capture(kind))
+
+    async def _svc_capture(self, kind: TemplateKind) -> None:
+        editor = self._editor
+        if editor is None:
+            self._picker_open = False
+            return
+        try:
+            await editor.run_capture(kind)
+        finally:
+            self._picker_open = False
+            self._push_editor()
+
+    def svc_close(self) -> None:
+        """Esc, or the modal's close button. May be refused - see the model."""
+        if self._editor is None:
+            return
+        self._schedule(self._svc_close())
+
+    async def _svc_close(self) -> None:
+        """Apply exactly what ``AgentClipApp._open_service_editor`` applies.
+
+        Two independent kinds of change come back and the propagation runs for
+        either: the presets table, which is ours to write to config.toml, and
+        captured appearances the editor already wrote or deleted on disk - which
+        still have to reach this view, because it caches profiles, paints them
+        in the sidebar and hunts for them on a poll timer.
+        """
+        editor = self._editor
+        if editor is None:
+            return
+        result = await editor.close()
+        if not result.closed:
+            self._push_editor()  # a capture is up, or the discard was declined
+            return
+        self._editor = None
+        self._bridge.send("editor", open=False)
+        try:
+            if result.edits is None:
+                return  # closed with no changes - nothing to persist or propagate
+            saved = True
+            if result.edits.services is not None:
+                try:
+                    save_services(result.edits.services, self._global_config_path)
+                except OSError as exc:
+                    # The in-memory adoption below still happens: the user's
+                    # edit is real for this process even when the file it should
+                    # outlive it in could not be written.
+                    saved = False
+                    self.notify(
+                        f"could not save the service presets: {exc}", severity="error", timeout=8
+                    )
+                self._adopt_config(replace(self._config, services=result.edits.services))
+            else:
+                self._adopt_config(self._config)
+            if saved:
+                self.notify(
+                    "service presets saved"
+                    if result.edits.services is not None
+                    else "appearance updated",
+                    timeout=4,
+                )
+        finally:
+            # A no-op when the propagation above already restarted the poller,
+            # which is the common case (``_adopt_config`` rebuilds it).
+            self.resume_detectors()
+
+    def _adopt_config(self, config: Config) -> None:
+        """``MainScreen.update_config``, spelled for this shell's readouts.
+
+        Everything here reads directly off ``self._config``; the controller is
+        updated too, so the NEXT session (and any ``/new``) picks the edit up. A
+        session already in flight keeps the Config snapshot its Engine was built
+        from - that is the contract, not an omission.
+        """
+        self._config = config
+        self._controller.update_config(config)
+        # cli.py's engine factory reads a cell it owns, so the shell that
+        # rebound the config has to hand it over - the TUI's equivalent is that
+        # its closure reads the attribute the editor reassigned.
+        self._on_config_change(config)
+        # The editor can delete a service's captured appearances (and a service
+        # itself), so the per-run cache is no longer trustworthy - drop it and
+        # let the next read come off disk.
+        self._profiles.clear()
+        # A deleted service can also be the one a window tab is pointed at. A
+        # window left pointing at a preset that no longer exists would silently
+        # drive the automation off ``Config.preset()``'s fallback.
+        for window, key in self._automation.services().items():
+            if key not in config.services:
+                self._automation.set_service(window, self._initial_services(config)[window])
+        self._push_tabs()
+        self._push_sidebar()
+        self._after_calibration()
+        # Everything the running poller was built from can have just changed:
+        # the preset's ``stable_seconds`` (baked into the stale tracker's tick
+        # count at start), its matcher/tolerance, and the busy/idle appearances
+        # behind it. Without this restart an edited stillness window would only
+        # take effect on the next unrelated recalibration.
+        self._start_detector_worker()
+        self._push_status()
+
     # == ChatView: sub-agent transport =========================================
 
     def delegation_available(self) -> bool:
@@ -2554,10 +2858,7 @@ class GuiView:
             )
             if preset
             else "",
-            # The TUI's line names F2 as the door to the captures; this shell
-            # has no service editor yet (increment 7), so it reports the count
-            # and stops rather than naming a key that would do nothing.
-            profile_note=f"appearance: {self.profile_for(slot).describe()}",
+            profile_note=f"appearance: {self.profile_for(slot).describe()}{PROFILE_HINT}",
             # The picker is locked while a session owns the services: BOTH
             # windows' budgets are baked in at bootstrap (the sub-agent's with
             # the session spec), so neither preset may move mid-session.
@@ -2657,6 +2958,10 @@ class GuiView:
         interacting with AgentClip. The HANDLE is OS state both shells snap
         focus back to, so it is kept below."""
         self._automation.set_own_window(foreground_window())
+
+
+def _no_config(config: Config) -> None:
+    """The config hand-back a view nobody wired an engine factory into gets."""
 
 
 def _no_schedule(coro: Coroutine[Any, Any, Any]) -> None:

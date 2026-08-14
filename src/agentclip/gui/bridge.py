@@ -159,6 +159,46 @@ load-bearing invariant. ``state`` is derived from the window's run history
 rather than stored, and only the LAST run's outcome is reported: the tab is a
 status light, not a log.
 
+The SERVICE EDITOR (F2) - a page modal over the whole per-service profile, and
+the one family whose event is the entire surface rather than one block of it
+(``ui-briefs/service-editor.md``)::
+
+    {type: "editor", open: false}
+    {type: "editor", open: true,
+     reload: bool,          # rewrite the text inputs? only after a form RELOAD
+     services: [{key: str, label: str, builtin: bool}, ...],  # + the add row
+     selected: str,         # a key, or "+add-new+"
+     is_new: bool, key_locked: bool,
+     form: {key, label, max, total, stable, extra},   # all strings
+     error: str,            # why the candidate is not being applied, or ""
+     signals: [{name, label, on}, ...], hover_scan: bool, capture_prose: bool,
+     require_fenced: bool, stream: bool, auto_submit: bool,
+     scroll: str, scrolls: [{value, label}, ...],
+     matcher: str, matchers: [{value, label}, ...], matcher_warning: str,
+     tolerance: int, tolerance_min: int, tolerance_max: int,
+     signal_warning: str, controls_disabled: bool, can_add: bool,
+     show_add: bool, show_reset: bool, show_delete: bool, show_forget: bool,
+     templates: str,        # "appearance: 3/7 captured"
+     kinds: [{kind, label, status, png, can_clear}, ...],   # all SEVEN, always
+     capturing: bool, hint: str}
+
+Two fields carry the whole of this surface's page-side contract. ``reload``
+is false on every push a keystroke caused and true on the ones a *reload*
+caused (a selection, an add, a reset, a delete): the model owns the form's
+values, but repainting a text box from it on every keystroke would fight the
+caret, so the page writes its inputs only when reload is true. ``controls_
+disabled`` is the "+ add new" state (brief §3.5) - the toggles, radios and
+slider are DISABLED, not blank, and keep showing what pressing "Add service"
+would create, because a blank checklist over a preset born with "screen stops
+changing" ticked is a lie about the only setting the form cannot otherwise
+show.
+
+``png`` on a kind row is a thumbnail of the FIRST image of that kind's stack,
+as a ``data:`` URI, encoded by the same ``screen/png.py`` the elements column
+uses and only when the profile is re-read (a capture, a clear, a forget, a
+selection) - never per keystroke. All seven rows are always present whether or
+not anything is captured.
+
 ``harness`` carries the rendered ``line`` as well as its parts because the
 fixed-width kind column is ``HarnessEntry.line``'s decision, taken once below
 both shells. The page keeps its own tail of these, bounded at the deque's own
@@ -351,6 +391,24 @@ class JsCalls(Protocol):
     def select_window(self, window: str) -> None: ...
     def next_window(self) -> None: ...
     def end_session(self) -> None: ...
+    # The service editor (F2). One method per intent for the reason the key
+    # family above has one: the modal's state is a MODEL on the Python side
+    # (``gui/service_editor.py``) and every press is a call on it, so a page
+    # asking for something this shell does not do fails at the bridge.
+    def open_service_editor(self) -> None: ...
+    def svc_select(self, key: str) -> None: ...
+    def svc_form(self, fields: dict[str, Any]) -> None: ...
+    def svc_detection(self, state: dict[str, Any]) -> None: ...
+    def svc_scroll(self, action: str) -> None: ...
+    def svc_matcher(self, matcher: str) -> None: ...
+    def svc_tolerance(self, value: int) -> None: ...
+    def svc_add(self) -> None: ...
+    def svc_reset(self) -> None: ...
+    def svc_delete(self) -> None: ...
+    def svc_capture(self, kind: str) -> None: ...
+    def svc_clear(self, kind: str) -> None: ...
+    def svc_forget(self) -> None: ...
+    def svc_close(self) -> None: ...
 
 
 class JsApi:
@@ -469,6 +527,75 @@ class JsApi:
         """`e`: open the session summary. Gated on the view side, where the
         phase is known, and refused with a toast rather than silence."""
         self._safely(self._calls.end_session)
+
+    # -- the service editor (F2) ----------------------------------------------
+    # The modal is drawn by the page and DECIDED on the Python side: the working
+    # copy, what validates, what applies live and what waits for a press all
+    # live in ``gui/service_editor.py``, so every one of these is a call on that
+    # model followed by one ``editor`` event back. Nothing here is a refusal -
+    # the model owns those and toasts them.
+
+    def svc_open(self) -> None:
+        """F2 and the sidebar's appearance line: open the per-service editor.
+        Refused (out loud) while a capture overlay is up anywhere in the app."""
+        self._safely(self._calls.open_service_editor)
+
+    def svc_select(self, key: str = "") -> None:
+        """The editor's own service picker - a key, or the "+ add new" row."""
+        self._safely(lambda: self._calls.svc_select(key))
+
+    def svc_form(self, fields: Any = None) -> None:
+        """A keystroke in the form column: the WHOLE candidate, every time.
+        ``max <= total`` is a cross-field rule, so there is no per-field
+        validity for the page to send."""
+        self._safely(lambda: self._calls.svc_form(dict(fields or {})))
+
+    def svc_detection(self, state: Any = None) -> None:
+        """Any toggle on the left column, read as a SET: the checklist, the
+        hover scan, both delivery ticks and the two ingest ticks together."""
+        self._safely(lambda: self._calls.svc_detection(dict(state or {})))
+
+    def svc_scroll(self, action: str = "") -> None:
+        self._safely(lambda: self._calls.svc_scroll(action))
+
+    def svc_matcher(self, matcher: str = "") -> None:
+        self._safely(lambda: self._calls.svc_matcher(matcher))
+
+    def svc_tolerance(self, value: int = 0) -> None:
+        """The tolerance slider, live and ungated: a real ``<input
+        type=range>`` cannot express a value outside the range config.py
+        enforces (docs/design/gui.md §3)."""
+        self._safely(lambda: self._calls.svc_tolerance(int(value)))
+
+    def svc_add(self) -> None:
+        """"Add service": the one discrete commit in the whole editor."""
+        self._safely(self._calls.svc_add)
+
+    def svc_reset(self) -> None:
+        self._safely(self._calls.svc_reset)
+
+    def svc_delete(self) -> None:
+        self._safely(self._calls.svc_delete)
+
+    def svc_capture(self, kind: str = "") -> None:
+        """One appearance's "Capture": the same fullscreen child process the
+        chat-region picker runs, answered minutes later through the editor
+        event rather than from here."""
+        self._safely(lambda: self._calls.svc_capture(kind))
+
+    def svc_clear(self, kind: str = "") -> None:
+        """One appearance's whole stack, off disk immediately and with no
+        confirm - it is one Capture press away from being back."""
+        self._safely(lambda: self._calls.svc_clear(kind))
+
+    def svc_forget(self) -> None:
+        """The whole service's captured appearances, behind a confirm."""
+        self._safely(self._calls.svc_forget)
+
+    def svc_close(self) -> None:
+        """Esc: apply the valid edits and leave. May be refused (a capture in
+        flight) or held for a confirm (invalid text that was never applied)."""
+        self._safely(self._calls.svc_close)
 
     @staticmethod
     def _safely(call: Callable[[], None]) -> None:

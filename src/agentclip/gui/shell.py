@@ -140,15 +140,22 @@ def run_gui(
     provider: ClipboardProvider,
     engine_factory: Callable[[EngineRequest], Engine],
     mcp_manager: McpStatusSource | None = None,
+    on_config_change: Callable[[Config], None] | None = None,
 ) -> int:
     """Open the window, run the GUI loop, return an exit code when it closes.
 
-    The three keyword arguments are the shell-agnostic pieces ``cli.main``
-    builds for both frontends - the clipboard backend, the per-session engine
-    factory and the process-wide MCP runtime. They are handed IN rather than
-    built here for the reason the module docstring gives: choosing a clipboard
-    backend and wiring an engine factory are launch questions, not window
-    questions, and a second construction site is a second thing to drift.
+    The keyword arguments are the shell-agnostic pieces ``cli.main`` builds for
+    both frontends - the clipboard backend, the per-session engine factory and
+    the process-wide MCP runtime. They are handed IN rather than built here for
+    the reason the module docstring gives: choosing a clipboard backend and
+    wiring an engine factory are launch questions, not window questions, and a
+    second construction site is a second thing to drift.
+
+    ``on_config_change`` is the way BACK for the one launch question a running
+    window can answer differently: the service editor saves a new preset table,
+    and the engine factory - built above this call, over a closure cli.py owns -
+    has to read it for the next session. The TUI's equivalent is that its
+    closure reads the attribute its editor reassigns.
 
     Order matters and is the design's (gui.md section 2). The window is created
     with the ``js_api`` object first, because pywebview injects the API into the
@@ -181,6 +188,7 @@ def run_gui(
         engine_factory=engine_factory,
         project_root=launch.project_root,
         mcp_manager=mcp_manager,
+        on_config_change=on_config_change,
     )
     width, height = WINDOW_SIZE
     with asset_dir() as assets:

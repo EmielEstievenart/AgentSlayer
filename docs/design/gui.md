@@ -312,8 +312,8 @@ a toast where a user could otherwise be left staring at nothing:
 
 **The list is empty.** Every `ChatView`/`AutomationView` method this shell
 implements is now the real one; what is left of the parity backlog is whole
-SURFACES (the service editor, settings/help/modals, the SSH dialog), not
-methods implemented smaller than their contract.
+SURFACES (settings/help/modals, the SSH dialog), not methods implemented
+smaller than their contract.
 
 One duplication is tracked with them: `gui/view.py:_distinct_rects` and
 `find_all` are `MainScreen`'s, spelled again because the two shells may not
@@ -350,7 +350,7 @@ step:
 6. ✅ elements panel — **parity increment 4**, with the chat-region picker and
    `/identify` (the two surfaces the panel is useless without: nothing is
    searched until a window is drawn).
-7. ⬜ service editor
+7. ✅ service editor — **parity increment 5**.
 8. ⬜ settings / help / modals
 9. ⬜ SSH connect dialog
 
@@ -445,8 +445,8 @@ Three deliberate divergences, recorded rather than smuggled:
   shown only under the Ctrl+V variant, exactly as `retry=True` says.
 - **Three sidebar lines drop their "F2"** (the appearance summary, `STALE_OFF`,
   `PROBE_UNCAPTURED`). The diagnosis is verbatim; the key is not, because this
-  shell has no service editor behind F2 until increment 7 and naming a key that
-  does nothing is worse than naming none.
+  shell has no service editor behind F2 yet and naming a key that does nothing
+  is worse than naming none. *(Reversed in increment 5, which is that editor.)*
 - **`w`/`i`/`r` refuse out loud.** `check_action`'s three-way footer dimming
   (§6.6 of the keys brief) has no equivalent here — there is no footer to hide a
   binding from — so a key that cannot fire toasts why instead of being silently
@@ -577,10 +577,80 @@ sub-agent's **one-shot "slot ready" toast** (`MainScreen._after_calibration`'s
 half that a repaint cannot carry — the delegate tool is baked in at bootstrap,
 so a window that just became ready reaches the model on the next `/new`), and
 the sidebar's "Set chat region..." button becoming real, which was increment 2's
-last standing toast. Deferred deliberately: the service editor behind F2
-(increment 7) — the appearance-summary lines still name the door rather than the
-key — and any GUI-native overlay, which the brief's open question 1 leaves to the
-child process on purpose.
+last standing toast. Deferred deliberately: the service editor behind F2 (which
+landed as increment 5) — the appearance-summary lines still name the door rather
+than the key — and any GUI-native overlay, which the brief's open question 1
+leaves to the child process on purpose.
+
+**Parity increment 5** — the SERVICE EDITOR (F2), against
+`docs/design/ui-briefs/service-editor.md`. The first surface whose MODEL was
+extracted rather than re-implemented against widgets: `gui/service_editor.py`
+holds the working copy, the validation, the commit models and the capture
+orchestration with no window, no page and no toolkit in it, and `gui/view.py`
+plus `app.js` hold only the two things a model cannot do (schedule the capture
+coroutine, and draw). It is why the editor's ~600 no-window tests exist at all —
+the TUI's equivalent needs a Pilot and a 120×45 terminal for the same
+assertions.
+
+- `{type: "editor"}` carries the WHOLE surface in one event, `open: false` being
+  the closed state rather than a second type. Two fields are the page-side
+  contract. **`reload`** is true only after a form RELOAD (a selection, an add,
+  a reset, a delete) and false after a keystroke: the model owns the form's
+  values, but repainting a text box from it on every input event would fight the
+  caret. **`controls_disabled`** is the "+ add new" state (brief §3.5) — the
+  toggles, radios and slider are DISABLED, not blank, and keep showing what
+  "Add service" would create.
+- The two commit models are the TUI's, exactly: an existing preset applies
+  **live** on every change that validates as a whole candidate (`max <= total`
+  is a cross-field rule, so per-field validity does not exist), an invalid
+  candidate is **never** committed and the working copy keeps its last-valid
+  values, and a new preset waits for the one discrete "Add service" press
+  because a key is immutable once created. The toggles/radios/slider write
+  through with no validation gate at all — none of them can express an illegal
+  value.
+- The seven APPEARANCE rows are real PNG data URIs (`screen/png.py`, the same
+  BGRX-as-opaque-alpha rule the elements column needs), encoded only when the
+  profile folder is re-read — a selection, a capture, a clear, a forget — never
+  per keystroke. Captures run the same `pick_region` child process increment 4
+  wired, write to the store immediately, ADD a variant rather than replacing
+  one, and the second press is refused **out loud** rather than raced (the claim
+  is synchronous, before the coroutine is scheduled, because two js_api presses
+  marshal onto the loop as two callbacks).
+- The save is `AgentClipApp._open_service_editor`'s, step for step:
+  `save_services` minimal-write into the shell's own `global_config_path`,
+  `replace(config, services=...)`, `SessionController.update_config`, the
+  per-run profile cache dropped, any window pointed at a deleted service
+  re-pointed, and the detector poller rebuilt — with the detectors suspended for
+  the **whole visit** and resumed in a `finally`, because a capture throws a
+  fullscreen overlay over the browser they watch.
+
+Three divergences, recorded rather than smuggled:
+
+- **The tolerance control is a real `<input type="range">`.** The TUI's is a
+  bespoke track+handle widget with arrow-key nudging, because Textual ships no
+  slider; brief §7 says to use the platform's own, and this is it. Only the
+  semantics carry over (0-64, default 24, live-apply, the number beside it).
+  Trivially, and named here only because §7 asked for the swap to be recorded.
+- **Increment 2's "three sidebar lines drop their F2" divergence is
+  REVERSED.** There is a service editor behind that key now, so the appearance
+  summary, `STALE_OFF`, `STALE_UNTICKED` and `PROBE_UNCAPTURED` are the TUI's
+  words again, and the sidebar grew the "Edit services..." button the TUI's
+  has.
+- **`cli.py` hands the GUI a config CELL, not a config.** The TUI's engine
+  factory closure reads `app.app_config`, an attribute its editor reassigns;
+  the GUI's window does not exist at the line where the factory is built, so
+  the cell lives in `main()` and the shell writes it back through
+  `run_gui(..., on_config_change=...)` → `GuiView._adopt_config`. Both shells
+  therefore build the NEXT session's Engine from whatever the editor last
+  saved, and neither touches a session already in flight. The previous
+  `lambda: config` was correct only while this shell had nothing that could
+  rebind one.
+
+One thing is deliberately smaller than the TUI's and says so here: a
+`save_services` that raises `OSError` **toasts and still applies in memory**
+(the TUI lets it propagate). It is the same trade `_persist_services` already
+makes for the service picker — remembering a pick is a convenience, never the
+point of the press.
 
 ## 4. SSH connect dialog (GUI-only surface)
 

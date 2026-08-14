@@ -12,7 +12,8 @@
    event, so the command and the key stay one implementation. F7 (the elements
    column) is the third show/hide and the one exception: the flip is local, but
    Python is told, because the crops are only encoded for a column somebody is
-   looking at.
+   looking at. F2 is not a toggle at all - the service editor's whole state is a
+   model on the Python side and this file only renders the `editor` event.
 
    Installed at PARSE time, not on DOMContentLoaded: the bridge can be draining
    before the DOM exists (evaluate_js waits for the page, but the first state
@@ -49,6 +50,17 @@
   var rejectOpen = false;
   var modalId = null;
   var modalKind = null;
+  // The service editor (F2). `svcBuilt` is once-per-page: the three control
+  // vocabularies and the seven appearance rows never change while the process
+  // runs, so they are built once and only their VALUES are repainted - which is
+  // what keeps a keystroke from yanking focus out of a checkbox.
+  var editorOpen = false;
+  var svcBuilt = false;
+  var svcSignals = {};
+  var svcScrolls = {};
+  var svcMatchers = {};
+  var svcKinds = {};
+  var svcOptions = "";
   // The harness decision log, page-side. The deque below is the source of
   // truth; this is a view of it that happens to keep its own copy, because the
   // bridge is one-way and a pane revealed after an hour must show the whole
@@ -932,6 +944,258 @@
     if (logOpen) paintLog(true);
   }
 
+  /* == service editor (F2) ==================================================
+     A page modal whose STATE is a model on the Python side
+     (agentclip/gui/service_editor.py): every press here is one call on it and
+     one `editor` event back, and every refusal (a second capture, a close over
+     an in-flight one) is toasted from down there. Nothing in this section
+     decides anything - not what validates, not which footer button shows, not
+     whether a Clear would do anything.
+
+     Two rules make the repaint safe to run on every keystroke. The dynamic
+     controls are built ONCE (their vocabularies - three signals, three scroll
+     actions, two matchers, seven appearances - are fixed for the process) and
+     afterwards only have their values written, so a change never yanks focus
+     out from under the keyboard. And the text inputs are written only when
+     `reload` is true, i.e. after a selection/add/reset/delete rather than after
+     a keystroke: the model owns the form's values, but repainting a box from it
+     on every input event would fight the caret. */
+
+  function svcForm() {
+    return {
+      key: el.svcKey.value,
+      label: el.svcLabel.value,
+      max: el.svcMax.value,
+      total: el.svcTotal.value,
+      stable: el.svcStable.value,
+      extra: el.svcExtra.value
+    };
+  }
+
+  // Read as a SET on any single change, never per-box: that is the shape the
+  // TUI's detection handler has, and the reason carries over - a handler that
+  // trusted which control fired would have to know which repaints are echoes.
+  function svcDetection() {
+    var signals = [];
+    Object.keys(svcSignals).forEach(function (name) {
+      if (svcSignals[name].checked) signals.push(name);
+    });
+    return {
+      signals: signals,
+      hover_scan: el.svcHover.checked,
+      capture_prose: el.svcProse.checked,
+      require_fenced: el.svcFenced.checked,
+      stream: el.svcStream.checked,
+      auto_submit: el.svcAutoSubmit.checked
+    };
+  }
+
+  function svcToggle(input, on, disabled) {
+    input.checked = Boolean(on);
+    input.disabled = Boolean(disabled);
+    // Disabled, not hidden: the layout must not reflow while a new service is
+    // being filled in, and the boxes keep SHOWING what "Add service" will
+    // create (service-editor.md §3.5).
+    if (input.parentNode) input.parentNode.classList.toggle("off", Boolean(disabled));
+  }
+
+  function svcRadios(host, group, options, call) {
+    var made = {};
+    host.innerHTML = "";
+    (options || []).forEach(function (opt) {
+      var row = document.createElement("label");
+      row.className = "svc-check";
+      var input = document.createElement("input");
+      input.type = "radio";
+      input.name = group;
+      input.value = opt.value;
+      var text = document.createElement("span");
+      text.textContent = opt.label;
+      row.appendChild(input);
+      row.appendChild(text);
+      input.addEventListener("change", function () {
+        if (input.checked) api(call, opt.value);
+      });
+      host.appendChild(row);
+      made[opt.value] = input;
+    });
+    return made;
+  }
+
+  function svcBuild(event) {
+    svcSignals = {};
+    el.svcSignalsBox.innerHTML = "";
+    (event.signals || []).forEach(function (sig) {
+      var row = document.createElement("label");
+      row.className = "svc-check";
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.id = "svc-signal-" + sig.name;
+      var text = document.createElement("span");
+      text.textContent = sig.label;
+      row.appendChild(box);
+      row.appendChild(text);
+      box.addEventListener("change", function () {
+        api("svc_detection", svcDetection());
+      });
+      el.svcSignalsBox.appendChild(row);
+      svcSignals[sig.name] = box;
+    });
+    svcScrolls = svcRadios(el.svcScroll, "svc-scroll-set", event.scrolls, "svc_scroll");
+    svcMatchers = svcRadios(el.svcMatcher, "svc-matcher-set", event.matchers, "svc_matcher");
+    // One row per TemplateKind, the kind's own value as the id, so one pair of
+    // handlers serves all seven and an eighth appearance is an enum member and
+    // nothing else.
+    svcKinds = {};
+    el.svcKinds.innerHTML = "";
+    (event.kinds || []).forEach(function (kind) {
+      var item = document.createElement("li");
+      item.className = "svc-kind";
+      item.id = "svc-kind-" + kind.kind;
+
+      var thumb = document.createElement("div");
+      thumb.className = "svc-thumb";
+      var img = document.createElement("img");
+      img.alt = kind.label;
+      img.hidden = true;
+      thumb.appendChild(img);
+
+      var text = document.createElement("div");
+      text.className = "svc-kind-text";
+      var name = document.createElement("div");
+      name.className = "svc-kind-name";
+      name.textContent = kind.label;
+      var status = document.createElement("div");
+      status.className = "svc-kind-status";
+      text.appendChild(name);
+      text.appendChild(status);
+
+      var actions = document.createElement("div");
+      actions.className = "svc-kind-actions";
+      var capture = document.createElement("button");
+      capture.type = "button";
+      capture.textContent = "Capture";
+      capture.addEventListener("click", function () {
+        api("svc_capture", kind.kind);
+      });
+      var clear = document.createElement("button");
+      clear.type = "button";
+      clear.textContent = "Clear";
+      clear.addEventListener("click", function () {
+        api("svc_clear", kind.kind);
+      });
+      actions.appendChild(capture);
+      actions.appendChild(clear);
+
+      item.appendChild(thumb);
+      item.appendChild(text);
+      item.appendChild(actions);
+      el.svcKinds.appendChild(item);
+      svcKinds[kind.kind] = { img: img, status: status, capture: capture, clear: clear };
+    });
+    svcBuilt = true;
+  }
+
+  function paintEditor(event) {
+    if (!event.open) {
+      editorOpen = false;
+      el.svcScrim.hidden = true;
+      return;
+    }
+    if (!svcBuilt) svcBuild(event);
+    var opening = !editorOpen;
+    editorOpen = true;
+    el.svcScrim.hidden = false;
+
+    var options = (event.services || [])
+      .map(function (row) {
+        return "<option value=\"" + escapeHtml(row.key) + "\">" + escapeHtml(row.label) + "</option>";
+      })
+      .join("");
+    if (options !== svcOptions) {
+      svcOptions = options;
+      el.svcSelect.innerHTML = options;
+    }
+    el.svcSelect.value = event.selected;
+
+    var form = event.form || {};
+    if (event.reload) {
+      el.svcKey.value = form.key || "";
+      el.svcLabel.value = form.label || "";
+      el.svcMax.value = form.max || "";
+      el.svcTotal.value = form.total || "";
+      el.svcStable.value = form.stable || "";
+      el.svcExtra.value = form.extra || "";
+    }
+    // Immutable once created: only a new service may name itself.
+    el.svcKey.disabled = Boolean(event.key_locked);
+    el.svcError.textContent = event.error || "";
+
+    var labels = event.labels || {};
+    el.svcHoverLabel.textContent = labels.hover_scan || "";
+    el.svcProseLabel.textContent = labels.capture_prose || "";
+    el.svcFencedLabel.textContent = labels.require_fenced || "";
+    el.svcStreamLabel.textContent = labels.stream || "";
+    el.svcAutoSubmitLabel.textContent = labels.auto_submit || "";
+    el.svcToleranceLabel.textContent = labels.tolerance || "";
+
+    var off = Boolean(event.controls_disabled);
+    (event.signals || []).forEach(function (sig) {
+      if (svcSignals[sig.name]) svcToggle(svcSignals[sig.name], sig.on, off);
+    });
+    svcToggle(el.svcHover, event.hover_scan, off);
+    svcToggle(el.svcProse, event.capture_prose, off);
+    svcToggle(el.svcFenced, event.require_fenced, off);
+    svcToggle(el.svcStream, event.stream, off);
+    svcToggle(el.svcAutoSubmit, event.auto_submit, off);
+    Object.keys(svcScrolls).forEach(function (value) {
+      svcToggle(svcScrolls[value], value === event.scroll, off);
+    });
+    Object.keys(svcMatchers).forEach(function (value) {
+      svcToggle(svcMatchers[value], value === event.matcher, off);
+    });
+
+    el.svcTolerance.min = String(event.tolerance_min);
+    el.svcTolerance.max = String(event.tolerance_max);
+    el.svcTolerance.value = String(event.tolerance);
+    el.svcTolerance.disabled = off;
+    el.svcToleranceValue.textContent = String(event.tolerance);
+
+    el.svcSignalWarning.textContent = event.signal_warning || "";
+    el.svcMatcherWarning.textContent = event.matcher_warning || "";
+
+    (event.kinds || []).forEach(function (kind) {
+      var node = svcKinds[kind.kind];
+      if (!node) return;
+      node.status.textContent = kind.status;
+      if (kind.png) {
+        node.img.src = kind.png;
+        node.img.hidden = false;
+      } else {
+        node.img.removeAttribute("src");
+        node.img.hidden = true;
+      }
+      // Capture stays live while another capture is in flight: the second press
+      // is REFUSED, out loud, and a disabled button would swallow the sentence
+      // that explains why (brief §3.3).
+      node.capture.disabled = off;
+      node.clear.disabled = !kind.can_clear;
+    });
+    el.svcTemplates.textContent = event.templates || "";
+    el.svcForget.hidden = !event.show_forget;
+
+    el.svcAdd.hidden = !event.show_add;
+    el.svcAdd.disabled = !event.can_add;
+    el.svcReset.hidden = !event.show_reset;
+    el.svcDelete.hidden = !event.show_delete;
+    el.svcHint.textContent = event.hint || "";
+    if (opening) {
+      window.setTimeout(function () {
+        el.svcSelect.focus();
+      }, 0);
+    }
+  }
+
   /* == chrome ============================================================== */
 
   function paintState(event) {
@@ -946,7 +1210,9 @@
     document.body.classList.toggle("yolo", Boolean(event.yolo));
     // Never steal the caret out of a reject note being written: the state push
     // that lands mid-typing is the gate's own, and it would take the box away.
-    if (event.composer_enabled && !rejectOpen) el.composer.focus();
+    // Nor out of the service editor, whose form is a dozen boxes deep and which
+    // is up for as long as somebody is configuring a service.
+    if (event.composer_enabled && !rejectOpen && !editorOpen) el.composer.focus();
   }
 
   /* == dispatch ============================================================ */
@@ -1096,6 +1362,9 @@
       case "elements":
         paintElements(event);
         return;
+      case "editor":
+        paintEditor(event);
+        return;
       default:
         return;
     }
@@ -1140,6 +1409,42 @@
       sideRegion: id("side-region"),
       sideSlotNote: id("side-slot-note"),
       sideDetectionTitle: id("side-detection-title"),
+      editServices: id("edit-services"),
+      svcScrim: id("svc-scrim"),
+      svcSelect: id("svc-select"),
+      svcSignalsBox: id("svc-signals"),
+      svcHover: id("svc-hover-scan"),
+      svcHoverLabel: id("svc-hover-scan-label"),
+      svcProse: id("svc-capture-prose"),
+      svcProseLabel: id("svc-capture-prose-label"),
+      svcFenced: id("svc-require-fenced"),
+      svcFencedLabel: id("svc-require-fenced-label"),
+      svcStream: id("svc-stream"),
+      svcStreamLabel: id("svc-stream-label"),
+      svcAutoSubmit: id("svc-auto-submit"),
+      svcAutoSubmitLabel: id("svc-auto-submit-label"),
+      svcSignalWarning: id("svc-signal-warning"),
+      svcScroll: id("svc-scroll"),
+      svcMatcher: id("svc-matcher"),
+      svcMatcherWarning: id("svc-matcher-warning"),
+      svcToleranceLabel: id("svc-tolerance-label"),
+      svcTolerance: id("svc-tolerance"),
+      svcToleranceValue: id("svc-tolerance-value"),
+      svcKey: id("svc-key"),
+      svcLabel: id("svc-label"),
+      svcMax: id("svc-max"),
+      svcTotal: id("svc-total"),
+      svcStable: id("svc-stable"),
+      svcExtra: id("svc-extra"),
+      svcError: id("svc-error"),
+      svcKinds: id("svc-kinds"),
+      svcTemplates: id("svc-templates"),
+      svcForget: id("svc-forget"),
+      svcHint: id("svc-hint"),
+      svcAdd: id("svc-add"),
+      svcReset: id("svc-reset"),
+      svcDelete: id("svc-delete"),
+      svcClose: id("svc-close"),
       elements: id("elements"),
       elementsTitle: id("elements-title"),
       elRows: id("el-rows"),
@@ -1282,6 +1587,54 @@
     el.setRegion.addEventListener("click", function () {
       api("set_region");
     });
+
+    // -- the service editor's own wiring -----------------------------------
+    // The five text boxes and the note box all send the WHOLE candidate on any
+    // input, because "max <= total" is a cross-field rule: there is no
+    // per-field validity for this side to send.
+    el.editServices.addEventListener("click", function () {
+      api("svc_open");
+    });
+    [el.svcKey, el.svcLabel, el.svcMax, el.svcTotal, el.svcStable, el.svcExtra].forEach(
+      function (input) {
+        input.addEventListener("input", function () {
+          api("svc_form", svcForm());
+        });
+      }
+    );
+    [el.svcHover, el.svcProse, el.svcFenced, el.svcStream, el.svcAutoSubmit].forEach(
+      function (box) {
+        box.addEventListener("change", function () {
+          api("svc_detection", svcDetection());
+        });
+      }
+    );
+    // A real range input, live and ungated: it cannot express a value outside
+    // the range config.py enforces, so there is no invalid state to withhold.
+    // The readout is updated locally as well as by the repaint, so dragging
+    // reads smoothly rather than one round trip behind the thumb.
+    el.svcTolerance.addEventListener("input", function () {
+      el.svcToleranceValue.textContent = el.svcTolerance.value;
+      api("svc_tolerance", Number(el.svcTolerance.value));
+    });
+    el.svcSelect.addEventListener("change", function () {
+      api("svc_select", el.svcSelect.value);
+    });
+    el.svcAdd.addEventListener("click", function () {
+      api("svc_add");
+    });
+    el.svcReset.addEventListener("click", function () {
+      api("svc_reset");
+    });
+    el.svcDelete.addEventListener("click", function () {
+      api("svc_delete");
+    });
+    el.svcForget.addEventListener("click", function () {
+      api("svc_forget");
+    });
+    el.svcClose.addEventListener("click", function () {
+      api("svc_close");
+    });
     // The log pane never scrolls its own way: reading the scroll position is
     // how "following" is decided, so the listener exists only to make the pane
     // focusable-by-wheel behave like any other scroll box.
@@ -1311,7 +1664,28 @@
         }
         return;
       }
+      // The service editor owns the keyboard the same way, one layer below the
+      // confirm scrim above (its "Forget appearance" and discard dialogs open
+      // over it). Escape closes it - which may be REFUSED on the far side while
+      // a capture overlay is up, or held for the discard confirm - and every
+      // session key and page toggle is inert until it is gone, exactly as a
+      // Textual ModalScreen stacks above its bindings.
+      if (editorOpen) {
+        if (ev.key === "Escape" && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+          ev.preventDefault();
+          api("svc_close");
+        }
+        return;
+      }
       if (!ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+        if (ev.key === "F2") {
+          // The per-service profile editor. A priority key like F3/F7/F8: it
+          // must win over a focused composer, and it is refused out loud on the
+          // far side while a region picker is up anywhere in the app.
+          ev.preventDefault();
+          api("svc_open");
+          return;
+        }
         if (ev.key === "F3") {
           ev.preventDefault();
           toggleSidebar();

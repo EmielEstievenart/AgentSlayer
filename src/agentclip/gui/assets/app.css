@@ -1,9 +1,10 @@
 /* The GUI shell's chrome. Dark, flat, and only as big as what exists: after
-   parity increment 3 that is the window tabs, the per-window transcripts, the
+   parity increment 5 that is the window tabs, the per-window transcripts, the
    composer, the run panel, the approval gate, the toasts, the modals (the
-   session summary among them), the sidebar, the status bar and the harness log
-   pane - and it still invents no vocabulary the remaining increments (elements
-   column, service editor) would argue with.
+   session summary among them), the sidebar, the status bar, the harness log
+   pane, the elements column and the service editor - and it still invents no
+   vocabulary the remaining increments (settings/help, the SSH dialog) would
+   argue with.
    Only system fonts - nothing here may reach the network. */
 
 :root {
@@ -1156,4 +1157,237 @@ button:not(:disabled) {
 
 [hidden] {
   display: none !important;
+}
+
+/* -- the service editor (F2) ----------------------------------------------
+   A page modal over the whole per-service profile. Its own scrim, one z-index
+   BELOW the confirm/summary one, because two of its actions ("Forget
+   appearance" and the discard-the-pending-edit close) open a confirm over it.
+
+   Three columns and a footer strip - the TUI's information hierarchy without
+   any of its cell arithmetic: fixed lanes for the settings and the appearance
+   rows, one flexible column for the editable form, and a footer whose width no
+   column can squeeze (ui-briefs/service-editor.md §7). Nothing here is pinned
+   in character cells and the appearance column scrolls like any other list;
+   both of those constraints exist only because sixel escapes bypass a
+   terminal's compositor. */
+
+.svc-scrim {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 25;
+}
+
+.svc-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(1120px, 96vw);
+  max-height: 92vh;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.svc-title {
+  margin-bottom: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.svc-body {
+  display: grid;
+  grid-template-columns: 260px minmax(220px, 1fr) 320px;
+  gap: 18px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.svc-col {
+  min-width: 0;
+}
+
+.svc-col > .side-title:first-child {
+  margin-top: 0;
+}
+
+.svc-col select,
+.svc-col input[type="text"],
+.svc-col textarea {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+}
+
+.svc-col textarea {
+  resize: vertical;
+}
+
+.svc-col input:disabled,
+.svc-col select:disabled,
+.svc-col textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Checkboxes and radios read as one list of sentences: the label carries the
+   row, and a disabled one is dimmed rather than removed so the column cannot
+   reflow while a new service is being filled in (brief §3.5). */
+.svc-check {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.svc-check input {
+  margin: 0;
+  flex: none;
+}
+
+.svc-check.off {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.svc-slider {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.svc-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.svc-slider-value {
+  min-width: 2.5em;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
+}
+
+/* Both inline readouts are advisory, not failures: the matcher one says a
+   saved choice will silently fall back, the signal one says a ticked detector
+   has no appearance to run against. Empty most of the time, and collapsed when
+   it is (no reserved band that would make the column jump). */
+.svc-warn:empty {
+  display: none;
+}
+
+.svc-warn {
+  margin: 4px 0 2px;
+  color: var(--warn);
+  font-size: 11.5px;
+}
+
+.svc-error:empty {
+  display: none;
+}
+
+.svc-error {
+  margin-top: 8px;
+  color: var(--err);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.svc-kinds {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.svc-kind {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+/* The crop box is drawn whether or not it holds a picture, so a capture
+   landing cannot walk every row below it down the column. */
+.svc-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 64px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.svc-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  image-rendering: pixelated;
+}
+
+.svc-kind-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.svc-kind-name {
+  font-size: 12.5px;
+}
+
+.svc-kind-status {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.svc-kind-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.svc-kind-actions button {
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+
+.svc-footer {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.svc-footer .hint {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.svc-modal button.danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.svc-modal button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }

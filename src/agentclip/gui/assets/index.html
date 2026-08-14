@@ -142,6 +142,11 @@
           <select id="service-select"></select>
           <div class="side-status" id="side-service-label"></div>
           <div class="side-status" id="side-profile-note"></div>
+          <!-- The service editor's discoverable door; F2 is the same call.
+               Not locked with the picker above it: what a session freezes is
+               WHICH preset drives it, not whether its sizes can be edited for
+               the next one. -->
+          <button id="edit-services" type="button">Edit services...</button>
 
           <div class="side-title" id="side-window-title">CHAT WINDOW</div>
           <button id="set-region" type="button">Set chat region...</button>
@@ -159,8 +164,8 @@
           <div class="side-status" id="det-COPY"></div>
 
           <div class="side-hint">
-            F3 hides this column · F5 armed · F7 elements · F8 log · F6 next
-            window · e summary
+            F3 hides this column · F5 armed · F2 services · F7 elements · F8 log
+            · F6 next window · e summary
           </div>
         </aside>
 
@@ -198,6 +203,125 @@
 
     <!-- Toasts stack here and expire on their own. -->
     <div class="toasts" id="toasts"></div>
+
+    <!-- The SERVICE EDITOR (F2): the whole per-service profile, as a page
+         modal. Three columns and a footer, which is the TUI's information
+         hierarchy without any of its cell arithmetic
+         (docs/design/ui-briefs/service-editor.md §2, §7).
+
+         Everything DERIVED arrives worded from Python and is written in by
+         paintEditor: the option labels, the checklist wording, the status
+         lines, both warnings and the thumbnails. What is static chrome - the
+         column headings, the form's field labels and its placeholders - is
+         spelled here, exactly as the sidebar's headings are.
+
+         Its own scrim, above the shell but BELOW the confirm scrim: the
+         "Forget appearance" and discard-the-pending-edit dialogs open over it
+         and have to be able to. -->
+    <div class="svc-scrim" id="svc-scrim" hidden>
+      <div class="svc-modal" role="dialog" aria-label="Service editor">
+        <div class="svc-title">SERVICE EDITOR</div>
+        <div class="svc-body">
+          <div class="svc-col">
+            <div class="side-title">Services</div>
+            <select id="svc-select"></select>
+
+            <div class="side-title">DETECTION · finished when</div>
+            <div id="svc-signals"></div>
+            <label class="svc-check"
+              ><input type="checkbox" id="svc-hover-scan" /><span
+                id="svc-hover-scan-label"
+              ></span
+            ></label>
+            <label class="svc-check"
+              ><input type="checkbox" id="svc-capture-prose" /><span
+                id="svc-capture-prose-label"
+              ></span
+            ></label>
+            <label class="svc-check"
+              ><input type="checkbox" id="svc-require-fenced" /><span
+                id="svc-require-fenced-label"
+              ></span
+            ></label>
+            <div class="svc-warn" id="svc-signal-warning"></div>
+
+            <div class="side-title">DELIVERY · how it goes in</div>
+            <label class="svc-check"
+              ><input type="checkbox" id="svc-stream" /><span id="svc-stream-label"></span
+            ></label>
+            <label class="svc-check"
+              ><input type="checkbox" id="svc-auto-submit" /><span
+                id="svc-auto-submit-label"
+              ></span
+            ></label>
+
+            <div class="side-title">SCROLL · reaching the reply</div>
+            <div id="svc-scroll"></div>
+
+            <div class="side-title">MATCHING · how it is found</div>
+            <div id="svc-matcher"></div>
+            <div class="svc-warn" id="svc-matcher-warning"></div>
+
+            <!-- A real <input type="range">, not the TUI's hand-built
+                 track+handle widget: Textual ships no slider and this shell
+                 does. Only the SEMANTICS carry over - 0-64, default 24, live
+                 apply with no validation gate, the number shown beside it
+                 (brief §7, docs/design/gui.md §3). -->
+            <div class="side-title" id="svc-tolerance-label"></div>
+            <div class="svc-slider">
+              <input type="range" id="svc-tolerance" min="0" max="64" step="1" />
+              <span class="svc-slider-value" id="svc-tolerance-value"></span>
+            </div>
+          </div>
+
+          <!-- The one flexible column: the editable form. -->
+          <div class="svc-col svc-col-form">
+            <div class="side-title">Key</div>
+            <input id="svc-key" type="text" placeholder="lowercase-with-hyphens" />
+            <div class="side-title">Name</div>
+            <input id="svc-label" type="text" placeholder="display name" />
+            <div class="side-title">Max paste size (chars)</div>
+            <input id="svc-max" type="text" placeholder="e.g. 12000" />
+            <div class="side-title">Total context size (chars)</div>
+            <input id="svc-total" type="text" placeholder="e.g. 500000" />
+            <div class="side-title">Stale (seconds unchanged)</div>
+            <input id="svc-stable" type="text" placeholder="e.g. 2.0" />
+            <!-- Deliberately SMALL: this text rides the model bootstrap, which
+                 has ~67 chars of slack on the smallest presets, so the size of
+                 the box is the budget warning and the label repeats it. -->
+            <div class="side-title">Extra instructions (keep short)</div>
+            <textarea
+              id="svc-extra"
+              rows="3"
+              placeholder="e.g. put a space between ] and ( in code"
+            ></textarea>
+            <div class="svc-error" id="svc-error"></div>
+          </div>
+
+          <div class="svc-col svc-col-appearance">
+            <div class="side-title">APPEARANCE · what it looks like</div>
+            <!-- One row per TemplateKind, all seven always, whether or not
+                 anything is captured. The thumbnail is the FIRST image of the
+                 kind's stack as a PNG data URI - there is no coarse fallback
+                 tier here and no reason the column may not scroll (brief §7). -->
+            <ol class="svc-kinds" id="svc-kinds"></ol>
+            <div class="side-status" id="svc-templates"></div>
+            <button id="svc-forget" type="button">Forget appearance</button>
+          </div>
+        </div>
+
+        <!-- One footer strip: the hint plus exactly one of add/reset/delete,
+             and the close the modal always has. -->
+        <div class="svc-footer">
+          <span class="hint" id="svc-hint"></span>
+          <span class="spacer"></span>
+          <button id="svc-add" type="button" hidden>Add service</button>
+          <button id="svc-reset" type="button" hidden>Reset to default</button>
+          <button id="svc-delete" type="button" hidden class="danger">Delete</button>
+          <button id="svc-close" type="button">Close (esc)</button>
+        </div>
+      </div>
+    </div>
 
     <!-- One modal at a time: confirm / prompt_text / show_summary, plus the
          payload block park_off_clipboard falls back to. -->

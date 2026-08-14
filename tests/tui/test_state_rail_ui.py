@@ -1,6 +1,6 @@
 """Pilot tests for the sidebar's STATE rail (tui.md section 1.3).
 
-The rail is an eight-line readout of ``tui.loop_state.LoopState`` painted at
+The rail is an eight-line readout of ``automation.loop_state.LoopState`` painted at
 the very top of the sidebar - where in the browser-automation loop (idle, auto
 insert, manual insert, wait send, wait generate, auto copy, manual copy,
 interpreting) the live window is, and which states ``LOOP_TRANSITIONS`` says
@@ -26,11 +26,11 @@ from pathlib import Path
 from textual.pilot import Pilot
 from textual.widgets import Static
 
+from agentclip.automation.loop_state import LoopState
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.loop_state import LoopState
 from agentclip.tui.messages import ClipboardCaptured
 from agentclip.tui.widgets.sidebar import Sidebar, state_row_id
 

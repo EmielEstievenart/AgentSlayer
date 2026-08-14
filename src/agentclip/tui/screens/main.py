@@ -158,6 +158,19 @@ from textual.worker import Worker, get_current_worker
 from agentclip.app import SessionController, SessionSpec, SessionView
 from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import RunCall, Severity
+from agentclip.automation.harness_log import (
+    HARNESS_LOG_MAX,
+    KIND_ARMED,
+    KIND_CLIPBOARD,
+    KIND_COPY,
+    KIND_GATE,
+    KIND_SESSION,
+    KIND_STATE,
+    KIND_TRIGGER,
+    HarnessEntry,
+    state_text,
+)
+from agentclip.automation.loop_state import LoopState
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.clip.chunking import STREAM_CHUNK_CHARS, split_for_stream
 from agentclip.clip.watcher import SelfWriteSet, watch, write_via
@@ -213,19 +226,6 @@ from agentclip.screen.template import (
     match_rect,
     same_element,
 )
-from agentclip.tui.harness_log import (
-    HARNESS_LOG_MAX,
-    KIND_ARMED,
-    KIND_CLIPBOARD,
-    KIND_COPY,
-    KIND_GATE,
-    KIND_SESSION,
-    KIND_STATE,
-    KIND_TRIGGER,
-    HarnessEntry,
-    state_text,
-)
-from agentclip.tui.loop_state import LoopState
 from agentclip.tui.messages import (
     BusyProbed,
     CallFinished,
@@ -975,14 +975,15 @@ class MainScreen(Screen[None]):
         # a reply. Opened with the reply gate and dies with it.
         self._send_gate: SendGate | None = None
         self._send_gate_ticks = 0
-        # Where the browser-automation loop is, as one value (tui.loop_state).
+        # Where the browser-automation loop is, as one value
+        # (automation.loop_state).
         # The booleans above are the evidence; this is the story the sidebar's
         # STATE rail draws, and ``_set_loop_state`` is its only writer.
         self._loop_state = LoopState.IDLE
         # ...and WHY it went there, kept for the user to read back (`/log`).
         # Bounded, never written to disk, and deliberately NOT cleared by /new:
         # a wedged user resets the session first and goes looking for the
-        # evidence second (tui.harness_log).
+        # evidence second (automation.harness_log).
         self._harness_log: deque[HarnessEntry] = deque(maxlen=HARNESS_LOG_MAX)
         # One running command's output, per call id, as complete LINES - the run
         # panel's tail is a view of this and nothing else (widgets/run_panel.py).
@@ -1656,7 +1657,7 @@ class MainScreen(Screen[None]):
         this is the one door: the rail draws one box for four different roads
         into ``MANUAL_COPY``, and a caller that could move the loop without
         saying which road it took is a caller whose decision is unreadable
-        afterwards. It is logged (``tui.harness_log``) only when the state
+        afterwards. It is logged (``automation.harness_log``) only when the state
         actually changes, so the same evidence arriving twice does not fill the
         log with a repeated non-event.
         """

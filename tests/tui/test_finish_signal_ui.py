@@ -55,6 +55,7 @@ from textual.pilot import Pilot
 from textual.widgets import Button, Static
 
 import agentclip.tui.screens.main as main_mod
+from agentclip.automation.loop_state import LoopState
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
@@ -67,7 +68,6 @@ from agentclip.screen.slot import AgentSlot
 from agentclip.screen.stale import StaleProbe, StaleState
 from agentclip.screen.template import Template
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.loop_state import LoopState
 from agentclip.tui.messages import BusyProbed, IdleProbed, SendReadyProbed, StaleProbed
 from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import (

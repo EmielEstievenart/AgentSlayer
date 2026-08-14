@@ -27,7 +27,7 @@ this widget is a view of it. Appends are mirrored here one entry at a time while
 it is visible, and while it is HIDDEN nothing is painted at all - the pane
 simply remembers that it is behind and refills itself from the deque the moment
 it is revealed. Two bounds, deliberately the same number
-(:data:`~agentclip.tui.harness_log.HARNESS_LOG_MAX`): with wrapping off, one
+(:data:`~agentclip.automation.harness_log.HARNESS_LOG_MAX`): with wrapping off, one
 entry is exactly one line, so the widget's ``max_lines`` prunes in lockstep with
 the deque and the two cannot drift apart during a long run with the pane open.
 """
@@ -39,7 +39,7 @@ from collections.abc import Iterable
 from rich.text import Text
 from textual.widgets import RichLog
 
-from agentclip.tui.harness_log import HARNESS_LOG_MAX, HarnessEntry, render_entries
+from agentclip.automation.harness_log import HARNESS_LOG_MAX, HarnessEntry, render_entries
 
 LOG_PANE_TITLE = "HARNESS DECISION LOG"
 LOG_PANE_HINT = "newest last · F8 hides"

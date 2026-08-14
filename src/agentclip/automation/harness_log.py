@@ -1,7 +1,7 @@
 """The harness decision log: every move the loop made, and WHY it made it.
 
 The sidebar's STATE rail says where the browser-automation loop is
-(:mod:`agentclip.tui.loop_state`); this says how it got there. Those are
+(:mod:`agentclip.automation.loop_state`); this says how it got there. Those are
 different questions, and the second one is the one a stuck user actually has -
 "why is it asking me to copy the reply myself?" has at least four answers (the
 tool is disarmed, the service has no captured copy button, the button was not

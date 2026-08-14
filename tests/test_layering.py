@@ -1,6 +1,7 @@
 """Enforce the architecture's import direction with ast (architecture.md section 0).
 
-    tui ──► clip                       tui & cli are the ONLY importers of clip/textual
+    tui ──► clip                       tui & cli are the ONLY importers of textual
+     ├──► automation ──► clip/screen   (the shared core, also a clip/screen importer)
      └──► engine ──► tools ──► sandbox
             │  └──► store
             └──► protocol (leaf)
@@ -114,12 +115,33 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
+    # automation: the screen-automation core both UI shells drive (Textual today,
+    # a pywebview GUI later). It IS the loop that watches and clicks the chat
+    # window, so it needs screen/clip the way tui and cli do - but it must never
+    # import textual, app, or tui: a shell depends on the automation, never the
+    # other way round.
+    (
+        "agentclip.automation",
+        frozenset(
+            {
+                "agentclip",
+                "agentclip.automation",
+                "agentclip.config",
+                "agentclip.clip",
+                "agentclip.screen",
+            }
+        ),
+    ),
 ]
 
-# Modules allowed to import agentclip.clip / agentclip.screen / textual.
+# Modules allowed to import textual: the UI shells themselves and nothing else.
 UI_MODULES = ("agentclip.cli", "agentclip.__main__", "agentclip.tui")
 
-# OS side-effect layers only the UI shell may touch (clipboard, screen overlay/click).
+# Modules allowed to import agentclip.clip / agentclip.screen: the UI shells,
+# plus the automation core they share (which is made of exactly those seams).
+CLIP_SCREEN_IMPORTERS = (*UI_MODULES, "agentclip.automation")
+
+# OS side-effect layers (clipboard, screen overlay/click): only CLIP_SCREEN_IMPORTERS.
 OS_LAYERS = ("agentclip.clip", "agentclip.screen")
 
 
@@ -185,17 +207,24 @@ def test_layer_rules() -> None:
 
 
 def test_only_tui_and_cli_import_clip_screen_or_textual() -> None:
+    """Two allowances, deliberately different in width.
+
+    ``clip``/``screen`` are the OS seams the automation core is MADE of, so the
+    shared core may reach them alongside the UI shells. ``textual`` is one
+    frontend's toolkit and stays scoped to the true shells - the moment the
+    automation imports it, the pywebview GUI can no longer drive it.
+    """
     violations: list[str] = []
     for path in all_modules():
         mod = module_name(path)
-        if any(_matches(mod, ui) for ui in UI_MODULES) or any(
-            _matches(mod, layer) for layer in OS_LAYERS
-        ):
-            continue
+        is_os_layer = any(_matches(mod, layer) for layer in OS_LAYERS)
+        may_import_textual = any(_matches(mod, ui) for ui in UI_MODULES)
+        may_import_os_layers = is_os_layer or any(_matches(mod, ui) for ui in CLIP_SCREEN_IMPORTERS)
         for imported in module_level_imports(path):
-            if imported.split(".")[0] == "textual" or any(
-                _matches(imported, layer) for layer in OS_LAYERS
-            ):
+            is_textual = imported.split(".")[0] == "textual"
+            is_os_import = any(_matches(imported, layer) for layer in OS_LAYERS)
+            allowed = may_import_textual if is_textual else may_import_os_layers
+            if (is_textual or is_os_import) and not allowed:
                 violations.append(f"{mod} imports {imported}")
     assert not violations, "clip/screen/textual leaked outside tui/cli:\n" + "\n".join(violations)
 
@@ -225,6 +254,23 @@ def test_engine_never_imports_ui_or_clipboard() -> None:
             root = imported.split(".")[0]
             assert root != "textual", f"{path.name} imports textual"
             assert not _matches(imported, "agentclip.clip"), f"{path.name} imports agentclip.clip"
+            assert not _matches(imported, "agentclip.tui"), f"{path.name} imports agentclip.tui"
+
+
+def test_automation_never_imports_textual_or_app() -> None:
+    """The shared automation core must outlive any one shell.
+
+    It may touch screen/clip (it is the loop that drives them), but a Textual
+    import - or a reach back up into app/tui - would weld it to today's
+    frontend and leave the pywebview GUI nothing to share.
+    """
+    automation_files = sorted((SRC / "automation").rglob("*.py"))
+    assert automation_files
+    for path in automation_files:
+        for imported in module_level_imports(path):
+            root = imported.split(".")[0]
+            assert root != "textual", f"{path.name} imports textual"
+            assert not _matches(imported, "agentclip.app"), f"{path.name} imports agentclip.app"
             assert not _matches(imported, "agentclip.tui"), f"{path.name} imports agentclip.tui"
 
 

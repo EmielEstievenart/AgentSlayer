@@ -34,6 +34,7 @@ import pytest
 from textual.pilot import Pilot
 
 import agentclip.tui.screens.main as main_mod
+from agentclip.automation.harness_log import EMPTY_LOG_LINE, HARNESS_LOG_MAX
 from agentclip.cli import make_engine_factory
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
@@ -43,7 +44,6 @@ from agentclip.screen.detector import build_detector
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.harness_log import EMPTY_LOG_LINE, HARNESS_LOG_MAX
 from agentclip.tui.messages import BusyProbed, ClipboardCaptured, SendReadyProbed
 from agentclip.tui.screens.main import MainScreen
 

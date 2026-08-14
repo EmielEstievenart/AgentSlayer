@@ -29,7 +29,7 @@ six capture buttons with six status lines had grown into two thirds of a 32-cell
 column. What is left is:
 
 * **STATE** - an eight-line rail at the very top of the column, one row per
-  ``tui.loop_state.LoopState``: the browser-automation loop (idle, auto/manual
+  ``automation.loop_state.LoopState``: the browser-automation loop (idle, auto/manual
   insert, wait send, wait generate, auto/manual copy, interpreting), NOT the
   engine's task phase. The active state gets a ``▶`` marker and bold/reverse
   styling, ``LOOP_TRANSITIONS[active]``'s legal next moves read at normal
@@ -88,12 +88,12 @@ from textual.message import Message
 from textual.timer import Timer
 from textual.widgets import Button, Select, Static
 
+from agentclip.automation.loop_state import LOOP_TRANSITIONS, LoopState
 from agentclip.config import Config
 from agentclip.mcp.types import McpServerStatus
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, SlotCalibration, can_delegate, missing
-from agentclip.tui.loop_state import LOOP_TRANSITIONS, LoopState
 
 _HINT = "F3 hides this column · F7 elements · F5 armed · F2 settings · F1 help"
 

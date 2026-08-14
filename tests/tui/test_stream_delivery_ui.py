@@ -23,13 +23,13 @@ from textual.pilot import Pilot
 from textual.widgets import Static
 
 import agentclip.tui.screens.main as main_mod
+from agentclip.automation.loop_state import LoopState
 from agentclip.cli import make_engine_factory
 from agentclip.clip.chunking import split_for_stream
 from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
 from agentclip.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
-from agentclip.tui.loop_state import LoopState
 from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import ENTER_FLASH_TEXT, PASTE_FLASH_TEXT
 

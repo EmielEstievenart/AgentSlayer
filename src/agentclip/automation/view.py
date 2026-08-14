@@ -22,10 +22,17 @@ being called with the state it is already showing (paints are idempotent, and
 several of them are re-issued unconditionally rather than only on a change).
 
 **Paint-only, by decision.** No OS primitive and no scheduling primitive appears
-here: the controller imports ``agentclip.screen`` directly for the first and
-owns its own threads for the second, so a shell can never quietly become the
-place a click or a timer lives. What crosses this seam is "here is what is true
-now, show it".
+here: the controller reaches ``agentclip.screen`` directly for the first
+(:mod:`agentclip.automation.ops`) and owns its own threads for the second, so a
+shell can never quietly become the place a click or a timer lives. What crosses
+this seam is "here is what is true now, show it".
+
+The other direction - the handful of things the automation still has to ASK a
+shell - is deliberately a port of its own
+(:class:`agentclip.automation.host.AutomationHost`), so "tell" and "ask" cannot
+quietly merge into one interface with a mixed thread contract: every method here
+may be called from a poller thread and must not block, while a host is only ever
+called from the event loop.
 
 The port is deliberately incomplete: it grows one method family per extraction
 slice, and only what the controller actually calls today is declared - a

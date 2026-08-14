@@ -119,7 +119,28 @@ Slices (each one commit, suite green, layering test run first):
      (`PaintLoopState`, `PaintArmed`) are drawn from the controller rather than
      from their payload, while the harness-log entries ride an ordered queue on
      the screen with the message as the nudge that drains it.
-6. auto-copy flow + click/hover/scroll sequences + start/end browser chat
+6. auto-copy flow + click/hover/scroll sequences + start/end browser chat.
+   **Shipped, with two seams the plan did not name.** The sequences are async
+   methods on the controller (the `SessionController._engine_call` precedent);
+   the shell keeps only the SCHEDULING (`run_worker(..., group="copyflow",
+   exclusive=True)`) and hands the body in, because that name is what the Pilot
+   suites stub. (a) The OS primitives stay off the view port as decided, but
+   they are reached through one substitutable object,
+   `automation/ops.py:ScreenOps`, whose default implementation *is* the direct
+   `agentclip.screen` call — the Textual suites monkeypatch those names at
+   `tui/screens/main.py`'s scope, so the shell hands in a subclass that resolves
+   its own module's names per call (slice 4's `_poll_capture`, generalised).
+   (b) What the sequences still have to ASK a shell is a second port,
+   `automation/host.py:AutomationHost` — the live preset/profile, `find_all`,
+   the verified copy click, the prose ingest (the session is `agentclip.app`,
+   above this layer), the detector rebuild. It is deliberately NOT folded into
+   `AutomationView`: that port's contract is "callable from a poller thread,
+   never blocking", and a host is only ever called from the event loop. Paints
+   the flow needed grew no new port methods — the copy-status line is
+   `paint_detection(COPY, …)` and the harvest's crop is `paint_elements`, so
+   both now carry the paint epoch. `_own_window` became `set_own_window` on the
+   controller (OS state, both shells snap back to it) with a read-only
+   compatibility property on `MainScreen`.
 7. delivery path (`deliver(...)` async; OSC-52 stays TUI-side)
 8. cleanup: dead code, doc sync (`architecture.md`, `tui.md` drift), module table
 

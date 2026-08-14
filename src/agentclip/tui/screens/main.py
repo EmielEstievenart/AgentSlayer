@@ -62,6 +62,19 @@ DURING a tick is ``_crop_elements`` - cutting the matched pixels down to panel
 size, which happens on the poller thread so the queue carries an icon rather
 than a chat window - and ``_live_has``, which reads immutable state only.
 
+The OS-ACTING SEQUENCES went the same way (gui.md §1, slice 6): the auto-copy
+harvest, the find-then-click primitive under every programmatic click, the hover
+scan and the two calls that move the automation between browser windows are
+coroutines on the AutomationController now, reaching ``agentclip.screen``
+directly. What is left here is the two things a shell really owns - SCHEDULING
+(``run_worker``, still the same group and exclusivity) and the handful of
+answers only this screen has, which cross as ``AutomationHost``: which service a
+window is on and what it looks like, where an appearance is right now
+(``_find_all``), handing a prose reply to the SESSION, and rebuilding the
+detector set after a retarget. The primitives themselves are reached through
+``_MainScreenOps``, whose only job is to resolve THIS module's names per call so
+the suites' patches still bite.
+
 That split is deliberate and load-bearing: **the detector detects, the state
 machine consumes**. Nothing about the send gate, the auto-copy flow or the
 session can reach into what a tick searches for, which is what lets the ELEMENTS
@@ -101,7 +114,7 @@ the spot (nothing answers a message that was never sent), and each phase of it
 is on a clock as well - ``SEND_GATE_TIMEOUT_TICKS`` for a button that never
 appears, ``SEND_GATE_SEEN_TIMEOUT_TICKS`` for one that appears and then never
 goes. Firing runs
-``_auto_copy_flow``: click the live chat input box, scroll to the bottom, find
+``AutomationController.auto_copy_flow``: click the live chat input box, scroll to the bottom, find
 the newest (lowest) copy-button icon anywhere in the drawn region - falling
 back, for services whose preset opts into ``hover_scan``, to a hover scan for
 chats that only render the icon under the pointer - click it, and let the
@@ -118,7 +131,7 @@ searched for INSIDE the drawn chat region on the spot (``_find_all``). Moving
 or resizing the browser therefore costs nothing.
 The browser's new-chat button works the same way: captured once per service,
 found inside the chat region and clicked where it actually is
-(``_click_profile_element``). Every such search asks for ALL the matches
+(``AutomationController.click_profile_element``). Every such search asks for ALL the matches
 rather than the first, because an appearance belongs to the service and not to
 a window: two windows of the same service overlapping one drawn region make it
 findable twice, and "click the first one" is exactly how a sub-agent's
@@ -137,7 +150,8 @@ calibrate (and watch) the sub-agent window while the master chat is mid-turn.
 Both of them, and the calibrations they point at, are the
 :class:`~agentclip.automation.controller.AutomationController`'s (``_automation``
 below): they are shared automation state, not one shell's, and this screen
-reaches them through it. ``start_browser_chat``/``end_browser_chat`` are the
+reaches them through it. ``start_browser_chat``/``end_browser_chat`` - the
+controller's since slice 6, delegated to from here - are the
 only things that move the live pointer, and ``start_browser_chat`` is
 all-or-nothing on purpose: it retargets the automation *only* after a verified
 click landed, so a False return guarantees nothing was clicked and nothing was
@@ -160,12 +174,10 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from collections import deque
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
-from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -183,6 +195,7 @@ from textual.widgets import Button, Collapsible, Footer, Input
 from agentclip.app import SessionController, SessionSpec, SessionView
 from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import RunCall, Severity
+from agentclip.automation import flow as _flow
 from agentclip.automation.controller import AutomationController, DetectorPoller
 from agentclip.automation.finish import (
     SEND_ARM_MIN_DIFF,
@@ -195,19 +208,17 @@ from agentclip.automation.harness_log import (
     HARNESS_LOG_MAX,
     KIND_ARMED,
     KIND_CLIPBOARD,
-    KIND_COPY,
     KIND_GATE,
     KIND_SESSION,
     HarnessEntry,
 )
 from agentclip.automation.loop_state import LoopState
+from agentclip.automation.ops import ElementClick, ScreenOps
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.clip.chunking import STREAM_CHUNK_CHARS, split_for_stream
 from agentclip.clip.watcher import SelfWriteSet, write_via
 from agentclip.config import (
     DELIVERY_STREAM,
-    SCROLL_END,
-    SCROLL_PAGE_DOWN,
     Config,
     ServicePreset,
     save_active_services,
@@ -229,9 +240,7 @@ from agentclip.screen.focus import (
     send_scroll_key,
 )
 from agentclip.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
-from agentclip.screen.hover import hover_scan_points
 from agentclip.screen.identify import IdentifiedElement, identify_elements, summarise
-from agentclip.screen.matchers import select_matcher
 from agentclip.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
 from agentclip.screen.presence import PresenceTracker
 from agentclip.screen.profile import ServiceProfile, TemplateKind
@@ -245,7 +254,6 @@ from agentclip.screen.slot import (
 )
 from agentclip.screen.stale import StaleTracker
 from agentclip.screen.template import (
-    DEFAULT_TOLERANCE,
     CandidateSource,
     RegionMatch,
     Template,
@@ -317,11 +325,9 @@ _BUSY_POLL_S = 0.5
 # budget, and this screen hands the values it can see to the controller at
 # construction, so patching this module's name still moves the clock.
 #
-# Hover pause before clicking a calibrated element, for the same reason the copy
-# click settles: web UIs paint their buttons on hover.
-_ELEMENT_CLICK_SETTLE_S = 0.05
 # Beat between opening a fresh browser chat and treating it as the live slot -
-# the page still has to render its (centred) input box. Tests shrink this.
+# the page still has to render its (centred) input box. Tests shrink this, which
+# is why ``_MainScreenOps`` reads it per call rather than at import.
 _NEW_CHAT_SETTLE_S = 0.4
 # Beat between the focus click landing on the chat's input box and the synthetic
 # Ctrl+V that follows it (``_insert_outbound``).
@@ -345,37 +351,15 @@ _SUBMIT_SETTLE_S = 0.15
 # one mid-repaint. Only between chunks: the last one is followed by the settle
 # the user's own Enter provides.
 _STREAM_CHUNK_SETTLE_S = 0.12
-# The wheel flick's size, in detents, for the auto-copy flow's snap to the
-# bottom. Deliberately far more than it takes to cross one screenful: a flick
-# that stops short leaves the newest reply's copy button above the fold and the
-# harvest hunts a transcript that is not showing the answer, which is a silent
-# fall to MANUAL_COPY. Over-shooting costs nothing at all - the page is already
-# at its bottom and the extra detents land on a wall - so the number is chosen
-# for the worst long response rather than the typical one.
-_SNAP_WHEEL_DETENTS = -100
-# How many Page Down taps a "page_down" scroll action sends in one burst
-# (ServicePreset.scroll_action). Sized like the wheel flick above and for the
-# same reason: a generous over-shoot that stops at the bottom, because the flow
-# wants the newest reply on screen, not a measured scroll. Twelve taps is
-# roughly a dozen screenfuls, which comfortably covers a long reply the user
-# scrolled away from. End needs no such count - one tap is the bottom by
-# definition, which is why it is left at one.
-_PAGE_DOWN_TAPS = 12
-# How many times the flow will snap-and-search before giving up on the static
-# frame. Pages that stream a reply keep growing while the flow is already
-# running, and a lazily rendered transcript can still be laying out the last
-# response when the first capture is taken - so one snap that comes up empty is
-# weak evidence. Each extra round re-scrolls (the same action, the same settle)
-# and re-searches; the pointer and the focus stay where round 1 put them.
-_COPY_SNAP_ROUNDS = 3
-# Beat between the snap and the capture, for the page to render what it just
-# scrolled to. Paid once per round.
-_SNAP_SETTLE_S = 0.4
-# How far ABOVE the chat box a keyboard-scroll focus click lands (see
-# ``_above_chatbox``). The gap between the transcript and the input box is
-# padding, and this is deliberately a small number: a few pixels higher is the
-# last response itself, where a click could land on a link or select text.
-_ABOVE_CHATBOX_PX = 10
+# The auto-copy harvest's own tuning numbers moved down with the sequence that
+# reads them (agentclip.automation.flow). They stay reachable under this
+# module's names because the Pilot suites size their assertions off them - how
+# many snap rounds a miss gets, how big the flick is, where the keyboard snap's
+# focus click lands.
+_SNAP_WHEEL_DETENTS = _flow.SNAP_WHEEL_DETENTS
+_PAGE_DOWN_TAPS = _flow.PAGE_DOWN_TAPS
+_COPY_SNAP_ROUNDS = _flow.COPY_SNAP_ROUNDS
+_ABOVE_CHATBOX_PX = _flow.ABOVE_CHATBOX_PX
 
 # What the user is asked to draw for a slot. It is the ONLY thing they draw
 # per window now, and it has to be generous rather than tight: everything else
@@ -447,28 +431,6 @@ class _SubRun:
     ok: bool = True
 
 
-class ElementClick(Enum):
-    """Outcome of the find-then-click primitive (``_click_profile_element``).
-
-    Six states, not a bool, because the five failures are five different
-    things to tell the user: the app is disarmed and may not click anything at
-    all (DISARMED - the user's own switch, and the only one that is not about
-    this element), nothing to look for or nowhere to look (NOT_CALIBRATED - go
-    capture it), it is simply not on screen (MISMATCH - nothing was clicked, and
-    clicking blind is never the answer), it is on screen in more than one place
-    (AMBIGUOUS - which is not a search failure but a *drawing* failure, and the
-    fix is to redraw the window), or we clicked and the OS refused (NOT_CLICKED
-    - Windows-only input).
-    """
-
-    CLICKED = "clicked"
-    MISMATCH = "mismatch"  # not on screen right now; refused to click
-    AMBIGUOUS = "ambiguous"  # several of them in the region; refused to guess
-    NOT_CLICKED = "not_clicked"  # found fine, but the click did not land
-    NOT_CALIBRATED = "not_calibrated"  # no chat region drawn, or nothing captured
-    DISARMED = "disarmed"  # the OS-acting switch is off; nothing was looked at
-
-
 # How many matches of one appearance are worth collecting. The question the
 # search answers is "one, or more than one?", so anything past a handful is the
 # same answer - and every extra candidate is a full pixel comparison.
@@ -493,96 +455,6 @@ def _distinct_rects(
         if not any(same_element(rect, other) for other in kept):
             kept.append(rect)
     return kept
-
-
-def _above_chatbox(box: ScreenRegion, region: ScreenRegion) -> ScreenRegion | None:
-    """A one-pixel click target in the padding just above ``box``, horizontally
-    centred on it - or None when that point is not inside ``region``.
-
-    For the focus click that precedes a KEYBOARD snap to the bottom. Clicking
-    the chat box itself puts a caret in the text field, and End there moves the
-    caret to the end of the line - the transcript never scrolls at all. The
-    padding strip above the box focuses the same page with nothing typable
-    under the pointer.
-
-    None is the "keep clicking the box" answer, and it covers the case that
-    matters: with no chat box calibrated ``_chatbox_region`` hands back the
-    whole drawn window, whose top edge has no padding above it inside the
-    region. Aiming above THAT would click outside the chat entirely.
-    """
-    x, _ = box.center
-    y = box.top - _ABOVE_CHATBOX_PX
-    if not (region.left <= x < region.left + region.width):
-        return None
-    if not (region.top <= y < region.top + region.height):
-        return None
-    return ScreenRegion(x, y, 1, 1)
-
-
-def _lowest_match(
-    templates: Sequence[Template],
-    scene: RegionImage,
-    *,
-    max_diff: float,
-    tolerance: int = DEFAULT_TOLERANCE,
-    matcher: CandidateSource | None = None,
-) -> tuple[Template, RegionMatch] | None:
-    """The bottom-most match of ANY of a kind's images, and the image that made it.
-
-    The copy button's question (screen.template.find_lowest_in_region) asked
-    across a whole stack: every response stamps one icon, the newest is the
-    lowest, and which of the service's captured pictures of it matched changes
-    nothing about that - only the size of the rectangle to click.
-    """
-    return _lowest_match_scored(
-        templates, scene, max_diff=max_diff, tolerance=tolerance, matcher=matcher
-    )[0]
-
-
-def _lowest_match_scored(
-    templates: Sequence[Template],
-    scene: RegionImage,
-    *,
-    max_diff: float,
-    tolerance: int = DEFAULT_TOLERANCE,
-    matcher: CandidateSource | None = None,
-) -> tuple[tuple[Template, RegionMatch] | None, float | None]:
-    """:func:`_lowest_match`, plus the closest the whole stack came to a hit.
-
-    The second value is the smallest REJECTED diff across every image of the
-    kind (None when no candidate was judged at all), and it is what lets a
-    failed copy-button search say whether the button was absent or the capture
-    has stopped matching it - see ``screen.template.find_lowest_with_best_miss``.
-    Across the stack rather than per image, because the user captured several
-    pictures of ONE control and "how close did we get" is a question about the
-    control.
-    """
-    best: tuple[Template, RegionMatch] | None = None
-    best_miss: float | None = None
-    for template in templates:
-        match, miss = find_lowest_with_best_miss(
-            template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher
-        )
-        if miss is not None and (best_miss is None or miss < best_miss):
-            best_miss = miss
-        if match is None:
-            continue
-        if best is None or (match.y, match.x) > (best[1].y, best[1].x):
-            best = (template, match)
-    return best, best_miss
-
-
-def _how_close(best_miss: float | None) -> str:
-    """The one number that turns "not found" into an actionable report.
-
-    A near miss says the capture has drifted and wants recapturing (F2), while
-    nothing judged at all says the icon simply was not on the frame. Written
-    once and read by every round of the auto-copy flow's hunt, so the retry
-    lines and the final verdict phrase the same fact the same way.
-    """
-    if best_miss is None:
-        return "no candidate cleared the first-stage sniff test"
-    return f"best candidate diff {best_miss:.2f}, needs ≤ {TemplateKind.COPY.max_diff:.2f}"
 
 
 def _element_crop(scene: RegionImage, sighting: Sighting | None) -> ElementCrop | None:
@@ -616,6 +488,63 @@ def _poll_capture(region: ScreenRegion) -> RegionImage:
     the in-line loop had for free.
     """
     return capture_region(region)
+
+
+class _MainScreenOps(ScreenOps):
+    """``ScreenOps`` with THIS module's names resolved at every call.
+
+    ``_poll_capture``'s reason, generalised to the whole hand the automation
+    puts on the machine. The OS-acting sequences live in the
+    AutomationController now and reach ``agentclip.screen`` through
+    :class:`~agentclip.automation.ops.ScreenOps`; the default implementation
+    calls those functions directly, which is right for the app and wrong for
+    this shell's test suites - they patch every one of them at
+    ``agentclip.tui.screens.main``'s scope, because that is where the code used
+    to live, and several of them re-patch mid-run. Overriding here keeps the
+    late binding those stubs have always relied on: each method below is a name
+    lookup in this module, per call, and nothing else.
+
+    The two beats are here for the same reason and no other: the suites shrink
+    them so a test does not sleep its way up a chat region or wait out a fresh
+    chat's render.
+    """
+
+    def capture(self, region: ScreenRegion) -> RegionImage:
+        return capture_region(region)
+
+    def click(self, region: ScreenRegion, *, settle_s: float | None = None) -> bool:
+        return click_region(region) if settle_s is None else click_region(region, settle_s=settle_s)
+
+    def move_cursor(self, x: int, y: int) -> bool:
+        return move_cursor(x, y)
+
+    def scroll(self, region: ScreenRegion, detents: int) -> bool:
+        return scroll_region(region, detents)
+
+    def scroll_key(self, key: str, taps: int = 1) -> bool:
+        return send_scroll_key(key, taps)
+
+    def focus_window(self, handle: int) -> bool:
+        return focus_window_verified(handle)
+
+    def lowest_match(
+        self,
+        template: Template,
+        scene: RegionImage,
+        *,
+        tolerance: int,
+        max_diff: float,
+        matcher: CandidateSource | None,
+    ) -> tuple[RegionMatch | None, float | None]:
+        return find_lowest_with_best_miss(
+            template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher
+        )
+
+    def hover_step_delay(self) -> float:
+        return _HOVER_STEP_DELAY_S
+
+    def new_chat_settle(self) -> float:
+        return _NEW_CHAT_SETTLE_S
 
 
 def _fmt_k(chars: int) -> str:
@@ -812,6 +741,16 @@ class MainScreen(Screen[None]):
         #   once, shared by both slots and persisted across runs.
         self._automation = AutomationController(
             view=self,
+            # The other half of the seam (agentclip.automation.host): what the
+            # OS-acting sequences down there still have to ASK this shell -
+            # which service the live window is on and what it looks like, where
+            # an appearance is on screen, and the two acts a harvest ends in
+            # that cannot live below (handing prose to the SESSION, rebuilding
+            # the detector set). Structural, like the two view ports.
+            host=self,
+            # ...and the hand they put on the machine, resolved at this module's
+            # scope so the suites' patches still bite (see ``_MainScreenOps``).
+            ops=_MainScreenOps(),
             services=self._initial_services(config),
             clipboard=provider,
             self_writes=self._self_writes,
@@ -880,11 +819,6 @@ class MainScreen(Screen[None]):
         # Whether the last status push said a session was running, so the log
         # can mark the two boundaries the controller never announces directly.
         self._logged_session_active = False
-        # Our own terminal window, refreshed while the user is demonstrably
-        # typing here - the auto-copy flow snaps focus back to it after
-        # clicking the browser's copy button. Not session-scoped: the terminal
-        # outlives /new.
-        self._own_window: int | None = None
         # One overlay at a time, across ALL pickers: cancelling an exclusive
         # worker cannot kill the blocking child overlay process it spawned, so
         # extra button presses are refused up front instead.
@@ -1354,28 +1288,24 @@ class MainScreen(Screen[None]):
 
     def _remember_own_window(self) -> None:
         """Record the foreground window at a moment the user is provably
-        interacting with AgentClip (launch, composer send), so the auto-copy
-        flow knows which window "back to the tool" means. A None reading (mid
-        focus switch, non-Windows) keeps the last good handle."""
-        handle = foreground_window()
-        if handle is not None:
-            self._own_window = handle
+        interacting with AgentClip (launch, composer send, a sidebar press).
+
+        Reading the foreground window is this shell's - only it knows when the
+        user is demonstrably here - but the HANDLE is OS state both shells snap
+        focus back to, so it is kept below (``set_own_window``, which ignores a
+        None reading and keeps the last good handle)."""
+        self._automation.set_own_window(foreground_window())
+
+    @property
+    def _own_window(self) -> int | None:
+        """The handle the automation snaps focus back to. The name predates the
+        extraction and is what the Pilot suites read."""
+        return self._automation.own_window
 
     async def _snap_focus_back(self) -> bool:
         """Bring AgentClip's own window back to the foreground after a click in
-        the browser. False = it never got there (nothing recorded, or Windows
-        kept focus in the browser); the caller carries on either way.
-
-        Verified and retried (``focus_window_verified``) rather than asked once:
-        the click that preceded this is *also* an activation request, and the
-        browser's own is still in flight when we make ours - a single
-        ``SetForegroundWindow`` wins the race often enough to look like it works
-        and loses it often enough to be the bug. Off the UI thread, because the
-        verification sleeps between tries.
-        """
-        if self._own_window is None:
-            return False
-        return await asyncio.to_thread(focus_window_verified, self._own_window)
+        the browser (the controller's - see ``snap_focus_back``)."""
+        return await self._automation.snap_focus_back()
 
     # -- dynamic bindings -----------------------------------------------------
 
@@ -2448,49 +2378,9 @@ class MainScreen(Screen[None]):
         return _distinct_rects(region, found)
 
     async def _chatbox_region(self) -> ScreenRegion | None:
-        """Which chat input box to poke right now, or None if none is known.
-
-        A fresh chat centres its input box and an ongoing one docks it at the
-        bottom, so both appearances are hunted in ONE capture of the live chat
-        region - the two layouts are mutually exclusive, so whichever is found
-        is the one on screen. Ongoing goes first: mid-session it is the common
-        case, and the search stops at the first hit.
-
-        When neither is found (the page is mid-transition, a dialog covers it,
-        or the service has no chat box captured at all) the whole chat window
-        is the answer rather than nothing: clicking a window is recoverable,
-        not clicking at all means the paste never lands.
-
-        Two input boxes of the same layout inside the region take that same
-        fallback, and for a sharper reason: this click is what focuses the
-        window a payload is about to be pasted into, so poking the wrong one
-        pastes a whole turn into somebody else's conversation. The drawn region
-        is the user's own answer to "where is this chat", so a click in the
-        middle of it is the conservative move - and it is exactly what happens
-        with no chat box captured at all.
-
-        Always the LIVE slot: mid-delegation this is the sub-agent's window.
-        """
-        region = self.live.chat_region
-        if region is None:
-            return None
-        try:
-            scene: RegionImage | None = await asyncio.to_thread(capture_region, region)
-        except CaptureError:
-            return region
-        for kind in (TemplateKind.CHATBOX_ONGOING, TemplateKind.CHATBOX_INITIAL):
-            found = await self._find_all(kind, scene=scene)
-            if len(found) == 1:
-                return found[0]
-            if len(found) > 1:
-                self.notify(
-                    f"found {len(found)} things that look like the {kind.label} in the chat "
-                    "window - clicking its centre instead; redraw the window so it contains "
-                    "only this chat",
-                    severity="warning",
-                )
-                return region
-        return region
+        """Which chat input box to poke right now, or None if none is known
+        (the controller's - see ``chatbox_region``)."""
+        return await self._automation.chatbox_region()
 
     async def _click_after_response(self) -> bool:
         """The payload is on the clipboard - poke the chat (when something is
@@ -2503,24 +2393,11 @@ class MainScreen(Screen[None]):
         return await self._focus_click(region)
 
     async def _focus_click(self, target: ScreenRegion) -> bool:
-        """Click ``target``'s centre to put the chat's window in front, warning
-        once - never per copy - if the OS refuses. True only when the click
-        landed, which is what tells a caller it is safe to type into whatever
-        that click just focused.
-
-        Split from ``_click_after_response`` because WHERE to click is the
-        caller's decision: the paste path wants the chat box itself (a caret in
-        the input field is the point), while a keyboard scroll wants anywhere
-        but (see ``_above_chatbox``).
-        """
-        clicked = await asyncio.to_thread(click_region, target)
-        if not clicked and not self._region_click_warned:
-            self._region_click_warned = True  # once, not on every copy
-            self.notify(
-                "the focus click did not land (it is Windows-only) - alt-tab to the chat instead",
-                severity="warning",
-            )
-        return clicked
+        """Click ``target``'s centre to put the chat's window in front (the
+        controller's - see ``focus_click``). WHERE to click stays the caller's
+        decision: the paste path wants the chat box itself, a keyboard scroll
+        wants anywhere but."""
+        return await self._automation.focus_click(target)
 
     async def read_clipboard(self) -> str | None:
         # Deliberately NOT gated by the armed switch: this is the one-shot read
@@ -2545,25 +2422,26 @@ class MainScreen(Screen[None]):
         opposite of helpful.
 
         It is enforced at four chokepoints rather than sprinkled through the
-        callers, because the acting primitives are five imported functions
+        callers, because the acting primitives are five screen-layer functions
         (``click_region``, ``scroll_region``, ``move_cursor``, ``send_paste``,
         ``focus_window_verified``) and every one of them is reached through
-        exactly one of these doors:
+        exactly one of these doors - only the first of which is still this
+        screen's:
 
         1. the paste path (``_insert_outbound``, reached by ``copy_outbound``
            and by the sidebar's retry button alike), which stops clicking and
            pasting but still WRITES the payload to the clipboard, so the user can
            paste it by hand - that is the existing MANUAL_INSERT fallback, and
            disarmed mode simply routes into it;
-        2. ``_click_profile_element``, the one find-then-click primitive, which
-           refuses with ``ElementClick.DISARMED`` before it touches anything -
-           covering /new's new-chat click and a delegation's chat-open alike;
-        3. the finish decision (``_evaluate_finish``), which keeps every scrap of
-           its bookkeeping and simply lands on MANUAL_COPY where it would have
-           launched the auto-copy flow;
-        4. the clipboard watcher - the one chokepoint that is no longer here:
-           the thread belongs to the AutomationController now, so the stop and
-           the restart happen inside its ``set_os_armed``.
+        2. ``AutomationController.click_profile_element``, the one find-then-click
+           primitive, which refuses with ``ElementClick.DISARMED`` before it
+           touches anything - covering /new's new-chat click and a delegation's
+           chat-open alike;
+        3. the finish decision (``AutomationController.evaluate_finish``), which
+           keeps every scrap of its bookkeeping and simply lands on MANUAL_COPY
+           where it would have launched the auto-copy flow;
+        4. the clipboard watcher: the thread belongs to the AutomationController,
+           so the stop and the restart happen inside its ``set_os_armed``.
 
         In-flight work is left alone on purpose. The detectors' state
         (``_awaiting_pasted_reply``, ``_send_gate``, ``_copy_armed``, the
@@ -2981,18 +2859,11 @@ class MainScreen(Screen[None]):
         return self._live_profile().has(kind)
 
     def _live_search(self) -> tuple[int, CandidateSource]:
-        """How the live window's service wants its appearances hunted for.
-
-        Every search this screen runs OUTSIDE the poller - the auto-copy
-        harvest, the manual harvest, the chat-box click, the /identify overlay -
-        has to use the same two settings the poller was built with, or the
-        ELEMENTS column and the thing about to click would be answering with
-        different rulers. The detector gets them via ``build_detector``; this is
-        the same pair for everybody else, read from the LIVE window's preset
-        because that is the window all of those touch.
-        """
-        preset = self._live_preset()
-        return preset.tolerance, select_matcher(preset.matcher).origins
+        """How the live window's service wants its appearances hunted for (the
+        controller's - see ``live_search``). Every search outside the poller has
+        to use the same two settings it was built with, or the ELEMENTS column
+        and the thing about to click would answer with different rulers."""
+        return self._automation.live_search()
 
     def _selected_service(self) -> str:
         """The selected tab's service - what the sidebar's picker shows."""
@@ -3680,8 +3551,9 @@ class MainScreen(Screen[None]):
 
     @on(PaintElements)
     def _on_paint_elements(self, message: PaintElements) -> None:
-        """Together with ``_paint_detection`` and the auto-copy flow's one-shot,
-        the only writer of the ELEMENTS column - which keeps it inside the
+        """Together with ``_paint_detection``'s reset, the only writer of the
+        ELEMENTS column - the poller's crops and the harvest's one-shot picture
+        of the frame it aimed at both arrive here now. Which keeps it inside the
         DETECTION block's ownership rule (tui.md 3.4e): the crops are cut from
         the LIVE window, so a tab click - which may be showing the OTHER
         window's transcript for the whole of a delegation - must never repaint
@@ -3715,11 +3587,10 @@ class MainScreen(Screen[None]):
     def _fire_auto_copy(self) -> None:
         """The controller decided the model stopped: harvest the reply.
 
-        The one action the finish decision still hands back, because launching a
-        coroutine is Textual's and the flow itself is (until the next slice) all
-        this screen's OS choreography - and since 5b the decision is taken on the
-        POLLER thread, where ``run_worker`` may not be called at all. So this
-        posts, and the handler launches.
+        The one action the finish decision still hands back, because SCHEDULING
+        is what a UI framework really owns - and since 5b the decision is taken
+        on the POLLER thread, where ``run_worker`` may not be called at all. So
+        this posts, and the handler launches.
 
         The deferral costs nothing the fire-once rule needed: ``evaluate_finish``
         sets ``flow_running`` synchronously *before* asking, so every tick that
@@ -3730,24 +3601,20 @@ class MainScreen(Screen[None]):
 
     @on(AutoCopyRequested)
     def _on_auto_copy_requested(self, message: AutoCopyRequested) -> None:
-        message.stop()
-        self.run_worker(self._run_auto_copy_flow(), group="copyflow", exclusive=True)
+        """Put the harvest on a worker: same group, same exclusivity as ever.
 
-    async def _run_auto_copy_flow(self) -> None:
-        """``_auto_copy_flow`` inside the flow-suspension bracket.
-
-        A wrapper rather than a try/finally inside the flow itself so the
-        guard's mechanics hold even when tests stub the flow out: whatever the
-        flow body does (return, raise, or get cancelled), the suspension lifts
-        and the stale tracker forgets the frames the flow's own scrolling and
-        hover-scanning produced (``AutomationController.end_flow``) - polling
-        resumes from a clean post-flow baseline instead of reading the flow's
-        mouse work as a new generation.
+        The bracket around it - the flow-suspension the ``finally`` lifts - is
+        the controller's (``run_auto_copy_flow``); what crosses back up is the
+        body, as this screen's own stubbable seam, resolved when the handler
+        runs so a suite that replaced ``_auto_copy_flow`` is still the one that
+        runs.
         """
-        try:
-            await self._auto_copy_flow()
-        finally:
-            self._automation.end_flow()
+        message.stop()
+        self.run_worker(
+            self._automation.run_auto_copy_flow(self._auto_copy_flow),
+            group="copyflow",
+            exclusive=True,
+        )
 
     # -- the gates, as this screen's own call sites still name them ------------
     # Every one of them is the AutomationController's decision now; these are
@@ -3774,114 +3641,16 @@ class MainScreen(Screen[None]):
         """The sidebar's send line, re-derived from the gate rather than stored."""
         return self._automation.send_gate_line()
 
-    def _copy_status(self, text: str) -> None:
-        """Repaint the copy button's status line, keeping its captured size in
-        front of whatever the flow has to report."""
-        with suppress(NoMatches):
-            templates = self._live_profile().variants(TemplateKind.COPY)
-            size = ""
-            if templates:
-                # The first image's size, plus how many more are being ORed
-                # with it - a line that named one size while three pictures
-                # were being searched for would misreport the calibration.
-                extra = f" +{len(templates) - 1}" if len(templates) > 1 else ""
-                size = f"{templates[0].width}×{templates[0].height}{extra} · "
-            self.sidebar.update_template(TemplateKind.COPY, f"{size}{text}")
-
-    def _hover_scan_for_copy(
-        self,
-        region: ScreenRegion,
-        templates: Sequence[Template],
-        *,
-        tolerance: int = DEFAULT_TOLERANCE,
-        matcher: CandidateSource | None = None,
-    ) -> tuple[Template, RegionMatch] | None:
-        """Walk the real cursor up ``region`` and stop at the FIRST frame the
-        copy icon appears in, or None if it never does.
-
-        Claude's chat only renders a response's copy button while the pointer is
-        over that response, so the cheap static capture finds nothing there no
-        matter how good the template is. Bottom-up (screen.hover picks the
-        stops) because the newest response - the one we want - is at the bottom,
-        so the usual answer is one or two stops in.
-
-        Blocking by design: a cursor move, a settle pause and a capture + region
-        scan per stop. Runs in a worker thread, never on the UI thread. Any
-        failure (unsupported platform, a capture that fails) ends the scan,
-        which the caller reports the same way as "not found" - a scan that
-        cannot see is not a scan that found nothing.
-        """
-        for x, y in hover_scan_points(region):
-            if not move_cursor(x, y):
-                return None
-            time.sleep(_HOVER_STEP_DELAY_S)
-            try:
-                scene = capture_region(region)
-            except CaptureError:
-                return None
-            found = _lowest_match(
-                templates,
-                scene,
-                max_diff=TemplateKind.COPY.max_diff,
-                tolerance=tolerance,
-                matcher=matcher,
-            )
-            if found is not None:
-                return found
-        return None
-
-    def _show_copy_crop(
-        self, scene: RegionImage, found: tuple[Template, RegionMatch] | None
-    ) -> None:
-        """Put the flow's OWN copy-button search result in the ELEMENTS column.
-
-        The poller draws that row every tick from its own presence search, so
-        this is not what keeps the row alive - it is the picture of the frame
-        the click was actually aimed at, posted at the instant it was aimed,
-        which is the one the user wants to see when a click misses. The next
-        poll tick will replace it with a picture of *now*, as it should.
-
-        Runs on the UI event loop rather than in a worker, which the rule in
-        ``tui.pixels`` allows here and nowhere else: the cut and the shrink are
-        over one icon-sized rectangle, not a chat region, so this is
-        microseconds. Everything the poller does stays in its thread.
-        """
-        sighting = (
-            None
-            if found is None
-            else Sighting(TemplateKind.COPY, found[0], found[1], time.monotonic())
-        )
-        with suppress(NoMatches):
-            self.elements_panel.show_matches({TemplateKind.COPY: _element_crop(scene, sighting)})
-
-    async def _snap_to_bottom(self, region: ScreenRegion, scroll_action: str) -> None:
-        """One snap of the transcript to its bottom, the way this service scrolls.
-
-        Pulled out of ``_auto_copy_flow`` because the flow does it up to
-        ``_COPY_SNAP_ROUNDS`` times and the three branches must not drift apart
-        between rounds - a retry that quietly used the wheel on a page whose
-        preset says End would be a retry of something else.
-
-        Deliberately *only* the scroll: the focus click and the pointer park in
-        front of round 1 are one-time choreography (nothing between rounds moves
-        either), and the settle belongs to the caller, which pays it per round.
-        """
-        if scroll_action == SCROLL_PAGE_DOWN:
-            await asyncio.to_thread(send_scroll_key, "page_down", _PAGE_DOWN_TAPS)
-        elif scroll_action == SCROLL_END:
-            await asyncio.to_thread(send_scroll_key, "end")
-        else:
-            await asyncio.to_thread(scroll_region, region, _SNAP_WHEEL_DETENTS)
-
     def _copy_last_seen_note(self) -> str:
         """What the always-running detector remembers about the copy button.
 
-        The other half of a failed harvest's report. ``best_miss`` says how
-        close THIS frame came; this says whether the poller has ever seen the
-        icon in this window at all - which separates "the capture no longer
-        matches anything, ever" from "it was there thirty seconds ago and this
-        response has not drawn one yet". Read-only, and never a coordinate: the
-        flow re-searches for what it clicks.
+        The other half of a failed harvest's report, and the reason it is still
+        here: the ``ScreenDetector`` is built and held by this screen. ``how_close``
+        says how close THIS frame came; this says whether the poller has ever
+        seen the icon in this window at all - which separates "the capture no
+        longer matches anything, ever" from "it was there thirty seconds ago and
+        this response has not drawn one yet". Read-only, and never a coordinate:
+        the harvest re-searches for what it clicks.
         """
         detector = self._detector
         if detector is None or not detector.searches(TemplateKind.COPY):
@@ -3892,214 +3661,16 @@ class MainScreen(Screen[None]):
         return f"; the poller last saw one {ago:.0f}s ago"
 
     async def _auto_copy_flow(self) -> None:
-        """Fired once by ``_evaluate_finish`` when the detectors agree reasoning
-        finished: focus the browser, snap the transcript to the bottom, then look
-        for the newest (lowest) copy-button icon anywhere in the chat region and
-        click it - the clipboard watcher ingests the resulting copy on its own.
+        """The harvest, one delegation below (``auto_copy_flow``).
 
-        The search is the whole chat region, not a same-width band beneath a
-        remembered icon: the icon appears once per response down the transcript,
-        and *lowest inside the window the user drew* is the same answer without
-        anyone having to remember a column.
-
-        It is its OWN search, deliberately, even though the poller has been
-        looking for the same icon twice a second all along. Three reasons, and
-        the first is enough: this flow has just clicked, scrolled and waited for
-        the page to render, so the newest response's icon is somewhere the last
-        poll frame does not show it - **a location up to half a second old is not
-        a click target**. The poller also answers a different question (is one on
-        screen, anywhere) from the one a harvest asks (which is the LOWEST, i.e.
-        newest), and it stops at the first hit to stay cheap. What the poller's
-        record IS good for is explaining a miss, which is where it is read below.
-
-        **The snap gets ``_COPY_SNAP_ROUNDS`` goes, not one.** A miss on the
-        static frame used to end the hunt, and the commonest cause of one is not
-        a drifted capture at all - it is a page that had not finished arriving.
-        A streamed reply keeps growing after the detectors call it finished, a
-        virtualized transcript renders the rows it just scrolled to a beat later,
-        and either way the bottom moves out from under a single snap. So a miss
-        re-scrolls (the same action, the same settle) and re-searches, up to
-        three rounds in all, each one logged as *round n/3* so a failure reads as
-        "we tried and the page never showed one" rather than as one unlucky
-        frame. The focus click and the pointer park are **not** repeated: nothing
-        between rounds touches the mouse or the focus, so both are still exactly
-        where round 1 put them, and re-clicking a transcript risks selecting text
-        or following a link.
-
-        The hover scan (opt-in, per service) runs after the LAST static miss, not
-        after the first: it drives the user's real cursor across the screen, and
-        doing that three times over would be three times the intrusion for the
-        same answer. The failure report keeps the **best** ``best_miss`` of all
-        the rounds - the closest the capture ever came is the number that
-        separates "drifted, recapture it" from "no candidate at all", and taking
-        the last round's would throw away the one informative frame whenever the
-        final scroll landed somewhere blank.
+        It stays a method of this screen because it is the seam the Pilot suites
+        stub: half a dozen of them replace the whole harvest with a recorder to
+        test what FIRES it, and the fire path reaches the flow through this
+        name. Everything the harvest DOES - the focus click, the snap rounds,
+        the hunt, the hover scan, the verified click, the snap-back - is the
+        controller's now.
         """
-        region = self.live.chat_region
-        templates = self._live_profile().variants(TemplateKind.COPY)
-        if region is None or not templates:
-            missing_part = (
-                "no chat window is drawn" if region is None else "no copy button is captured"
-            )
-            self._log_harness(KIND_COPY, f"auto-copy flow could not start: {missing_part}")
-            self._set_loop_state(
-                LoopState.MANUAL_COPY, "there is nothing for the auto-copy flow to search"
-            )
-            return
-
-        # Focus the chat window and park the pointer on the transcript. Both are
-        # done ONCE, in front of the first snap: the rounds that follow scroll
-        # the way this service says it scrolls (``ServicePreset.scroll_action``,
-        # ``_snap_to_bottom``) and touch neither the focus nor the mouse, so a
-        # retry inherits this choreography rather than repeating it.
-        #
-        # The keyboard forms ride this focus click - keys go to whatever has
-        # focus - so the click may not land in the CHAT BOX the way the paste
-        # path's deliberately does: a caret in the input field swallows End
-        # outright (it means "end of line" there) and the transcript never
-        # moves. The padding just above the box focuses the same window with
-        # nothing typable under the pointer. The wheel is aimed by coordinates
-        # and does not care either way, so it keeps the plain box click.
-        #
-        # Whatever the click focused, the pointer is then parked on the
-        # transcript's center before anything scrolls, because some chat pages
-        # only scroll the pane the pointer is over: with the cursor left sitting
-        # in the input box the wheel turns against a one-line field and the keys
-        # go nowhere the reader can see. It has to be ``move_cursor`` - a real
-        # synthetic MOVE - and not the ``SetCursorPos`` teleport inside
-        # ``scroll_region``, since a teleported pointer does not reliably make a
-        # browser fire the hover chain those pages track. Best-effort: a move
-        # that does not happen (unsupported platform, disarmed) leaves the snap
-        # exactly as it was before this step existed, which is worth trying
-        # anyway.
-        scroll_action = self._live_preset().scroll_action
-        box = await self._chatbox_region()  # the live chat box, else the chat region
-        if box is not None:
-            target = box
-            if scroll_action in (SCROLL_PAGE_DOWN, SCROLL_END):
-                target = _above_chatbox(box, region) or box
-            await self._focus_click(target)
-        await asyncio.sleep(0.15)
-        await asyncio.to_thread(move_cursor, *region.center)
-        await asyncio.sleep(0.1)  # let the page's hover tracking register it
-
-        tolerance, matcher = self._live_search()
-        found: tuple[Template, RegionMatch] | None = None
-        best_miss: float | None = None
-        for attempt in range(1, _COPY_SNAP_ROUNDS + 1):
-            await self._snap_to_bottom(region, scroll_action)
-            await asyncio.sleep(_SNAP_SETTLE_S)  # let the page render what it scrolled to
-
-            try:
-                scene = await asyncio.to_thread(capture_region, region)
-            except CaptureError as exc:
-                self.notify(f"could not capture the chat region: {exc}", severity="error")
-                self._copy_status("capture failed")
-                self._log_harness(KIND_COPY, f"could not capture the chat region: {exc}")
-                self._set_loop_state(
-                    LoopState.MANUAL_COPY, "the chat region could not be captured to search in"
-                )
-                return
-            found, miss = await asyncio.to_thread(
-                _lowest_match_scored,
-                templates,
-                scene,
-                max_diff=TemplateKind.COPY.max_diff,
-                tolerance=tolerance,
-                matcher=matcher,
-            )
-            # The closest ANY round came, not the last one's: see the docstring.
-            if miss is not None and (best_miss is None or miss < best_miss):
-                best_miss = miss
-            # The ELEMENTS column's picture of the frame the click is being
-            # AIMED at, which the poller's own copy row cannot be: this frame is
-            # the one after the scroll and the settle. Cut from THIS frame, which
-            # is why it happens before the hover scan - a hover-scan hit was
-            # verified against a frame taken with the pointer somewhere else, and
-            # cutting it out of the static one would draw whatever the icon was
-            # hiding. Repainted every round, so the column shows the frame the
-            # flow is looking at now rather than the one it started with.
-            self._show_copy_crop(scene, found)
-            if found is not None:
-                break
-            if attempt < _COPY_SNAP_ROUNDS:
-                # Deliberately NOT the word "not found": that line is the
-                # flow's verdict, and a hunt that is still scrolling has not
-                # reached one. Saying it here would report a failure the very
-                # next round can overturn.
-                self._copy_status(f"re-snapping ({attempt + 1}/{_COPY_SNAP_ROUNDS})")
-                self._log_harness(
-                    KIND_COPY,
-                    f"copy button not found on round {attempt}/{_COPY_SNAP_ROUNDS} "
-                    f"({_how_close(best_miss)}) - snapping to the bottom again",
-                )
-        if found is None and self._live_preset().hover_scan:
-            # Nothing in the static frame: this service is one of the chats that
-            # only paint the icon under the pointer, so try again while hovering
-            # up the region. Opt-in per service (``hover_scan``) because the scan
-            # drives the user's real mouse across the screen - worth it where it
-            # is the only way to find the icon, gratuitous everywhere else, where
-            # a static miss simply means the icon is not there.
-            self._copy_status("hover-scanning")
-            found = await asyncio.to_thread(
-                self._hover_scan_for_copy,
-                region,
-                templates,
-                tolerance=tolerance,
-                matcher=matcher,
-            )
-        if found is None:
-            self.notify("copy button not found on screen", severity="warning")
-            self._copy_status("not found")
-            # The number goes on the ``copy`` entry, the consequence on the
-            # ``state`` one: the two print on adjacent lines, and repeating the
-            # parenthetical on both made the log read as a stutter.
-            self._log_harness(
-                KIND_COPY,
-                f"copy button not found after {_COPY_SNAP_ROUNDS} snaps "
-                f"({_how_close(best_miss)}{self._copy_last_seen_note()})",
-            )
-            self._set_loop_state(
-                LoopState.MANUAL_COPY, "the copy button was not found on screen"
-            )
-            return
-
-        template, match = found
-        target = match_rect(region, template, match)
-        clicked = await self._verified_copy_click(target)
-        if clicked:
-            self.notify(f"copy button clicked (diff {match.diff:.2f})")
-            self._copy_status(f"clicked (diff {match.diff:.2f})")
-            self._log_harness(
-                KIND_COPY,
-                f"copy button found and clicked (diff {match.diff:.2f}); the clipboard "
-                "changed, so the reply is on its way in",
-            )
-            # The response is on its way to the clipboard - hand focus back to
-            # AgentClip so the user watches the ingest here, not the browser. A
-            # short beat first so the click registers before focus moves away.
-            if self._own_window is not None:
-                await asyncio.sleep(0.15)
-                await self._snap_focus_back()
-            await self._ingest_prose_harvest()
-            return
-
-        # Every attempt clicked but the clipboard never changed - leave the
-        # browser focused so the user can click the copy button themselves.
-        self.notify(
-            "copy click did not take - click the response's copy button yourself",
-            severity="warning",
-        )
-        self._copy_status("click did not take")
-        self._log_harness(
-            KIND_COPY,
-            f"the copy button was found (diff {match.diff:.2f}) and clicked, but the "
-            "clipboard never changed",
-        )
-        self._set_loop_state(
-            LoopState.MANUAL_COPY,
-            "the copy click did not take - click the response's copy button yourself",
-        )
+        await self._automation.auto_copy_flow()
 
     async def _ingest_prose_harvest(self) -> None:
         """Hand a verified copy click's harvest to the session even when it has
@@ -4136,82 +3707,17 @@ class MainScreen(Screen[None]):
         )
         self._controller.submit_clipboard(text, accept_prose=True)
 
-    # Small offsets from the matched rect, still inside a ~24 px icon.
-    _COPY_CLICK_OFFSETS = ((0, 0), (-3, -3), (3, 3))
-    _COPY_VERIFY_READS = 6
-    _COPY_VERIFY_INTERVAL_S = 0.2
-
     async def _verified_copy_click(self, target: ScreenRegion) -> bool:
-        """Click the matched copy-button rect, retrying at slightly offset
-        points (still inside the icon) until the clipboard actually changes.
+        """Click the matched copy-button rect at slightly offset points until the
+        clipboard actually changes (the controller's - see
+        ``verified_copy_click``).
 
-        Sometimes the click lands on the right spot but nothing is copied (a
-        hover-rendered button that hadn't quite settled). Each attempt polls
-        the clipboard for a change instead of trusting the click return value,
-        since ``click_region`` only reports whether the OS accepted the input,
-        not whether the target app reacted to it.
-
-        Returns True once a change is observed (or, when the clipboard can't
-        be read at all, after one unverified click - retrying blind would
-        just spam clicks with no way to tell if any of them worked).
+        A named seam rather than a straight call from inside the harvest,
+        because it is the one the Pilot suites stub: verifying a click means
+        three clicks and up to six clipboard reads a fifth of a second apart,
+        and none of that is about where the transcript scrolled to.
         """
-        try:
-            before = await asyncio.to_thread(self._provider.read_text)
-        except ClipboardUnavailable:
-            await asyncio.to_thread(click_region, target, settle_s=0.05)
-            return True
-
-        for dx, dy in self._COPY_CLICK_OFFSETS:
-            shifted = ScreenRegion(target.left + dx, target.top + dy, target.width, target.height)
-            await asyncio.to_thread(click_region, shifted, settle_s=0.05)
-            for _ in range(self._COPY_VERIFY_READS):
-                await asyncio.sleep(self._COPY_VERIFY_INTERVAL_S)
-                try:
-                    after = await asyncio.to_thread(self._provider.read_text)
-                except ClipboardUnavailable:
-                    after = None
-                if after != before:
-                    return True
-        return False
-
-    # -- profile elements: the reusable find-then-click -------------------------
-
-    async def _click_profile_element(
-        self, slot: AgentSlot, kind: TemplateKind, *, settle_s: float = _ELEMENT_CLICK_SETTLE_S
-    ) -> ElementClick:
-        """Find ``kind`` inside ``slot``'s chat region right now, and click it.
-
-        The primitive every programmatic click on a service appearance goes
-        through. It replaces "click where those pixels used to be" with "click
-        where they *are*", which is both safer and the reason the browser may
-        move: a page that re-laid itself out, scrolled, or opened a dialog
-        simply reads as not-on-screen and gets no click at all. Refusing is
-        always the safe answer - the user can click it themselves.
-
-        Finding it TWICE is refused just as firmly. An appearance belongs to
-        the service, so a second window of the same service sitting inside the
-        drawn region carries an identical button; picking one of them is a coin
-        toss between two conversations, and the loser is a chat that gets
-        clicked - reset, even - on behalf of the other.
-
-        DISARMED is answered FIRST, above even the calibration check: this is
-        one of the four chokepoints the armed switch is enforced at
-        (``set_os_armed``), it is the only programmatic click on a service
-        appearance in the app, and a refusal that has already captured the
-        screen and searched it would be answering a question nobody may act on.
-        """
-        if not self._automation.os_armed:
-            return ElementClick.DISARMED
-        cal = self._automation.calibration(slot)
-        if cal.chat_region is None or not self._profile_for(slot).has(kind):
-            return ElementClick.NOT_CALIBRATED
-        found = await self._find_all(kind, slot)
-        if not found:
-            return ElementClick.MISMATCH
-        if len(found) > 1:
-            return ElementClick.AMBIGUOUS
-        clicked = await asyncio.to_thread(click_region, found[0], settle_s=settle_s)
-        return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
+        return await self._automation.verified_copy_click(target)
 
     # -- the browser's new-chat button ------------------------------------------
     #
@@ -4321,7 +3827,7 @@ class MainScreen(Screen[None]):
         afterwards would credit the master with a chat that was opened in the
         sub-agent's window - and end the master's session for it.
         """
-        outcome = await self._click_profile_element(slot, TemplateKind.NEW_CHAT)
+        outcome = await self._automation.click_profile_element(slot, TemplateKind.NEW_CHAT)
         if outcome is not ElementClick.CLICKED:
             # Reset first, only so the toast can say truthfully whether it
             # happened: on the sub-agent tab, and with no session running, there
@@ -4412,77 +3918,70 @@ class MainScreen(Screen[None]):
             self._profile_for(AgentSlot.SUBAGENT),
         )
 
-    async def start_browser_chat(self, slot: AgentSlot) -> bool:
-        """Open a fresh browser chat in ``slot`` and make it the live one.
+    # -- AutomationHost: what the sequences below still ask this shell ---------
+    # The counterpart of the AutomationView block: those are paints going down
+    # to up, these are the four questions and the two acts the OS-acting
+    # sequences in the AutomationController cannot answer for themselves
+    # (agentclip/automation/host.py). Each is one line onto a private this
+    # screen already had, which is also what keeps the late binding the Pilot
+    # suites rely on: they stub ``_find_all``, ``_verified_copy_click`` and
+    # ``_start_detector_worker`` on the CLASS, and the lookup happens here, per
+    # call, rather than at construction.
 
-        All-or-nothing, and that is the whole point. A True return means the
-        new-chat button verified against its snapshot, the click landed, and the
-        automation (paste click, finish detector, auto-copy) now targets that
-        window. A False return means **nothing happened at all**: no click, no
-        retarget, no trigger reset - so the caller can abort the delegation
-        before anything is pasted. Pasting a sub-agent's bootstrap into the
-        master chat would corrupt that conversation irrecoverably, so every
-        failure here is a refusal rather than a best effort.
+    def live_preset(self) -> ServicePreset:
+        """The preset of the window the automation is driving: how it scrolls,
+        whether it wants a hover scan, how its appearances are hunted for."""
+        return self._live_preset()
+
+    def profile_for(self, slot: AgentSlot) -> ServiceProfile:
+        """What one window's service looks like."""
+        return self._profile_for(slot)
+
+    async def find_all(
+        self,
+        kind: TemplateKind,
+        slot: AgentSlot | None = None,
+        *,
+        scene: RegionImage | None = None,
+    ) -> list[ScreenRegion]:
+        """Every place ``kind`` is on screen right now, in absolute coordinates."""
+        return await self._find_all(kind, slot, scene=scene)
+
+    async def verified_copy_click(self, target: ScreenRegion) -> bool:
+        """Click the copy button until the clipboard changes."""
+        return await self._verified_copy_click(target)
+
+    async def ingest_harvest(self) -> None:
+        """A verified copy click landed: show a non-protocol reply as prose if
+        this service opted in. The SESSION is ``agentclip.app``'s, which the
+        automation layer may not import - hence the ask."""
+        await self._ingest_prose_harvest()
+
+    def copy_seen_note(self) -> str:
+        """What the always-running detector remembers about the copy button."""
+        return self._copy_last_seen_note()
+
+    def rebuild_detectors(self) -> None:
+        """The automation moved to another window: rebuild the detector set
+        around what THAT window's calibration says now, and repoint the
+        readout."""
+        self._start_detector_worker()
+
+    async def start_browser_chat(self, slot: AgentSlot) -> bool:
+        """Open a fresh browser chat in ``slot`` and make it the live one (the
+        controller's - see ``start_browser_chat``).
+
+        All-or-nothing by contract: a False return means nothing was clicked and
+        nothing was retargeted, so the caller can abort the delegation before a
+        character is pasted.
         """
-        outcome = await self._click_profile_element(slot, TemplateKind.NEW_CHAT)
-        if outcome is ElementClick.DISARMED:
-            # Same all-or-nothing contract as every other refusal here: the
-            # delegation is abandoned before a single character is pasted, which
-            # is the only safe answer when the sub-agent's chat was never opened.
-            self.notify(
-                f"disarmed - the {slot.label} chat was not opened, so nothing was "
-                "delegated; press F5 to arm",
-                severity="error",
-            )
-            return False
-        if outcome is ElementClick.NOT_CALIBRATED:
-            self.notify(
-                f"the {slot.label} chat's new-chat button is not calibrated - "
-                "nothing was clicked",
-                severity="error",
-            )
-            return False
-        if outcome is not ElementClick.CLICKED:
-            # AMBIGUOUS is the one worth spelling out: nothing is broken, the
-            # drawn region simply holds two chats, and the fix is a redraw
-            # rather than a recapture.
-            reasons = {
-                ElementClick.MISMATCH: "is not on screen",
-                ElementClick.AMBIGUOUS: (
-                    "was found in several places in the drawn window - redraw it so it "
-                    "contains only this chat"
-                ),
-            }
-            reason = reasons.get(outcome, "could not be clicked (it is Windows-only)")
-            self.notify(
-                f"the {slot.label} chat's new-chat button {reason} - nothing was "
-                "clicked and nothing was pasted",
-                severity="error",
-            )
-            return False
-        self._automation.select_live_slot(slot)
-        self._reset_finish_trigger()
-        # The master's outstanding reply is not this window's business: the
-        # sub-agent's own bootstrap copy re-opens the gate a moment from now.
-        self._close_reply_gate()
-        self.hide_paste_flash()
-        self._start_detector_worker()  # baseline + regions from the new live slot
-        await asyncio.sleep(_NEW_CHAT_SETTLE_S)  # let the fresh chat render its input box
-        return True
+        return await self._automation.start_browser_chat(slot)
 
     def end_browser_chat(self) -> None:
-        """Hand the automation back to the master chat when a delegation ends.
-
-        Unconditional and never fails: the master window is where the session
-        lives, so returning to it must work even after the sub-run blew up.
-        """
-        self._automation.select_live_slot(AgentSlot.MASTER)
-        self._reset_finish_trigger()
-        # Symmetrically: the sub-run's last reply is done with, and the
-        # master's turn resumes by composing and copying its next outbound.
-        self._close_reply_gate()
-        self.hide_paste_flash()
-        self._start_detector_worker()
+        """Hand the automation back to the master chat when a delegation ends
+        (the controller's - see ``end_browser_chat``). Unconditional and never
+        fails: the master window is where the session lives."""
+        self._automation.end_browser_chat()
 
     # -- ChatView: sub-agent transport (thin adapters over the slot primitives) -
     # The port speaks SessionRefs (it must not know what a screen slot is); the

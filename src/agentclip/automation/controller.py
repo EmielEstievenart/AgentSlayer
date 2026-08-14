@@ -374,6 +374,11 @@ class AutomationController:
         # a cancelled loop's flag stays set forever and that loop can only end.
         self._detector_stop = threading.Event()
         self._detector_poller: DetectorPoller | None = None
+        # The detector the current run polls through, remembered by
+        # ``detector_loop``. It is the object that holds the live trackers, so a
+        # reset that swaps a tracker has to reach it or the poller keeps folding
+        # into the one that was replaced (``reset_trackers``).
+        self._detector: ScreenDetector | None = None
         # -- the probe consumer ------------------------------------------------
         # What the shell still answers for the decisions below. Two callbacks and
         # nothing else, because those are the only two questions the fold cannot
@@ -711,6 +716,11 @@ class AutomationController:
         """
         stop = self._detector_stop
         generation = self._detector_generation
+        # Remembered, not only closed over: ``reset_trackers`` swaps a tracker
+        # rather than clearing it in place, and the object that has to end up
+        # holding the replacement is this one - the poller reads its trackers
+        # through ``detector.busy``/``.idle``/``.stale`` every tick.
+        self._detector = detector
 
         def loop() -> None:
             while not stop.is_set():
@@ -906,11 +916,43 @@ class AutomationController:
         streak and a previous frame, and every caller here (the paste, the send,
         the auto-copy flow) has just PRODUCED the frames behind that streak
         itself.
+
+        **Swap, not clear.** Every caller is on the UI thread and the tracker
+        being cleared is being polled on the detector thread, which reads the
+        streak, spends a template search or a frame diff, and writes the streak
+        back - so an in-place ``reset()`` landing inside that search is undone
+        by the write that follows it, and the frames the paste or the flow
+        produced stay in history. That is the one thing ``_tick_lock`` cannot
+        fix at its own grain: the expensive halves of a tick are deliberately
+        OUTSIDE it (module docstring), and a UI thread waiting on a template
+        search is precisely the stall this split exists to remove. So each
+        tracker is replaced by a ``fresh()`` one of the same calibration, and
+        the poll still in flight folds its frame into an object nobody will read
+        again.
+
+        The replacement has to reach the DETECTOR, because that is what the
+        poller reads its trackers through; this object's three slots are the
+        same instances under their own names. The identity guard is what keeps a
+        test that installed a tracker of its own from having the detector's
+        overwritten with it.
         """
         with self._tick_lock:
-            for tracker in (self._busy_tracker, self._idle_tracker, self._stale_tracker):
-                if tracker is not None:
-                    tracker.reset()
+            detector = self._detector
+            if self._busy_tracker is not None:
+                spare = self._busy_tracker.fresh()
+                if detector is not None and detector.busy is self._busy_tracker:
+                    detector.busy = spare
+                self._busy_tracker = spare
+            if self._idle_tracker is not None:
+                spare = self._idle_tracker.fresh()
+                if detector is not None and detector.idle is self._idle_tracker:
+                    detector.idle = spare
+                self._idle_tracker = spare
+            if self._stale_tracker is not None:
+                stale_spare = self._stale_tracker.fresh()
+                if detector is not None and detector.stale is self._stale_tracker:
+                    detector.stale = stale_spare
+                self._stale_tracker = stale_spare
 
     def forget_verdicts(self) -> None:
         """Drop everything a rebuilt detector set makes obsolete.
@@ -931,6 +973,10 @@ class AutomationController:
             self._idle_tracker = None
             self._stale_tracker = None
             self._active_detectors = ()
+            # The detector those trackers belonged to goes with them: it
+            # describes a composition that no longer exists, and the shell calls
+            # this immediately before building the one that replaces it.
+            self._detector = None
 
     def reset_finish_trigger(self) -> None:
         """Forget every detector verdict and the auto-copy arm.

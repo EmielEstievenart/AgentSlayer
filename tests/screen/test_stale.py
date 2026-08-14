@@ -114,6 +114,30 @@ def test_reset_forgets_the_frame_and_the_streak() -> None:
     assert tracker.poll().stable_ticks == 1
 
 
+def test_fresh_is_a_reset_that_hands_back_a_new_object() -> None:
+    """The swap spelling of ``reset``, for a caller on another thread.
+
+    Same region and same thresholds, no frame and no streak: the fold still in
+    flight keeps writing into the tracker it started on, and the one the caller
+    installs compares nothing against the screen that fold described
+    (automation/controller.py's ``reset_trackers``).
+    """
+    tracker = StaleTracker(REGION, required_ticks=2, capture=lambda _region: BLACK)
+    tracker.poll()
+    assert tracker.poll().stable_ticks == 1
+
+    spare = tracker.fresh()
+
+    assert spare is not tracker
+    # Back to first-frame semantics, and the streak did not carry across.
+    assert spare.poll() == StaleProbe(StaleState.CHANGING, None, 0)
+    assert spare.poll().stable_ticks == 1
+    assert spare.poll().state is StaleState.STALE  # required_ticks came along
+    # The original still holds its own history - that is what makes the swap
+    # safe: whatever is mid-fold lands there and nobody reads it again.
+    assert tracker.poll().stable_ticks == 2
+
+
 def test_a_supplied_frame_is_used_instead_of_capturing() -> None:
     """Several detectors share one tick's capture of the same region: passing
     the frame in is both cheaper and makes them judge the same instant."""

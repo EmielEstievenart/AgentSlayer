@@ -167,7 +167,29 @@ Slices (each one commit, suite green, layering test run first):
    for the retry button and for `c`'s second tap), the slice-6 arrangement
    unchanged; `redeliver_outbound`'s two refusals are the controller's
    `may_redeliver`.
-8. cleanup: dead code, doc sync (`architecture.md`, `tui.md` drift), module table
+8. cleanup: dead code, doc sync (`architecture.md`, `tui.md` drift), module table.
+   **Shipped, plus the one race the extraction surfaced.** Moving the poller off
+   the message pump (slice 4) put the UI thread's `reset_trackers` alongside a
+   poller thread inside `detector.observe`, and a tracker reads its streak,
+   spends a template search, then writes the streak back - so an in-place
+   `reset()` was read-modify-written away a frame later and the frames the paste
+   or the flow produced stayed in history. `_tick_lock` cannot close that at its
+   own grain (the expensive halves of a tick are deliberately outside it), so the
+   answer is **swap, not clear**: `PresenceTracker.fresh()` / `StaleTracker.fresh()`
+   hand back a tracker of the same calibration with no history, and
+   `reset_trackers` installs it in the controller AND in the live detector - which
+   is why the controller now remembers the run's `ScreenDetector` (the poller
+   reads its trackers through that object, so a swap that stopped at the
+   controller would change nothing). The poll still in flight folds its frame into
+   an object nobody reads again.
+
+**Phase 0 is complete** — `5e419cb` (slice 1) through this commit (slice 8) on
+`master`, i.e. `git log 5e419cb^..` filtered to "UI split phase 0": the
+automation brain lives below the shells, `architecture.md` §0/§1 carry
+`agentclip.automation` and its three seams, and `tui.md` points at where each
+moved name went. What is left on `MainScreen` is the shell: tabs, transcripts,
+sidebar routing, the paint handlers, the `run_worker` scheduling, and the
+compatibility seams the Pilot suites patch.
 
 ## 2. The GUI shell
 

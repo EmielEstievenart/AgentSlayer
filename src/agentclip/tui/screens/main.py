@@ -85,7 +85,8 @@ appearance captured) still decides what can ever fold into a verdict - an empty
 set means finish detection is off and the sidebar says so - but a captured send
 or copy button is still watched and still shown.
 
-Their combined verdict drives the copy-button auto-click (``_evaluate_finish``):
+Their combined verdict drives the copy-button auto-click
+(``AutomationController.evaluate_finish``):
 the busy appearance is on screen only WHILE the model generates, so finding it
 means "still generating"; the idle appearance is on screen only while the chat
 is idle, so finding it means "finished"; and the stale detector needs no
@@ -104,7 +105,7 @@ by ``copy_outbound`` and shut by the harvest): the poller runs off the
 CALIBRATION, so it reports on a resting chat too, but only a pasted outbound
 lets a verdict reach for the mouse. Riding on top of that gate, for services
 whose profile has a ``SEND_READY`` appearance, is the READY-TO-SEND gate
-(``_open_send_gate``): while the send button is on screen the outbound is
+(``AutomationController.open_send_gate``): while the send button is on screen the outbound is
 sitting in the composer UNSENT, so finish detection is held back entirely until
 the button is seen and then seen to vanish - which is the user's Enter. No
 capture means no gate and the behaviour that shipped before it. Delaying a
@@ -935,11 +936,10 @@ class MainScreen(Screen[None]):
     def _detector_generation(self) -> int:
         """Which poller RUN a verdict belongs to.
 
-        The counter belongs to whoever starts the poll threads (the controller),
-        the comparison to whoever reads the probes - which is still this screen,
-        so ``_ghost`` and the two stamp-only handlers read it through here. It is
-        also what a test stamps an injected probe with to speak as the current
-        poller (``tui.messages``).
+        The counter and the comparison both belong to the controller now
+        (``AutomationController.is_ghost``); this stays as the read a test uses
+        to stamp an injected probe so it speaks as the current poller
+        (``AutomationController.feed_probe``).
         """
         return self._automation.detector_generation
 
@@ -2151,13 +2151,6 @@ class MainScreen(Screen[None]):
         (the controller's - see ``chatbox_region``)."""
         return await self._automation.chatbox_region()
 
-    async def _focus_click(self, target: ScreenRegion) -> bool:
-        """Click ``target``'s centre to put the chat's window in front (the
-        controller's - see ``focus_click``). WHERE to click stays the caller's
-        decision: the paste path wants the chat box itself, a keyboard scroll
-        wants anywhere but."""
-        return await self._automation.focus_click(target)
-
     async def read_clipboard(self) -> str | None:
         # Deliberately NOT gated by the armed switch: this is the one-shot read
         # behind `i` (force-ingest), which is the user asking, once, for what is
@@ -2936,7 +2929,7 @@ class MainScreen(Screen[None]):
         """The user pointed the SELECTED window tab at a different service.
 
         The picker edits one tab, so the key lands in that window's slot of
-        ``_services`` and the tab's label follows. Everything downstream of
+        the controller's ``services`` map and the tab's label follows. Everything downstream of
         "what does this service look like?" repaints: the appearance summary and
         the readiness note (half of which is the profile).
 
@@ -2970,7 +2963,8 @@ class MainScreen(Screen[None]):
         so every way the write can fail (read-only config dir, a locked file, a
         full disk) degrades to a warning toast and a session that carries on
         with the switch the user actually asked for. Only the PERSISTENCE is
-        lost; ``_services`` above is already updated either way.
+        lost; the controller's ``services`` map above is already updated
+        either way.
 
         A screen mounted outside the real app (unit tests do this) has no config
         path to write to, and no business inventing the user's one, so it simply
@@ -3021,9 +3015,10 @@ class MainScreen(Screen[None]):
         tab may touch them, because the tab and the live window part company for
         the whole of a delegation.
 
-        ``_active_detectors`` records which of the FINISH detectors will post,
-        in the fixed busy -> idle -> stale order, which is what makes the last
-        one the tick's closing message (see ``_finish_tick_closed_by``). It is
+        ``_active_detectors`` records which of the FINISH detectors will
+        report, in the fixed busy -> idle -> stale order, which is what makes
+        the last one the tick's closing probe (see ``finish_tick_closed_by`` on
+        the controller). It is
         not the same question as whether a worker runs: a service with a
         captured send button and an empty checklist has nothing that can decide
         a response finished, and still has something to show the user in the
@@ -3041,7 +3036,8 @@ class MainScreen(Screen[None]):
         stamp: ``retarget_detectors`` below ends whatever was polling and opens a
         new run, which is why it is called before the two exits that start
         nothing at all - a rebuild that finds no window still has to invalidate
-        the probes the old one has in flight (see ``_ghost``). What stays here is
+        the probes the old one has in flight (see ``is_ghost`` on the
+        controller). What stays here is
         every question about MEANING: which detectors this composition runs, what
         the sidebar says about them, and every verdict they will produce.
         """
@@ -3390,10 +3386,6 @@ class MainScreen(Screen[None]):
     def _close_reply_gate(self) -> None:
         """No reply is outstanding any more, so nothing may move the mouse."""
         self._automation.close_reply_gate()
-
-    def _release_send_gate(self) -> None:
-        """Seen, then gone: the user pressed Enter, so let the detectors go."""
-        self._automation.release_send_gate()
 
     def _send_gate_line(self) -> str:
         """The sidebar's send line, re-derived from the gate rather than stored."""

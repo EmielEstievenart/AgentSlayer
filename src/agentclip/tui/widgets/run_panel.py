@@ -124,11 +124,6 @@ class RunPanel(Vertical):
         return self._expanded
 
     @property
-    def running_call(self) -> int | None:
-        """The call id whose handler the engine is inside, if the panel knows."""
-        return self._running_id
-
-    @property
     def streaming_call(self) -> int | None:
         """The running call that can actually produce output - or None.
 

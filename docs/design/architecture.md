@@ -12,6 +12,8 @@ Dependency direction (imports may only point downward; enforced by a lint test, 
 
 ```
 tui  ──►  clip (watcher/providers)
+ ├──►  app         ──►  engine          (UI-agnostic session orchestration)
+ └──►  automation  ──►  clip, screen    (UI-agnostic screen automation)
  │
  ▼
 engine  ──►  tools  ──►  sandbox (Workspace)
@@ -23,7 +25,19 @@ config (leaf)  ◄── imported by everyone;  ──► hosts (reads the proje
 hosts (leaf)   ◄── config, tools, store, engine: the OS seam
 ```
 
-`clip` and `screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `tui` and `cli`. `protocol`, `config` and `hosts` are leaves. `tools` never imports `engine`. Anything violating this is a bug.
+`clip` and `screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `tui`, `cli` and `automation`. `protocol`, `config` and `hosts` are leaves. `tools` never imports `engine`. Anything violating this is a bug.
+
+**`automation` is the second UI-agnostic layer**, added when the desktop GUI shell was decided (docs/design/gui.md §1) and extracted from `MainScreen` over phase 0. It is `app`'s sibling and its opposite number: `app` drives the *engine* through the `ChatView` port, `automation` drives the *screen* through the `AutomationView` port, and a UI shell is what plugs into both. Allowed imports: `agentclip.screen`, `agentclip.clip`, `agentclip.config`, itself. Banned: `textual`, `agentclip.app`, `agentclip.tui` — a shell depends on the automation, never the other way round.
+
+That inverts what used to be true of the acting primitives, and the note in `app/view.py` that said so was reversed in the same wave: mouse clicks, synthetic keystrokes, focus snap-back, screen capture, the detector poll threads, the clipboard watcher AND the clipboard write are **not** called from a view layer any more. They are called from `AutomationController`, below every shell, so that two frontends cannot drift into two different automations. `os_armed` — the standing "do not touch the world" switch — lives there for the same reason; `ChatView.set_os_armed` only forwards the intent. What a shell still owns is scheduling (Textual's `run_worker`) and painting.
+
+Three seams carry the split, and they are deliberately not one object (docs/design/gui.md §1):
+
+| seam | direction | thread contract |
+|---|---|---|
+| `automation/view.py:AutomationView` | controller → shell | paint-only, callable from the poller/watcher threads, must be non-blocking and thread-safe (the TUI posts a message; a GUI enqueues to its JS bridge) |
+| `automation/host.py:AutomationHost` | controller → shell | the handful of answers only a shell has (live preset/profile, `find_all`, the verified copy click, prose ingest, detector rebuild, the OSC-52 park-off-clipboard). Event-loop thread only — which is exactly why it is not folded into `AutomationView` |
+| `automation/ops.py:ScreenOps` | controller → OS | `agentclip.screen` behind one substitutable object, so the OS primitives stay off the paint port and a shell's test suite can patch them at its own module scope |
 
 `hosts` is the **OS seam**: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`mkdir`/`rmdir`/`stat`/`lstat`/`listdir`/`realpath`, plus the `case_sensitive` fact), carried on `ToolContext`. `LocalHost` is this PC; `SshHost` is a machine over SSH (docs/design/remote-ssh.md), chosen once at launch in `cli.py` and shared by the workspace jail, the tool context, the backup store and the engine — one session is one machine. Rule for new tools: write against Host primitives and it works everywhere. Process execution is `spawn` + an `ExecHandle` the caller polls (`wait`/`peek`/`kill`/`drain`), because cancellation, timeouts and the live output tail are policy above the seam, not OS access.
 
@@ -84,8 +98,28 @@ src/agentclip/
 │   ├── view.py            # ChatView Protocol (the one UI seam) + SessionView snapshot + RunCall rows
 │   └── types.py           # SessionSpec, SessionRef, EngineRequest, SessionStats
 │
-├── screen/                # OS screen layer (like clip: imported ONLY by tui/cli; stdlib-only
-│                          # AT MODULE LEVEL — cv2/numpy are lazy, function-body imports, see matchers.py)
+├── automation/            # UI-agnostic screen automation: app's sibling, shared by both UI
+│   │                      #   shells. Imports screen/clip/config and NOTHING above (gui.md §1)
+│   ├── controller.py      # AutomationController: the armed switch, the slot pointers, the
+│   │                      #   clipboard watcher + detector poller threads, the probe consumer,
+│   │                      #   the finish decision, the OS-acting sequences, the delivery path
+│   ├── view.py            # AutomationView Protocol: the PAINT-only port (paint_loop_state,
+│   │                      #   paint_detection/stale/elements/armed, paste flash, notify).
+│   │                      #   Callable from the poller/watcher threads: never blocking
+│   ├── host.py            # AutomationHost Protocol: what only a shell can answer (live
+│   │                      #   preset/profile, find_all, verified copy click, prose ingest,
+│   │                      #   detector rebuild, park_off_clipboard). Event-loop thread only
+│   ├── ops.py             # ScreenOps: agentclip.screen behind one substitutable object,
+│   │                      #   plus ElementClick and the sequences' beats/offsets
+│   ├── finish.py          # the finish vocabulary: SendGate, the verdict folds, the phrasing
+│   ├── flow.py            # the auto-copy flow's geometry: lowest_match, above_chatbox, snap
+│   ├── delivery.py        # the paste banner's four wordings and the delivery beats
+│   ├── loop_state.py      # LoopState: where the browser-automation loop is (the STATE rail)
+│   └── harness_log.py     # HarnessEntry + the /log renderer: the decision log's vocabulary
+│
+├── screen/                # OS screen layer (like clip: imported ONLY by tui/cli/automation;
+│                          # stdlib-only AT MODULE LEVEL — cv2/numpy are lazy,
+│                          # function-body imports, see matchers.py)
 │   ├── region.py          # ScreenRegion dataclass + the "left top width height" wire format
 │   ├── overlay.py         # draw-a-box tkinter overlay; runs in a CHILD process (--pick-region)
 │   ├── picker.py          # spawns the child (works frozen and from source), parses its stdout
@@ -107,11 +141,16 @@ src/agentclip/
 └── tui/
     ├── app.py             # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
     ├── messages.py        # ClipboardCaptured, CallStarted/CallFinished/CallOutput (the engine worker
-    │                      # thread's bridge to the run panel), and the generation-stamped *Probed
+    │                      # thread's bridge to the run panel), McpStatusChanged, and the PAINT family:
+    │                      # one message per AutomationView method (the automation's threads asking
+    │                      # for a repaint), plus AutoCopyRequested. No probe messages: the poller
+    │                      # feeds AutomationController.consume_* in its own call stack
     ├── graphics.py        # can this terminal draw sixels? probed ONCE from cli.main, before Textual (tui.md §1.7)
     ├── pixels.py          # the half-block renderer: pure functions over RegionImage, the no-sixel fallback
     ├── screens/
-    │   ├── main.py        # the ChatView adapter: tabs, transcripts, sidebar routing, detectors
+    │   ├── main.py        # the ChatView + AutomationView + AutomationHost adapter: tabs,
+    │   │                  #   transcripts, sidebar routing, and the scheduling the automation
+    │   │                  #   core hands back (run_worker); the automation itself is below it
     │   ├── service_editor.py # F2: the whole per-service PROFILE editor (tui.md §1.4)
     │   ├── settings.py    # F4: appearance/theme picker
     │   ├── help.py        # F1 cheatsheet; its command section renders from app/commands.py
@@ -814,7 +853,8 @@ testpaths = ["tests"]
 tests/
 ├── conftest.py                      # tmp workspace fixture, default Config fixture, ScriptedLLM helper
 ├── test_layering.py                 # imports each module, asserts dependency direction (no tui/clip
-│                                    #   imports inside engine/protocol/tools/store) — enforces §0
+│                                    #   imports inside engine/protocol/tools/store; no textual/app/tui
+│                                    #   inside automation) — enforces §0, generically and by name
 ├── hosts/
 │   ├── test_local_host.py           # real files + real subprocesses: stat/listdir/realpath, kill+drain
 │   ├── test_fake_host.py            # the in-memory twin behaves like a filesystem (symlinks included)
@@ -853,6 +893,9 @@ tests/
 ├── clip/
 │   └── test_watcher.py              # FakeClipboard: change detection, self-write suppression,
 │                                    #   non-protocol noise ignored, None (non-text) tolerated
+├── automation/                      # the screen-automation core, driven through FakeAutomationView:
+│                                    #   no Textual, no terminal, no mouse. The threads are REAL
+│                                    #   (watcher, detector poller) and every test joins its own
 └── tui/
     └── test_smoke.py                # ONE Pilot test: app boots with FakeClipboard injected, post
                                      #   ClipboardCaptured(reply), approval modal appears, press "y",

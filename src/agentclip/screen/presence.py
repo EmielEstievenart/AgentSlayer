@@ -225,3 +225,27 @@ class PresenceTracker:
         self._streak = 0
         self._found_since_reset = False
         self._last_sighting = None
+
+    def fresh(self) -> PresenceTracker:
+        """A tracker of this exact configuration that has seen nothing yet.
+
+        The SWAP spelling of :meth:`reset`, for a caller on a different thread
+        from the one polling. ``observe`` reads the streak, spends a template
+        search, and writes the streak back - so a reset landing in the middle of
+        that search is read-modify-written away a frame later, silently undoing
+        itself. Replacing the *reference* cannot lose that race: the poll still
+        in flight folds its frame into an object nobody will read again, and the
+        next one starts from a tracker that genuinely remembers nothing.
+
+        Deliberately this class and not ``type(self)``: what is copied is the
+        calibration - the images, the polarity, the thresholds, the matcher -
+        and a subclass is free to reset itself in place instead.
+        """
+        return PresenceTracker(
+            self._templates,
+            found_is_busy=self._found_is_busy,
+            required_ticks=self._required_ticks,
+            tolerance=self._tolerance,
+            max_diff=self._max_diff,
+            matcher=self._matcher,
+        )

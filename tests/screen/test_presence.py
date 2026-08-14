@@ -319,3 +319,29 @@ def test_an_idle_tracker_reports_its_sighting_the_same_way() -> None:
     assert tracker.last_sighting is not None
     tracker.observe(ABSENT)
     assert tracker.last_sighting is None
+
+
+def test_fresh_is_a_reset_that_hands_back_a_new_object() -> None:
+    """The swap spelling of ``reset``, for a caller on another thread.
+
+    Same calibration - the images, the polarity, the thresholds - and none of
+    the history: the tracker still in flight keeps whatever it was writing, and
+    the one the caller installs remembers nothing (automation/controller.py's
+    ``reset_trackers``).
+    """
+    tracker = busy_tracker(required_ticks=3)
+    tracker.observe(PRESENT)
+    states(tracker, [ABSENT, ABSENT])  # two of the three misses banked
+
+    spare = tracker.fresh()
+
+    assert spare is not tracker
+    assert spare.last_sighting is None
+    # The streak did not come with it: three misses from scratch, not one.
+    assert states(spare, [ABSENT, ABSENT]) == [BusyState.MATCH, BusyState.MATCH]
+    assert spare.observe(ABSENT).state is BusyState.CHANGED
+    # ...and it is still looking for the same appearance, the same way round.
+    assert spare.observe(PRESENT).generating_now is True
+    # The original is untouched - handing back a copy is what lets a poll that
+    # is still mid-search finish into an object nobody will read again.
+    assert tracker.observe(ABSENT).state is BusyState.CHANGED

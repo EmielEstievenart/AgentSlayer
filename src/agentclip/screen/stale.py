@@ -150,3 +150,22 @@ class StaleTracker:
         """
         self._last = None
         self._streak = 0
+
+    def fresh(self) -> StaleTracker:
+        """A tracker of this exact configuration that has seen no frames yet.
+
+        The SWAP spelling of :meth:`reset`, for a caller on a different thread
+        from the one polling. ``_fold`` rolls the previous frame forward and
+        then computes the new streak from the old one, so a reset landing
+        between those two steps is undone by the write that follows it - the
+        frame the flow produced stays in history and the streak it built
+        survives. Replacing the *reference* cannot lose that race: the fold
+        still in flight lands in an object nobody will read again.
+        """
+        return StaleTracker(
+            self._region,
+            tolerance=self._tolerance,
+            max_diff=self._max_diff,
+            required_ticks=self._required_ticks,
+            capture=self._capture,
+        )

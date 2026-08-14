@@ -199,6 +199,35 @@ uses and only when the profile is re-read (a capture, a clear, a forget, a
 selection) - never per keystroke. All seven rows are always present whether or
 not anything is captured.
 
+The slash-command registry and the appearance, both pushed once per page load
+(``GuiView.start`` and ``page_ready``) because both are things the page needs to
+HAVE rather than to be told about::
+
+    {type: "commands",
+     rows: [{name: str, label: str, summary: str}, ...]}   # COMMANDS, in order
+    {type: "settings", theme: "dark"|"light",
+     themes: [{value: str, label: str}, ...]}
+
+``commands`` is ``agentclip.app.commands.COMMANDS`` - the one table the
+controller's dispatch, `/help`, the unknown-command hint and the TUI's own popup
+and help screen all read - and it feeds BOTH page consumers: the composer's
+autocomplete popup and the help modal's command section, so neither can document
+a command that no longer exists. The filtering rules stay on the page (a round
+trip per keystroke would be latency for string work); the data never does.
+
+``settings`` is the F4 surface in full, which is one setting: the TUI's
+SettingsScreen is a theme picker and nothing else, so this one is too. The value
+lives in the shell's own config table (``[gui] theme``) because the GUI's
+palettes are CSS and ``[general] theme`` names a Textual theme - see
+``config.VALID_GUI_THEMES``.
+
+Help, settings, the payload block and the quit-mid-turn confirm all reuse the
+ONE modal element the ``modal`` family above drives. Only the last of them is a
+``modal`` event: help and settings are page chrome (like F3's sidebar) and the
+quit confirm is an ordinary ``ChatView.confirm``, raised from
+``GuiView.confirm_quit`` after the window's ``closing`` handler refused the
+close (``gui/runner.py:window_closing``).
+
 ``harness`` carries the rendered ``line`` as well as its parts because the
 fixed-width kind column is ``HarnessEntry.line``'s decision, taken once below
 both shells. The page keeps its own tail of these, bounded at the deque's own
@@ -391,6 +420,16 @@ class JsCalls(Protocol):
     def select_window(self, window: str) -> None: ...
     def next_window(self) -> None: ...
     def end_session(self) -> None: ...
+    # The three remaining MainScreen bindings. `t` is absent: focusing the
+    # composer is a page-side act with no controller behind it, like F3 and F8.
+    def undo(self) -> None: ...
+    def export_log(self) -> None: ...
+    # F4's one setting. The flip is applied page-side (a CSS class), but WHICH
+    # theme is current is config, so the page asks rather than remembers.
+    def set_theme(self, theme: str) -> None: ...
+    # ctrl+q. The window's own close button reaches the same decision through
+    # ``GuiRunner.window_closing`` instead, which cannot come through here.
+    def request_quit(self) -> None: ...
     # The service editor (F2). One method per intent for the reason the key
     # family above has one: the modal's state is a MODEL on the Python side
     # (``gui/service_editor.py``) and every press is a call on it, so a page
@@ -527,6 +566,25 @@ class JsApi:
         """`e`: open the session summary. Gated on the view side, where the
         phase is known, and refused with a toast rather than silence."""
         self._safely(self._calls.end_session)
+
+    def undo(self) -> None:
+        """`u`: undo the most recent turn. The confirm the controller opens on
+        the way is the same one the TUI shows, composed there."""
+        self._safely(self._calls.undo)
+
+    def export_log(self) -> None:
+        """`l`: write the whole chat log to a file. Safe mid-turn - it is a
+        read-only snapshot and never touches the engine."""
+        self._safely(self._calls.export_log)
+
+    def theme(self, name: str = "") -> None:
+        """F4's appearance picker: persist ``[gui] theme`` and repaint the
+        settings modal from what was actually saved."""
+        self._safely(lambda: self._calls.set_theme(name))
+
+    def quit(self) -> None:
+        """ctrl+q: close the window, asking first when a turn is in flight."""
+        self._safely(self._calls.request_quit)
 
     # -- the service editor (F2) ----------------------------------------------
     # The modal is drawn by the page and DECIDED on the Python side: the working

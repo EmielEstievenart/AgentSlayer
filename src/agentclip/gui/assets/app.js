@@ -7,13 +7,21 @@
    window.pywebview.api call, and every one of those lands on the same
    controller method the TUI's key binding does.
 
-   Two toggles never leave this file: F3 (the sidebar) and F8 (the log pane) are
+   Some keys never leave this file. F3 (the sidebar) and F8 (the log pane) are
    pure show/hide of a page element. /log comes back the other way as a `toggle`
    event, so the command and the key stay one implementation. F7 (the elements
-   column) is the third show/hide and the one exception: the flip is local, but
-   Python is told, because the crops are only encoded for a column somebody is
-   looking at. F2 is not a toggle at all - the service editor's whole state is a
-   model on the Python side and this file only renders the `editor` event.
+   column) is a show/hide with one exception: the flip is local, but Python is
+   told, because the crops are only encoded for a column somebody is looking at.
+   F1 (help) and `t` (put the caret back in the chat box) are wholly local; F4's
+   theme picker paints locally and tells Python, which is what persists it. F2
+   is not a toggle at all - the service editor's whole state is a model on the
+   Python side and this file only renders the `editor` event.
+
+   Two tables are the spine of the key surface, and both exist so that a thing
+   cannot be done without being documented: KEYS below drives BOTH the keydown
+   dispatcher and the help sheet's key table, and the `commands` event carries
+   agentclip.app.commands.COMMANDS, which drives BOTH the slash popup and the
+   help sheet's command table.
 
    Installed at PARSE time, not on DOMContentLoaded: the bridge can be draining
    before the DOM exists (evaluate_js waits for the page, but the first state
@@ -50,6 +58,31 @@
   var rejectOpen = false;
   var modalId = null;
   var modalKind = null;
+  // The page's OWN modals, which ride the same element the Python prompts do
+  // (docs/design/gui.md 3): "help" (F1), "settings" (F4) and "payload" (the
+  // clipboard fallback). Never both at once with a prompt - a prompt is a flow
+  // parked on an answer and it always wins.
+  var pageModal = null;
+  // The slash-command registry, as it arrives from agentclip.app.commands, and
+  // the popup's two pieces of state. `popupIndex === null` is the RESTING state
+  // of an unnarrowed list, not an error: nothing is highlighted until the user
+  // has typed a letter or pressed an arrow, which is why Enter on a bare "/"
+  // completes nothing (commands.py's own note on why /yolo is last).
+  var commands = [];
+  var popupMatches = [];
+  var popupIndex = null;
+  // Which composer mode is current. The popup is suppressed in exactly one of
+  // them - `answer`, the TUI's `verbatim` - because while an ask_user answer is
+  // open a leading slash is TEXT, and offering to complete it would be a lie
+  // about what Enter is going to do (modals-keys-esc.md 6.1).
+  var composerMode = "idle";
+  // The appearance, and the choices the settings modal offers. Both are Python's
+  // ([gui] theme); this side only wears what it is told.
+  var theme = "dark";
+  var themeChoices = [];
+  // tui/widgets/transcript.py's MAX_EVENTS, per WINDOW: a transcript is a
+  // reading surface, not an archive, and the whole log is one `l` away.
+  var MAX_EVENTS = 500;
   // The service editor (F2). `svcBuilt` is once-per-page: the three control
   // vocabularies and the seven appearance rows never change while the process
   // runs, so they are built once and only their VALUES are repainted - which is
@@ -246,6 +279,11 @@
     var empty = box.querySelector(".empty");
     if (empty) empty.parentNode.removeChild(empty);
     box.appendChild(node);
+    // Prune from the top at MAX_EVENTS, the TUI's rule and its number. Per
+    // window, because the cap is about how much DOM one scroll carries and each
+    // panel is its own scroll; the exported log (`l`) is the archive and is
+    // built from the Python-side event list, which this never touches.
+    while (box.childElementCount > MAX_EVENTS) box.removeChild(box.firstElementChild);
     // A hidden panel has no layout to measure - offsetHeight and clientHeight
     // are both 0 - so the fit-or-park arithmetic below would park every event
     // written into the window the user is not looking at. Pin it to the bottom
@@ -637,6 +675,114 @@
     api("decide", "reject", note);
   }
 
+  /* == the slash-command popup =============================================
+     agentclip/tui/widgets/command_popup.py, in a div. The registry itself
+     arrives from Python (the `commands` event) so a command added there cannot
+     go missing here; what this file owns is when the list is up, which row is
+     lit and what completing one writes - and none of that may take focus away
+     from the composer, which is why the popup is a block of divs with nothing
+     clickable in it and is driven entirely from the textarea's own events. */
+
+  // app/commands.py:match_prefix, rule for rule. A line qualifies only while it
+  // is a single bare token behind ONE slash, and each of the three ways it stops
+  // being a command in progress closes the list on its own: "//" is the
+  // literal-slash escape hatch, any whitespace means the command is chosen and
+  // its argument is being typed, and no match at all is no list.
+  function matchPrefix(text) {
+    var line = String(text || "");
+    if (line.charAt(0) !== "/" || line.slice(0, 2) === "//") return [];
+    var token = line.slice(1);
+    if (/\s/.test(token)) return [];
+    var prefix = token.toLowerCase();
+    return commands.filter(function (command) {
+      return command.name.indexOf(prefix) === 0;
+    });
+  }
+
+  function sameMatches(a, b) {
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i += 1) {
+      if (a[i] !== b[i]) return false;
+    }
+    return true;
+  }
+
+  // The one place visibility is decided, called from every event that can change
+  // the box: typing, pasting, completing, a mode change, a reset.
+  function syncPopup() {
+    if (composerMode === "answer" || el.composer.disabled) {
+      popupHide();
+      return;
+    }
+    var matches = matchPrefix(el.composer.value);
+    if (!matches.length) {
+      popupHide();
+      return;
+    }
+    // The highlight is re-decided only when the LIST actually changed, so a
+    // redundant sync cannot throw away the user's arrow presses. And nothing is
+    // preselected until at least one letter has been typed - "/" alone offers
+    // the whole registry with no row lit, which is the second lock on the door
+    // /yolo sits behind (commands.py's ordering note).
+    if (!sameMatches(matches, popupMatches)) {
+      popupMatches = matches;
+      popupIndex = el.composer.value.length > 1 ? 0 : null;
+    }
+    popupPaint();
+    el.popup.hidden = false;
+  }
+
+  function popupPaint() {
+    var html = "";
+    for (var i = 0; i < popupMatches.length; i += 1) {
+      html +=
+        '<div class="cmd-row' +
+        (i === popupIndex ? " on" : "") +
+        '"><span class="cmd-name">' +
+        escapeHtml(popupMatches[i].label) +
+        '</span><span class="cmd-why">' +
+        escapeHtml(popupMatches[i].summary) +
+        "</span></div>";
+    }
+    el.popup.innerHTML = html;
+    var lit = el.popup.querySelector(".cmd-row.on");
+    if (lit) lit.scrollIntoView({ block: "nearest" });
+  }
+
+  function popupOpen() {
+    return popupMatches.length > 0 && !el.popup.hidden;
+  }
+
+  function popupHide() {
+    popupMatches = [];
+    popupIndex = null;
+    el.popup.hidden = true;
+    el.popup.innerHTML = "";
+  }
+
+  // From no highlight an arrow ARMS the list: down lands on the first row, up on
+  // the last - which is what wrapping would have done from either edge anyway.
+  function popupMove(delta) {
+    if (!popupOpen()) return;
+    if (popupIndex === null) popupIndex = delta > 0 ? 0 : popupMatches.length - 1;
+    else popupIndex = (popupIndex + delta + popupMatches.length) % popupMatches.length;
+    popupPaint();
+  }
+
+  // Enter and Tab do the same thing, and both are swallowed even when there is
+  // nothing highlighted: a bare "/" plus Enter must not send a lone slash to the
+  // model, it must sit there waiting to be narrowed.
+  function popupComplete() {
+    if (popupIndex === null) return;
+    // The canonical name plus ONE trailing space - never the argument hint. The
+    // space is load-bearing twice over: it is where the argument gets typed, and
+    // it is what makes match_prefix return nothing, so the list closes itself and
+    // the next Enter is a plain send.
+    el.composer.value = "/" + popupMatches[popupIndex].name + " ";
+    el.composer.selectionStart = el.composer.selectionEnd = el.composer.value.length;
+    popupHide();
+  }
+
   /* == toasts ============================================================== */
 
   function toast(event) {
@@ -671,6 +817,11 @@
   }
 
   function showModal(event) {
+    // A controller flow is parked on this answer, so it takes the element off
+    // whatever page screen was using it - the help sheet is not worth stranding
+    // a turn behind.
+    pageModal = null;
+    el.modal.classList.remove("wide");
     modalId = event.prompt_id;
     modalKind = event.modal;
     el.modalTitle.textContent = event.title || "";
@@ -734,24 +885,203 @@
     return null;
   }
 
+  // Is anything at all on the scrim? Both kinds count: a page screen owns the
+  // keyboard exactly as a prompt does, which is the "a modal owns all key input
+  // while it is open" rule Textual's screen stack gives the TUI for free.
+  function modalUp() {
+    return modalId !== null || pageModal !== null;
+  }
+
+  // The frame every page-owned screen opens with: title, a Close button, and the
+  // one element they all share.
+  function openPageModal(kind, title, wide) {
+    if (modalId) return false; // a parked flow wins; see showModal
+    pageModal = kind;
+    modalKind = null;
+    el.modal.classList.toggle("wide", Boolean(wide));
+    el.modalTitle.textContent = title;
+    el.modalBody.innerHTML = "";
+    el.modalActions.innerHTML = "";
+    el.modalHint.hidden = true;
+    el.modalHint.textContent = "";
+    el.scrim.hidden = false;
+    return true;
+  }
+
+  function closePageModal() {
+    if (!pageModal) return;
+    pageModal = null;
+    el.modal.classList.remove("wide");
+    el.scrim.hidden = true;
+  }
+
+  function pageModalClose(label) {
+    var close = document.createElement("button");
+    close.type = "button";
+    close.textContent = label;
+    close.addEventListener("click", closePageModal);
+    el.modalActions.appendChild(close);
+  }
+
   function showPayload(event) {
     // park_off_clipboard's GUI equivalent: the clipboard provider refused the
     // payload and this shell has no OSC-52, so the text is put somewhere the
     // user can select it (docs/design/gui.md 2).
-    modalId = null;
-    modalKind = null;
-    el.modalHint.hidden = true;
-    el.modalTitle.textContent = "Copy this payload by hand";
+    if (!openPageModal("payload", "Copy this payload by hand", false)) return;
     el.modalBody.innerHTML = "<pre class='payload'>" + escapeHtml(event.text) + "</pre>";
-    el.modalActions.innerHTML = "";
-    var close = document.createElement("button");
-    close.type = "button";
-    close.textContent = "Close";
-    close.addEventListener("click", function () {
-      el.scrim.hidden = true;
+    pageModalClose("Close");
+  }
+
+  /* == help (F1) and settings (F4) ==========================================
+     Two page-owned screens over the one modal element. What they show comes
+     from exactly two places and neither is prose typed twice: the KEY table is
+     rendered from KEYS - the same array the keydown handler dispatches from,
+     which is what makes "the help documents a key that moved" structurally
+     impossible here - and the COMMAND table is rendered from the `commands`
+     event, i.e. from agentclip.app.commands.COMMANDS, the registry the
+     controller's dispatch and `/help` read. The remaining prose is about the
+     chat box and the loop rather than about any binding, and is spelled here
+     the way index.html spells the sidebar's headings. */
+
+  // Prose blocks, in the order tui/screens/help.py puts them. Each is a heading
+  // and a paragraph; the tables slot in between by section name.
+  var HELP_PROSE = [
+    [
+      "Chat box (bottom of the window)",
+      "Type a message and press Enter to send it. Shift+Enter inserts a newline " +
+        "(the TUI uses Ctrl+J; this is the web convention and a deliberate " +
+        "difference). Esc clears the box and keeps the caret there; Esc on an " +
+        "EMPTY box lets go of it, which is what frees the single-key shortcuts " +
+        "below - press t to type again."
+    ],
+    [
+      "Chat commands (type in the chat box, leading slash)",
+      'Typing "/" pops the list up above the box and each further character ' +
+        "narrows it. Nothing is highlighted until you press a letter or an " +
+        "arrow - then Enter (or Tab) COMPLETES the highlighted row and the next " +
+        'Enter sends it. Esc closes the list without touching your text. "//text" ' +
+        "sends a literal leading slash."
+    ],
+    [
+      "Window tabs (top of the chat column) - a tab is a BROWSER WINDOW",
+      "Row 1 is the master window, the chat you steer. Row 2 is the sub-agent " +
+        "window a delegated sub-task runs in. Each carries its own service, its " +
+        "own drawn rectangle and its own transcript. Selecting a tab only " +
+        "changes what YOU see and what the sidebar configures - never where " +
+        "output lands, and never which window the automation is driving."
+    ],
+    [
+      "Permission mode (bottom-left of the status bar)",
+      "shift+tab cycles it: ask -> plan -> unattended -> ask. ask asks you about " +
+        "every edit and command; plan REFUSES both, so the model can only read " +
+        "and propose; unattended refuses anything that would have asked, for " +
+        "when you walk away. The key works while you are typing and while a turn " +
+        "is running."
+    ],
+    [
+      "Sub-agents (only once the sub-agent window is calibrated - see the sidebar)",
+      "The model can hand one bounded sub-task to a fresh sub-agent in its own " +
+        "chat. That tab shows the run's state and the status bar goes magenta - " +
+        "you still approve every edit and command. ctrl+x cancels the calls " +
+        "running right now; /abort ends the whole run."
+    ]
+  ];
+
+  // The last word, after the key tables: what the whole thing is FOR.
+  var HELP_CODA = [
+    "The loop",
+    "AgentClip copies a payload - paste it into your chat and send. Click the " +
+      "reply's Copy button; AgentClip detects it, shows what is running, gates " +
+      "edits and commands, then copies the combined results - paste them back. " +
+      "Repeat until the model sends task_done."
+  ];
+
+  function helpTable(rows) {
+    var html = "<table class='help-rows'>";
+    rows.forEach(function (row) {
+      html +=
+        "<tr><td class='k" +
+        (row.cmd ? " cmd" : "") +
+        "'>" +
+        escapeHtml(row.keys) +
+        "</td><td class='d'>" +
+        escapeHtml(row.what) +
+        "</td></tr>";
     });
-    el.modalActions.appendChild(close);
-    el.scrim.hidden = false;
+    return html + "</table>";
+  }
+
+  function helpSection(head, note, rows) {
+    var html = "<div class='help-section'><div class='help-head'>" + escapeHtml(head) + "</div>";
+    if (note) html += "<p class='help-note'>" + escapeHtml(note) + "</p>";
+    if (rows && rows.length) html += helpTable(rows);
+    return html + "</div>";
+  }
+
+  function openHelp() {
+    if (!openPageModal("help", "AGENTCLIP HELP", true)) return;
+    var html = "";
+    HELP_PROSE.forEach(function (pair) {
+      // The commands section is the one whose body is DATA: the registry rows
+      // go under its paragraph rather than being written out here.
+      var rows = null;
+      if (pair[0].indexOf("Chat commands") === 0) {
+        rows = commands.map(function (command) {
+          return { keys: command.label, what: command.summary, cmd: true };
+        });
+      }
+      html += helpSection(pair[0], pair[1], rows);
+    });
+    // ...and every key section, rendered from the very table the handler reads.
+    KEY_SECTIONS.forEach(function (section) {
+      var rows = KEYS.filter(function (entry) {
+        return entry.section === section;
+      }).map(function (entry) {
+        return { keys: entry.keys.join(" / "), what: entry.what };
+      });
+      if (rows.length) html += helpSection(section, "", rows);
+    });
+    html += helpSection(HELP_CODA[0], HELP_CODA[1], null);
+    el.modalBody.innerHTML = html;
+    el.modalHint.textContent = "escape (or F1) closes";
+    el.modalHint.hidden = false;
+    pageModalClose("Close (esc)");
+  }
+
+  function openSettings() {
+    if (!openPageModal("settings", "SETTINGS", false)) return;
+    var head = document.createElement("div");
+    head.className = "help-head";
+    head.textContent = "Appearance";
+    el.modalBody.appendChild(head);
+    themeChoices.forEach(function (choice) {
+      var row = document.createElement("label");
+      row.className = "set-choice";
+      var input = document.createElement("input");
+      input.type = "radio";
+      input.name = "gui-theme";
+      input.value = choice.value;
+      input.checked = choice.value === theme;
+      // Live: picking one wears it at once and saves it at once. There is no
+      // Save button and so nothing to revert on escape - the TUI stages the
+      // write behind Save because its preview is an app-wide reactive; a class
+      // on <body> costs nothing to try and the user picked what they picked.
+      input.addEventListener("change", function () {
+        applyTheme(choice.value);
+        api("theme", choice.value);
+      });
+      row.appendChild(input);
+      row.appendChild(document.createTextNode(choice.label));
+      el.modalBody.appendChild(row);
+    });
+    el.modalHint.textContent = "picking a theme applies and saves it · escape closes";
+    el.modalHint.hidden = false;
+    pageModalClose("Close (esc)");
+  }
+
+  function applyTheme(name) {
+    theme = name === "light" ? "light" : "dark";
+    document.body.classList.toggle("theme-light", theme === "light");
   }
 
   /* == sidebar ==============================================================
@@ -1199,6 +1529,11 @@
   /* == chrome ============================================================== */
 
   function paintState(event) {
+    // The composer's mode decides whether a leading slash means anything: in
+    // `answer` mode it does not (the TUI's `verbatim`), and the popup is
+    // suppressed rather than offering to complete something Enter will send
+    // verbatim anyway (modals-keys-esc.md 6.1).
+    composerMode = event.composer_mode || "idle";
     el.composer.disabled = !event.composer_enabled;
     el.composer.placeholder = event.composer_placeholder || "";
     el.send.disabled = !event.composer_enabled;
@@ -1212,7 +1547,8 @@
     // that lands mid-typing is the gate's own, and it would take the box away.
     // Nor out of the service editor, whose form is a dozen boxes deep and which
     // is up for as long as somebody is configuring a service.
-    if (event.composer_enabled && !rejectOpen && !editorOpen) el.composer.focus();
+    if (event.composer_enabled && !rejectOpen && !editorOpen && !modalUp()) el.composer.focus();
+    syncPopup();
   }
 
   /* == dispatch ============================================================ */
@@ -1324,6 +1660,19 @@
         return;
       case "composer_reset":
         el.composer.value = "";
+        popupHide();
+        return;
+      case "commands":
+        // The slash registry. One push per load, feeding both the popup and the
+        // help sheet's command table (bridge.py's catalogue).
+        commands = event.rows || [];
+        return;
+      case "settings":
+        themeChoices = event.themes || [];
+        applyTheme(event.theme);
+        // A settings modal open across a repaint (the save's own echo) keeps
+        // showing the truth rather than the radio the click left behind.
+        if (pageModal === "settings") openSettings();
         return;
       case "toast":
         toast(event);
@@ -1342,6 +1691,7 @@
       case "modal_close":
         if (modalId === event.prompt_id) {
           modalId = null;
+          modalKind = null;
           el.scrim.hidden = true;
         }
         return;
@@ -1370,6 +1720,313 @@
     }
   }
 
+  /* == the key table =========================================================
+     ONE array, two consumers: the document keydown handler dispatches from it
+     and the help sheet renders it. That is the whole point of it being a table
+     at all - a key rebound in a switch statement and a help screen written in
+     prose drift on the first change, and a cheatsheet nobody trusts is worse
+     than none.
+
+     It is the GUI's OWN table, not a copy of the TUI's: Shift+Enter is the
+     newline here, F1/F4 open page screens rather than Textual modals, and every
+     recorded divergence in docs/design/gui.md §3 shows up as the wording of a
+     row. The composer's own keys (Enter, Shift+Enter, the arrows and Esc inside
+     the box) are deliberately NOT here - they belong to the textarea's handler,
+     which is a different dispatcher, and the help sheet describes them as prose
+     in its "Chat box" block.
+
+     Fields:
+       keys    what the help sheet SHOWS ("shift+tab", "ctrl+x")
+       on      the raw KeyboardEvent.key values that match
+       mods    "" | "ctrl" | "shift" - which modifier must be down
+       hot     fires even while a text box has focus. The TUI buys this with
+               priority=True; here it is this flag, plus one rule the flag
+               cannot express: a PRINTABLE key never fires while typing, whatever
+               it is bound to, which is why "?" opens help from the transcript
+               and types a question mark in the composer.
+       when    optional extra condition (the gate keys)
+       what    the help sheet's description
+       section which help block it appears under */
+
+  var KEY_SECTIONS = ["App", "Approval", "Session"];
+
+  var KEYS = [
+    // -- App ---------------------------------------------------------------
+    { keys: ["F1", "?"], on: ["F1", "?"], mods: "", hot: true, section: "App",
+      what: "this help", run: function () { openHelp(); } },
+    { keys: ["F2"], on: ["F2"], mods: "", hot: true, section: "App",
+      what: "service profiles: sizes, what each service LOOKS like, which finish signals it may watch",
+      run: function () { api("svc_open"); } },
+    { keys: ["F3"], on: ["F3"], mods: "", hot: true, section: "App",
+      what: "hide/show the sidebar", run: function () { toggleSidebar(); } },
+    { keys: ["F4"], on: ["F4"], mods: "", hot: true, section: "App",
+      what: "appearance (theme)", run: function () { openSettings(); } },
+    { keys: ["F5"], on: ["F5"], mods: "", hot: true, section: "App",
+      what: "ARM / DISARM the tool (also /armed). Disarmed it still watches and shows everything, but never clicks, pastes or reads your clipboard",
+      run: function () { api("armed", null); } },
+    { keys: ["F6"], on: ["F6"], mods: "", hot: true, section: "App",
+      what: "select the next window tab (view only - it never moves what the automation drives)",
+      run: function () { api("next_window"); } },
+    { keys: ["F7"], on: ["F7"], mods: "", hot: true, section: "App",
+      what: "hide/show ELEMENTS - the pictures the automation is recognising right now",
+      run: function () { toggleElements(); } },
+    { keys: ["F8"], on: ["F8"], mods: "", hot: true, section: "App",
+      what: "hide/show the HARNESS DECISION LOG (also /log)", run: function () { toggleLog(); } },
+    { keys: ["shift+tab"], on: ["Tab"], mods: "shift", hot: true, section: "App",
+      what: "cycle the permission mode: ask -> plan -> unattended -> ask. Works before a session and mid-turn",
+      run: function () { api("mode"); } },
+    { keys: ["ctrl+enter"], on: ["Enter"], mods: "ctrl", hot: true, section: "App",
+      what: "send the chat box without having to be in it", run: function () { send(); } },
+    { keys: ["ctrl+q"], on: ["q", "Q"], mods: "ctrl", hot: true, section: "App",
+      what: "quit (asks first when a turn is mid-flight, as closing the window does)",
+      run: function () { api("quit"); } },
+
+    // -- Approval ----------------------------------------------------------
+    { keys: ["y"], on: ["y"], mods: "", section: "Approval", when: gateIsOpen,
+      what: "approve the gated call", run: function () { api("decide", "approve", ""); } },
+    { keys: ["n"], on: ["n"], mods: "", section: "Approval", when: gateIsOpen,
+      what: "reject it (a reason is optional)", run: function () { openReject(); } },
+    { keys: ["a"], on: ["a"], mods: "", section: "Approval", when: alwaysOffered,
+      what: "approve and stop asking - auto-accept edits, or always allow this pattern",
+      run: function () { api("decide", "approve_always", ""); } },
+
+    // -- Session -----------------------------------------------------------
+    { keys: ["u"], on: ["u"], mods: "", section: "Session",
+      what: "undo the last turn (confirm first; a revert notice is copied for the model)",
+      run: function () { api("undo"); } },
+    { keys: ["c"], on: ["c"], mods: "", section: "Session",
+      what: "re-copy the last outbound payload; press c TWICE quickly and it is pasted into the chat as well",
+      run: function () { api("recopy"); } },
+    { keys: ["i"], on: ["i"], mods: "", section: "Session",
+      what: "force-ingest the clipboard now", run: function () { api("ingest"); } },
+    { keys: ["r"], on: ["r"], mods: "", section: "Session",
+      what: "re-send this service's extra instructions with the next payload (set them with F2)",
+      run: function () { api("reinstruct"); } },
+    { keys: ["w"], on: ["w"], mods: "", section: "Session",
+      what: "pause/resume the clipboard watcher", run: function () { api("watch"); } },
+    { keys: ["t"], on: ["t"], mods: "", section: "Session",
+      what: "jump back to the chat box", run: focusComposer },
+    { keys: ["e"], on: ["e"], mods: "", section: "Session",
+      what: "end session / show the summary", run: function () { api("end_session"); } },
+    { keys: ["l"], on: ["l"], mods: "", section: "Session",
+      what: "export the whole chat log to a file (raw blocks and payloads, for debugging)",
+      run: function () { api("export_log"); } },
+    { keys: ["x"], on: ["x"], mods: "", section: "Session",
+      what: "expand/collapse the last collapsed output", run: function () { toggleLastBlock(); } },
+    { keys: ["ctrl+x"], on: ["x", "X"], mods: "ctrl", hot: true, section: "Session",
+      what: "cancel the tool calls running now. The turn still ends cleanly and the model is told",
+      run: function () { api("cancel"); } },
+    { keys: ["ctrl+o"], on: ["o", "O"], mods: "ctrl", hot: true, section: "Session",
+      what: "show/hide what the running command is printing (clicking the run panel does the same)",
+      run: function () { toggleRunOutput(); } }
+  ];
+
+  function gateIsOpen() {
+    return gateOpen;
+  }
+
+  function alwaysOffered() {
+    return gateOpen && gateAlwaysOffered;
+  }
+
+  // `t`. Page-side, with no controller behind it, exactly like F3's sidebar:
+  // "put the caret back in the box" is a fact about this window. The gate is the
+  // box's own disabled flag, which Python already composed from the brief's
+  // precedence table (GuiView._composer_mode) - so there is one answer to "may
+  // the user type right now", not two.
+  function focusComposer() {
+    if (el.composer.disabled) return;
+    el.composer.focus();
+  }
+
+  function keyMatches(entry, ev) {
+    if (ev.altKey || ev.metaKey) return false;
+    if (ev.ctrlKey !== (entry.mods === "ctrl")) return false;
+    if (entry.mods === "shift" && !ev.shiftKey) return false;
+    return entry.on.indexOf(ev.key) !== -1;
+  }
+
+  function dispatchKey(ev, typing) {
+    var printable =
+      typeof ev.key === "string" &&
+      ev.key.length === 1 &&
+      !ev.ctrlKey &&
+      !ev.altKey &&
+      !ev.metaKey;
+    for (var i = 0; i < KEYS.length; i += 1) {
+      var entry = KEYS[i];
+      if (!keyMatches(entry, ev)) continue;
+      // Inert while a text box has focus - the ONE thing keeping the letters
+      // below from firing into a sentence somebody is typing - unless the key is
+      // hot AND is not a character the box would have received.
+      if (typing && (!entry.hot || printable)) continue;
+      if (entry.when && !entry.when()) continue;
+      ev.preventDefault();
+      entry.run();
+      return true;
+    }
+    return false;
+  }
+
+  // The composer's own dispatcher, and the first three stages of the Esc
+  // chain. Enter sends, Shift+Enter is a newline: the TUI uses ctrl+j because
+  // Enter is its send key inside a TextArea, and this is the web-native
+  // convention - a deliberate shell-idiom difference (docs/design/gui.md 2),
+  // not drift.
+  function onComposerKey(ev) {
+    // The popup owns five keys and only while it is open, checked FIRST -
+    // ahead of Enter and ahead of Esc's own stages, exactly as
+    // ChatComposer._on_key checks it (modals-keys-esc.md 3.3, stage 1).
+    if (popupOpen() && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+      if (ev.key === "ArrowUp" || ev.key === "ArrowDown") {
+        ev.preventDefault();
+        popupMove(ev.key === "ArrowUp" ? -1 : 1);
+        return;
+      }
+      if (ev.key === "Enter" || ev.key === "Tab") {
+        // Swallowed even with nothing highlighted: a bare "/" plus Enter must
+        // not send a lone slash, it must wait to be narrowed. Tab is Enter's
+        // twin here and does NOT move focus.
+        ev.preventDefault();
+        popupComplete();
+        return;
+      }
+      if (ev.key === "Escape") {
+        // ESC STAGE 1: the popup only. The text and the caret are untouched,
+        // and this does not fall through to the two stages below.
+        ev.preventDefault();
+        popupHide();
+        return;
+      }
+    }
+    if (ev.key === "Enter" && !ev.shiftKey && !ev.ctrlKey) {
+      ev.preventDefault();
+      send();
+      return;
+    }
+    if (ev.key === "Escape") {
+      ev.preventDefault();
+      // ESC STAGE 3: an empty box lets go, which is what makes the single-key
+      // shortcuts (w/c/i/r/x/u/t/l/e, y/n/a) reachable at all - the
+      // inert-while-typing rule is only safe because there is a way to stop
+      // typing.
+      if (!el.composer.value) {
+        el.composer.blur();
+        return;
+      }
+      // ESC STAGE 2: text present clears the box and KEEPS focus so the
+      // rewrite can start immediately. Through execCommand so the browser's
+      // own undo stack survives it - assigning .value would throw the
+      // paragraph away for good, and the TUI's equivalent is deliberately an
+      // undoable edit (history.checkpoint(); clear()).
+      el.composer.select();
+      if (!document.execCommand || !document.execCommand("delete")) {
+        el.composer.value = "";
+      }
+      syncPopup();
+    }
+  
+  }
+
+  /* The app-wide dispatcher, and the rest of the Esc chain.
+
+     THE ESC CHAIN, in the brief's precedence order (modals-keys-esc.md 3.3 /
+     6.2), across the two handlers that implement it:
+
+       1. slash popup open        -> composer handler above: closes the popup
+                                     only, text and caret untouched
+       2. composer has text       -> composer handler above: clears it
+                                     (undoably) and KEEPS focus
+       3. composer is empty       -> composer handler above: blurs, which is
+                                     "command mode"
+       4. reject-reason box open  -> below, and on the box's own handler when
+                                     it has the caret: closes the note and
+                                     leaves the gate pending
+       5. a modal is on top       -> below, first: each screen's own meaning
+                                     (a confirm denies, the summary closes,
+                                     a text prompt cancels, help and settings
+                                     close, the service editor asks Python)
+       6. nothing of the above    -> no-op
+
+     Stage 5 is CHECKED first here and that is not a reordering: a GUI modal
+     traps focus behind its scrim, so stages 1-3 cannot be live at the same
+     time as one, and the two orders can only ever agree. Textual gets the
+     same guarantee from its screen stack. No stage is skipped - every surface
+     the brief names exists in this shell. */
+  function onDocumentKey(ev) {
+    // Whatever a nearer handler already claimed is not this one's business.
+    // The composer's Esc stages and the reject note's own keys all
+    // preventDefault, so this is how stages 1-3 stop stage 4 from also
+    // firing on the way up.
+    if (ev.defaultPrevented) return;
+    // The inert-letters rule (main-chat.md section 6): a focused text box
+    // swallows every bare letter, and it is the ONLY thing keeping y/n/a/x
+    // and the session keys from firing into a sentence someone is typing.
+    // SELECT counts as typing: a focused <select> uses bare letters to jump
+    // to an option, and the service picker is one keystroke away from every
+    // session key on the table.
+    var tag = ev.target && ev.target.tagName;
+    var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+    var plain = !ev.ctrlKey && !ev.altKey && !ev.metaKey;
+    // ESC STAGE 5, part one: a modal owns the keyboard while it is up. The
+    // session keys would otherwise fire into a screen that is asking a
+    // question, and the summary has four keys of its own.
+    if (modalUp()) {
+      if (typing || !plain) return;
+      if (ev.key === "Escape") {
+        ev.preventDefault();
+        // Each screen's own escape: a page screen just closes; a prompt
+        // answers the way that prompt says no (the summary "closes", a
+        // confirm denies, a text prompt cancels).
+        if (pageModal) closePageModal();
+        else if (modalKind === "summary") answer("close");
+        else if (modalKind === "text") answer(null);
+        else answer(false);
+        return;
+      }
+      // F1 closes the help sheet it opened, exactly as the TUI's HelpScreen
+      // answers to f1 as well as escape.
+      if (ev.key === "F1" && pageModal === "help") {
+        ev.preventDefault();
+        closePageModal();
+        return;
+      }
+      var choice = modalKind === "summary" ? summaryKey(ev.key) : null;
+      if (choice) {
+        ev.preventDefault();
+        answer(choice);
+      }
+      return;
+    }
+    // ESC STAGE 5, part two: the service editor owns the keyboard the same
+    // way, one layer below the confirm scrim above (its "Forget appearance"
+    // and discard dialogs open over it). Escape closes it - which may be
+    // REFUSED on the far side while a capture overlay is up, or held for the
+    // discard confirm - and every session key and page toggle is inert until
+    // it is gone.
+    if (editorOpen) {
+      if (ev.key === "Escape" && plain) {
+        ev.preventDefault();
+        api("svc_close");
+      }
+      return;
+    }
+    // ESC STAGE 4: the reject-reason box is open but does not have the caret
+    // (the user clicked away, or never typed). Closing it returns to the
+    // pending gate without rejecting anything.
+    if (ev.key === "Escape" && plain) {
+      ev.preventDefault();
+      if (rejectOpen) closeReject();
+      // ESC STAGE 6 otherwise: nothing to cancel, nothing happens.
+      return;
+    }
+    // Everything else is the key table's, which is also what the help sheet
+    // is drawn from - so a binding cannot exist without being documented, and
+    // cannot be documented without existing.
+    dispatchKey(ev, typing);
+  
+  }
+
   /* == input =============================================================== */
 
   function send() {
@@ -1377,6 +2034,7 @@
     var text = el.composer.value;
     if (!text.trim()) return;
     el.composer.value = "";
+    popupHide();
     api("submit", text);
   }
 
@@ -1387,6 +2045,7 @@
       winRowMaster: id("win-row-master"),
       winRowSub: id("win-row-sub"),
       composer: id("composer"),
+      popup: id("cmd-popup"),
       send: id("send"),
       phase: id("phase"),
       loop: id("loop"),
@@ -1466,6 +2125,7 @@
       gateNote: id("gate-note"),
       toasts: id("toasts"),
       scrim: id("scrim"),
+      modal: id("modal"),
       modalTitle: id("modal-title"),
       modalBody: id("modal-body"),
       modalActions: id("modal-actions"),
@@ -1509,35 +2169,11 @@
       });
     });
 
-    // Enter sends, Shift+Enter is a newline. The TUI uses ctrl+j for the
-    // newline because Enter is its send key inside a TextArea; this is the
-    // web-native convention and a deliberate shell-idiom difference
-    // (docs/design/gui.md 2), not drift.
-    el.composer.addEventListener("keydown", function (ev) {
-      if (ev.key === "Enter" && !ev.shiftKey) {
-        ev.preventDefault();
-        send();
-        return;
-      }
-      // Esc's two composer stages (modals-keys-esc.md section 3.3): text
-      // present clears the box and KEEPS focus so the rewrite can start
-      // immediately; an empty box blurs, which is what makes the single-key
-      // shortcuts (w/c/i/r/x, y/n/a) reachable at all - the inert-while-typing
-      // rule is only safe because there is a way to stop typing. The clear goes
-      // through execCommand so the browser's own undo stack survives it;
-      // assigning .value would throw the paragraph away for good.
-      if (ev.key === "Escape") {
-        ev.preventDefault();
-        if (!el.composer.value) {
-          el.composer.blur();
-          return;
-        }
-        el.composer.select();
-        if (!document.execCommand || !document.execCommand("delete")) {
-          el.composer.value = "";
-        }
-      }
-    });
+    el.composer.addEventListener("keydown", onComposerKey);
+    // Every edit re-decides the list: typing, pasting, cutting, undo. One
+    // listener rather than one per cause, which is what `sync_popup` on the
+    // Changed event is on the other side.
+    el.composer.addEventListener("input", syncPopup);
     el.send.addEventListener("click", send);
 
     // A click anywhere on the run panel is the same request as ctrl+o: the
@@ -1640,138 +2276,7 @@
     // focusable-by-wheel behave like any other scroll box.
     el.logLines.addEventListener("wheel", function () {}, { passive: true });
 
-    document.addEventListener("keydown", function (ev) {
-      // The inert-letters rule (main-chat.md section 6): a focused text box
-      // swallows every bare letter, and it is the ONLY thing keeping y/n/a/x
-      // and the five session keys from firing into a sentence someone is
-      // typing. The function keys, shift+tab and the ctrl-chords are the TUI's
-      // priority bindings and fire regardless of focus.
-      // SELECT counts as typing: a focused <select> uses bare letters to jump
-      // to an option, and the service picker is one keystroke away from every
-      // session key on this list.
-      var tag = ev.target && ev.target.tagName;
-      var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
-      // A modal owns the keyboard while it is up: the session keys below would
-      // otherwise fire into a screen that is asking a question, and the summary
-      // has four keys of its own. The scrim covers the app, so this is the same
-      // "modal screens stack above bindings" rule the TUI gets from Textual.
-      if (modalId) {
-        if (typing || ev.ctrlKey || ev.altKey || ev.metaKey) return;
-        var choice = modalKind === "summary" ? summaryKey(ev.key) : null;
-        if (choice) {
-          ev.preventDefault();
-          answer(choice);
-        }
-        return;
-      }
-      // The service editor owns the keyboard the same way, one layer below the
-      // confirm scrim above (its "Forget appearance" and discard dialogs open
-      // over it). Escape closes it - which may be REFUSED on the far side while
-      // a capture overlay is up, or held for the discard confirm - and every
-      // session key and page toggle is inert until it is gone, exactly as a
-      // Textual ModalScreen stacks above its bindings.
-      if (editorOpen) {
-        if (ev.key === "Escape" && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
-          ev.preventDefault();
-          api("svc_close");
-        }
-        return;
-      }
-      if (!ev.ctrlKey && !ev.altKey && !ev.metaKey) {
-        if (ev.key === "F2") {
-          // The per-service profile editor. A priority key like F3/F7/F8: it
-          // must win over a focused composer, and it is refused out loud on the
-          // far side while a region picker is up anywhere in the app.
-          ev.preventDefault();
-          api("svc_open");
-          return;
-        }
-        if (ev.key === "F3") {
-          ev.preventDefault();
-          toggleSidebar();
-          return;
-        }
-        if (ev.key === "F5") {
-          // preventDefault first: F5 is the browser's reload, and a WebView2
-          // window that reloaded here would drop the whole session's chrome.
-          ev.preventDefault();
-          api("armed", null); // null = toggle, the bare /armed and F5
-          return;
-        }
-        if (ev.key === "F7") {
-          // The ELEMENTS column. A priority key in the TUI and the same here:
-          // it must win over a focused composer, which is why it is up with F3
-          // and F8 rather than down with the bare letters.
-          ev.preventDefault();
-          toggleElements();
-          return;
-        }
-        if (ev.key === "F8") {
-          ev.preventDefault();
-          toggleLog();
-          return;
-        }
-        if (ev.key === "F6") {
-          // Pure navigation: it moves what the user SEES and what the sidebar
-          // configures, and never where output lands or which window the
-          // automation drives.
-          ev.preventDefault();
-          api("next_window");
-          return;
-        }
-      }
-      if (ev.key === "Tab" && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
-        // Never gated - it must work pre-session and mid-turn, which are the
-        // two moments the feature exists for (modals-keys-esc.md section 6.3).
-        ev.preventDefault();
-        api("mode");
-        return;
-      }
-      if (ev.ctrlKey && !ev.altKey && !ev.metaKey) {
-        if (ev.key === "x" || ev.key === "X") {
-          ev.preventDefault();
-          api("cancel");
-        } else if (ev.key === "o" || ev.key === "O") {
-          ev.preventDefault();
-          toggleRunOutput();
-        }
-        return;
-      }
-      if (typing || ev.ctrlKey || ev.altKey || ev.metaKey) return;
-      if (ev.key === "x") {
-        toggleLastBlock();
-        return;
-      }
-      // The session keys. Each one is a single controller call on the far side
-      // and every refusal lives there, so a press that cannot do anything comes
-      // back as a toast rather than being swallowed here.
-      if (ev.key === "w") {
-        api("watch");
-        return;
-      }
-      if (ev.key === "c") {
-        api("recopy");
-        return;
-      }
-      if (ev.key === "i") {
-        api("ingest");
-        return;
-      }
-      if (ev.key === "r") {
-        api("reinstruct");
-        return;
-      }
-      if (ev.key === "e") {
-        // The session summary. Gated on the Python side, where the phase is
-        // known, and refused with a toast rather than silence.
-        api("end_session");
-        return;
-      }
-      if (!gateOpen) return;
-      if (ev.key === "y") api("decide", "approve", "");
-      else if (ev.key === "n") openReject();
-      else if (ev.key === "a" && gateAlwaysOffered) api("decide", "approve_always", "");
-    });
+    document.addEventListener("keydown", onDocumentKey);
 
     booted = true;
     while (pending.length) receive(pending.shift());

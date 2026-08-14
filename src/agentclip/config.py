@@ -111,6 +111,15 @@ DEFAULT_DENY_TOKENS = (";", "&&", "||", "|", "`", "$(", ">", "<", "\n")
 VALID_THEMES = frozenset({"textual-light", "textual-dark", "claude-warm", "claude-dark"})
 DEFAULT_THEME = "textual-dark"
 
+# The GUI shell's appearance, in its OWN table. `[general] theme` names a
+# Textual theme and is validated against VALID_THEMES above; the pywebview
+# shell's themes are CSS palettes with no Textual equivalent, so writing one of
+# these names into that key would make every TUI launch warn and reset it. Two
+# shells, two vocabularies, one file - and `[gui]` is where this shell's answers
+# go (docs/design/gui.md section 3).
+VALID_GUI_THEMES = frozenset({"dark", "light"})
+DEFAULT_GUI_THEME = "dark"
+
 
 # How long the response region must sit unchanged before the stale finish
 # detector calls the response done. Per service because streaming cadence
@@ -450,6 +459,18 @@ class NotifyConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class GuiConfig:
+    """The pywebview shell's own settings - one key so far, its appearance.
+
+    Shell-specific on purpose: see VALID_GUI_THEMES. Everything the two shells
+    genuinely share already lives in the tables above, and a setting only one
+    frontend can honour belongs where the other one will never read it.
+    """
+
+    theme: str = DEFAULT_GUI_THEME
+
+
+@dataclass(frozen=True, slots=True)
 class BackupConfig:
     keep_sessions: int = 5
 
@@ -461,6 +482,7 @@ class Config:
     approval: ApprovalConfig = field(default_factory=ApprovalConfig)
     limits: LimitsConfig = field(default_factory=LimitsConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+    gui: GuiConfig = field(default_factory=GuiConfig)
     backup: BackupConfig = field(default_factory=BackupConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
@@ -901,6 +923,7 @@ def load_config(
             )
     limits_t = merged.get("limits", {})
     notify_t = merged.get("notify", {})
+    gui_t = merged.get("gui", {})
     backup_t = merged.get("backup", {})
     paths_t = merged.get("paths", {})
     permission_t = merged.get("permission", {})
@@ -1019,6 +1042,11 @@ def load_config(
         warnings.append(f"config: unknown theme {theme!r}; using {DEFAULT_THEME!r}")
         theme = DEFAULT_THEME
 
+    gui_theme = _take_str(gui_t, "theme", DEFAULT_GUI_THEME, "gui", warnings)
+    if gui_theme not in VALID_GUI_THEMES:
+        warnings.append(f"config: unknown gui theme {gui_theme!r}; using {DEFAULT_GUI_THEME!r}")
+        gui_theme = DEFAULT_GUI_THEME
+
     # A misspelt permission mode must not silently arm a session that never asks:
     # anything unreadable falls back to "ask" and says so.
     mode = _take_str(approval_t, "mode", "ask", "approval", warnings)
@@ -1103,6 +1131,7 @@ def load_config(
             bell=_take_bool(notify_t, "bell", True, "notify", warnings),
             toast=_take_bool(notify_t, "toast", True, "notify", warnings),
         ),
+        gui=GuiConfig(theme=gui_theme),
         backup=BackupConfig(
             keep_sessions=_take_int(backup_t, "keep_sessions", 5, 1, 1_000, "backup", warnings),
         ),
@@ -1253,6 +1282,39 @@ def save_theme(theme: str, path: Path | None = None) -> None:
     fd, tmp_name = tempfile.mkstemp(
         dir=target.parent, prefix=f".{target.name}.", suffix=".tmp"
     )
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(data, f)
+        os.replace(tmp_name, target)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(tmp_name)
+        raise
+
+
+def save_gui_theme(theme: str, path: Path | None = None) -> None:
+    """Persist ``theme`` as ``[gui] theme`` into the global config.toml at
+    ``path`` (default: :func:`default_global_config_path`).
+
+    :func:`save_theme`'s twin, one table over: the GUI shell's palettes are CSS
+    and have no Textual name, so they may not share ``[general] theme`` - a
+    ``"dark"`` there would make every TUI launch warn and fall back
+    (see :data:`VALID_GUI_THEMES`). Same atomic write, same "only this key is
+    touched, everything else in the file survives verbatim" contract, same
+    injectable ``path`` so a test never writes into the user's real config.
+    """
+    target = path if path is not None else default_global_config_path()
+    discard_warnings: list[str] = []
+    data = _read_toml(target, discard_warnings)
+
+    gui_table = dict(data.get("gui", {}))
+    gui_table["theme"] = theme
+
+    data = dict(data)
+    data["gui"] = gui_table
+
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
     try:
         with os.fdopen(fd, "wb") as f:
             tomli_w.dump(data, f)

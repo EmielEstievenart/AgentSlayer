@@ -602,7 +602,9 @@ def test_the_page_draws_the_column_and_binds_f7() -> None:
     assert 'id="elements-title"' in html
     # One <img> per row, sized by CSS, and the F7 flip that tells Python.
     assert 'createElement("img")' in js
-    assert 'ev.key === "F7"' in js and "toggleElements" in js
+    # F7 is a row of the one key table the dispatcher and the help sheet share
+    # (parity increment 6), not a branch of a switch any more.
+    assert 'on: ["F7"]' in js and "toggleElements" in js
     assert 'api("elements", !el.elements.hidden)' in js
     assert 'api("set_region")' in js
     assert ".el-crop img" in css

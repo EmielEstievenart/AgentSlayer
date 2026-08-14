@@ -106,6 +106,17 @@
           </section>
 
           <footer class="composer">
+            <!-- The slash-command popup. Absolutely positioned over the
+                 transcript rather than in the flow, so narrowing the list does
+                 not shove the conversation up and down a line at a time; and
+                 deliberately NON-FOCUSABLE - no buttons, no tabindex, no
+                 controls of any kind. It is painted from the composer's own key
+                 and input events and the caret never leaves the box, which is
+                 exactly the TUI's design (its CommandPopup is one Static that
+                 cannot take focus). Rows never wrap: a wrapped summary would
+                 put the highlight on a different line from the command it is
+                 about. -->
+            <div class="cmd-popup" id="cmd-popup" aria-hidden="true" hidden></div>
             <textarea id="composer" rows="3" disabled placeholder="no session"></textarea>
             <button id="send" type="button" disabled>Send</button>
           </footer>
@@ -164,8 +175,8 @@
           <div class="side-status" id="det-COPY"></div>
 
           <div class="side-hint">
-            F3 hides this column · F5 armed · F2 services · F7 elements · F8 log
-            · F6 next window · e summary
+            F1 help · F3 hides this column · F5 armed · F2 services · F7
+            elements · F8 log · F6 next window · e summary
           </div>
         </aside>
 
@@ -323,10 +334,14 @@
       </div>
     </div>
 
-    <!-- One modal at a time: confirm / prompt_text / show_summary, plus the
-         payload block park_off_clipboard falls back to. -->
+    <!-- One modal at a time, and ONE implementation of one: the Python prompts
+         (confirm / prompt_text / show_summary - the quit-mid-turn warning among
+         them), the payload block park_off_clipboard falls back to, and the
+         page's own two screens, F1's help sheet and F4's settings. A prompt is a
+         controller flow parked on an answer, so a prompt always wins: F1/F4 are
+         inert while one is up. -->
     <div class="scrim" id="scrim" hidden>
-      <div class="modal">
+      <div class="modal" id="modal">
         <div class="modal-title" id="modal-title"></div>
         <div class="modal-body" id="modal-body"></div>
         <div class="modal-actions" id="modal-actions"></div>

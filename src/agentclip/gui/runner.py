@@ -21,6 +21,19 @@ caller of ``evaluate_js``. The automation's watcher and detector threads are
 unchanged: the AutomationController has always owned them, and this shell only
 starts and stops them exactly as ``MainScreen`` does.
 
+**Closing mid-turn.** pywebview's ``closing`` event is created with
+``should_lock=True`` (``webview/window.py``), so its handlers run SYNCHRONOUSLY
+on the window's own thread and a handler returning ``False`` sets
+``args.Cancel`` on the WinForms ``FormClosing`` args - the close is refused
+(``webview/platforms/winforms.py:on_closing``, ``webview/event.py:Event.set``).
+That is the whole mechanism :meth:`GuiRunner.window_closing` uses, and it is
+also why that method may do nothing but read a flag and post: the bridge's
+drainer parks inside ``evaluate_js`` waiting on this very thread, and
+``destroy_window`` reaches it through a blocking ``Control.Invoke``, so anything
+that waited here would be waiting on itself. It posts the confirm onto the loop,
+returns ``False``, and the *answer* comes back through the ordinary bridge path
+and closes the window from the loop thread.
+
 **Shutdown** is the same shape as the TUI's quit path (``AgentClipApp.action_quit``
 -> ``MainScreen.on_unmount``), in the same order and for the same reasons: stop
 what touches the machine first (the clipboard watcher and the detector poller,
@@ -74,6 +87,12 @@ class GuiRunner:
         self._running = threading.Event()
         self._stopped = False
         self._page_started = False
+        # Has a close already been approved? Set by every PROGRAMMATIC close
+        # (``request_close``, which is both ``ChatView.exit_app`` and the
+        # confirm's yes) and by the first ``closing`` that found nothing to
+        # lose, so the ``closing`` that ``window.destroy()`` itself raises does
+        # not ask the same question a second time.
+        self._quit_ok = threading.Event()
         self._on_close = on_close if on_close is not None else _no_close
         self.bridge = Bridge()
         self.view = GuiView(
@@ -107,12 +126,50 @@ class GuiRunner:
 
     def request_close(self) -> None:
         """``ChatView.exit_app``: ask the window to go away. Shutdown itself
-        happens on the window's ``closing`` event, so quitting from the page and
-        quitting from the title bar take exactly one path."""
+        happens after ``webview.start()`` returns, so quitting from the page and
+        quitting from the title bar take exactly one path.
+
+        Called from the GUI's loop thread - by the controller when it wants out,
+        and by the quit confirm's yes. Either way the close is already approved,
+        so the flag goes down first: ``window.destroy()`` raises ``closing`` on
+        the window's own thread on its way out, and that one must sail through
+        rather than re-ask.
+        """
+        self._quit_ok.set()
         try:
             self._on_close()
         except Exception:  # noqa: BLE001 - a window already gone is not an error
             return
+
+    def window_closing(self) -> bool | None:
+        """The window is being closed. Return ``False`` to refuse it.
+
+        **Runs on the window's own thread** and must never block there (see the
+        module docstring): the drainer is parked against that thread inside
+        ``evaluate_js``, and a ``destroy`` reaches it through a blocking
+        ``Invoke``. So this reads two flags and, at most, posts one callback.
+
+        Three outcomes, and only the middle one is new:
+
+        * already approved (``exit_app``, or a confirmed quit) -> ``None``,
+          close proceeds;
+        * a turn would be lost (``GuiView.mid_turn``, ``action_quit``'s own
+          formula) -> post the confirm onto the loop and return ``False``, which
+          is what ``Event.set`` turns into ``args.Cancel = True``;
+        * nothing in flight -> ``None``, exactly as this shell has always
+          behaved.
+        """
+        if self._quit_ok.is_set():
+            return None
+        try:
+            mid_turn = self.view.mid_turn
+        except Exception:  # noqa: BLE001 - never trap a user in a window
+            return None
+        if not mid_turn:
+            self._quit_ok.set()
+            return None
+        self.schedule_call(self.view.confirm_quit)
+        return False
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -279,6 +336,18 @@ class GuiRunner:
 
     def end_session(self) -> None:
         self.schedule_call(self.view.end_session)
+
+    def undo(self) -> None:
+        self.schedule_call(self.view.undo)
+
+    def export_log(self) -> None:
+        self.schedule_call(self.view.export_log)
+
+    def set_theme(self, theme: str) -> None:
+        self.schedule_call(self.view.set_theme, theme)
+
+    def request_quit(self) -> None:
+        self.schedule_call(self.view.request_quit)
 
     # The service editor (F2). Fourteen one-line marshals for the reason the
     # rest are one-line marshals: pywebview runs each js_api method on a thread

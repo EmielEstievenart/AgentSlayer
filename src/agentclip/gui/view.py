@@ -31,7 +31,8 @@ per-window transcripts and the session summary (increment 3), the ELEMENTS
 column, the chat-region picker and ``/identify`` (increment 4), and the SERVICE
 EDITOR behind F2 (increment 5, whose model lives in ``gui/service_editor.py``).
 What is left of the parity backlog is whole SURFACES this shell does not have
-yet - settings/help/modals, the SSH connect dialog.
+yet - the SSH connect dialog. (Help, settings, the slash popup and the whole key
+chain landed in increment 6.)
 """
 
 from __future__ import annotations
@@ -45,6 +46,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 
 from agentclip.app import SessionController, SessionSpec, SessionView
+from agentclip.app.commands import COMMANDS
 from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import RunCall, Severity
 from agentclip.automation.controller import AutomationController, DetectorPoller
@@ -58,11 +60,14 @@ from agentclip.automation.loop_state import LOOP_TRANSITIONS, LoopState
 from agentclip.automation.ops import ElementClick
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.config import (
+    VALID_GUI_THEMES,
     Config,
+    GuiConfig,
     ServicePreset,
     default_global_config_path,
     default_profile_dir,
     save_active_services,
+    save_gui_theme,
     save_services,
 )
 from agentclip.engine.engine import Decision, Engine, PendingAction
@@ -202,6 +207,36 @@ STALE_OFF = "finish detection off - F2 to configure"
 # What the SERVICE block's appearance count is followed by: the door to the
 # captures, which is the editor this key opens (``sidebar.PROFILE_HINT``).
 PROFILE_HINT = " · F2 for captures + detection"
+
+# == settings (F4) ============================================================
+# The TUI's SettingsScreen is a theme picker and nothing else - one "Appearance"
+# tab over four Textual themes (``tui/screens/settings.py``), and it does NOT
+# touch ``[notify] bell/toast``, which is file-only in both shells. So this
+# shell's F4 mirrors exactly that: an appearance picker, no more.
+#
+# The two palettes are CSS, not Textual themes, so they are named in this
+# shell's own vocabulary and persisted in this shell's own config table
+# (``[gui] theme``, ``config.VALID_GUI_THEMES``). Live preview is the TUI's
+# model too: picking one applies it immediately - but here it is also SAVED
+# immediately, because a page-side class flip has no "revert on escape" to be
+# the other half of a staged edit and a setting that survives the window is what
+# the user asked for by picking it (docs/design/gui.md §3).
+THEME_CHOICES: tuple[tuple[str, str], ...] = (
+    ("dark", "Dark"),
+    ("light", "Light"),
+)
+# ``AgentClipApp._open_settings``'s toast, word for word.
+THEME_SAVED = "theme saved"
+
+# == quitting mid-turn (ctrl+q / the window's close button) ===================
+# ``AgentClipApp.action_quit``'s ConfirmScreen, verbatim: the same two sentences
+# in the same order, because what they promise (the turn is lost, the backups
+# are not) is the whole reason the dialog exists.
+QUIT_TITLE = "Quit mid-turn?"
+QUIT_BODY = (
+    "The current turn is incomplete and its results were never sent to the "
+    "model. Per-turn backups are kept on disk."
+)
 
 # == the ELEMENTS column ======================================================
 # The third column (F7): one row per appearance the tool can recognise, showing
@@ -709,6 +744,10 @@ class GuiView:
         self._detector: ScreenDetector | None = None
         self._detector_worker: DetectorPoller | None = None
         self._logged_session_active = False
+        # Is the quit-mid-turn confirm already up? ``AgentClipApp.action_quit``'s
+        # ``isinstance(self.screen, ConfirmScreen)`` guard: hammering the window's
+        # X while the dialog is open must not stack a second one behind it.
+        self._quit_confirming = False
 
         self._controller = SessionController(
             config,
@@ -744,6 +783,8 @@ class GuiView:
         self._push_rail()
         self._push_tabs()
         self._push_sidebar()
+        self._push_commands()
+        self._push_settings()
         self._remember_own_window()
         # Nothing is drawn yet, so this starts no worker - but it is the only
         # writer of the DETECTION block, and the block has to name the window it
@@ -788,6 +829,11 @@ class GuiView:
         self._push_tabs()
         self._push_sidebar()
         self._push_mcp()
+        # The registry and the appearance: both are page state a reload wipes,
+        # and both are read off Python (the commands from
+        # ``agentclip.app.commands``, the theme from the config).
+        self._push_commands()
+        self._push_settings()
         # A fresh page draws the ELEMENTS column hidden, whatever it was doing
         # before the load, so the encoder is told the truth before the rows go
         # out - a reload is the one moment this flag can be stale.
@@ -1727,18 +1773,169 @@ class GuiView:
         chat able to follow up, and the summary is one keypress away with three
         exits (undo one turn, start fresh, or just go back).
         """
-        view = self._last_view
-        if view is None or not view.session_active:
-            self.notify("no session yet - describe a task first", severity="warning")
-            return
-        phase = view.snapshot.phase.name if view.snapshot else "IDLE"
-        if view.busy or phase not in ("AWAITING_REPLY", "DONE"):
-            self.notify(
-                "a turn is running - the summary opens when the floor is back with you",
-                severity="warning",
-            )
+        if not self._settled(
+            "no session yet - describe a task first",
+            "a turn is running - the summary opens when the floor is back with you",
+        ):
             return
         self._controller.end_session()
+
+    def undo(self) -> None:
+        """`u`: put the most recent turn's file changes back.
+
+        Gated exactly as ``MainScreen.check_action`` gates it (a live session, no
+        turn in flight, the floor back with the user) and refused out loud where
+        the TUI dims the key - increment 2's divergence, kept.
+
+        What the confirm SAYS is the controller's, not this shell's: ``_undo_flow``
+        composes both lines and awaits ``ChatView.confirm``, so the dialog that
+        opens here is the same dialog the TUI opens, word for word. There is no
+        preview API to list the individual files - the engine only knows what it
+        restored *after* it has restored it (``store/backups.py:UndoReport``) -
+        so "what this restores" is the sentence the controller writes.
+        """
+        if not self._settled(
+            "no session yet - nothing to undo",
+            "a turn is running - undo waits until the floor is back with you",
+        ):
+            return
+        self._controller.undo()
+
+    def export_log(self) -> None:
+        """`l`: write the whole chat log (every window, every sub-run) to a file.
+
+        Gated on a session only: the export is a read-only snapshot that runs
+        outside the flow worker, so it is safe mid-turn and the TUI gates it the
+        same way (``check_action``: ``export_log`` -> ``session_active``).
+        """
+        if self._last_view is None or not self._last_view.session_active:
+            self.notify("no session yet - nothing to export", severity="warning")
+            return
+        self._controller.export_log()
+
+    def _settled(self, no_session: str, mid_turn: str) -> bool:
+        """The gate `u`, `e` and `t` share: a session, no turn, AWAITING_REPLY/DONE.
+
+        One implementation because ``check_action`` has one (``if action in
+        ("undo", "end_session")``, and ``follow_up``'s clause is the same three
+        conditions): two copies of "is the floor back with the user" is exactly
+        how two keys start disagreeing about it. Only the two refusals differ,
+        because a refusal that does not name what was refused is noise.
+        """
+        view = self._last_view
+        if view is None or not view.session_active:
+            self.notify(no_session, severity="warning")
+            return False
+        phase = view.snapshot.phase.name if view.snapshot else "IDLE"
+        if view.busy or phase not in ("AWAITING_REPLY", "DONE"):
+            self.notify(mid_turn, severity="warning")
+            return False
+        return True
+
+    # == settings (F4) and the help sheet (F1) =================================
+
+    def _push_commands(self) -> None:
+        """The slash-command registry, for the popup AND the help modal.
+
+        ``agentclip.app.commands.COMMANDS`` is the one table every consumer
+        reads - the controller's dispatch, `/help`, the unknown-command hint and
+        the TUI's popup and help screen - and this is how it reaches a page that
+        cannot import Python. It crosses ONCE per load rather than per keystroke:
+        the filtering is the page's (a round trip per character would be a
+        keystroke's worth of latency for string work), the DATA is never the
+        page's, which is what keeps a command added here from being invisible
+        there.
+        """
+        self._bridge.send(
+            "commands",
+            rows=[
+                {"name": command.name, "label": command.label, "summary": command.summary}
+                for command in COMMANDS
+            ],
+        )
+
+    def _push_settings(self) -> None:
+        self._bridge.send(
+            "settings",
+            theme=self._config.gui.theme,
+            themes=[{"value": value, "label": label} for value, label in THEME_CHOICES],
+        )
+
+    def set_theme(self, theme: str) -> None:
+        """F4's one setting: which CSS palette the page wears.
+
+        Saved as it is picked (see :data:`THEME_CHOICES`). An ``OSError`` toasts
+        and still applies in memory - the same trade ``_persist_services`` and
+        the service editor's save already make, for the same reason: remembering
+        a preference is a convenience, never the point of the press.
+        """
+        if theme not in VALID_GUI_THEMES:
+            return
+        self._config = replace(self._config, gui=GuiConfig(theme=theme))
+        try:
+            save_gui_theme(theme, self._global_config_path)
+        except OSError as exc:
+            self.notify(f"could not save the theme: {exc}", severity="warning")
+        else:
+            self.notify(THEME_SAVED, timeout=4)
+        self._push_settings()
+
+    # == quitting ==============================================================
+
+    @property
+    def mid_turn(self) -> bool:
+        """Would closing the window now lose a turn? ``action_quit``'s formula.
+
+        The ``not awaiting_new_session`` carve-out is the load-bearing half: the
+        inline "describe the task" prompt leaves the session worker parked on a
+        future, which reads as busy, but there is no turn to lose - so quitting
+        from the empty start screen must not raise the warning.
+
+        Read from the WINDOW's own thread (``GuiRunner.window_closing``), so it
+        does nothing but read three flags a loop-thread write rebinds atomically.
+        """
+        view = self._last_view
+        if view is None or not view.session_active or self._awaiting_new_session:
+            return False
+        return view.busy or view.pending_approval or view.awaiting_answer
+
+    def request_quit(self) -> None:
+        """ctrl+q: the same question closing the window asks, from the page.
+
+        One decision, two doors - the window's ``closing`` handler cannot reach
+        this method (it runs on a thread that may not touch the loop) so it
+        re-reads :attr:`mid_turn` itself, but the *rule* is here and both doors
+        end in the same confirm and the same close.
+        """
+        if self.mid_turn:
+            self.confirm_quit()
+            return
+        self._on_exit()
+
+    def confirm_quit(self) -> None:
+        """Ask before losing the turn, then close - scheduled onto the loop.
+
+        Never called from the window's closing handler directly: that handler
+        runs on the window's own thread, which is the thread the bridge drainer
+        parks against inside ``evaluate_js``, so it may only set a flag and
+        return (``gui/runner.py``). This runs one hop later, on the loop, and the
+        dialog it opens is the ordinary ``confirm`` modal every other prompt
+        uses - which means the answer comes back through the ordinary bridge
+        path and the window is destroyed from a thread that is not the one
+        waiting on it.
+        """
+        if self._quit_confirming:
+            return
+        self._quit_confirming = True
+        self._schedule(self._confirm_quit_flow())
+
+    async def _confirm_quit_flow(self) -> None:
+        try:
+            confirmed = await self.confirm(QUIT_TITLE, QUIT_BODY)
+        finally:
+            self._quit_confirming = False
+        if confirmed:
+            self._on_exit()
 
     def toggle_watch(self) -> None:
         """`w`: pause or resume the clipboard watcher.

@@ -311,9 +311,8 @@ a toast where a user could otherwise be left staring at nothing:
    matched crop.
 
 **The list is empty.** Every `ChatView`/`AutomationView` method this shell
-implements is now the real one; what is left of the parity backlog is whole
-SURFACES (settings/help/modals, the SSH dialog), not methods implemented
-smaller than their contract.
+implements is now the real one; what is left of the parity backlog is one whole
+SURFACE (the SSH dialog), not methods implemented smaller than their contract.
 
 One duplication is tracked with them: `gui/view.py:_distinct_rects` and
 `find_all` are `MainScreen`'s, spelled again because the two shells may not
@@ -351,7 +350,8 @@ step:
    `/identify` (the two surfaces the panel is useless without: nothing is
    searched until a window is drawn).
 7. ✅ service editor — **parity increment 5**.
-8. ⬜ settings / help / modals
+8. ✅ settings / help / modals — **parity increment 6**, with the slash popup,
+   the whole key chain and the quit gate.
 9. ⬜ SSH connect dialog
 
 Shipped so far: **slice 1** (`63e3c76`) — the window over the packaged page, no
@@ -399,7 +399,9 @@ Still deferred after increment 1, and named so nobody reads them as done: the
 composer's slash-command popup, the transcript's 500-event prune, and every
 `MainScreen` binding that is not on this surface (`u`/`i`/`c`/`e`/`l`/`t`,
 `shift+tab`) — they land with increment 4, which is where the rail that shows
-their state is.
+their state is. *(Made good: `i`/`c`/`shift+tab` in increment 2, `e` in
+increment 3, and the popup, the prune and `u`/`l`/`t` in increment 6 — the
+keys brief, not the rail, turned out to be where the last three belonged.)*
 
 **Parity increment 2** — the SIDEBAR, the STATUS BAR and the HARNESS LOG, against
 `docs/design/ui-briefs/sidebar-status-log.md`, plus the keys whose state those
@@ -511,9 +513,9 @@ export is per RUN again (`render_log` slices `_sub_runs` out of the sub-agent
 window's log under one `## sub-agent: <title> (<chat>)` heading each), and F6
 is kept even though a DOM tab strip needs no hotkey — the composer holds focus
 for most of a session. Deferred deliberately: the top-level `u`/`l`/`t`
-bindings (they belong to `modals-keys-esc.md`, increment 8), and any N-window
-chrome — one master and one sub-agent is the current real contract (brief §4 of
-the ambiguities).
+bindings (they belong to `modals-keys-esc.md`, increment 8 — and landed there),
+and any N-window chrome — one master and one sub-agent is the current real
+contract (brief §4 of the ambiguities).
 
 **Parity increment 4** — the ELEMENTS COLUMN, the CHAT-REGION PICKER and
 `/identify`, against `docs/design/ui-briefs/elements-panel.md`. The three land
@@ -651,6 +653,86 @@ One thing is deliberately smaller than the TUI's and says so here: a
 (the TUI lets it propagate). It is the same trade `_persist_services` already
 makes for the service picker — remembering a pick is a convenience, never the
 point of the press.
+
+**Parity increment 6** — HELP (F1), SETTINGS (F4), the COMPOSER'S SLASH POPUP,
+the whole KEY table and the six-stage ESC chain, and the quit-mid-turn gate,
+against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
+(`commands` and `settings`, both once per page load) and one core file changed —
+`config.py`, for a `[gui]` table; everything else is view and page.
+
+- **One table feeds the key handler and the help sheet.** `app.js`'s `KEYS` is
+  the dispatcher's only door and the sheet's key rows are rendered from it, so a
+  binding cannot exist undocumented or be documented without existing; a test
+  asserts the absence of any second dispatch path rather than the presence of a
+  string. The table is **this shell's**, recorded divergences included
+  (Shift+Enter is the newline, F1/F4 open page screens, `t` never leaves the
+  page). The COMMAND rows come the other way: `{type: "commands"}` carries
+  `agentclip.app.commands.COMMANDS` verbatim, so the popup and the help sheet
+  read the same registry `/help` and the controller's dispatch do. The filtering
+  rules are page-side — a round trip per keystroke would be latency for string
+  work — the data never is.
+- **The Esc chain is the brief's, in the brief's order**, split across the two
+  dispatchers that own it: stages 1-3 (popup / clear-with-undo / blur) on the
+  composer, stages 4-6 (reject note / modal-local / no-op) on the document. Stage
+  5 is *checked* first in the document handler and that is not a reordering — a
+  GUI modal traps focus behind its scrim, so stages 1-3 cannot be live beside
+  one, and Textual's screen stack gives the TUI the same guarantee. **No stage is
+  skipped**: every surface the brief names exists here. The two handlers are
+  named functions rather than inline closures precisely so the order is
+  readable and assertable. `ev.defaultPrevented` is what stops a composer Esc
+  from also firing stage 4 on the way up.
+- **`t`, `u` and `l` land**, the last of increment 3's deferrals. `u` and `e`
+  share one gate (`check_action` has one clause for both), `l` is gated on the
+  session alone because the export is a read-only snapshot that never touches
+  the engine, and all three refuse out loud — increment 2's divergence, kept.
+  `t` is wholly page-side: putting the caret back in the chat box is a fact
+  about this window, and its gate is the composer's own `disabled` flag, which
+  Python already composed from the brief's precedence table.
+- **Closing the window mid-turn asks first.** pywebview's `closing` is a
+  *locking* event — handlers run synchronously on the window's own thread and a
+  handler returning `False` sets `args.Cancel` (`webview/event.py:Event.set` ->
+  `winforms.py:on_closing`, verified in 5.4). That thread is the one the bridge
+  drainer parks against inside `evaluate_js`, and `destroy_window` reaches it
+  through a blocking `Control.Invoke`, so `GuiRunner.window_closing` does
+  **only** two things: read `GuiView.mid_turn` (`action_quit`'s own formula,
+  `awaiting_new_session` carve-out included) and, if a turn would be lost, post
+  the confirm onto the loop and return `False`. The dialog is the ordinary
+  `ChatView.confirm` with the TUI's two sentences verbatim; the answer comes back
+  through the ordinary bridge path and `window.destroy()` is called from the loop
+  thread. A `_quit_ok` flag is set before every programmatic close, so the
+  `closing` that `destroy()` itself raises sails through rather than re-asking.
+  With nothing in flight the close proceeds exactly as it always has, and the
+  teardown still hangs off `webview.start()` returning. `ctrl+q` reaches the same
+  decision through `GuiView.request_quit`.
+- **The transcript prunes at 500 events per window** (`TranscriptPanel.MAX_EVENTS`),
+  deferred since increment 1. Per window because the cap is about how much DOM
+  one scroll carries; the Python-side event list is untouched, so `l` still
+  exports everything that ever happened.
+- Help, settings, the payload block and every blocking prompt reuse the **one**
+  modal element. A parked flow always wins it — F1/F4 are inert while a prompt
+  is up, which is the same "a modal owns all key input" rule the TUI gets from
+  its screen stack.
+
+Two decisions recorded rather than smuggled:
+
+- **Settings persist in a new `[gui]` table, not `[general] theme`.** That key
+  names a *Textual* theme and is validated against `VALID_THEMES`; the GUI's
+  palettes are CSS and have no Textual equivalent, so writing `"dark"` there
+  would make every TUI launch warn and reset it. `config.py` gains
+  `GuiConfig`/`VALID_GUI_THEMES` and `save_gui_theme`, the last a clone of
+  `save_theme` one table over (same atomic write, same "only this key is
+  touched" contract). It is the minimum a shell-specific setting can cost, and
+  it is the only core change in this increment.
+- **F4 is a theme picker and nothing else**, because the TUI's SettingsScreen is
+  (§2.2 of the brief) — one "Appearance" tab, and it does not touch
+  `[notify] bell/toast`, which is file-only in both shells. A **real light
+  theme** ships rather than the "dark (light theme planned)" fallback: every
+  colour below `:root` is a token now, so the theme is a palette rather than a
+  second stylesheet, and a test fails on any hard-coded hex that escapes it. The
+  one divergence from the TUI's model: the pick applies **and saves** at once
+  rather than staging behind Save/Cancel. The TUI stages because its preview is
+  an app-wide reactive that Escape must revert; a class on `<body>` costs nothing
+  to try, and there is no Save button to make "revert" mean anything.
 
 ## 4. SSH connect dialog (GUI-only surface)
 

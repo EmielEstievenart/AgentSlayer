@@ -171,7 +171,10 @@ def run_gui(
     that very thread - tearing down from there would make the two wait on each
     other for as long as the join allows. Once the pump has returned there is no
     such knot, and a window that closed is exactly the moment the TUI's quit
-    path does its own unwinding.
+    path does its own unwinding. The ``closing`` event IS subscribed - but only
+    as a GATE: it decides whether this close may happen at all (a turn in flight
+    asks first) and does nothing else, which is the one thing that thread can
+    safely do.
     """
     try:
         import webview
@@ -204,6 +207,13 @@ def run_gui(
             )
             runner.attach(window.evaluate_js, on_close=window.destroy)
             window.events.loaded += runner.page_loaded
+            # Closing mid-turn asks first. This handler runs on the window's own
+            # thread and RETURNS FALSE to cancel the close (pywebview's
+            # ``closing`` is a locking event and a False from any handler sets
+            # ``args.Cancel``); it never tears anything down from there - see
+            # ``GuiRunner.window_closing``. The teardown still hangs off
+            # ``webview.start()`` returning, below.
+            window.events.closing += runner.window_closing
             runner.start()
             # Blocks until the last window is closed. Everything slow belongs
             # AFTER first paint (gui.md section 2), which is why the controllers

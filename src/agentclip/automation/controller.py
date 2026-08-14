@@ -8,7 +8,7 @@ can drive the identical loop. It talks to the UI only through the
 Textual (docs/design/gui.md §1).
 
 It is being filled one slice at a time; today it holds the state that everything
-else in the loop is read against, plus the first of the threads:
+else in the loop is read against, plus both of the polling threads:
 
 **The armed flag.** ``/armed`` and F5. DISARMED means the tool stops ACTING on
 the machine - no clicks, no synthetic paste, no cursor moves, no focus stealing,
@@ -30,6 +30,29 @@ Textual shell posts a message from it; the GUI will enqueue onto its bridge),
 which is the same non-blocking, thread-safe contract every ``AutomationView``
 method has.
 
+**The detector poller.** The second thread, and so far only its PRODUCER half:
+the loop that captures the live chat window once per tick, hands that one frame
+to one :class:`~agentclip.screen.detector.ScreenDetector`, and pushes the
+answers out through the five probe callbacks handed in at construction. What
+those answers MEAN - the per-detector bookkeeping, the sidebar readout, the
+combined finish verdict - is still the shell's, and moves down here as one unit
+in the next slice, because a decision split across two threads is a race the
+single-threaded handlers do not have today (docs/design/gui.md §1).
+
+Which is why the run's ``generation`` stamp is here rather than there. Stopping
+a poller is a flag, not a join: the loop it interrupts still finishes the tick
+it was in and pushes those probes, so they arrive after the automation may
+already have been retargeted at another browser window. The stamp is what makes
+that decidable - ``retarget_detectors`` opens a new run, every probe carries the
+run it was taken in, and a consumer compares. Nothing here filters: the counter
+belongs to whoever starts the threads, the judgement to whoever reads the
+probes.
+
+The composition is deliberately split in three calls, because the shell has
+paints to interleave: ``retarget_detectors`` (stop, and bump the counter - even
+when nothing new starts), ``detector_loop`` (compose this run's loop around a
+detector the shell built) and ``start_detectors`` (run it on a thread).
+
 **The slot pointers.** Which chat window is being configured and which one is
 being driven, plus the drawn box and the service key behind each. Two pointers,
 independent on purpose: *calibrating* is the slot behind the selected window tab
@@ -46,22 +69,42 @@ this object holds the service KEY per window and nothing about what that key
 resolves to. Same rule for the calibration: the controller owns which slot is
 which, the shell owns what it does with the rectangle.
 
-Threading: every method here is called from the UI thread, and the watcher
-thread only ever calls *out* (through ``on_clipboard_captured``). The one piece
-of state it shares with the loop it started is a ``threading.Event``, which is
+Threading: every method here is called from the UI thread, and the watcher and
+poller threads only ever call *out* (through the callbacks). The one piece of
+state each shares with the loop it started is a ``threading.Event``, which is
 what makes "stop" a flag rather than a lock.
 """
 
 from __future__ import annotations
 
 import threading
+import time
 from collections.abc import Callable, Mapping
 
 from agentclip.automation.view import AutomationView
 from agentclip.clip.base import ClipboardProvider
 from agentclip.clip.watcher import SelfWriteSet, watch
+from agentclip.screen.busy import BusyProbe
+from agentclip.screen.capture import CaptureError, RegionImage
+from agentclip.screen.detector import ScreenDetector, Sighting
+from agentclip.screen.profile import TemplateKind
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, SlotCalibration, new_slots
+from agentclip.screen.stale import StaleProbe
+
+# What a poll tick pushes out, and the one thing it needs pushed in. Every sink
+# is called FROM the poller thread with the generation of the run that produced
+# the reading, so an implementation must be non-blocking and thread-safe - the
+# same contract the ``AutomationView`` port carries.
+CaptureFn = Callable[[ScreenRegion], RegionImage]
+BusySink = Callable[[BusyProbe, int], None]
+StaleSink = Callable[[StaleProbe, int], None]
+SendReadySink = Callable[[bool | None, int], None]
+# The tick's recognitions, raw: the frame they were verified against and the
+# sightings inside it. Cutting the crops out is the shell's (a crop is sized for
+# whatever renderer will draw it), and it happens on this thread - the UI thread
+# gets one small picture per appearance, never the frame.
+ElementsSink = Callable[[RegionImage, Mapping[TemplateKind, Sighting | None], int], None]
 
 
 def _accept_all(_text: str) -> bool:
@@ -71,6 +114,52 @@ def _accept_all(_text: str) -> bool:
 
 def _drop_capture(_text: str) -> None:
     """Capture sink for a controller nobody handed one to."""
+
+
+def _drop_busy(_probe: BusyProbe, _generation: int) -> None:
+    """Busy/idle probe sink for a controller nobody handed one to."""
+
+
+def _drop_stale(_probe: StaleProbe, _generation: int) -> None:
+    """Stale probe sink for a controller nobody handed one to."""
+
+
+def _drop_send_ready(_found: bool | None, _generation: int) -> None:
+    """Send-ready probe sink for a controller nobody handed one to."""
+
+
+def _drop_elements(
+    _scene: RegionImage,
+    _sightings: Mapping[TemplateKind, Sighting | None],
+    _generation: int,
+) -> None:
+    """Recognition sink for a controller nobody handed one to."""
+
+
+class DetectorPoller:
+    """One running poll loop: the thread, and the flag that ends it.
+
+    Handed back by ``start_detectors`` so a shell can mirror the run in its own
+    chrome and a test can join it. ``cancel``/``is_cancelled`` keep the
+    vocabulary the Textual worker this replaced had, because "cancelled" is what
+    the loop's own tick check reads and what a caller asks about after a
+    retarget - the thread outlives the cancel by one tick, deliberately.
+    """
+
+    def __init__(self, thread: threading.Thread, stop: threading.Event) -> None:
+        self.thread = thread
+        self._stop = stop
+
+    @property
+    def is_cancelled(self) -> bool:
+        """Has this run been told to end? True the instant ``cancel`` is called,
+        which is up to one tick before the thread actually finishes."""
+        return self._stop.is_set()
+
+    def cancel(self) -> None:
+        """End the run. Idempotent, and never a join: the caller is the UI
+        thread and the loop only notices between ticks."""
+        self._stop.set()
 
 
 class AutomationController:
@@ -86,6 +175,11 @@ class AutomationController:
         poll_interval_ms: int = 300,
         accepts: Callable[[str], bool] | None = None,
         on_clipboard_captured: Callable[[str], None] | None = None,
+        on_busy_probe: BusySink | None = None,
+        on_idle_probe: BusySink | None = None,
+        on_stale_probe: StaleSink | None = None,
+        on_send_ready_probe: SendReadySink | None = None,
+        on_elements: ElementsSink | None = None,
     ) -> None:
         self._view = view
         # True is every version of this app before the switch existed, and it
@@ -136,6 +230,29 @@ class AutomationController:
         # disarmed and re-armed does not get handed back a watcher they switched
         # off. Written on transitions only - see ``set_os_armed``.
         self._watch_before_disarm = False
+        # -- the detector poller ------------------------------------------------
+        # Where every tick's readings go, one sink per thing a tick can say, in
+        # the order the loop pushes them. Handed in at construction like the
+        # capture sink above and for the same reason: they are the shell's way
+        # across the thread boundary, and they do not change for its lifetime.
+        self._on_busy_probe: BusySink = on_busy_probe if on_busy_probe is not None else _drop_busy
+        self._on_idle_probe: BusySink = on_idle_probe if on_idle_probe is not None else _drop_busy
+        self._on_stale_probe: StaleSink = (
+            on_stale_probe if on_stale_probe is not None else _drop_stale
+        )
+        self._on_send_ready_probe: SendReadySink = (
+            on_send_ready_probe if on_send_ready_probe is not None else _drop_send_ready
+        )
+        self._on_elements: ElementsSink = on_elements if on_elements is not None else _drop_elements
+        # Which poller RUN a probe belongs to: bumped by every
+        # ``retarget_detectors``, stamped into everything the loop pushes, and
+        # compared by whoever consumes it. The module docstring says why the
+        # counter is here and the comparison is not.
+        self._detector_generation = 0
+        # The current run's stop flag - replaced per run rather than cleared, so
+        # a cancelled loop's flag stays set forever and that loop can only end.
+        self._detector_stop = threading.Event()
+        self._detector_poller: DetectorPoller | None = None
 
     # == the ARMED switch =====================================================
 
@@ -271,6 +388,158 @@ class AutomationController:
             self._watcher_stop.set()
         self._watcher = None
         self._watcher_stop = None
+
+    # == the detector poller ===================================================
+
+    @property
+    def detector_generation(self) -> int:
+        """Which poller run is the live one. Stamped into every probe."""
+        return self._detector_generation
+
+    @property
+    def detectors_running(self) -> bool:
+        """Is a poll loop watching the live window right now?"""
+        return self._detector_poller is not None
+
+    @property
+    def detector_poller(self) -> DetectorPoller | None:
+        """The running poller, or None. For shells that mirror it into their own
+        chrome, and for tests that join its thread."""
+        return self._detector_poller
+
+    def retarget_detectors(self) -> int:
+        """Close the current poller run and open a new one; returns its stamp.
+
+        The first of the three calls a rebuild is made of, and the only one that
+        always happens: a rebuild that finds nothing to watch (no drawn window,
+        nothing calibrated) still ENDS the run that was watching the old one,
+        and still has to invalidate the probes that run has in flight. Bumping
+        the counter here rather than at the start of a loop is what makes that
+        true - "the automation moved" and "a new loop exists" are different
+        events, and only the first one is the question a probe is asking.
+
+        The stop is the same flag-not-join as ``stop_input``'s, for the same
+        reason: the caller is the UI thread. So the loop this ends is still free
+        to finish the tick it was in, and the probes it pushes carry the OLD
+        stamp - which is the whole point.
+        """
+        self.stop_detectors()
+        self._detector_generation += 1
+        self._detector_stop = threading.Event()
+        return self._detector_generation
+
+    def detector_loop(
+        self,
+        detector: ScreenDetector,
+        region: ScreenRegion,
+        *,
+        capture: CaptureFn,
+        poll_seconds: float,
+    ) -> Callable[[], None]:
+        """Compose the current run's poll loop, ready to be handed to a thread.
+
+        ONE capture per tick, handed to ONE detector. That is not only cheaper:
+        every verdict then describes the same instant of a moving screen rather
+        than four moments of it, and a failed capture reaches all of them as the
+        same ERROR instead of some seeing a frame and others not.
+
+        What the detector searches for was decided when the SHELL built it (from
+        one window's calibration - ``screen.detector.build_detector``), and the
+        loop only carries the answers out, in the fixed busy -> idle -> stale
+        order the tick-closing rule downstream reads. It is a bridge, not a
+        policy: nothing here knows which appearances exist or what a verdict
+        means.
+
+        Everything is read once, here: the region, the detector, the cadence and
+        the stamp all describe the window this run was started for, and a run
+        that re-read them mid-flight would drift onto another one. ``capture``
+        is passed in rather than imported for the same reason the clipboard
+        provider is - and because the shell's test suites stub the capture at
+        their own call site.
+        """
+        stop = self._detector_stop
+        generation = self._detector_generation
+        on_busy = self._on_busy_probe
+        on_idle = self._on_idle_probe
+        on_stale = self._on_stale_probe
+        on_send_ready = self._on_send_ready_probe
+        on_elements = self._on_elements
+
+        def loop() -> None:
+            while not stop.is_set():
+                try:
+                    scene: RegionImage | None = capture(region)
+                except CaptureError:
+                    scene = None  # every detector hears about it the same way
+                tick = detector.observe(scene)
+                if tick.busy is not None:
+                    on_busy(tick.busy, generation)
+                if tick.idle is not None:
+                    on_idle(tick.idle, generation)
+                if tick.stale is not None:
+                    on_stale(tick.stale, generation)
+                # The send button, every tick it is captured - it closes no tick
+                # and folds into no verdict, and the gate that consumes it
+                # ignores it whenever it is not holding. Three-valued: on
+                # screen, not on screen, or no answer because the capture failed.
+                if detector.searches(TemplateKind.SEND_READY):
+                    on_send_ready(tick.present(TemplateKind.SEND_READY), generation)
+                # One push for the whole tick's pictures, after the verdicts they
+                # illustrate, out of the very frame the matches were verified
+                # against. A failed capture recognised nothing and says nothing:
+                # an empty map would blank rows a dropped frame is no evidence
+                # about, so the tick simply pushes nothing.
+                if scene is not None and tick.sightings:
+                    on_elements(scene, tick.sightings, generation)
+                # Sleep in short increments so cancellation lands promptly.
+                remaining = poll_seconds
+                while remaining > 0 and not stop.is_set():
+                    step = min(0.05, remaining)
+                    time.sleep(step)
+                    remaining -= step
+
+        return loop
+
+    def start_detectors(self, loop: Callable[[], None]) -> DetectorPoller:
+        """Run a composed loop on a fresh ``agentclip-detector`` thread.
+
+        The last of the three calls, and the only one that touches a thread - so
+        a shell (or a test) that wants the composition without the polling stops
+        here and never calls it. Daemon, like the watcher: an exit must never
+        wait on a poll interval.
+
+        It runs the loop of the run ``retarget_detectors`` opened, and shares
+        that run's stop flag with it: starting a loop composed for a run that
+        has since been stopped hands back a poller that ends on its first check,
+        which is what a caller skipping the retarget is asking for.
+        """
+        thread = threading.Thread(target=loop, name="agentclip-detector", daemon=True)
+        poller = DetectorPoller(thread, self._detector_stop)
+        self._detector_poller = poller
+        thread.start()
+        return poller
+
+    def stop_detectors(self) -> None:
+        """End the running poller, without waiting for it.
+
+        Deliberately no join, exactly like ``stop_input``: the caller is the UI
+        thread and the loop only notices between ticks. Dropping the handle
+        makes "stopped" true immediately for everything that asks, and the tick
+        the thread it leaves is still finishing pushes probes stamped with a run
+        that is no longer the live one.
+
+        This is also the SUSPEND a shell reaches for when a modal takes the
+        screen (the service editor's capture overlay is a sustained large delta
+        over the very window the detectors watch, which is what arms the
+        auto-copy on staleness alone). Deliberately the same call and
+        deliberately no generation bump: nothing has moved, and the rebuild that
+        resumes it opens the new run. The resume itself cannot live here -
+        putting the poller back means rebuilding the detector around whatever
+        the calibration says NOW, and composing that is the shell's.
+        """
+        if self._detector_poller is not None:
+            self._detector_poller.cancel()
+        self._detector_poller = None
 
     # == the slot pointers =====================================================
 

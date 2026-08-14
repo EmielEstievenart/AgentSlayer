@@ -33,18 +33,22 @@ panel rather than minting a pane, so the window's whole history is one scroll -
 and ``render_log`` slices it back apart per run, because an export wants one
 heading per sub-task, not one over five.
 
-Threading: the clipboard watcher is a plain ``threading.Thread`` the
-AutomationController owns (docs/design/gui.md §1) and this screen only starts,
-stops and mirrors; captures come back through ``_clipboard_captured``, which
-bridges them via the thread-safe ``post_message(ClipboardCaptured)`` -> the
-controller. The screen's own workers - the flow coroutines ``spawn`` starts and
-the detector poller - are ``run_worker``s Textual cancels on unmount, where the
-watcher is stopped by name instead. The detectors are the same shape: ONE thread
-worker takes a single capture of the live chat region per tick and hands it to
-one ``screen.detector.ScreenDetector`` - a plain, Textual-free object that
-searches for every appearance the live window's service is CALIBRATED for and
-answers with a snapshot - bridging ``BusyProbed`` / ``IdleProbed`` /
-``StaleProbed`` / ``SendReadyProbed`` / ``ElementsMatched`` back to the UI.
+Threading: the clipboard watcher and the detector poller are plain
+``threading.Thread``s the AutomationController owns (docs/design/gui.md §1) and
+this screen only starts, stops and mirrors; captures come back through
+``_clipboard_captured``, which bridges them via the thread-safe
+``post_message(ClipboardCaptured)`` -> the controller. The screen's own workers -
+the flow coroutines ``spawn`` starts - are ``run_worker``s Textual cancels on
+unmount, where both controller threads are stopped by name instead. The
+detectors are the same shape as the watcher: ONE poll loop takes a single
+capture of the live chat region per tick and hands it to one
+``screen.detector.ScreenDetector`` - a plain, Textual-free object that searches
+for every appearance the live window's service is CALIBRATED for and answers
+with a snapshot - and this screen's five ``_post_*`` callbacks turn each answer
+into ``BusyProbed`` / ``IdleProbed`` / ``StaleProbed`` / ``SendReadyProbed`` /
+``ElementsMatched`` on the way back to the UI. Only the producing half is the
+controller's so far: what a probe MEANS is still decided here, on the UI thread,
+in the handlers those messages reach.
 
 That split is deliberate and load-bearing: **the detector detects, the state
 machine consumes**. Nothing about the send gate, the auto-copy flow or the
@@ -146,7 +150,7 @@ import asyncio
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from enum import Enum
@@ -162,12 +166,11 @@ from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Button, Collapsible, Footer, Input
-from textual.worker import Worker, get_current_worker
 
 from agentclip.app import SessionController, SessionSpec, SessionView
 from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import RunCall, Severity
-from agentclip.automation.controller import AutomationController
+from agentclip.automation.controller import AutomationController, DetectorPoller
 from agentclip.automation.harness_log import (
     HARNESS_LOG_MAX,
     KIND_ARMED,
@@ -637,6 +640,19 @@ def _element_crop(scene: RegionImage, sighting: Sighting | None) -> ElementCrop 
     return None if image is None else ElementCrop(image, match.diff)
 
 
+def _poll_capture(region: ScreenRegion) -> RegionImage:
+    """The detector poller's capture, resolved HERE at every tick.
+
+    The loop lives in the AutomationController now, so the function it captures
+    with has to be handed in - and handing in ``capture_region`` itself would
+    freeze whatever this module's name pointed at when the run started. The
+    Pilot suites patch that name (``main_mod.capture_region``), some of them
+    while a poller is already running, so the indirection keeps the late binding
+    the in-line loop had for free.
+    """
+    return capture_region(region)
+
+
 def _fmt_k(chars: int) -> str:
     return f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
 
@@ -904,18 +920,24 @@ class MainScreen(Screen[None]):
             poll_interval_ms=config.clipboard.poll_interval_ms,
             accepts=looks_like_protocol,
             on_clipboard_captured=self._clipboard_captured,
+            # ...and the poll loop's five ways out, each turned into the message
+            # its handler below already answers (``_post_*``, called on the
+            # poller thread). The probes themselves are unchanged: only the
+            # thread that produces them moved.
+            on_busy_probe=self._post_busy_probe,
+            on_idle_probe=self._post_idle_probe,
+            on_stale_probe=self._post_stale_probe,
+            on_send_ready_probe=self._post_send_ready_probe,
+            on_elements=self._post_element_crops,
         )
         self._delegation_ready = False  # last-seen SUBAGENT can_delegate, for the one-shot toast
         self._region_click_warned = False
-        self._detector_worker: Worker[None] | None = None
-        # Which poller RUN a verdict belongs to. Bumped by every
-        # ``_start_detector_worker``, stamped into every probe message the loop
-        # posts, and checked on the way back in (``_ghost``). Cancelling a thread
-        # worker only raises a flag - the loop it interrupts still finishes its
-        # tick and posts - so without this a probe taken from the window the
-        # automation was driving BEFORE a delegation started or ended arrives
-        # after the retarget and arms the auto-copy against the new window.
-        self._detector_generation = 0
+        # This screen's mirror of the controller's poller: set by
+        # ``_spawn_detector_worker``, dropped by ``_stop_detector_worker``, and
+        # the thing ``resume_detectors`` asks "is one already up?". A mirror
+        # rather than a read-through, because a test freezes the spawn and puts
+        # its own stand-in here.
+        self._detector_worker: DetectorPoller | None = None
         # Latest verdict per detector: True = finished, False = generating,
         # None = capture error. ``_seen`` is what makes a detector count toward
         # the combined verdict, so a detector that has never reported cannot
@@ -1128,6 +1150,18 @@ class MainScreen(Screen[None]):
     def _os_armed(self) -> bool:
         return self._automation.os_armed
 
+    @property
+    def _detector_generation(self) -> int:
+        """Which poller RUN a verdict belongs to.
+
+        The counter belongs to whoever starts the poll threads (the controller),
+        the comparison to whoever reads the probes - which is still this screen,
+        so ``_ghost`` and the two stamp-only handlers read it through here. It is
+        also what a test stamps an injected probe with to speak as the current
+        poller (``tui.messages``).
+        """
+        return self._automation.detector_generation
+
     # The last compatibility proxy onto the MASTER slot. The single-window
     # vocabulary predates slots and is what the older Pilot suites poke; only
     # ``_chat_region`` is left, because it is the only thing a slot still holds.
@@ -1311,18 +1345,21 @@ class MainScreen(Screen[None]):
         self._controller.start()
 
     def on_unmount(self) -> None:
-        """Quitting must not leave a thread polling the user's clipboard.
+        """Quitting must not leave a thread polling the user's clipboard - or
+        capturing their screen twice a second.
 
-        This is the same seam Textual's own teardown used when the watcher was a
-        thread WORKER: ``Widget._on_unmount`` cancels every worker the node
-        started, and this screen's unmount is dispatched on app shutdown. Now
-        that the thread belongs to the AutomationController, that teardown has to
-        be asked for by name. The loop notices between ticks and the thread is a
-        daemon besides, so nothing here can hang the exit; this is what makes it
-        stop *promptly*, and what keeps a test run from accumulating one live
-        watcher per app it booted.
+        This is the same seam Textual's own teardown used when both were thread
+        WORKERS: ``Widget._on_unmount`` cancels every worker the node started,
+        and this screen's unmount is dispatched on app shutdown. Now that the
+        threads belong to the AutomationController, that teardown has to be
+        asked for by name - once per thread, because "stopped" is a flag each
+        loop reads and not a group cancel. Both loops notice between ticks and
+        both threads are daemons besides, so nothing here can hang the exit;
+        this is what makes them stop *promptly*, and what keeps a test run from
+        accumulating one live watcher and one live poller per app it booted.
         """
         self._automation.stop_input()
+        self._stop_detector_worker()
 
     def _remember_own_window(self) -> None:
         """Record the foreground window at a moment the user is provably
@@ -3271,13 +3308,18 @@ class MainScreen(Screen[None]):
         detector is likewise built once per run - its trackers carry streaks and
         a previous frame, and all of that describes one window - with the
         "stable for N seconds" wish converted to ticks of the poll cadence here,
-        from the live window's service preset. The run gets a fresh
-        ``_detector_generation`` too, which every message it posts carries back
-        (see ``_ghost``).
+        from the live window's service preset.
+
+        The THREAD is the AutomationController's, and so is the run's generation
+        stamp: ``retarget_detectors`` below ends whatever was polling and opens a
+        new run, which is why it is called before the two exits that start
+        nothing at all - a rebuild that finds no window still has to invalidate
+        the probes the old one has in flight (see ``_ghost``). What stays here is
+        every question about MEANING: which detectors this composition runs, what
+        the sidebar says about them, and every verdict they will produce.
         """
         self._stop_detector_worker()
-        self._detector_generation += 1
-        generation = self._detector_generation
+        self._automation.retarget_detectors()
         # Every tracker is rebuilt below, so the verdicts they produced belong
         # to detectors that no longer exist. The trigger's ARM survives: it
         # records that the model was generating, which recapturing a button
@@ -3336,69 +3378,31 @@ class MainScreen(Screen[None]):
             # can decide a response finished.
             return
 
-        def loop() -> None:
-            worker = get_current_worker()
-            while not worker.is_cancelled:
-                try:
-                    scene: RegionImage | None = capture_region(region)
-                except CaptureError:
-                    scene = None  # every detector hears about it the same way
-                # ONE search pass over the frame, for everything the live
-                # window's service is calibrated for. What that is was decided
-                # when the detector was built; this loop only carries the answers
-                # across the thread boundary, in the fixed busy -> idle -> stale
-                # order the tick-closing rule reads.
-                tick = detector.observe(scene)
-                if tick.busy is not None:
-                    self.post_message(BusyProbed(tick.busy, generation))
-                if tick.idle is not None:
-                    self.post_message(IdleProbed(tick.idle, generation))
-                if tick.stale is not None:
-                    self.post_message(StaleProbed(tick.stale, generation))
-                # The send button, every tick it is captured - it closes no tick
-                # and folds into no verdict, and the gate that CONSUMES this
-                # (``on_send_ready_probed``) ignores it whenever it is not
-                # holding. ``present`` is three-valued: on screen, not on screen,
-                # or no answer at all because the capture failed.
-                if detector.searches(TemplateKind.SEND_READY):
-                    self.post_message(
-                        SendReadyProbed(tick.present(TemplateKind.SEND_READY), generation)
-                    )
-                # One message for the whole tick's pictures, after the verdicts
-                # they illustrate, cut from the very frame the matches were
-                # verified against (§1.7). A failed capture recognised nothing
-                # and says nothing: an empty map would blank rows a dropped
-                # frame is no evidence about, so the tick simply posts nothing.
-                if scene is not None and tick.sightings:
-                    self.post_message(
-                        ElementsMatched(
-                            {
-                                kind: _element_crop(scene, sighting)
-                                for kind, sighting in tick.sightings.items()
-                            },
-                            generation,
-                        )
-                    )
-                # Sleep in short increments so cancellation lands promptly.
-                remaining = _BUSY_POLL_S
-                while remaining > 0 and not worker.is_cancelled:
-                    step = min(0.05, remaining)
-                    time.sleep(step)
-                    remaining -= step
-
-        self._spawn_detector_worker(loop)
+        # ONE search pass over the frame per tick, for everything the live
+        # window's service is calibrated for, pushed back out through the
+        # ``_post_*`` callbacks below in the fixed busy -> idle -> stale order
+        # the tick-closing rule reads. The loop belongs to the controller; what
+        # it watches, how fast, and with what capture are decided here.
+        self._spawn_detector_worker(
+            self._automation.detector_loop(
+                detector,
+                region,
+                capture=_poll_capture,
+                poll_seconds=_BUSY_POLL_S,
+            )
+        )
 
     def _spawn_detector_worker(self, loop: Callable[[], None]) -> None:
-        """Run the composed poll loop as a thread worker.
+        """Run the composed poll loop on the controller's poller thread.
 
         The seam between deciding *what* to watch and actually watching it, so
         a test can freeze the polling and still observe the composition - the
         live loop repaints the DETECTION block within milliseconds, which is
-        exactly what makes its resting lines otherwise unassertable.
+        exactly what makes its resting lines otherwise unassertable. It stayed a
+        method of this screen for that reason alone: the thread it starts is the
+        controller's now, and this is only where the screen learns of it.
         """
-        self._detector_worker = self.run_worker(
-            loop, thread=True, group="busyprobe", exit_on_error=False
-        )
+        self._detector_worker = self._automation.start_detectors(loop)
 
     def _paint_detection(self, stale_line: str) -> None:
         """Repaint the sidebar's DETECTION block for the LIVE window.
@@ -3448,9 +3452,16 @@ class MainScreen(Screen[None]):
             sidebar.update_stale(stale_line)
 
     def _stop_detector_worker(self) -> None:
+        """Cancel the mirrored run, and tell the controller the same thing.
+
+        Both halves, because they are not always the same object: a test freezes
+        the spawn and leaves its own stand-in in ``_detector_worker``, and the
+        controller is the one that actually holds a thread.
+        """
         if self._detector_worker is not None:
             self._detector_worker.cancel()
             self._detector_worker = None
+        self._automation.stop_detectors()
 
     def suspend_detectors(self) -> None:
         """Stop polling (and disarm the trigger) while a modal owns the screen.
@@ -3475,6 +3486,51 @@ class MainScreen(Screen[None]):
         """
         if self._detector_worker is None:
             self._start_detector_worker()
+
+    # -- the poller thread's way back in ---------------------------------------
+    # Five callbacks the AutomationController's poll loop pushes each tick's
+    # readings through, and the whole of what they do is what
+    # ``_clipboard_captured`` does for the watcher thread: turn the reading into
+    # the message its handler already answers and return. ``post_message`` is
+    # Textual's thread-safe bridge, so nothing here touches a widget, reads a
+    # verdict or decides anything - the deciding happens on the UI thread, in
+    # the handlers below, exactly as it did when the loop was a worker of this
+    # screen's. Each carries the generation of the run that produced it (see
+    # ``_ghost``).
+
+    def _post_busy_probe(self, probe: BusyProbe, generation: int) -> None:
+        self.post_message(BusyProbed(probe, generation))
+
+    def _post_idle_probe(self, probe: BusyProbe, generation: int) -> None:
+        self.post_message(IdleProbed(probe, generation))
+
+    def _post_stale_probe(self, probe: StaleProbe, generation: int) -> None:
+        self.post_message(StaleProbed(probe, generation))
+
+    def _post_send_ready_probe(self, found: bool | None, generation: int) -> None:
+        self.post_message(SendReadyProbed(found, generation))
+
+    def _post_element_crops(
+        self,
+        scene: RegionImage,
+        sightings: Mapping[TemplateKind, Sighting | None],
+        generation: int,
+    ) -> None:
+        """One tick's recognitions, cut down to pictures before they cross.
+
+        The one callback that does work rather than only wrapping: the crop runs
+        HERE, on the poller thread that captured the frame, because the message
+        queue should carry an icon and not a chat window (see ``_element_crop``).
+        That is why the loop pushes the raw frame and its sightings instead of
+        crops - sizing a crop is a question about which renderer this terminal
+        can drive, and that is the shell's to answer.
+        """
+        self.post_message(
+            ElementsMatched(
+                {kind: _element_crop(scene, sighting) for kind, sighting in sightings.items()},
+                generation,
+            )
+        )
 
     def _finish_tick_closed_by(self, detector: str) -> bool:
         """Is ``detector``'s message the tick's LAST, given what is running?

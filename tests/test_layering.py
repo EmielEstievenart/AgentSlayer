@@ -1,6 +1,7 @@
 """Enforce the architecture's import direction with ast (architecture.md section 0).
 
-    tui ──► clip                       tui & cli are the ONLY importers of textual
+    tui ─┐                             tui & cli are the ONLY importers of textual
+    gui ─┴► clip                       gui is the ONLY importer of pywebview
      ├──► automation ──► clip/screen   (the shared core, also a clip/screen importer)
      └──► engine ──► tools ──► sandbox
             │  └──► store
@@ -132,14 +133,41 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
+    # gui: the pywebview shell (docs/design/gui.md section 2). A sibling of tui,
+    # not a layer above or below it: it drives the same app + automation
+    # controllers over the same OS seams, so its allowance is the TUI's minus
+    # everything Textual - and plus the one toolkit that IS this shell, which no
+    # other module may import (see test_pywebview_only_in_the_gui_shell). It has
+    # a rule at all, where tui and cli are unrestricted, because it is new: the
+    # cheapest moment to say what a shell may reach for is before it reaches.
+    (
+        "agentclip.gui",
+        frozenset(
+            {
+                "agentclip",
+                "agentclip.app",
+                "agentclip.automation",
+                "agentclip.clip",
+                "agentclip.config",
+                "agentclip.gui",
+                "agentclip.protocol",
+                "agentclip.screen",
+                "webview",
+            }
+        ),
+    ),
 ]
 
 # Modules allowed to import textual: the UI shells themselves and nothing else.
+# agentclip.gui is deliberately NOT here - it is a shell, but it is the OTHER
+# one, and the whole point of two shells is that neither is built on the other's
+# toolkit (see test_gui_never_imports_textual).
 UI_MODULES = ("agentclip.cli", "agentclip.__main__", "agentclip.tui")
 
-# Modules allowed to import agentclip.clip / agentclip.screen: the UI shells,
-# plus the automation core they share (which is made of exactly those seams).
-CLIP_SCREEN_IMPORTERS = (*UI_MODULES, "agentclip.automation")
+# Modules allowed to import agentclip.clip / agentclip.screen: the UI shells -
+# both of them - plus the automation core they share (which is made of exactly
+# those seams).
+CLIP_SCREEN_IMPORTERS = (*UI_MODULES, "agentclip.gui", "agentclip.automation")
 
 # OS side-effect layers (clipboard, screen overlay/click): only CLIP_SCREEN_IMPORTERS.
 OS_LAYERS = ("agentclip.clip", "agentclip.screen")
@@ -244,6 +272,42 @@ def test_paramiko_only_in_the_ssh_host() -> None:
         assert not any(
             imported.split(".")[0] == "paramiko" for imported in module_level_imports(path)
         ), f"{module_name(path)} imports paramiko"
+
+
+def test_pywebview_only_in_the_gui_shell() -> None:
+    """The window toolkit is one package's business.
+
+    ``agentclip.gui`` IS pywebview wearing a UI shell, so it imports it; nothing
+    else may, because the ``gui`` extra is optional and a TUI-only install must
+    not be able to trip over a missing window library. ``cli.main`` reaches the
+    shell on --gui through an import inside the function, which this checker
+    does not see - by design, that is the same allowance every lazy optional
+    import in this project uses.
+    """
+    for path in all_modules():
+        mod = module_name(path)
+        if _matches(mod, "agentclip.gui"):
+            continue
+        assert not any(
+            imported.split(".")[0] == "webview" for imported in module_level_imports(path)
+        ), f"{mod} imports pywebview"
+
+
+def test_gui_never_imports_textual() -> None:
+    """The two shells are siblings, and neither may be built on the other.
+
+    A ``textual`` import here (or a reach into ``agentclip.tui`` for a widget,
+    a message, a helper) would make the GUI a Textual app in disguise and put
+    the TUI's toolkit in the way of every GUI-only install. What the shells
+    share, they share BELOW themselves: app, automation, clip, screen.
+    """
+    gui_files = sorted((SRC / "gui").rglob("*.py"))
+    assert gui_files
+    for path in gui_files:
+        for imported in module_level_imports(path):
+            root = imported.split(".")[0]
+            assert root != "textual", f"{path.name} imports textual"
+            assert not _matches(imported, "agentclip.tui"), f"{path.name} imports agentclip.tui"
 
 
 def test_engine_never_imports_ui_or_clipboard() -> None:

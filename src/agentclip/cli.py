@@ -329,6 +329,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # arrives as JSON on stdin and is drawn where each element sits on screen.
     parser.add_argument("--show-identify", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--gui",
+        action="store_true",
+        help="launch the experimental GUI shell instead of the TUI",
+    )
+    parser.add_argument(
         "--list-matchers",
         action="store_true",
         help="print which appearance-matcher backends this build can run, and exit",
@@ -574,6 +579,27 @@ def main(argv: list[str] | None = None) -> int:
 
     launch.data_root.mkdir(parents=True, exist_ok=True)
     prune_sessions(launch.data_root, config.backup.keep_sessions)
+    # The fork between the two shells (docs/design/gui.md section 0). It sits
+    # here, after everything about WHERE the session runs is settled and before
+    # the first TUI-only step: the sixel probe below is a question for a
+    # terminal the GUI does not have, and asking it on this path would be a
+    # stray escape sequence written at a window nobody is looking at. What the
+    # GUI shell grows next (the clipboard provider, the MCP runtime, the engine
+    # factory) is shell-agnostic and will rise ABOVE this branch as it lands;
+    # this slice opens the window and nothing else. Imported inside the
+    # function because pywebview is the optional `gui` extra - a TUI launch must
+    # not pay for the import, and an install without the extra must still run.
+    if args.gui:
+        from agentclip.gui.shell import run_gui
+
+        try:
+            return run_gui(launch)
+        finally:
+            # The same hand-back the TUI path does below: a --ssh launch has a
+            # live connection open by now whichever shell it was headed for.
+            close = getattr(launch.host, "close", None)
+            if close is not None:
+                close()
     # BEFORE app.run(), and this is the only place it may happen: probing asks
     # the terminal questions over stdin/stdout, and once Textual starts its own
     # reader thread the answers go to Textual instead - which is exactly how the

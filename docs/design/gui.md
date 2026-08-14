@@ -195,9 +195,30 @@ compatibility seams the Pilot suites patch.
 
 - Package `agentclip.gui`; entry `agentclip --gui` (same binary; TUI stays the
   default until the GUI reaches parity — flipping the default is a later decision).
-- **No Node toolchain.** The frontend is hand-written ES modules + CSS shipped as
+- **No Node toolchain.** The frontend is hand-written JS + CSS shipped as
   package data; no build step, no npm. If we ever outgrow this, that's a new decision
   here first.
+- pywebview is the optional extra **`gui`** (`uv sync --extra gui`, `pip install
+  agentclip[gui]`), the same shape as `cv` and `mcp`: `gui/shell.py` imports
+  `webview` inside its functions and `cli.main` imports the shell only on `--gui`,
+  so a TUI launch never pays for it and an install without the extra still runs —
+  it exits 2 naming the extra. The extra is in the `dev` group too, so the suite
+  can exercise the real toolkit. `tests/test_layering.py` gives `agentclip.gui` its
+  own RULES entry (the TUI's reach minus Textual, plus `webview`), adds it to
+  `CLIP_SCREEN_IMPORTERS`, keeps it OUT of the textual exemption, and names two
+  boundary tests: `test_gui_never_imports_textual`,
+  `test_pywebview_only_in_the_gui_shell`.
+- The assets are located with `importlib.resources` (`files("agentclip.gui") /
+  "assets"`, materialized by `as_file` for the lifetime of the window loop), never
+  `__file__` — so a wheel, a source checkout and the PyInstaller extraction all
+  resolve the same way.
+- The window loads a **`file://` URL**, not a path: pywebview starts a local Bottle
+  HTTP server for a bare local path, and this page has nothing to serve. The price
+  is that a `file://` origin cannot load ES module scripts (Chromium blocks them
+  from an opaque origin), so the frontend is classic `<script>` files. If the JS
+  ever needs real modules, the switch is to pass the path and let pywebview serve
+  it on 127.0.0.1 — a change of one line and of this paragraph. The app version
+  reaches the page as a URL fragment (`#v=…`) until the bridge exists.
 - Bridge: Python→JS via pywebview `evaluate_js` fed from a thread-safe queue (the
   GUI's implementation of the view-port thread contract); JS→Python via pywebview's
   `js_api` object whose methods call the same controller methods the TUI calls.

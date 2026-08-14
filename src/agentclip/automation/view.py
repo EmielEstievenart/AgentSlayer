@@ -28,15 +28,26 @@ place a click or a timer lives. What crosses this seam is "here is what is true
 now, show it".
 
 The port is deliberately incomplete: it grows one method family per extraction
-slice (``paint_loop_state``, ``paint_detection``, ``paint_stale``,
-``paint_elements``, the paste-flash pair), and only what the controller actually
-calls today is declared - a Protocol listing methods nothing calls is a promise
-no implementation is held to.
+slice, and only what the controller actually calls today is declared - a
+Protocol listing methods nothing calls is a promise no implementation is held
+to.
+
+**Text, not decisions.** Everything below takes the finished words (or the
+finished value) and is told where to put them. What a probe reads as, which of
+the send gate's four exits was taken, why the loop moved - all of that is
+decided in the controller, out of :mod:`agentclip.automation.finish`, so the two
+shells cannot phrase the same reading differently. A view that had to choose the
+wording would be a second state machine.
 """
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Literal, Protocol
+
+from agentclip.automation.harness_log import HarnessEntry
+from agentclip.automation.loop_state import LoopState
+from agentclip.screen.profile import TemplateKind
 
 # Same vocabulary as ``ChatView.notify``'s, spelled again rather than imported:
 # the automation layer may not import ``agentclip.app`` (tests/test_layering.py),
@@ -45,6 +56,42 @@ Severity = Literal["information", "warning", "error"]
 
 
 class AutomationView(Protocol):
+    # -- the loop's state and its reasons -------------------------------------
+    # Where the browser-automation loop is now (the TUI's STATE rail), and the
+    # entry saying how it got there (the TUI's `/log` pane). Two calls because
+    # they have two different lifetimes: the state is a value that is REPAINTED,
+    # the entry is a line that is APPENDED, and the controller's deque - not the
+    # pane - is the log (see ``AutomationController.harness_log``).
+    def paint_loop_state(self, state: LoopState) -> None: ...
+
+    def paint_harness_entry(self, entry: HarnessEntry) -> None: ...
+
+    # -- what the detectors are seeing ----------------------------------------
+    # One line per appearance the live window's service is calibrated for, plus
+    # the stale detector's, which has no appearance behind it and so gets a call
+    # of its own. ``text`` is already phrased (agentclip.automation.finish).
+    def paint_detection(self, kind: TemplateKind, text: str) -> None: ...
+
+    def paint_stale(self, text: str) -> None: ...
+
+    # One tick's RECOGNITIONS as pictures - what the detectors matched, so the
+    # user can see it is their send button and not a corner of their wallpaper.
+    # The crops are opaque here on purpose: a crop is sized for whatever renderer
+    # will draw it, so cutting one is the shell's and this layer only routes the
+    # mapping through. It closes no tick and folds into no verdict.
+    def paint_elements(self, crops: Mapping[TemplateKind, object]) -> None: ...
+
+    # -- the "your move" banner -----------------------------------------------
+    # Up while the payload is waiting on the user (Ctrl+V, or Enter), down the
+    # moment the send is proven - which is the half the controller drives, since
+    # it is the finish decision and the send gate that PROVE it. ``text`` is the
+    # caller's wording: what the banner asks for depends on how the payload was
+    # delivered, and ``retry`` offers the one-press re-run beside the nag that
+    # says the paste never landed.
+    def show_paste_flash(self, text: str, *, retry: bool = False) -> None: ...
+
+    def hide_paste_flash(self) -> None: ...
+
     # -- the ARMED switch -----------------------------------------------------
     # Put the standing DISARMED indication up or take it down. Called on every
     # ``set_os_armed``, INCLUDING the ones that did not change the flag: an

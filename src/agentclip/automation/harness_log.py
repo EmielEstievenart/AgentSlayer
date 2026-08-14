@@ -16,20 +16,21 @@ notify() already says the thing, the log says the same thing.
 
 The contract, in four lines:
 
-* ``MainScreen._set_loop_state`` is the sole writer of ``LoopState`` and now
-  demands a reason, so a transition cannot reach the rail without reaching the
-  log. Everything else (the send gate, the trigger arming, the auto-copy flow's
-  failures, the clipboard, the armed switch, the session boundaries) appends
-  through the same small helper.
+* ``AutomationController.set_loop_state`` is the sole writer of ``LoopState``
+  and demands a reason, so a transition cannot reach the rail without reaching
+  the log. Everything else (the send gate, the trigger arming, the auto-copy
+  flow's failures, the clipboard, the armed switch, the session boundaries)
+  appends through the same small helper, ``log_harness``.
 * The store is a ``deque`` bounded at :data:`HARNESS_LOG_MAX`, the same 500 the
   transcript panel prunes to: this is a debugging tail, not an archive.
 * It SURVIVES ``/new``. A wedged user's first move is often to reset the
   session, and clearing the log there would destroy the very evidence they are
   about to go looking for - the reset writes its own entry instead, which is
   the boundary marker they need.
-* Appends happen on the UI event loop only. Worker threads reach the screen
-  through ``post_message``, and the async flows log after their awaits return,
-  so the deque is never touched concurrently and needs no lock.
+* Appends happen on the UI event loop only. Worker threads reach the shell
+  through its own thread-safe bridge (the Textual one posts a message) and the
+  async flows log after their awaits return, so the deque is never touched
+  concurrently and needs no lock.
 
 Nothing is written to disk. That matches the rest of the screen layer (the
 appearances are the only thing it persists) and keeps a log that records what

@@ -88,6 +88,14 @@ from textual.message import Message
 from textual.timer import Timer
 from textual.widgets import Button, Select, Static
 
+from agentclip.automation.finish import SEND_READY_ARMED as SEND_READY_ARMED
+from agentclip.automation.finish import SEND_READY_HOLDING as SEND_READY_HOLDING
+from agentclip.automation.finish import SEND_READY_OVERRIDDEN as SEND_READY_OVERRIDDEN
+from agentclip.automation.finish import SEND_READY_RELEASED as SEND_READY_RELEASED
+from agentclip.automation.finish import SEND_READY_RESTING as SEND_READY_RESTING
+from agentclip.automation.finish import SEND_READY_SEEN as SEND_READY_SEEN
+from agentclip.automation.finish import SEND_READY_STUCK as SEND_READY_STUCK
+from agentclip.automation.finish import SEND_READY_TIMEOUT as SEND_READY_TIMEOUT
 from agentclip.automation.loop_state import LOOP_TRANSITIONS, LoopState
 from agentclip.config import Config
 from agentclip.mcp.types import McpServerStatus
@@ -253,22 +261,15 @@ COPY_RESTING = "no click yet"
 # the run is indistinguishable from a detector that simply never finds anything.
 PROBE_UNCAPTURED = "ticked but not captured - F2"
 
-# The send gate's line (tui.md 3.4b). It is not a finish detector: it reports
-# whether the ready-to-send button is holding finish detection back between
-# AgentClip's paste and the user's Enter. Seven states, because "nothing is
-# happening" has to be told apart from "this service cannot do it at all" - and
-# because the three ways the gate can let go WITHOUT seeing the button vanish
-# are three different things to tell the user about their capture: the model is
-# visibly generating (so the send is proven by better evidence), the button
-# never showed at all, or it showed and then never stopped showing.
-SEND_READY_RESTING = "no gate - not captured"
-SEND_READY_ARMED = "gate armed - holds the next paste"
-SEND_READY_HOLDING = "watching for the send button"
-SEND_READY_SEEN = "on screen - press Enter to send"
-SEND_READY_RELEASED = "gone - sent, finish detection running"
-SEND_READY_OVERRIDDEN = "generating - sent, finish detection running"
-SEND_READY_TIMEOUT = "never appeared - finish detection running"
-SEND_READY_STUCK = "never went away - finish detection running"
+# The send gate's line (tui.md 3.4b) is re-exported from the imports above rather
+# than spelled here: the gate itself is the AutomationController's, so the words
+# it puts on that line live with it (agentclip.automation.finish) and both shells
+# say the same thing. Eight states, because "nothing is happening" has to be told
+# apart from "this service cannot do it at all" - and because the three ways the
+# gate can let go WITHOUT seeing the button vanish are three different things to
+# tell the user about their capture: the model is visibly generating (so the send
+# is proven by better evidence), the button never showed at all, or it showed and
+# then never stopped showing.
 
 # The DETECTION block's heading, which names the window every line under it is
 # about. That is the LIVE window - the one the automation drives - and not the

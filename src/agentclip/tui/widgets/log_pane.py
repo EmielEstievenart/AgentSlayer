@@ -22,8 +22,8 @@ sentence of reason (~120 cells), and the only place on this screen wide enough
 for that is the whole terminal. It costs the columns above it ~30% of their
 height while it is open, which is what `F8` (and `/log`) is for.
 
-**The deque stays the source of truth.** ``MainScreen._harness_log`` is the log;
-this widget is a view of it. Appends are mirrored here one entry at a time while
+**The deque stays the source of truth.** ``AutomationController.harness_log`` is
+the log; this widget is a view of it. Appends are mirrored here one entry at a time while
 it is visible, and while it is HIDDEN nothing is painted at all - the pane
 simply remembers that it is behind and refills itself from the deque the moment
 it is revealed. Two bounds, deliberately the same number

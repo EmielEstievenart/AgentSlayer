@@ -61,8 +61,9 @@ Decisions ratified from the extraction plan:
   `agentclip.clip`, `agentclip.config`, itself. Banned: `textual`, `agentclip.app`,
   `agentclip.tui`. It is OS-coupled core, shared by both shells — the same flavor of
   layer `screen/` and `clip/` already are.
-- **`AutomationView` is paint-only**: `paint_loop_state`, `paint_detection`,
-  `paint_stale`, `paint_elements`, `paint_armed`, paste-flash show/hide, `notify`.
+- **`AutomationView` is paint-only**: `paint_loop_state`, `paint_harness_entry`,
+  `paint_detection`, `paint_stale`, `paint_elements`, `paint_armed`,
+  paste-flash show/hide, `notify`.
   Same thread contract as `ChatView.call_*`: methods may be called from poller/watcher
   threads, implementations must be non-blocking and thread-safe (the TUI posts a
   message; the GUI enqueues to its JS bridge). No OS primitives on the port — the
@@ -92,9 +93,19 @@ Slices (each one commit, suite green, layering test run first):
    (Re-cut from the original plan: moving probe bookkeeping ahead of
    `_evaluate_finish` would have split reader and writer across threads — a
    race today's single-threaded handlers don't have.)
-5. the whole consumer, atomically: probe bookkeeping + painting + send gate +
-   finish-evaluation move as one unit onto the poller thread; the
-   `feed_probe` test seam replaces message injection in the same commit
+5. the whole consumer — split in two, because moving the code and moving the
+   thread are separable and only one of them can change behavior:
+   - **5a (code)**: probe bookkeeping, painting, both gates, the loop-state
+     writer + harness log and finish-evaluation become controller methods,
+     still invoked from the UI-thread message handlers they always ran on.
+     The view grows the paint family (`paint_loop_state`, `paint_detection`,
+     `paint_stale`, `paint_elements`, the paste-flash pair) with the port's
+     thread contract, which the TUI implements as synchronous widget writes
+     for now. The fire path stays a callback (`on_fire`), and so does the one
+     question the fold cannot answer itself (`has_appearance`).
+   - **5b (thread)**: the poller calls `consume_*` directly, the paint
+     implementations become `post_message`, and the `feed_probe` test seam
+     replaces message injection in the same commit
 6. auto-copy flow + click/hover/scroll sequences + start/end browser chat
 7. delivery path (`deliver(...)` async; OSC-52 stays TUI-side)
 8. cleanup: dead code, doc sync (`architecture.md`, `tui.md` drift), module table

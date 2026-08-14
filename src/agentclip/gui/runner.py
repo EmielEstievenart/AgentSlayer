@@ -261,6 +261,15 @@ class GuiRunner:
     def set_service(self, key: str) -> None:
         self.schedule_call(self.view.set_service, key)
 
+    def select_window(self, window: str) -> None:
+        self.schedule_call(self.view.select_window, window)
+
+    def next_window(self) -> None:
+        self.schedule_call(self.view.next_window)
+
+    def end_session(self) -> None:
+        self.schedule_call(self.view.end_session)
+
 
 def _no_close() -> None:
     """The close a runner with no window behind it gets (tests)."""

@@ -24,7 +24,7 @@ from agentclip.automation.loop_state import LoopState
 from agentclip.automation.view import AutomationView
 from agentclip.engine.engine import Decision, PendingAction, Phase, StatusSnapshot
 from agentclip.gui.bridge import JsApi
-from agentclip.gui.view import GuiView
+from agentclip.gui.view import MASTER_WINDOW, SUBAGENT_WINDOW, GuiView
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.profile import TemplateKind
 from agentclip.screen.slot import AgentSlot
@@ -167,10 +167,12 @@ async def test_clearing_the_transcript_resets_the_automation_too(harness: Harnes
     assert harness.flush().of_type("transcript_clear")
 
 
-# == session views (reduced scope: one transcript, dividers, labels) ==========
+# == session views (one persistent transcript per window) =====================
 
 
-async def test_a_delegated_run_opens_with_a_divider_and_is_labelled(harness: Harness) -> None:
+async def test_a_delegated_run_opens_with_a_divider_in_the_sub_agents_transcript(
+    harness: Harness,
+) -> None:
     view = harness.view
     ref = SessionRef(id="sub-1", role="subagent", title="rename the helper", chat_name="jade-otter")
     await view.open_session_view(ref)
@@ -179,16 +181,20 @@ async def test_a_delegated_run_opens_with_a_divider_and_is_labelled(harness: Har
 
     events = harness.flush().of_type("transcript")
     assert "── task: rename the helper ──" in events[0]["text"]
-    assert events[1]["label"] == "assistant · sub-agent ‹rename the helper›"
+    assert events[1]["text"] == "sub-agent thinking"
     assert events[2]["text"] == "sub-agent finished"
     assert events[2]["ok"] is True
+    # All three in the SUB-AGENT window's transcript, none in the master's.
+    assert [event["window"] for event in events] == [SUBAGENT_WINDOW] * 3
 
 
 def test_focusing_an_unknown_session_is_harmless(harness: Harness) -> None:
-    """The controller focuses by id; losing a transcript line is never worth
-    taking a running session down with an exception."""
+    """The controller focuses by id; an id no window claims is ignored rather
+    than fatal, and rather than guessing - a transcript line lost beats one
+    written into the wrong conversation's panel."""
     harness.view.focus_session_view("sub-99")
-    assert harness.flush().last("focus_session")["session_id"] == "sub-99"
+    assert harness.view._focused_window == MASTER_WINDOW
+    assert not harness.flush().of_type("focus_session")
 
 
 # == state + the composer's precedence table ==================================

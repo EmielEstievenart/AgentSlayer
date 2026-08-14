@@ -509,7 +509,9 @@ def test_the_page_repaints_everything_it_could_have_missed(harness: Harness) -> 
     ``ready`` re-pushes every surface composed on this side."""
     harness.view._mcp_manager = FakeMcp(FakeStatus("fs", "connected"))
     api_of(harness).ready()
-    assert {"status", "state", "rail", "sidebar", "mcp", "armed"} <= set(harness.flush().types)
+    assert {"status", "state", "rail", "tabs", "sidebar", "mcp", "armed"} <= set(
+        harness.flush().types
+    )
 
 
 def test_f5_toggles_the_armed_switch_in_both_directions(harness: Harness) -> None:

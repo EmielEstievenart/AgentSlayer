@@ -214,6 +214,15 @@ class Calls:
     def set_service(self, key: str) -> None:
         self._note(("set_service", key))
 
+    def select_window(self, window: str) -> None:
+        self._note(("select_window", window))
+
+    def next_window(self) -> None:
+        self._note(("next_window",))
+
+    def end_session(self) -> None:
+        self._note(("end_session",))
+
     def _note(self, entry: tuple[object, ...]) -> None:
         if self.explode:
             raise RuntimeError("controller blew up")
@@ -254,6 +263,9 @@ def test_every_key_action_reaches_the_binding_the_tui_makes() -> None:
     api.reinstruct()
     api.retry_insert()
     api.service("chatgpt")
+    api.window("m1-s1")
+    api.next_window()
+    api.end_session()
     assert calls.trace == [
         ("set_os_armed", None),
         ("set_os_armed", False),
@@ -264,6 +276,11 @@ def test_every_key_action_reaches_the_binding_the_tui_makes() -> None:
         ("reinstruct",),
         ("retry_insert",),
         ("set_service", "chatgpt"),
+        # Increment 3's: the two tab moves are pure view-side navigation (no
+        # controller call is made for either) and `e` is gated on the far side.
+        ("select_window", "m1-s1"),
+        ("next_window",),
+        ("end_session",),
     ]
 
 

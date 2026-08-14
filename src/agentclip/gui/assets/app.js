@@ -27,8 +27,16 @@
   var pending = [];
   var booted = false;
   var el = {};
-  var stick = true;
-  var parked = false;
+  // One transcript per browser WINDOW, keyed by window id, each with its own
+  // scroll state: a tab is a window (tui.md 1.6), its transcript is permanent,
+  // and switching tabs must put the user back exactly where they were reading.
+  // The keys are the Python side's MASTER_WINDOW / SUBAGENT_WINDOW.
+  var panels = {};
+  var MASTER_WINDOW = "m1";
+  // Which window is SHOWN and which one new output is written into. They are
+  // the same except during a delegation, and neither is the automation's live
+  // target - selecting a tab never redirects a paste.
+  var selectedWindow = MASTER_WINDOW;
   var runRows = {};
   var runOutput = {};
   var streamingCall = null;
@@ -37,6 +45,7 @@
   var gateAlwaysOffered = false;
   var rejectOpen = false;
   var modalId = null;
+  var modalKind = null;
   // The harness decision log, page-side. The deque below is the source of
   // truth; this is a view of it that happens to keep its own copy, because the
   // bridge is one-way and a pane revealed after an hour must show the whole
@@ -207,25 +216,44 @@
     return html.join("");
   }
 
-  /* == transcript ========================================================== */
+  /* == transcripts (one per window) ========================================= */
 
-  function append(node, beat) {
-    var empty = el.transcript.querySelector(".empty");
+  function panel(win) {
+    // An event for a window this page does not draw lands in the master's
+    // rather than nowhere: a transcript line is never worth losing, and the
+    // only way to get here is a Python side that grew a third window first.
+    return panels[win] || panels[MASTER_WINDOW];
+  }
+
+  function append(win, node, beat) {
+    var target = panel(win);
+    var box = target.node;
+    var empty = box.querySelector(".empty");
     if (empty) empty.parentNode.removeChild(empty);
-    el.transcript.appendChild(node);
+    box.appendChild(node);
+    // A hidden panel has no layout to measure - offsetHeight and clientHeight
+    // are both 0 - so the fit-or-park arithmetic below would park every event
+    // written into the window the user is not looking at. Pin it to the bottom
+    // instead and let the first paint after it is shown do the real thing.
+    if (box.hidden) {
+      target.stick = true;
+      target.parked = false;
+      box.scrollTop = box.scrollHeight;
+      return;
+    }
     // Fit-or-park (main-chat.md 6): an event taller than the viewport parks
     // with its top at the top so the user reads from the first line; anything
     // that fits pins the panel to the bottom unless they scrolled away.
-    var viewport = el.transcript.clientHeight;
+    var viewport = box.clientHeight;
     if (viewport > 0 && node.offsetHeight > viewport) {
-      el.transcript.scrollTop = node.offsetTop;
-      parked = true;
-      stick = false;
+      box.scrollTop = node.offsetTop;
+      target.parked = true;
+      target.stick = false;
       return;
     }
-    if (parked && !beat) return;
-    parked = false;
-    if (stick) el.transcript.scrollTop = el.transcript.scrollHeight;
+    if (target.parked && !beat) return;
+    target.parked = false;
+    if (target.stick) box.scrollTop = box.scrollHeight;
   }
 
   function block(className, html) {
@@ -261,7 +289,9 @@
   // `x` toggles the MOST RECENT collapsible, independent of focus - the TUI's
   // deliberate "what did that command print" shortcut (main-chat.md section 6).
   function toggleLastBlock() {
-    var blocks = el.transcript.querySelectorAll("details");
+    // In the transcript the user is LOOKING at: the shortcut means "what did
+    // that command print", and that question is always about what is on screen.
+    var blocks = panel(selectedWindow).node.querySelectorAll("details");
     if (!blocks.length) return;
     var last = blocks[blocks.length - 1];
     last.open = !last.open;
@@ -269,9 +299,14 @@
   }
 
   function addTranscript(event) {
+    // Every transcript event names its window, so output keeps landing in the
+    // right panel while the user reads another one - the specific bug class the
+    // TUI's docstrings call out ("looks exactly like data loss").
+    var win = event.window || MASTER_WINDOW;
     if (event.kind === "user" || event.kind === "prose") {
       var label = event.label || (event.kind === "user" ? "you" : "assistant");
       append(
+        win,
         block(
           "ev ev-" + event.kind,
           '<div class="ev-head">' + escapeHtml(label) + "</div>" + renderMarkdown(event.text)
@@ -285,13 +320,14 @@
       if (event.raw) {
         html += details("raw block (" + event.raw.split("\n").length + " lines)", event.raw);
       }
-      append(block("ev ev-call", html), false);
+      append(win, block("ev ev-call", html), false);
       return;
     }
     if (event.kind === "outbound") {
       var note = escapeHtml(event.note);
       if (event.parts > 1) note += " · part 1 of " + event.parts;
       append(
+        win,
         block(
           "ev ev-call",
           '<div class="ev-summary">' +
@@ -304,10 +340,73 @@
       return;
     }
     if (event.kind === "error") {
-      append(block("ev ev-error", escapeHtml(event.text)), false);
+      append(win, block("ev ev-error", escapeHtml(event.text)), false);
       return;
     }
-    append(block("ev " + noteClass(event.text), escapeHtml(event.text)), false);
+    // A sub-run divider is a note like any other; it gets its own rule so the
+    // eye finds where one delegated task ended and the next began.
+    var cls = /^── task: /.test(String(event.text || "")) ? "ev-divider" : noteClass(event.text);
+    append(win, block("ev " + cls, escapeHtml(event.text)), false);
+  }
+
+  /* == window tabs ==========================================================
+     Rendered, never decided: the label (glyph included), the state and which
+     window is selected all arrive composed, because "how did the last run in
+     this window go" is one rule and there must not be two copies of it. */
+
+  function tabNode(tab) {
+    var node = document.createElement("button");
+    node.type = "button";
+    node.className = "win-tab " + (tab.state || "none");
+    node.id = "win-" + tab.window;
+    node.textContent = tab.label;
+    if (tab.window === selectedWindow) node.classList.add("selected");
+    node.addEventListener("click", function () {
+      // Fired even for the tab that is already selected: after the controller
+      // moved the view mid-delegation, "click the tab I am on" is how the user
+      // says "show me this window" (tabs-delegation-summary.md 6).
+      api("window", tab.window);
+    });
+    return node;
+  }
+
+  // What each window is CALLED, learned from the tabs event so the sidebar's
+  // two per-window headings can name the window they configure without a
+  // second copy of the vocabulary.
+  var windowNames = {};
+
+  function windowName(win) {
+    return windowNames[win] || "";
+  }
+
+  function paintTabs(event) {
+    selectedWindow = event.selected || MASTER_WINDOW;
+    [["masters", el.winRowMaster], ["subs", el.winRowSub]].forEach(function (pair) {
+      pair[1].innerHTML = "";
+      (event[pair[0]] || []).forEach(function (tab) {
+        windowNames[tab.window] = tab.name;
+        var node = tabNode(tab);
+        // Where new output is going, when that is not where the user is
+        // looking - the one moment the two pointers visibly disagree.
+        if (tab.window === event.focused && tab.window !== selectedWindow) {
+          node.classList.add("writing");
+          node.title = "output is landing here";
+        }
+        pair[1].appendChild(node);
+      });
+    });
+    showPanel(selectedWindow);
+  }
+
+  function showPanel(win) {
+    Object.keys(panels).forEach(function (key) {
+      var target = panels[key];
+      target.node.hidden = key !== win;
+    });
+    var shown = panel(win);
+    // A panel that was written into while hidden has no measured scroll, so
+    // following it is re-established the moment it is on screen again.
+    if (shown.stick) shown.node.scrollTop = shown.node.scrollHeight;
   }
 
   /* == run panel ===========================================================
@@ -551,15 +650,19 @@
   function answer(value) {
     var target = modalId;
     modalId = null;
+    modalKind = null;
     el.scrim.hidden = true;
     if (target) api("prompt", target, value);
   }
 
   function showModal(event) {
     modalId = event.prompt_id;
+    modalKind = event.modal;
     el.modalTitle.textContent = event.title || "";
     el.modalBody.innerHTML = "";
     el.modalActions.innerHTML = "";
+    el.modalHint.textContent = event.hint || "";
+    el.modalHint.hidden = !event.hint;
     if (event.modal === "confirm") {
       el.modalBody.appendChild(block("modal-text", escapeHtml(event.body || "")));
       el.modalActions.appendChild(button("Yes", true));
@@ -587,14 +690,33 @@
           return "<tr><th>" + escapeHtml(pair[0]) + "</th><td>" + escapeHtml(pair[1]) + "</td></tr>";
         })
         .join("");
+      // The model's own task_done text, or the placeholder saying there was
+      // none - a blank panel under the table reads as a rendering failure.
       el.modalBody.innerHTML =
-        "<table class='stats'>" + rows + "</table>" + renderMarkdown(event.summary || "");
-      el.modalActions.appendChild(button("New session", "new"));
-      el.modalActions.appendChild(button("Undo last turn", "undo"));
-      el.modalActions.appendChild(button("Export log", "export"));
-      el.modalActions.appendChild(button("Close", "close"));
+        "<table class='stats'>" +
+        rows +
+        "</table>" +
+        renderMarkdown(event.summary || event.placeholder || "");
+      el.modalActions.appendChild(button("Undo last turn (u)", "undo"));
+      el.modalActions.appendChild(button("New session (t)", "new"));
+      // Export is a LOOP, not an exit: the controller writes the log and
+      // re-opens this screen, which is why it sits with the other two rather
+      // than being the last thing you do.
+      el.modalActions.appendChild(button("Export chat log (l)", "export"));
+      el.modalActions.appendChild(button("Close (esc)", "close"));
     }
     el.scrim.hidden = false;
+  }
+
+  // The summary's single-letter keys. A terminal convention rather than a
+  // contract (the buttons are this shell's real affordance), kept because a
+  // modal that answered only to a mouse would be the one screen here that did.
+  function summaryKey(key) {
+    if (key === "u") return "undo";
+    if (key === "t") return "new";
+    if (key === "l") return "export";
+    if (key === "Escape") return "close";
+    return null;
   }
 
   function showPayload(event) {
@@ -602,6 +724,8 @@
     // payload and this shell has no OSC-52, so the text is put somewhere the
     // user can select it (docs/design/gui.md 2).
     modalId = null;
+    modalKind = null;
+    el.modalHint.hidden = true;
     el.modalTitle.textContent = "Copy this payload by hand";
     el.modalBody.innerHTML = "<pre class='payload'>" + escapeHtml(event.text) + "</pre>";
     el.modalActions.innerHTML = "";
@@ -640,6 +764,12 @@
     el.sideRegion.textContent = event.region || "";
     el.sideSlotNote.textContent = event.slot_note || "";
     el.sideDetectionTitle.textContent = event.detection_title || "DETECTION";
+    // Both per-window blocks say which window they are editing: the sidebar
+    // sits a long way from the tab bar in a 1200px window, and "which chat is
+    // this picker about" must not be a question you answer by looking up.
+    var win = windowName(event.window);
+    el.sideServiceTitle.textContent = win ? "SERVICE · " + win : "SERVICE";
+    el.sideWindowTitle.textContent = win ? "CHAT WINDOW · " + win : "CHAT WINDOW";
     var options = JSON.stringify(event.services || []);
     if (options !== serviceOptions) {
       serviceOptions = options;
@@ -762,11 +892,23 @@
         addTranscript(event);
         return;
       case "transcript_clear":
-        el.transcript.innerHTML = '<p class="empty">Describe a task below to start a session.</p>';
-        parked = false;
-        stick = true;
+        // Every window's transcript, because /new is a SESSION teardown: the
+        // windows themselves - their tabs, their services, their calibrations -
+        // are untouched, and only what the sessions wrote goes.
+        Object.keys(panels).forEach(function (key) {
+          var target = panels[key];
+          target.node.innerHTML = '<p class="empty">' + escapeHtml(target.empty) + "</p>";
+          target.parked = false;
+          target.stick = true;
+        });
         return;
       case "focus_session":
+        // Where output is going now. The tabs event that follows carries it
+        // too; nothing here has to move the view, which is the controller's
+        // one reach into the selection and is made on the Python side.
+        return;
+      case "tabs":
+        paintTabs(event);
         return;
       case "state":
         paintState(event);
@@ -908,7 +1050,10 @@
 
   function boot() {
     el = {
-      transcript: id("transcript"),
+      transcripts: id("transcripts"),
+      wintabs: id("wintabs"),
+      winRowMaster: id("win-row-master"),
+      winRowSub: id("win-row-sub"),
       composer: id("composer"),
       send: id("send"),
       phase: id("phase"),
@@ -926,6 +1071,8 @@
       serviceSelect: id("service-select"),
       sideServiceLabel: id("side-service-label"),
       sideProfileNote: id("side-profile-note"),
+      sideServiceTitle: id("side-service-title"),
+      sideWindowTitle: id("side-window-title"),
       setRegion: id("set-region"),
       sideRegion: id("side-region"),
       sideSlotNote: id("side-slot-note"),
@@ -950,8 +1097,27 @@
       scrim: id("scrim"),
       modalTitle: id("modal-title"),
       modalBody: id("modal-body"),
-      modalActions: id("modal-actions")
+      modalActions: id("modal-actions"),
+      modalHint: id("modal-hint")
     };
+
+    // One entry per drawn transcript, each with its own follow/park state. The
+    // window ids are the Python side's and are read off the DOM rather than
+    // spelled twice, so adding a window is one element and no JS.
+    panels = {};
+    Array.prototype.forEach.call(
+      el.transcripts.querySelectorAll(".transcript"),
+      function (node) {
+        var empty = node.querySelector(".empty");
+        panels[node.getAttribute("data-window")] = {
+          node: node,
+          stick: true,
+          parked: false,
+          // Remembered so /new can put each panel's own resting line back.
+          empty: empty ? empty.textContent : ""
+        };
+      }
+    );
 
     // The app version still rides in the URL fragment, as it has since slice 1:
     // a hard-coded string here would drift the first time __version__ moved.
@@ -959,11 +1125,17 @@
     var slot = id("version");
     if (version && slot) slot.textContent = "v" + decodeURIComponent(version[1]);
 
-    el.transcript.addEventListener("scroll", function () {
-      var bottom =
-        el.transcript.scrollHeight - el.transcript.scrollTop - el.transcript.clientHeight;
-      stick = bottom < 24;
-      if (stick) parked = false;
+    // Per panel: whether the user has scrolled away is a fact about ONE
+    // transcript, and the master's must not be forgotten because a sub-agent's
+    // was read to the bottom.
+    Object.keys(panels).forEach(function (key) {
+      var target = panels[key];
+      target.node.addEventListener("scroll", function () {
+        var box = target.node;
+        var bottom = box.scrollHeight - box.scrollTop - box.clientHeight;
+        target.stick = bottom < 24;
+        if (target.stick) target.parked = false;
+      });
     });
 
     // Enter sends, Shift+Enter is a newline. The TUI uses ctrl+j for the
@@ -1061,6 +1233,19 @@
       // session key on this list.
       var tag = ev.target && ev.target.tagName;
       var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+      // A modal owns the keyboard while it is up: the session keys below would
+      // otherwise fire into a screen that is asking a question, and the summary
+      // has four keys of its own. The scrim covers the app, so this is the same
+      // "modal screens stack above bindings" rule the TUI gets from Textual.
+      if (modalId) {
+        if (typing || ev.ctrlKey || ev.altKey || ev.metaKey) return;
+        var choice = modalKind === "summary" ? summaryKey(ev.key) : null;
+        if (choice) {
+          ev.preventDefault();
+          answer(choice);
+        }
+        return;
+      }
       if (!ev.ctrlKey && !ev.altKey && !ev.metaKey) {
         if (ev.key === "F3") {
           ev.preventDefault();
@@ -1077,6 +1262,14 @@
         if (ev.key === "F8") {
           ev.preventDefault();
           toggleLog();
+          return;
+        }
+        if (ev.key === "F6") {
+          // Pure navigation: it moves what the user SEES and what the sidebar
+          // configures, and never where output lands or which window the
+          // automation drives.
+          ev.preventDefault();
+          api("next_window");
           return;
         }
       }
@@ -1119,6 +1312,12 @@
       }
       if (ev.key === "r") {
         api("reinstruct");
+        return;
+      }
+      if (ev.key === "e") {
+        // The session summary. Gated on the Python side, where the phase is
+        // known, and refused with a toast rather than silence.
+        api("end_session");
         return;
       }
       if (!gateOpen) return;

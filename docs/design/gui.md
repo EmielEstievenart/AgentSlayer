@@ -295,11 +295,12 @@ delivery, clipboard watcher, blocking prompts, `render_state`. These four are
 implemented smaller than the TUI's, each saying so at its own definition and in
 a toast where a user could otherwise be left staring at nothing:
 
-1. **Window tabs / session views.** `open_session_view` / `focus_session_view` /
-   `finish_session_view` render into ONE transcript with a `── task: … ──`
-   divider and a `· sub-agent ‹title›` label rather than minting a tab. The
-   controller's contract (open → focus → … → finish, single-flight) is satisfied
-   as written; the tab bar is a later increment.
+1. ~~**Window tabs / session views.**~~ **Done in parity increment 3** —
+   `open_session_view` / `focus_session_view` / `finish_session_view` are the
+   real implementations now: one persistent transcript per browser window, a
+   two-row tab bar over them, sub-run dividers and the derived `▶`/`✓`/`✗`
+   state. The reduced single-transcript version (a divider plus a
+   `· sub-agent ‹title›` speaker label) is gone.
 2. ~~**`toggle_harness_log`.**~~ **Done in parity increment 2** — the pane
    landed with the state rail, exactly as this line said it would.
 3. **`show_identify_overlay`.** The tkinter child-process mechanism carries over
@@ -334,7 +335,7 @@ step:
 3. ✅ run panel — **parity increment 1**, with (2).
 4. ✅ sidebar / status / state rail — **parity increment 2**, with the harness
    log pane and the keys those surfaces report on.
-5. ⬜ window tabs / delegation / summary
+5. ✅ window tabs / delegation / summary — **parity increment 3**.
 6. ⬜ elements panel
 7. ⬜ service editor
 8. ⬜ settings / help / modals
@@ -448,6 +449,57 @@ rebuild), locked while a session owns the preset. The picker edits the MASTER
 window only — there is no tab bar to select another one until increment 5, which
 is also where the CHAT WINDOW block grows the sub-agent's readiness note. The
 "Set chat region..." button toasts: calibration lands with the elements panel.
+(Both halves of that sentence were made good by increment 3: the picker edits
+whichever window the tab bar has selected, and the CHAT WINDOW block carries the
+sub-agent's readiness note.)
+
+**Parity increment 3** — the WINDOW TABS, the DELEGATION VIEWS and the SESSION
+SUMMARY, against `docs/design/ui-briefs/tabs-delegation-summary.md`. Nothing new
+crossed the ports and no core change was needed; the three reduced session-view
+methods became the real ones, and one more family of *decisions* crosses with
+the data:
+
+- `{type: "tabs"}` carries both rows (masters, then the selected master's
+  sub-agent windows), the one selection that spans them, and per tab the
+  composed `label`, the `service` and the `state`. The state is **derived from
+  the window's run history, never stored** — none / `running` / `ok` / `failed`,
+  last run only — because "how did the last run in this window go" is one rule
+  and two copies of it would drift. The glyphs (`▶`/`✓`/`✗`) ride in the label
+  for parity of wording; the page also colours from `state`, which is the half
+  the brief actually requires (§7: a GUI may badge this however it likes).
+- **A tab is a browser WINDOW, not a session view.** It exists before any
+  session, keeps its own service, and `/new` keeps both tabs and both
+  calibrations while forgetting the runs — the sub-agent tab drops its `✓`
+  because the runs are gone, not because the window is.
+- **Three pointers, not one**, and this is the whole of the surface's
+  correctness: `_selected_window` (what is shown, what the sidebar configures),
+  `_focused_window` (where `add_*` lands, moved only by `focus_session_view`),
+  and the automation's live slot (what is driven, never moved by a tab). Every
+  `transcript` event now carries its `window`, so output keeps landing in the
+  sub-agent's panel while the user reads the master's.
+- The **sidebar's SERVICE and CHAT WINDOW blocks now describe the SELECTED
+  window** — the picker writes into that window's slot, the appearance summary
+  and region are its, and the readiness line is `slot_note`'s two-input answer
+  (the window's box, and what *that tab's* service looks like). DETECTION keeps
+  naming the LIVE window: a different pointer, and they part company for the
+  whole of a delegation.
+- The **summary** is the existing modal grown up: the stats rows, the
+  `task_done` markdown (with the "no summary" placeholder), four buttons and the
+  four single-letter keys. `e` is gated exactly as `check_action` gates it
+  (session active, not busy, `AWAITING_REPLY`/`DONE`) and refuses out loud, per
+  increment 2's divergence. The code's behaviour is the contract, not `tui.md`
+  §1.5's older prose: `u` undoes **one** turn behind a confirm and returns to
+  the chat; `l` writes the log and re-opens the summary (a loop); `escape` is
+  "back", not "end".
+
+Two small things landed with it, both consequences rather than additions: the
+export is per RUN again (`render_log` slices `_sub_runs` out of the sub-agent
+window's log under one `## sub-agent: <title> (<chat>)` heading each), and F6
+is kept even though a DOM tab strip needs no hotkey — the composer holds focus
+for most of a session. Deferred deliberately: the top-level `u`/`l`/`t`
+bindings (they belong to `modals-keys-esc.md`, increment 8), and any N-window
+chrome — one master and one sub-agent is the current real contract (brief §4 of
+the ambiguities).
 
 ## 4. SSH connect dialog (GUI-only surface)
 

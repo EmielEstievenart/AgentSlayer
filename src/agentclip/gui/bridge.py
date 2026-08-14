@@ -43,12 +43,11 @@ exercised - ordering included - by a test with a list in it.
 whatever that type carries; ``json.dumps`` runs with ``ensure_ascii``, so every
 payload is ASCII on the wire no matter what the model wrote. The producer is
 always :class:`~agentclip.gui.view.GuiView` and the consumer is always
-``app.js``'s ``dispatch``. Four families are pinned here because they are the
-ones a renderer has to get exactly right; the rest (``transcript``, ``state``,
-``toast``, ``modal``, ``flash``, ``elements``, ``payload``, ``armed``,
-``focus_session``, ``composer_reset``, ``transcript_clear``, ``modal_close``,
-``toggle``) are each raised at one place in ``gui/view.py``, next to the port
-method they answer.
+``app.js``'s ``dispatch``. Five families are pinned here because they are the
+ones a renderer has to get exactly right; the rest (``state``, ``toast``,
+``modal``, ``flash``, ``elements``, ``payload``, ``armed``, ``composer_reset``,
+``transcript_clear``, ``modal_close``, ``toggle``) are each raised at one place
+in ``gui/view.py``, next to the port method they answer.
 
 The approval gate - ``show_gate`` / ``hide_gate``::
 
@@ -111,6 +110,24 @@ The sidebar's remaining blocks and the log::
     {type: "mcp", rows: [{name: str, state: str, line: str}, ...]}
     {type: "harness", kind: str, time: str, text: str, line: str}
     {type: "toggle", what: "log"}                           # /log, from Python
+
+The window tabs and the per-window transcripts - one tab per browser WINDOW,
+one persistent transcript per tab (``ui-briefs/tabs-delegation-summary.md``)::
+
+    {type: "tabs", selected: str, focused: str,
+     masters: [{window: str, name: str, service: str,
+                state: "none"|"running"|"ok"|"failed", label: str}, ...],
+     subs: [...]}                       # the SELECTED master's sub-agents
+    {type: "transcript", window: str, kind: ..., ...}   # every add_* carries it
+    {type: "focus_session", session_id: str, window: str, role: str}
+
+``selected`` is what the user is looking at and what the sidebar configures;
+``focused`` is which transcript new output is written into. They are the same
+window except for the duration of a delegation, and neither is the automation's
+LIVE target - that one never moves for a tab click, which is this surface's
+load-bearing invariant. ``state`` is derived from the window's run history
+rather than stored, and only the LAST run's outcome is reported: the tab is a
+status light, not a log.
 
 ``harness`` carries the rendered ``line`` as well as its parts because the
 fixed-width kind column is ``HarnessEntry.line``'s decision, taken once below
@@ -294,6 +311,12 @@ class JsCalls(Protocol):
     def reinstruct(self) -> None: ...
     def retry_insert(self) -> None: ...
     def set_service(self, key: str) -> None: ...
+    # The window tabs. Both are pure view-side navigation - no controller call
+    # is made for either - but they still cross here, because the page is where
+    # the click happens and the SELECTION lives in the view.
+    def select_window(self, window: str) -> None: ...
+    def next_window(self) -> None: ...
+    def end_session(self) -> None: ...
 
 
 class JsApi:
@@ -381,8 +404,24 @@ class JsApi:
         self._safely(self._calls.retry_insert)
 
     def service(self, key: str = "") -> None:
-        """The sidebar's service picker."""
+        """The sidebar's service picker - it edits the SELECTED window."""
         self._safely(lambda: self._calls.set_service(key))
+
+    def window(self, key: str = "") -> None:
+        """A window tab was clicked: show that window and point the sidebar at
+        it. Fired even for the tab that is already selected - that is how "click
+        the tab I am on" means "show me this window" after a delegation moved
+        the view (tabs-delegation-summary.md §6)."""
+        self._safely(lambda: self._calls.select_window(key))
+
+    def next_window(self) -> None:
+        """F6: the next window tab in the bar's order."""
+        self._safely(self._calls.next_window)
+
+    def end_session(self) -> None:
+        """`e`: open the session summary. Gated on the view side, where the
+        phase is known, and refused with a toast rather than silence."""
+        self._safely(self._calls.end_session)
 
     @staticmethod
     def _safely(call: Callable[[], None]) -> None:

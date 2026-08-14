@@ -24,11 +24,12 @@ touches the page directly.
 not parity, so a handful of ``ChatView`` methods are implemented smaller than
 the TUI's rather than left as a silent ``pass`` that would strand a controller
 flow. Each one says so at its own definition and they are listed together in
-``docs/design/gui.md`` §2: window tabs (one transcript with dividers), the
-``/identify`` overlay, and the elements crops (kinds, not pictures). Everything
-a *turn* passes through - the transcript, the gate, the delivery, the watcher,
-the prompts - is the real thing, and so, since parity increment 2, are the
-sidebar, the status bar's ten segments and the harness log pane.
+``docs/design/gui.md`` §2: what is left of that list is the ``/identify``
+overlay and the elements crops (kinds, not pictures). Everything a *turn*
+passes through - the transcript, the gate, the delivery, the watcher, the
+prompts - is the real thing, and so are the sidebar, the status bar's ten
+segments and the harness log pane (parity increment 2) and the window tabs,
+the per-window transcripts and the session summary (parity increment 3).
 """
 
 from __future__ import annotations
@@ -88,8 +89,9 @@ _MAX_MATCHES = 8
 _REASON_PREVIEW_CHARS = 200
 
 # The browser windows the automation drives, as the AutomationController keys
-# them. Opaque strings down there by design; the GUI has no tab bar yet, so it
-# names the same two the TUI does and shows one transcript for both.
+# them. Opaque strings down there by design; the GUI names the same two the TUI
+# does, because a tab IS a browser window in both shells (tui.md §1.6): it
+# exists before any session, keeps its own service, and survives ``/new``.
 MASTER_WINDOW = "m1"
 SUBAGENT_WINDOW = "m1-s1"
 
@@ -98,13 +100,32 @@ _WINDOW_SLOTS: dict[str, AgentSlot] = {
     SUBAGENT_WINDOW: AgentSlot.SUBAGENT,
 }
 
+# What the tab bar cycles, in the order it is on screen: every master, then the
+# selected master's sub-agent windows. A tuple rather than ``_WINDOW_SLOTS``'s
+# key order, so the picture cannot silently re-order itself the day the mapping
+# grows an entry (``WindowTabs.order``).
+_WINDOW_ORDER: tuple[str, ...] = (MASTER_WINDOW, SUBAGENT_WINDOW)
+
 MASTER_VIEW = "master"
 
-# The two browser windows, as the DETECTION heading names them. The TUI's
-# ``_WINDOW_NAMES``; this shell has no tab bar yet, but the heading still has to
-# say which window the lines under it are about - the LIVE one, which parts
-# company with what the user is reading for the whole of a delegation.
+# The two browser windows, as the tabs and the DETECTION heading name them (the
+# TUI's ``_WINDOW_NAMES``). The heading is about the LIVE window, which parts
+# company with the SELECTED one - what the user is reading - for the whole of a
+# delegation; the tabs are about the selected one. Two pointers, one vocabulary.
 _WINDOW_NAMES = {MASTER_WINDOW: "MASTER", SUBAGENT_WINDOW: "SUB-AGENT"}
+
+# A window tab's state, derived from its run history rather than stored, and the
+# glyph the label carries for it (``MainScreen._window_label``). The three-state
+# distinction is the parity requirement; the BMP glyphs are the TUI's terminal
+# constraint and are kept here only because the page also colours from ``state``
+# and a label that reads the same in both shells is a cheaper assertion surface
+# than one that does not (ui-briefs/tabs-delegation-summary.md §7).
+WINDOW_STATE_GLYPH: dict[str, str] = {
+    "none": "",
+    "running": "▶ ",
+    "ok": "✓ ",
+    "failed": "✗ ",
+}
 
 # == the sidebar's words ======================================================
 # Everything from here to ``_service_options`` is ``tui/widgets/sidebar.py``'s,
@@ -167,7 +188,13 @@ STALE_UNTICKED = "stillness not watched for this service"
 STALE_OFF = "finish detection off - nothing can decide a reply finished"
 
 REGION_UNSET = "not set - alt-tab to the chat yourself"
+# The CHAT WINDOW block's readiness line, per SELECTED window - ``tui/widgets/
+# sidebar.py:slot_note``, whose two inputs are the window's drawn box and what
+# the service THAT TAB is pointed at looks like. The master's window is never
+# "ready or not": it is where the user's own conversation already is.
 SLOT_NOTE_MASTER = "the main agent's chat window"
+SLOT_NOTE_READY = "delegation ON"
+SLOT_NOTE_MISSING = "delegation off · need: "
 
 # The MCP block: the state literal -> the words the column shows.
 _MCP_STATE_LABEL: dict[str, str] = {
@@ -233,13 +260,44 @@ class LogEvent:
     The page holds the rendered DOM; this holds the text. Same split as the
     TUI's (``TranscriptPanel.event_log`` beside its widgets) and for the same
     reason: an export must survive whatever the display prunes, and must carry
-    the verbatim payloads the rendered form collapses.
+    the verbatim payloads the rendered form collapses. One list per WINDOW, as
+    the panels are.
     """
 
     time: str
     headline: str
     body: str = ""
     fenced: bool = False
+
+
+def _run_divider(title: str) -> str:
+    """The line separating one delegated run from the next in the sub-agent
+    window's transcript. That window's transcript is never cleared between runs,
+    so this is the only thing saying where one sub-task ended and the next
+    began (``MainScreen._run_divider``)."""
+    return f"── task: {title} ──"
+
+
+@dataclass(slots=True)
+class _SubRun:
+    """Where one delegated run lives inside the sub-agent window's transcript.
+
+    The window's transcript is persistent, so a run is a *slice* of it rather
+    than a panel of its own: ``start`` is the index of its first event (just
+    past the divider) and ``end`` is set when it finishes. The list is never
+    pruned, so both stay valid for the life of the session - which is what lets
+    ``render_log`` put one ``## sub-agent:`` heading over each run instead of
+    one over all of them (``MainScreen._SubRun``).
+    """
+
+    ref: SessionRef
+    start: int
+    end: int | None = None
+    # How it ended, recorded when ``end`` is, and always the CALLER's answer:
+    # a run that was refused a fresh chat, blew its paste budget or crashed
+    # reaches ``finish_session_view`` exactly like one that finished, so the
+    # view must never infer this from the note text.
+    ok: bool = True
 
 
 class McpStatusSource(Protocol):
@@ -416,13 +474,27 @@ class GuiView:
         self._schedule = schedule if schedule is not None else _no_schedule
         self._on_exit = on_exit if on_exit is not None else _no_exit
 
-        # -- transcript ------------------------------------------------------
-        self._events: list[LogEvent] = []
-        # Which session's output is being written. One transcript in this slice,
-        # so this only decides whether a line is LABELLED as a sub-agent's - see
-        # ``focus_session_view``.
-        self._focused_session = MASTER_VIEW
+        # -- transcripts, one per WINDOW -------------------------------------
+        # Three pointers, and the whole of this surface's correctness is that
+        # they are three (ui-briefs/tabs-delegation-summary.md §2):
+        #  * SELECTED - what the user is looking at and what the sidebar
+        #    configures. Moved by a tab click and by F6, and never by anything
+        #    else... except a controller focus, which re-establishes the view.
+        #  * FOCUSED - which window's transcript the controller's ``add_*``
+        #    calls are written into. Moved ONLY by ``focus_session_view``.
+        #  * LIVE - which window the automation drives. It lives below, in the
+        #    AutomationController, and is moved only by start/end_browser_chat.
+        # They coincide almost always and visibly diverge for exactly the
+        # duration of a delegation, which is the state this shell most has to
+        # get right: selecting a tab must never redirect a paste.
+        self._events: dict[str, list[LogEvent]] = {window: [] for window in _WINDOW_ORDER}
+        self._selected_window = MASTER_WINDOW
+        self._focused_window = MASTER_WINDOW
         self._sessions: dict[str, SessionRef] = {}
+        # Where each delegated run begins and ends inside the sub-agent
+        # window's transcript, and how it ended. Cleared with the session; the
+        # WINDOWS are not (see ``clear_transcript``).
+        self._sub_runs: list[_SubRun] = []
 
         # -- session chrome mirrored off the last render_state ---------------
         self._last_view: SessionView | None = None
@@ -491,6 +563,7 @@ class GuiView:
         self._push_status()
         self._push_state_event()
         self._push_rail()
+        self._push_tabs()
         self._push_sidebar()
         self._remember_own_window()
         # Nothing is drawn yet, so this starts no worker - but it is the only
@@ -533,6 +606,7 @@ class GuiView:
         self._push_status()
         self._push_state_event()
         self._push_rail()
+        self._push_tabs()
         self._push_sidebar()
         self._push_mcp()
         self._bridge.send("armed", armed=self._automation.os_armed)
@@ -603,20 +677,17 @@ class GuiView:
 
     async def add_user(self, text: str) -> None:
         self._record("you", text)
-        self._bridge.send("transcript", kind="user", text=text, label=self._speaker_label("you"))
+        self._send_transcript(kind="user", text=text, label="you")
 
     async def add_prose(self, text: str) -> None:
         self._record("assistant", text)
-        self._bridge.send(
-            "transcript", kind="prose", text=text, label=self._speaker_label("assistant")
-        )
+        self._send_transcript(kind="prose", text=text, label="assistant")
 
     async def add_call(self, call: ToolCall) -> None:
         target = _call_target(call)
         raw = call.raw.strip("\n")
         self._record(f"tool call {call.id} - {call.tool} {target}".rstrip(), raw, fenced=True)
-        self._bridge.send(
-            "transcript",
+        self._send_transcript(
             kind="call",
             call_id=call.id,
             tool=call.tool,
@@ -627,18 +698,17 @@ class GuiView:
 
     async def add_note(self, text: str) -> None:
         self._record(text)
-        self._bridge.send("transcript", kind="note", text=text)
+        self._send_transcript(kind="note", text=text)
 
     async def add_error(self, text: str) -> None:
         self._record(f"ERROR: {text}")
-        self._bridge.send("transcript", kind="error", text=text)
+        self._send_transcript(kind="error", text=text)
 
     async def add_outbound(self, outbound: Outbound, label: str) -> None:
         payload = outbound.chunks[0]
         note = f"→ {label} ({outbound.total_chars:,} chars)"
         self._record(f"{note} [outbound turn {outbound.turn}]", payload, fenced=True)
-        self._bridge.send(
-            "transcript",
+        self._send_transcript(
             kind="outbound",
             note=note,
             turn=outbound.turn,
@@ -650,17 +720,22 @@ class GuiView:
     async def clear_transcript(self) -> None:
         """The ``/new`` teardown, and the automation half of it in full.
 
-        The calibrations SURVIVE (they describe where a service's windows are,
-        not what the finished session said), the pointers go home to MASTER, and
-        the poller is rebuilt against it - all exactly as ``MainScreen`` does it,
-        because every one of those is a fact about the browser rather than about
-        a widget.
+        The WINDOWS survive - both tabs stay, with their services and their
+        calibrations, because a window outlives the sessions run in it and the
+        browser is still open, still drawn, still pointed at its service. What
+        goes is session bookkeeping: both transcripts are emptied, the run
+        slices are forgotten (so the sub-agent tab drops its ``✓``/``✗``), the
+        pointers go home to MASTER and the poller is rebuilt against it. That
+        split - runs reset, calibration does not - is the whole of
+        ``MainScreen._remove_session_views`` plus ``clear_transcript``.
         """
-        self._events.clear()
+        for events in self._events.values():
+            events.clear()
         self._sessions.clear()
-        self._focused_session = MASTER_VIEW
+        self._sub_runs.clear()
+        self._focused_window = MASTER_WINDOW
+        self._select_window(MASTER_WINDOW)  # ...which moves ``calibrating`` too
         self._automation.select_live_slot(AgentSlot.MASTER)
-        self._automation.select_calibrating_slot(AgentSlot.MASTER)
         self._automation.reset_finish_trigger()
         self._automation.close_reply_gate()
         self._automation.forget_pending_insert()
@@ -674,20 +749,35 @@ class GuiView:
         self._bridge.send("transcript_clear")
 
     def has_transcript_events(self) -> bool:
-        return bool(self._events)
+        return any(self._events.values())
 
     def render_log(self, meta_lines: list[str]) -> str:
-        """The export, in the same markdown shape the TUI writes.
+        """The master's transcript, then every sub-agent RUN under its heading.
 
-        One document rather than one per window: this shell has one transcript,
-        and a delegated run appears in it under its divider, so slicing runs
-        back apart (``MainScreen.render_log``) has nothing to slice yet.
+        One exported document for the whole delegation tree, exactly as
+        ``MainScreen.render_log`` writes it: the master reads end to end (the
+        sub-runs appear in it as the delegate call and its result) and each
+        delegated run follows under its own title and chat name, so nothing a
+        sub-agent did is only visible in a tab. Per RUN rather than per window,
+        even though the runs share one transcript - five sub-tasks under a
+        single heading is a wall, and ``_sub_runs`` remembers the slices.
         """
-        lines = ["# AgentClip chat log", ""]
-        lines += [f"- {m}" for m in meta_lines]
-        lines += ["", "---", ""]
+        header = ["# AgentClip chat log", ""]
+        header += [f"- {m}" for m in meta_lines]
+        header += ["", "---", ""]
+        master = "\n".join(header) + "\n" + self._render_events(self._events[MASTER_WINDOW])
+        parts = [master.rstrip() + "\n"]
+        sub = self._events[SUBAGENT_WINDOW]
+        for run in self._sub_runs:
+            chat = f" ({run.ref.chat_name})" if run.ref.chat_name else ""
+            body = self._render_events(sub[run.start : run.end])
+            parts.append(f"## sub-agent: {run.ref.title}{chat}\n\n{body}".rstrip() + "\n")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _render_events(events: Sequence[LogEvent]) -> str:
         body: list[str] = []
-        for event in self._events:
+        for event in events:
             body.append(f"## [{event.time}] {event.headline}")
             body.append("")
             text = event.body.rstrip("\n")
@@ -697,50 +787,225 @@ class GuiView:
                     body += [fence, text, fence, ""]
                 else:
                     body += [text, ""]
-        return ("\n".join(lines) + "\n" + "\n".join(body)).rstrip() + "\n"
+        return "\n".join(body)
 
     def _record(self, headline: str, body: str = "", *, fenced: bool = False) -> None:
-        self._events.append(
+        """Append to the FOCUSED window's log - never the selected one.
+
+        Which is the point of the split: the user may be reading the master's
+        transcript while a sub-agent run's output keeps landing correctly in
+        the sub-agent's.
+        """
+        self._events[self._focused_window].append(
             LogEvent(datetime.now().strftime("%H:%M:%S"), headline, body, fenced)
         )
 
-    def _speaker_label(self, base: str) -> str:
-        """Whose line this is. With one transcript, the label is the only thing
-        that says a sub-agent wrote it."""
-        if self._focused_session == MASTER_VIEW:
-            return base
-        ref = self._sessions.get(self._focused_session)
-        title = ref.title if ref is not None else self._focused_session
-        return f"{base} · sub-agent ‹{title}›"
+    def _send_transcript(self, **fields: Any) -> None:
+        """One transcript event, addressed to the window it belongs to.
 
-    # == ChatView: session views ===============================================
-    # REDUCED SCOPE (gui.md §2): the TUI mints a window tab per browser window
-    # and routes each session's output into its own panel. This slice has ONE
-    # transcript, so a delegated run opens with a divider, is labelled while it
-    # runs, and closes with its note. Nothing can be misrouted because nothing
-    # is routed - and the controller's contract (open -> focus -> ... -> finish,
-    # single-flight) is satisfied exactly as written.
+        Every ``add_*`` goes through here, so the routing question is answered
+        once: the page appends into the panel named by ``window``, whichever
+        panel it happens to be showing.
+        """
+        self._bridge.send("transcript", window=self._focused_window, **fields)
+
+    # == ChatView: session views (window transcripts) ==========================
+    # The port speaks session ids; this shell speaks windows, exactly as the TUI
+    # does. ``_window_of_session`` is the whole adapter - a sub-agent session's
+    # output belongs in the sub-agent window's transcript, whichever run it is.
+
+    def _window_of_session(self, session_id: str) -> str | None:
+        """Which browser window a session's output belongs in.
+
+        Unknown ids answer None rather than guessing: losing a transcript line
+        beats writing it into the wrong conversation's panel.
+        """
+        ref = self._sessions.get(session_id)
+        if ref is not None:
+            return SUBAGENT_WINDOW if ref.role == "subagent" else MASTER_WINDOW
+        return MASTER_WINDOW if session_id == MASTER_VIEW else None
 
     async def open_session_view(self, session: SessionRef) -> None:
+        """Start ``session``'s transcript in its window and focus that window.
+
+        No panel is minted: the sub-agent window's transcript is permanent, so
+        a run opens by appending a divider to whatever is already in it and
+        recording where it began (``_SubRun``). That is what makes the window's
+        history one scroll instead of a graveyard of tabs.
+
+        Focus moves here, not on the user's next click: the controller writes
+        the sub-agent's whole run through the ordinary ``add_*`` calls right
+        after this returns.
+        """
         self._sessions[session.id] = session
-        await self.add_note(f"── task: {session.title} ──")
+        # Focus FIRST, so the divider itself lands in the right transcript: the
+        # TUI writes it straight into the window's panel, and this shell writes
+        # every transcript line through the focused pointer.
         self.focus_session_view(session.id)
+        window = self._focused_window
+        await self.add_note(_run_divider(session.title))
+        if window == SUBAGENT_WINDOW:
+            # Just PAST the divider: the run's own events are what an export
+            # puts under its heading.
+            self._sub_runs.append(_SubRun(session, len(self._events[window])))
+            self._push_tabs()
 
     def focus_session_view(self, session_id: str) -> None:
-        """Route every later ``add_*`` at that session. Unknown ids are recorded
-        rather than refused: losing a transcript line is never worth taking a
-        running session down with an exception."""
-        self._focused_session = session_id
+        """Route every later ``add_*`` into that session's window (and show it).
+
+        Unknown ids are ignored rather than fatal: losing a transcript line is
+        never worth taking a running session down with an exception.
+        """
+        window = self._window_of_session(session_id)
+        if window is None:
+            return
+        self._focused_window = window
         ref = self._sessions.get(session_id)
         self._bridge.send(
             "focus_session",
             session_id=session_id,
+            window=window,
             role=ref.role if ref is not None else "master",
         )
+        # Showing what is being written is the controller's one reach into the
+        # SELECTED pointer, and the only one: a delegation starting pulls the
+        # user's eyes to the sub-agent's transcript, and its ending hands them
+        # back. Nothing about the live/automation target moves with it.
+        self._select_window(window)
 
     async def finish_session_view(self, session_id: str, note: str, ok: bool) -> None:
-        self._record(note)
-        self._bridge.send("transcript", kind="note", text=note, ok=ok)
+        """A sub-agent run ended: annotate its transcript and re-badge its tab.
+
+        Nothing is removed - the transcripts are output-only and the composer
+        always targets the controller's active session, so leaving the run
+        readable costs nothing and is the whole point of keeping it. The tab
+        drops its ``▶`` for a ``✓`` or a ``✗``: the label belongs to the WINDOW,
+        so it reports what happened in it, and the run's own title lives in the
+        divider above its transcript.
+
+        ``ok`` is the outcome and it is a PARAMETER rather than an inference,
+        because the caller is the only one who knows: a run that was refused a
+        fresh chat, blew its budget or crashed reaches here exactly like a run
+        that finished, through the same ``finally``.
+        """
+        window = self._window_of_session(session_id)
+        if window is None:
+            return
+        # The note belongs to the finishing run's transcript, whichever window
+        # is focused by the time this lands.
+        self._events[window].append(
+            LogEvent(datetime.now().strftime("%H:%M:%S"), note)
+        )
+        self._bridge.send("transcript", window=window, kind="note", text=note, ok=ok)
+        if window == SUBAGENT_WINDOW:
+            for run in reversed(self._sub_runs):
+                if run.ref.id == session_id:
+                    run.end = len(self._events[window])
+                    run.ok = ok
+                    break
+            self._push_tabs()
+
+    # == window tabs (view-local: never a controller call) =====================
+    # A tab is a browser WINDOW, not a session view (tui.md §1.6): it exists
+    # before any session, keeps its own service and its own calibration, and
+    # survives ``/new``. Clicking one and F6 are deliberately not routed through
+    # the controller - they are pure navigation over state this view already
+    # holds, and the controller never asks which tab the user is looking at.
+
+    def select_window(self, window: str) -> None:
+        """The page's tab click: show that window, and point the sidebar at it.
+
+        Idempotent by design rather than an early return: "click the tab I am
+        already on" has to keep meaning "show me this window", which is how a
+        user re-establishes their view after the controller moved focus
+        elsewhere mid-delegation. Repainting loses nothing here - every readout
+        the tab bar and the sidebar draw is re-derived from state this object
+        holds, never written into the page out of band
+        (ui-briefs/tabs-delegation-summary.md §6).
+        """
+        self._select_window(window)
+
+    def next_window(self) -> None:
+        """F6: select the next window in the bar's own order.
+
+        Kept even though a DOM tab strip is clickable and focusable, unlike the
+        TUI's (§7 of the brief calls the hotkey reasonable-but-not-load-bearing
+        for a GUI): the composer holds focus for most of a session and the tabs
+        are one keystroke away rather than a mouse trip.
+        """
+        order = list(_WINDOW_ORDER)
+        try:
+            index = order.index(self._selected_window)
+        except ValueError:  # pragma: no cover - the pointer is never off-list
+            index = -1
+        self._select_window(order[(index + 1) % len(order)])
+
+    def _select_window(self, window: str) -> None:
+        """Make ``window`` the tab the user sees and the sidebar configures.
+
+        It pointedly does NOT touch the automation's LIVE slot. Looking at a
+        window is not driving it: a click here while a sub-agent is mid-run
+        must not send the next paste into the master's chat. Nor does it touch
+        the DETECTION block, which reports on the live window and is the
+        detectors' to write.
+        """
+        if window not in _WINDOW_SLOTS:
+            return
+        self._selected_window = window
+        self._automation.select_calibrating_slot(_WINDOW_SLOTS[window])
+        self._push_tabs()
+        self._push_sidebar()
+
+    def _push_tabs(self) -> None:
+        """The two-row bar: master windows, then the selected master's subs.
+
+        One event for both rows because the bar owns ONE selection across them
+        - the two-row shape is a tree, not two independent pickers - and
+        because the selected/focused pair is only readable as a pair: they are
+        the same window except during a delegation, which is exactly when the
+        page has something extra to say.
+        """
+        self._bridge.send(
+            "tabs",
+            selected=self._selected_window,
+            focused=self._focused_window,
+            masters=[self._tab(MASTER_WINDOW)],
+            subs=[self._tab(SUBAGENT_WINDOW)],
+        )
+
+    def _tab(self, window: str) -> dict[str, str]:
+        """One tab: what it is, how it is doing, what it runs on.
+
+        The service key rides on the tab because it is per window and the
+        sidebar only ever shows the SELECTED one's - without it, "which chat is
+        the sub-agent going to open?" is a question you answer by clicking
+        around (``MainScreen._window_label``).
+        """
+        name = _WINDOW_NAMES[window]
+        service = self._automation.service_of(window)
+        state = self._window_state(window)
+        glyph = WINDOW_STATE_GLYPH[state]
+        return {
+            "window": window,
+            "name": name,
+            "service": service,
+            "state": state,
+            "label": f"{glyph}{name} · {service}" if service else f"{glyph}{name}",
+        }
+
+    def _window_state(self, window: str) -> str:
+        """A window's run state, DERIVED from its run history, never stored.
+
+        Only the LAST run's outcome is reported: the tab is a status light for
+        the window, not a log, and the earlier runs stay readable by scrolling
+        its transcript. The master never gets one - it is the user's own
+        conversation, and there is no "run" of it to have succeeded.
+        """
+        if window != SUBAGENT_WINDOW or not self._sub_runs:
+            return "none"
+        if any(run.end is None for run in self._sub_runs):
+            return "running"
+        return "ok" if self._sub_runs[-1].ok else "failed"
 
     # == ChatView: state + chrome ==============================================
 
@@ -1078,6 +1343,33 @@ class GuiView:
         )
         self._controller.force_ingest()
 
+    def end_session(self) -> None:
+        """`e`: close the session out and read what happened.
+
+        Gated exactly as ``MainScreen.check_action`` gates it - a live session,
+        no turn in flight, and the floor back with the user (AWAITING_REPLY or
+        DONE) - because the summary is a report on a settled session and mid-turn
+        numbers would be a lie the moment they were read. The TUI hides the key;
+        this shell has no footer to hide it from, so it says why instead
+        (docs/design/gui.md §3).
+
+        It is NOT the end of the session: ``task_done`` leaves the user in the
+        chat able to follow up, and the summary is one keypress away with three
+        exits (undo one turn, start fresh, or just go back).
+        """
+        view = self._last_view
+        if view is None or not view.session_active:
+            self.notify("no session yet - describe a task first", severity="warning")
+            return
+        phase = view.snapshot.phase.name if view.snapshot else "IDLE"
+        if view.busy or phase not in ("AWAITING_REPLY", "DONE"):
+            self.notify(
+                "a turn is running - the summary opens when the floor is back with you",
+                severity="warning",
+            )
+            return
+        self._controller.end_session()
+
     def toggle_watch(self) -> None:
         """`w`: pause or resume the clipboard watcher.
 
@@ -1124,12 +1416,11 @@ class GuiView:
         """The SERVICE picker: point this window at a different service.
 
         The same path ``MainScreen._on_service_changed`` takes - the key lands
-        in the window's slot of the automation's map, the pick is written back
-        to the global config so the next launch comes up on it, and the detector
-        worker is rebuilt because a different service is a different set of
-        captured appearances. What is missing next to the TUI's is the tab
-        relabel, because this shell has no tab bar yet (increment 5): the picker
-        edits the MASTER window, which is the only one it can show.
+        in the SELECTED window's slot of the automation's map, that window's tab
+        is relabelled (the service key is part of what a tab says), the pick is
+        written back to the global config so the next launch comes up on it, and
+        the detector worker is rebuilt because a different service is a
+        different set of captured appearances.
         """
         if key not in self._config.services:
             return
@@ -1140,9 +1431,10 @@ class GuiView:
             self.notify("the service is fixed while a session runs", severity="warning")
             self._push_sidebar()
             return
-        self._automation.set_service(MASTER_WINDOW, key)
+        self._automation.set_service(self._selected_window, key)
         self._persist_services()
         self._start_detector_worker()
+        self._push_tabs()
         self._push_sidebar()
         self._push_status()
 
@@ -1230,13 +1522,30 @@ class GuiView:
         return answer if isinstance(answer, str) else None
 
     async def show_summary(self, rows: list[tuple[str, str]], summary: str) -> str:
+        """The session summary: the stats table, the model's own ``task_done``
+        text, and four ways out.
+
+        The four answers are the controller's vocabulary
+        (``SessionController._show_summary``): ``undo`` closes this and undoes
+        THE SINGLE MOST RECENT turn behind a confirm, ``new`` runs the same
+        reset ``/new`` does, ``export`` writes the chat log and RE-OPENS this
+        screen (a loop, not an exit), and ``close`` is "back", not "end" - the
+        transcript and the session are untouched. Anything else - a modal an
+        abort poisoned, a page that answered with a shape we do not know - is
+        an empty string, which the controller reads as "none of the above" and
+        simply leaves the session alone.
+        """
         answer = await self._modal(
             "summary",
-            title="Session summary",
+            title="SESSION SUMMARY",
             rows=[[label, value] for label, value in rows],
             summary=summary,
+            # The empty summary has to say WHY it is empty: a blank panel under
+            # a stats table reads as a rendering failure (``SummaryScreen``).
+            placeholder="*(the model sent no summary)*",
+            hint="u undo last turn · t new session · l export chat log · esc close",
         )
-        return answer if isinstance(answer, str) else ""
+        return answer if answer in ("undo", "new", "export", "close") else ""
 
     async def _modal(self, modal: str, **fields: Any) -> Any:
         """Open one modal and park on the answer the page sends back.
@@ -1771,14 +2080,24 @@ class GuiView:
     def _push_sidebar(self) -> None:
         """The sidebar's blocks that are not a rail, a banner or a verdict.
 
+        Everything per-window in here describes the SELECTED window - the
+        service picker, the appearance summary, the drawn region and the
+        readiness note - because that is what a tab selection IS: it shows a
+        window's transcript and points every per-window control at that window
+        (``MainScreen._select_window``). The one block that does not follow the
+        selection is DETECTION, whose heading names the LIVE window and whose
+        lines only the detector machinery writes.
+
         One event rather than five because they are repainted by the same few
-        moments (a service pick, a detector rebuild, a session boundary) and a
-        page that reassembles a column out of five partial writes has five ways
-        to be half-painted.
+        moments (a tab click, a service pick, a detector rebuild, a session
+        boundary) and a page that reassembles a column out of five partial
+        writes has five ways to be half-painted.
         """
-        service = self._service_for(AgentSlot.MASTER)
+        window = self._selected_window
+        slot = _WINDOW_SLOTS[window]
+        service = self._service_for(slot)
         preset = self._config.services.get(service)
-        cal = self._automation.calibration(AgentSlot.MASTER)
+        cal = self._automation.calibration(slot)
         region = cal.chat_region
         live_window = _WINDOW_NAMES[
             SUBAGENT_WINDOW if self._automation.live_slot is AgentSlot.SUBAGENT else MASTER_WINDOW
@@ -1797,14 +2116,33 @@ class GuiView:
             # The TUI's line names F2 as the door to the captures; this shell
             # has no service editor yet (increment 7), so it reports the count
             # and stops rather than naming a key that would do nothing.
-            profile_note=f"appearance: {self.profile_for(AgentSlot.MASTER).describe()}",
-            # The picker is locked while a session owns the services: the
-            # master's budget is baked into its Engine at bootstrap.
+            profile_note=f"appearance: {self.profile_for(slot).describe()}",
+            # The picker is locked while a session owns the services: BOTH
+            # windows' budgets are baked in at bootstrap (the sub-agent's with
+            # the session spec), so neither preset may move mid-session.
             locked=not self._awaiting_new_session,
+            window=window,
             region=f"{region.describe()} · chatbot window" if region is not None else REGION_UNSET,
-            slot_note=SLOT_NOTE_MASTER,
+            slot_note=self._slot_note(slot),
             detection_title=f"DETECTION · {live_window}",
         )
+
+    def _slot_note(self, slot: AgentSlot) -> str:
+        """The CHAT WINDOW block's readiness line for the selected window.
+
+        ``tui/widgets/sidebar.py:slot_note``, spelled again for the reason the
+        other display strings above are. Two inputs, because readiness has two
+        halves: the box this window was drawn as, and what the service THAT TAB
+        is pointed at looks like - which is the sub-agent tab's own service
+        whenever the sub-agent tab is selected, never the master's.
+        """
+        if slot is AgentSlot.MASTER:
+            return SLOT_NOTE_MASTER
+        cal = self._automation.calibration(slot)
+        profile = self.profile_for(slot)
+        if can_delegate(cal, profile):
+            return SLOT_NOTE_READY
+        return SLOT_NOTE_MISSING + ", ".join(missing(cal, profile))
 
     def _mcp_counts(self) -> tuple[int, int | None]:
         """``connected`` over ``enabled`` - or ``None`` when there is no manager.

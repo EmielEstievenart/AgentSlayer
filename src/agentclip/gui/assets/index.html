@@ -41,8 +41,29 @@
 
       <div class="body">
         <div class="chat">
-          <main class="transcript" id="transcript">
-            <p class="empty">Describe a task below to start a session.</p>
+          <!-- The window tabs. A tab is a BROWSER WINDOW, not a session view
+               (tui.md section 1.6): it exists before any session, keeps its own
+               service, and survives /new. Two rows because the windows are a
+               two-level tree - row 1 the masters, row 2 the selected master's
+               sub-agent windows - and ONE selection spans both. Selecting a tab
+               shows that window's transcript and points the sidebar at it; it
+               never moves the automation's live target. -->
+          <nav class="wintabs" id="wintabs">
+            <div class="win-row" id="win-row-master"></div>
+            <div class="win-row win-row-sub" id="win-row-sub"></div>
+          </nav>
+
+          <!-- One persistent transcript per window, exactly one shown. A
+               delegated run does not mint a pane: it appends a divider to the
+               sub-agent window's transcript and keeps writing, so the window's
+               history is one scroll. -->
+          <main class="transcripts" id="transcripts">
+            <div class="transcript" id="tr-m1" data-window="m1">
+              <p class="empty">Describe a task below to start a session.</p>
+            </div>
+            <div class="transcript" id="tr-m1-s1" data-window="m1-s1" hidden>
+              <p class="empty">Nothing has been delegated to this window yet.</p>
+            </div>
           </main>
 
           <!-- The run panel: one row per planned call while a turn executes,
@@ -112,12 +133,17 @@
             <div id="mcp-rows"></div>
           </div>
 
-          <div class="side-title">SERVICE</div>
+          <!-- Both headings name the SELECTED window, because both blocks
+               configure it: picking a tab points the service picker and the
+               region button at that window. The DETECTION heading below names
+               the LIVE one instead - a different pointer, and the two part
+               company for the whole of a delegation. -->
+          <div class="side-title" id="side-service-title">SERVICE</div>
           <select id="service-select"></select>
           <div class="side-status" id="side-service-label"></div>
           <div class="side-status" id="side-profile-note"></div>
 
-          <div class="side-title">CHAT WINDOW</div>
+          <div class="side-title" id="side-window-title">CHAT WINDOW</div>
           <button id="set-region" type="button">Set chat region...</button>
           <div class="side-status" id="side-region"></div>
           <div class="side-status" id="side-slot-note"></div>
@@ -132,7 +158,9 @@
           <div class="side-status" id="det-STALE"></div>
           <div class="side-status" id="det-COPY"></div>
 
-          <div class="side-hint">F3 hides this column · F5 armed · F8 log</div>
+          <div class="side-hint">
+            F3 hides this column · F5 armed · F8 log · F6 next window · e summary
+          </div>
         </aside>
       </div>
 
@@ -161,6 +189,11 @@
         <div class="modal-title" id="modal-title"></div>
         <div class="modal-body" id="modal-body"></div>
         <div class="modal-actions" id="modal-actions"></div>
+        <!-- The summary's keys line. Buttons are the GUI's real affordance
+             (the single letters are a terminal convention), but the keys work
+             too and a modal that answered only to a mouse would be the one
+             screen in this app that did. -->
+        <div class="modal-hint" id="modal-hint" hidden></div>
       </div>
     </div>
   </body>

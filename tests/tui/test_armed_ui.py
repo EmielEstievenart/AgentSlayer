@@ -681,6 +681,29 @@ async def test_a_session_started_while_disarmed_gets_its_watcher_on_re_arm(
         await _wait_for(pilot, lambda: main._watch_worker is not None, "watcher started on re-arm")
 
 
+async def test_quitting_stops_the_watcher(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Teardown, which is a promise about the OS just like DISARMED is: after the
+    app is gone, nothing of ours is still reading the user's clipboard.
+
+    It used to come for free - Textual cancels the workers a node started when it
+    unmounts, and the watcher was one of them. The thread belongs to the
+    AutomationController now, so the screen asks for it by name on unmount, and
+    this is the test that would notice if that line disappeared.
+    """
+    app, fake = _make_app(tmp_path, profile_root)
+    _patch_os(monkeypatch, fake)
+    _toasts(monkeypatch)
+    async with app.run_test(size=SIZE) as pilot:
+        main = await _start_session(app, pilot)
+        await _wait_for(pilot, lambda: main._watch_worker is not None, "watcher running")
+        thread = main._watch_worker
+    assert thread is not None
+    thread.join(timeout=10)
+    assert not thread.is_alive(), "the watcher thread outlived the app"
+
+
 # == what keeps working ========================================================
 
 

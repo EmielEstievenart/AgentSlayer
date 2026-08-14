@@ -33,10 +33,13 @@ panel rather than minting a pane, so the window's whole history is one scroll -
 and ``render_log`` slices it back apart per run, because an export wants one
 heading per sub-task, not one over five.
 
-Threading: the clipboard watcher is a ``run_worker(thread=True)`` that bridges
-captures via the thread-safe ``post_message(ClipboardCaptured)`` -> the controller.
-The controller's flow coroutines run via ``spawn`` (also ``run_worker``), so Textual
-cancels everything on unmount. The detectors are the same shape: ONE thread
+Threading: the clipboard watcher is a plain ``threading.Thread`` the
+AutomationController owns (docs/design/gui.md §1) and this screen only starts,
+stops and mirrors; captures come back through ``_clipboard_captured``, which
+bridges them via the thread-safe ``post_message(ClipboardCaptured)`` -> the
+controller. The screen's own workers - the flow coroutines ``spawn`` starts and
+the detector poller - are ``run_worker``s Textual cancels on unmount, where the
+watcher is stopped by name instead. The detectors are the same shape: ONE thread
 worker takes a single capture of the live chat region per tick and hands it to
 one ``screen.detector.ScreenDetector`` - a plain, Textual-free object that
 searches for every appearance the live window's service is CALIBRATED for and
@@ -140,6 +143,7 @@ user has selected. The two coincide constantly and are never the same question.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from collections import deque
 from collections.abc import Callable, Coroutine, Sequence
@@ -179,7 +183,7 @@ from agentclip.automation.harness_log import (
 from agentclip.automation.loop_state import LoopState
 from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.clip.chunking import STREAM_CHUNK_CHARS, split_for_stream
-from agentclip.clip.watcher import SelfWriteSet, watch, write_via
+from agentclip.clip.watcher import SelfWriteSet, write_via
 from agentclip.config import (
     DELIVERY_STREAM,
     SCROLL_END,
@@ -841,7 +845,6 @@ class MainScreen(Screen[None]):
         self._profile_root = profile_root
         self._profiles: dict[str, ServiceProfile] = {}
         self._self_writes = SelfWriteSet()
-        self._watch_worker: Worker[None] | None = None
         self._snap: StatusSnapshot | None = None  # mirrors SessionView.snapshot (read by tests)
         self._gate_kind: str | None = None  # the in-flight gate's kind, for a/check_action
         # The pattern `a` would remember at the in-flight gate, or None in legacy
@@ -876,8 +879,14 @@ class MainScreen(Screen[None]):
         # the state the loop is read against and this screen no longer does:
         #
         # * the global ARMED switch (F5, `/armed`) - see ``set_os_armed``, whose
-        #   consequences (the watcher, the four chokepoints, the toasts) stay
-        #   here while the decision itself lives down there;
+        #   remaining consequences (three of the four chokepoints, the status
+        #   bar, the toasts) stay here while the decision itself, and the
+        #   clipboard watcher it stops, live down there;
+        # * the clipboard watcher thread: the provider is handed in (cli.py
+        #   picks the backend at startup and it comes down through this screen),
+        #   the protocol pre-filter is handed in (the automation layer may not
+        #   import ``agentclip.protocol``), and captures come back out through
+        #   ``_clipboard_captured`` below;
         # * every user-drawn calibration, one per agent slot, plus the two
         #   pointers into them - *calibrating* is the slot behind the SELECTED
         #   window tab (what the sidebar configures), *live* is the slot the
@@ -890,15 +899,14 @@ class MainScreen(Screen[None]):
         self._automation = AutomationController(
             view=self,
             services=self._initial_services(config),
+            clipboard=provider,
+            self_writes=self._self_writes,
+            poll_interval_ms=config.clipboard.poll_interval_ms,
+            accepts=looks_like_protocol,
+            on_clipboard_captured=self._clipboard_captured,
         )
         self._delegation_ready = False  # last-seen SUBAGENT can_delegate, for the one-shot toast
         self._region_click_warned = False
-        # What the clipboard watcher was doing when the disarm took it away, so
-        # re-arming restores that rather than a guess (see ``set_os_armed``).
-        # Watcher control, not the armed decision: it is READ off
-        # ``_watch_worker`` and spent on ``_start_watcher``, both of which are
-        # this screen's until the watcher moves down.
-        self._watch_before_disarm = False
         self._detector_worker: Worker[None] | None = None
         # Which poller RUN a verdict belongs to. Bumped by every
         # ``_start_detector_worker``, stamped into every probe message the loop
@@ -1301,6 +1309,20 @@ class MainScreen(Screen[None]):
             self._paint_mcp()
         self._remember_own_window()  # the user just launched us - focus is our terminal
         self._controller.start()
+
+    def on_unmount(self) -> None:
+        """Quitting must not leave a thread polling the user's clipboard.
+
+        This is the same seam Textual's own teardown used when the watcher was a
+        thread WORKER: ``Widget._on_unmount`` cancels every worker the node
+        started, and this screen's unmount is dispatched on app shutdown. Now
+        that the thread belongs to the AutomationController, that teardown has to
+        be asked for by name. The loop notices between ticks and the thread is a
+        daemon besides, so nothing here can hang the exit; this is what makes it
+        stop *promptly*, and what keeps a test run from accumulating one live
+        watcher per app it booted.
+        """
+        self._automation.stop_input()
 
     def _remember_own_window(self) -> None:
         """Record the foreground window at a moment the user is provably
@@ -2493,7 +2515,9 @@ class MainScreen(Screen[None]):
         3. the finish decision (``_evaluate_finish``), which keeps every scrap of
            its bookkeeping and simply lands on MANUAL_COPY where it would have
            launched the auto-copy flow;
-        4. the clipboard watcher, stopped here and restarted below.
+        4. the clipboard watcher - the one chokepoint that is no longer here:
+           the thread belongs to the AutomationController now, so the stop and
+           the restart happen inside its ``set_os_armed``.
 
         In-flight work is left alone on purpose. The detectors' state
         (``_awaiting_pasted_reply``, ``_send_gate``, ``_copy_armed``, the
@@ -2506,34 +2530,31 @@ class MainScreen(Screen[None]):
         The watcher rule, of the two on offer: disarming forces it off and
         remembers what it was, and re-arming puts *that* back - so a user who had
         paused it with `w`, disarmed, and re-armed does not get a watcher they
-        turned off themselves. While disarmed `w` is refused outright (there is
-        no state in which a watcher may run), which is why ``check_action`` dims
-        it exactly as it does in manual-clipboard mode.
+        turned off themselves. That rule (and the transition-only bookkeeping
+        behind it) is the controller's now; what is left here is `w` itself,
+        refused outright while disarmed because there is no state in which a
+        watcher may run - which is why ``check_action`` dims it exactly as it
+        does in manual-clipboard mode.
 
         ``target`` is the wanted state; ``None`` toggles (bare `/armed`, F5).
         Painting is synchronous and unconditional - both indicators and the
         toast repaint even when the state did not change, so an explicit
         `/armed off` typed twice confirms itself rather than looking ignored.
-        The watcher half, in contrast, moves only on a real TRANSITION: a second
-        `/armed off` that re-read the (already stopped) worker would remember
-        "it was off" and quietly lose the watcher the first one took away.
 
         The FLAG itself is the AutomationController's - one armed switch below
         every shell rather than one per frontend (docs/design/gui.md §1) - and
-        the banner repaint rides down with it as ``paint_armed``. What is left
-        here is every consequence the screen owns: the watcher, the status
-        segment that has to be repainted after ``watch_paused`` moves, the
-        footer's bindings, and the toast.
+        so, since this slice, is the clipboard watcher the disarm stops. Both
+        have moved by the time the call returns, which is what lets the chrome
+        below simply read the result: ``watch_paused`` mirrors what the
+        controller ended up doing with the watcher rather than deciding it.
+        What is left here is the screen's own consequences: that status segment,
+        the footer's bindings, and the toast.
         """
         was_armed = self._automation.os_armed
         armed = self._automation.set_os_armed(target)
         if armed and not was_armed:
-            if self._watch_before_disarm:
-                self._start_watcher()  # no-ops in manual mode, and if already up
-            self._watch_before_disarm = False
+            self._mirror_watcher()
         elif was_armed and not armed:
-            self._watch_before_disarm = self._watch_worker is not None
-            self.stop_input()
             self.watch_paused = True  # truthful: nothing is polling the clipboard
         self._log_harness(
             KIND_ARMED,
@@ -2574,26 +2595,29 @@ class MainScreen(Screen[None]):
             self.sidebar.show_armed_state(armed)
 
     def start_input(self) -> None:
-        if not self._automation.os_armed:
-            # A session started while disarmed still WANTS the watcher, so the
-            # re-arm turns it on: this is the one place the remembered state is
-            # set from an intention rather than from an observation.
-            self._watch_before_disarm = True
-            return
-        if self._provider.name == "manual":
-            self.notify(
-                "manual clipboard mode: press i and paste the model's reply into the box; "
-                "outbound payloads go out via the terminal's OSC-52 copy",
-                severity="warning",
-                timeout=10,
-            )
-            return
-        self._start_watcher()
+        """ChatView: the session wants the clipboard watched.
+
+        Every rule behind that (disarmed defers, manual mode explains itself
+        instead, and the toast that says so) is the controller's; this end only
+        mirrors what it did into the chrome.
+        """
+        self._automation.start_input()
+        self._mirror_watcher()
 
     def stop_input(self) -> None:
-        if self._watch_worker is not None:
-            self._watch_worker.cancel()
-            self._watch_worker = None
+        self._automation.stop_input()
+
+    def _mirror_watcher(self) -> None:
+        """Bring ``watch_paused`` in line after something tried to START one.
+
+        The reactive is presentation - the status bar's "paused" and the `w`
+        binding read it - so it follows the controller rather than leading it.
+        Only the True->False direction lives here, because that is the only one
+        a start can cause; the pauses (the `w` key, the disarm) say so at their
+        own site, exactly as they always did.
+        """
+        if self._automation.watching:
+            self.watch_paused = False
 
     # == ChatView: scheduling + lifecycle =====================================
 
@@ -2643,31 +2667,31 @@ class MainScreen(Screen[None]):
 
     # -- clipboard watcher ----------------------------------------------------
 
+    @property
+    def _watch_worker(self) -> threading.Thread | None:
+        """The watcher, as a truthiness this screen (and its tests) can read.
+
+        Compatibility surface: it was a Textual thread worker owned here and is
+        now a ``threading.Thread`` owned by the AutomationController, but every
+        reader only ever asked whether one exists.
+        """
+        return self._automation.watcher_thread
+
     def _start_watcher(self) -> None:
-        if self._provider.name == "manual" or self._watch_worker is not None:
-            return
-        provider = self._provider
-        self_writes = self._self_writes
-        interval = self._config.clipboard.poll_interval_ms
+        """Resume the watcher and mirror it into the chrome (the `w` key's other
+        half). The start rules - manual mode, already running - are the
+        controller's; this is the two-line shell wrapper around them."""
+        self._automation.start_watching()
+        self._mirror_watcher()
 
-        def capture(text: str) -> None:
-            self.post_message(ClipboardCaptured(text))  # thread-safe bridge to the UI
+    def _clipboard_captured(self, text: str) -> None:
+        """The watcher thread's way in: post, return, decide on the UI thread.
 
-        def loop() -> None:
-            worker = get_current_worker()
-            watch(
-                provider,
-                interval,
-                should_stop=lambda: worker.is_cancelled,
-                accepts=looks_like_protocol,
-                on_capture=capture,
-                self_writes=self_writes,
-            )
-
-        self._watch_worker = self.run_worker(
-            loop, thread=True, group="clipwatch", exit_on_error=False
-        )
-        self.watch_paused = False
+        Called from the AutomationController's watcher thread, so it does the one
+        thing that is safe from there - ``post_message`` is Textual's thread-safe
+        bridge - and the whole decision lives in the handler below.
+        """
+        self.post_message(ClipboardCaptured(text))
 
     def on_clipboard_captured(self, message: ClipboardCaptured) -> None:
         message.stop()
@@ -4895,9 +4919,8 @@ class MainScreen(Screen[None]):
                 severity="warning",
             )
             return
-        if self._watch_worker is not None:
-            self._watch_worker.cancel()
-            self._watch_worker = None
+        if self._automation.watching:
+            self._automation.stop_input()
             self.watch_paused = True
             self._paint_status()
             self.notify("clipboard watcher paused - w resumes, i ingests manually")

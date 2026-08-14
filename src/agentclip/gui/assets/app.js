@@ -9,7 +9,10 @@
 
    Two toggles never leave this file: F3 (the sidebar) and F8 (the log pane) are
    pure show/hide of a page element. /log comes back the other way as a `toggle`
-   event, so the command and the key stay one implementation.
+   event, so the command and the key stay one implementation. F7 (the elements
+   column) is the third show/hide and the one exception: the flip is local, but
+   Python is told, because the crops are only encoded for a column somebody is
+   looking at.
 
    Installed at PARSE time, not on DOMContentLoaded: the bridge can be draining
    before the DOM exists (evaluate_js waits for the page, but the first state
@@ -831,6 +834,68 @@
     el.sidebar.hidden = !el.sidebar.hidden;
   }
 
+  /* == elements column (F7) =================================================
+     One row per appearance the detector can recognise, in the detector's own
+     report order, showing the pixels it last matched. The whole column is
+     repainted per tick: it is seven small rows, a row's state is only readable
+     against the others (the two chat-box rows are EXPECTED to disagree), and
+     the pictures arrive as ready-made data URIs - the sizing, the byte order
+     and the "has this crop changed" question are all settled on the Python side
+     (docs/design/ui-briefs/elements-panel.md).
+
+     Hiding is a pure show/hide here, but it is also TOLD to Python, which is
+     the one thing F3 and F8 do not do: a hidden column costs nothing to leave
+     un-drawn, and encoding a PNG per matched appearance twice a second for a
+     column nobody is looking at is the one part of this surface that is not
+     free. The rows keep arriving either way, so opening it shows the current
+     tick rather than the next one. */
+
+  function toggleElements() {
+    el.elements.hidden = !el.elements.hidden;
+    api("elements", !el.elements.hidden);
+  }
+
+  function paintElements(event) {
+    // The heading names the LIVE window - the one being driven - which parts
+    // company with the tab the user is reading for the whole of a delegation.
+    el.elementsTitle.textContent = event.window
+      ? "ELEMENTS · " + event.window
+      : "ELEMENTS";
+    el.elRows.innerHTML = "";
+    (event.rows || []).forEach(function (row) {
+      var item = document.createElement("li");
+      item.className = "el-row " + (row.state || "resting");
+      item.id = "el-" + row.kind;
+
+      var text = document.createElement("div");
+      text.className = "el-text";
+      var name = document.createElement("div");
+      name.className = "el-name";
+      name.textContent = row.label;
+      var verdict = document.createElement("div");
+      verdict.className = "el-verdict";
+      verdict.textContent = row.text;
+      text.appendChild(name);
+      text.appendChild(verdict);
+
+      // The crop box is drawn whether or not it holds a picture: a row that
+      // grew when its element appeared would make every row below it jump on a
+      // 0.5s timer.
+      var box = document.createElement("div");
+      box.className = "el-crop";
+      if (row.png) {
+        var img = document.createElement("img");
+        img.src = row.png;
+        img.alt = row.label;
+        box.appendChild(img);
+      }
+
+      item.appendChild(text);
+      item.appendChild(box);
+      el.elRows.appendChild(item);
+    });
+  }
+
   /* == harness log ==========================================================
      Follow/freeze is a PROPERTY, not a mode: "am I at the tail" is read fresh
      on every append, so there is no flag that can disagree with where the
@@ -1029,9 +1094,7 @@
         if (event.what === "log") toggleLog();
         return;
       case "elements":
-        // Nothing draws these yet - the ELEMENTS column is increment 6. It is
-        // dispatched (rather than dropped upstream) so the renderer is the only
-        // thing that increment has to grow.
+        paintElements(event);
         return;
       default:
         return;
@@ -1077,6 +1140,9 @@
       sideRegion: id("side-region"),
       sideSlotNote: id("side-slot-note"),
       sideDetectionTitle: id("side-detection-title"),
+      elements: id("elements"),
+      elementsTitle: id("elements-title"),
+      elRows: id("el-rows"),
       logpane: id("logpane"),
       logLines: id("log-lines"),
       statusbar: id("statusbar"),
@@ -1209,13 +1275,12 @@
     el.serviceSelect.addEventListener("change", function () {
       api("service", el.serviceSelect.value);
     });
+    // The draw-a-box overlay is a fullscreen child process (screen/picker.py),
+    // so this click starts something that answers minutes later and through the
+    // sidebar - there is nothing to wait for here, and a second press while one
+    // is up is refused on the far side rather than queued.
     el.setRegion.addEventListener("click", function () {
-      toast({
-        message:
-          "drawing the chat region lands with the elements panel increment - " +
-          "until then the payload goes to the clipboard and the paste is yours",
-        severity: "warning"
-      });
+      api("set_region");
     });
     // The log pane never scrolls its own way: reading the scroll position is
     // how "following" is decided, so the listener exists only to make the pane
@@ -1257,6 +1322,14 @@
           // window that reloaded here would drop the whole session's chrome.
           ev.preventDefault();
           api("armed", null); // null = toggle, the bare /armed and F5
+          return;
+        }
+        if (ev.key === "F7") {
+          // The ELEMENTS column. A priority key in the TUI and the same here:
+          // it must win over a focused composer, which is why it is up with F3
+          // and F8 rather than down with the bare letters.
+          ev.preventDefault();
+          toggleElements();
           return;
         }
         if (ev.key === "F8") {

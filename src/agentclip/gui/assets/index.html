@@ -159,8 +159,25 @@
           <div class="side-status" id="det-COPY"></div>
 
           <div class="side-hint">
-            F3 hides this column · F5 armed · F8 log · F6 next window · e summary
+            F3 hides this column · F5 armed · F7 elements · F8 log · F6 next
+            window · e summary
           </div>
+        </aside>
+
+        <!-- ELEMENTS (F7): one row per appearance the detector can recognise,
+             showing the pixels it last matched. A sibling of the sidebar, not
+             part of it (elements-panel.md 2.1): seven pictures hung off the
+             bottom of the settings column would push the verdict lines it
+             exists for below the fold. Each crop is an <img> fed a PNG data URI
+             built on the Python side - the whole sixel/half-block machinery the
+             TUI needs is a terminal adaptation and has no equivalent here, so
+             there is also no "which renderer" line to draw (brief 7). The
+             column starts hidden; F7 both reveals it and tells Python to start
+             encoding. -->
+        <aside class="elements" id="elements" hidden>
+          <div class="side-title" id="elements-title">ELEMENTS</div>
+          <ol class="el-rows" id="el-rows"></ol>
+          <div class="side-hint">F7 hides this column</div>
         </aside>
       </div>
 

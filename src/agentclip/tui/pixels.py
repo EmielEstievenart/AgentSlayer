@@ -34,7 +34,22 @@ from rich.color import Color
 from rich.style import Style
 from rich.text import Text
 
-from agentclip.screen.capture import RegionImage
+from agentclip.screen.capture import RegionImage, crop
+
+# Re-exported, not defined here any more. ``crop`` is the cutter both element
+# panels are built on - the matched rectangle out of the frame it was found in -
+# and it is a pure function over a captured buffer with nothing terminal about
+# it, so it lives next to the type it cuts (``screen.capture``) now that a
+# second shell needs it and the two shells may not import each other. Imported
+# under this name so every existing caller and test keeps working.
+__all__ = [
+    "HALF_BLOCK",
+    "crop",
+    "downsample",
+    "fit_cells",
+    "half_block_text",
+    "thumbnail",
+]
 
 # U+2580: the top half of the cell is painted in the foreground colour, the
 # bottom half in the background colour. Two pixels per cell, and the only glyph
@@ -121,41 +136,6 @@ def _axis_samples(index: int, out_size: int, src_size: int) -> list[int]:
     if span <= _SAMPLES_PER_AXIS:
         return list(range(lo, hi))
     return [lo + (k * span) // _SAMPLES_PER_AXIS for k in range(_SAMPLES_PER_AXIS)]
-
-
-def crop(image: RegionImage, x: int, y: int, width: int, height: int) -> RegionImage:
-    """The ``width x height`` rectangle of ``image`` at ``(x, y)``, clamped to it.
-
-    The cutter the element panel is built on: a template search answers *where*
-    the appearance is (``screen.template.RegionMatch``, scene-local), and this
-    turns that answer back into the handful of pixels that actually matched, so
-    the TUI can show the user the thing the detector recognised instead of a
-    coordinate.
-
-    Clamped rather than checked, and empty rather than raised, for the same
-    reason as :func:`downsample`: this runs on a poll timer over a rectangle a
-    moving browser produced, and the caller's answer to every degenerate case -
-    a match reported off the edge of a frame, a zero-size request, a truncated
-    buffer - is the same one it already has for "there was no match". The
-    returned image is whatever part of the request the source really holds, so
-    its ``width``/``height`` may be smaller than asked for and zero when the
-    rectangle and the image do not overlap at all.
-    """
-    src_w, src_h = image.width, image.height
-    if src_w <= 0 or src_h <= 0 or len(image.pixels) < src_w * src_h * 4:
-        return RegionImage(0, 0, b"")
-    left, top = max(0, x), max(0, y)
-    right, bottom = min(src_w, x + width), min(src_h, y + height)
-    out_w, out_h = right - left, bottom - top
-    if out_w <= 0 or out_h <= 0:
-        return RegionImage(0, 0, b"")
-    src = image.pixels
-    out = bytearray(out_w * out_h * 4)
-    for row in range(out_h):
-        start = ((top + row) * src_w + left) * 4
-        offset = row * out_w * 4
-        out[offset : offset + out_w * 4] = src[start : start + out_w * 4]
-    return RegionImage(out_w, out_h, bytes(out))
 
 
 def thumbnail(image: RegionImage, max_cols: int, max_rows: int) -> RegionImage | None:

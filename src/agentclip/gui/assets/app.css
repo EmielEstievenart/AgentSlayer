@@ -954,6 +954,92 @@ button:not(:disabled) {
   color: var(--warn);
 }
 
+/* -- elements column (F7) -------------------------------------------------
+   A sibling of the sidebar with its own toggle, never nested inside it
+   (elements-panel.md 2.1). Narrower than the sidebar because a row is a short
+   label over a small picture, and scrolling because seven rows of both is
+   taller than most windows. */
+
+.elements {
+  flex: none;
+  width: 210px;
+  overflow-y: auto;
+  padding: 14px 14px 18px;
+  border-left: 1px solid var(--line);
+  background: var(--bg-raised);
+  font-size: 12.5px;
+}
+
+.elements > .side-title:first-child {
+  margin-top: 0;
+}
+
+.el-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Every row is the same height whether or not it holds a picture, so a match
+   landing cannot make the column dance (elements-panel.md 2.2). */
+.el-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.el-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.el-name {
+  color: var(--text);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.el-verdict {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.el-row.found .el-verdict {
+  color: var(--ok);
+}
+
+/* "Searched and not there" is a live verdict, not an absence: it reads warm,
+   while "nothing has ever been searched for this" stays dim. */
+.el-row.missing .el-verdict {
+  color: var(--warn);
+}
+
+/* The crop box: a fixed slot the picture is fitted INTO, so an icon and a
+   848x5 chat-box strip both land in the same row height without either being
+   distorted. object-fit keeps the crop's own aspect ratio and pixelated
+   rendering keeps a doubled 12px icon the blocky thing the detector matched
+   rather than a smoothed guess at one (brief 7: the intent carries over, the
+   terminal cell arithmetic does not). */
+.el-crop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 36px;
+}
+
+.el-crop img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
 /* -- harness log pane (F8, /log) ------------------------------------------ */
 
 .logpane {

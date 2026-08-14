@@ -564,7 +564,7 @@ def test_the_automation_paints_all_reach_the_page(harness: Harness) -> None:
     view.paint_loop_state(LoopState.WAIT_SEND)
     view.paint_detection(TemplateKind.COPY, "copy button: not on screen")
     view.paint_stale("stale: unchanged for 2.0s")
-    view.paint_elements({TemplateKind.COPY: object(), TemplateKind.BUSY: None})
+    view.paint_elements({TemplateKind.COPY: None, TemplateKind.BUSY: None})
     view.show_paste_flash(">>> PRESS ENTER <<<", retry=True)
     view.hide_paste_flash()
     view.paint_armed(False)
@@ -580,7 +580,9 @@ def test_the_automation_paints_all_reach_the_page(harness: Harness) -> None:
         },
         {"type": "detection", "kind": "STALE", "label": "", "text": "stale: unchanged for 2.0s"},
     ]
-    assert recorder.last("elements")["kinds"] == ["COPY"]
+    # The column's own contract is pinned in tests/gui/test_elements.py; what
+    # matters here is that the paint reached the page at all.
+    assert recorder.last("elements")["rows"]
     assert recorder.of_type("flash") == [
         {"type": "flash", "show": True, "text": ">>> PRESS ENTER <<<", "retry": True},
         {"type": "flash", "show": False},
@@ -742,18 +744,22 @@ def test_exit_app_closes_the_window(harness: Harness) -> None:
     assert harness.exits == 1
 
 
-@pytest.mark.parametrize("method", ["show_identify_overlay"])
-def test_the_reduced_scope_methods_say_so_instead_of_going_quiet(
-    harness: Harness, method: str
-) -> None:
-    """A silent ``pass`` on this port is a user staring at a screen where
-    nothing happened - the controller has already told them it asked.
+def test_no_port_method_is_reduced_scope_any_more(harness: Harness) -> None:
+    """The list this used to parametrize over is empty.
 
-    ``toggle_harness_log`` used to be on this list and is not any more: the pane
-    it needed landed with parity increment 2 (see tests/gui/test_chrome.py).
+    ``toggle_harness_log`` came off it with parity increment 2 (the pane landed),
+    the three session-view methods with increment 3, and the last two -
+    ``show_identify_overlay`` and ``paint_elements`` - with increment 4: the
+    overlay is the same child process the TUI shells out to, and the crops are
+    real PNGs (tests/gui/test_elements.py). What is left is a guard: a method
+    re-reduced to a toast would be a parity regression, not a new smaller
+    implementation, and it should have to delete this test to happen.
     """
-    getattr(harness.view, method)()
-    assert harness.flush().of_type("toast"), f"{method} said nothing at all"
+    view = harness.view
+    assert not view._elements  # nothing searched yet - the resting state
+    view.show_identify_overlay()
+    assert harness.scheduled, "/identify went nowhere"
+    assert not harness.flush().of_type("toast")
 
 
 async def test_delegation_is_unavailable_and_says_what_is_missing(harness: Harness) -> None:

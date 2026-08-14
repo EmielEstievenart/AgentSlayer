@@ -303,20 +303,31 @@ a toast where a user could otherwise be left staring at nothing:
    `· sub-agent ‹title›` speaker label) is gone.
 2. ~~**`toggle_harness_log`.**~~ **Done in parity increment 2** — the pane
    landed with the state rail, exactly as this line said it would.
-3. **`show_identify_overlay`.** The tkinter child-process mechanism carries over
-   unchanged, but `/identify` needs a *drawn* chat window and this shell has no
-   calibration surface yet. Toasts rather than putting an empty overlay up.
-4. **`paint_elements`.** Routes the KINDS a tick recognised, not their pictures:
-   no `crop_elements` is wired in, so PNG data URIs per crop land with the
-   elements panel.
+3. ~~**`show_identify_overlay`.**~~ **Done in parity increment 4** — the same
+   `--show-identify` child process the TUI shells out to, gated on the live
+   window having a region and refusing out loud when it does not.
+4. ~~**`paint_elements`.**~~ **Done in parity increment 4** — `crop_elements` is
+   wired in, and what crosses is one row per kind with a PNG data URI per
+   matched crop.
+
+**The list is empty.** Every `ChatView`/`AutomationView` method this shell
+implements is now the real one; what is left of the parity backlog is whole
+SURFACES (the service editor, settings/help/modals, the SSH dialog), not
+methods implemented smaller than their contract.
 
 One duplication is tracked with them: `gui/view.py:_distinct_rects` and
 `find_all` are `MainScreen`'s, spelled again because the two shells may not
-import each other. They move down into `agentclip.automation` when the GUI grows
-calibration and there are two real callers.
-- Images (elements panel, service-editor thumbnails): PNG data URIs per crop. The
-  BGRX→RGB rule and crop-not-whole-frame policy carry over from `tui/graphics.py`;
-  the sixel/half-block machinery does not.
+import each other. They were to move down into `agentclip.automation` "when the
+GUI grows calibration and there are two real callers" — increment 4 is that
+moment (a region can be drawn now, so `find_all` really runs here), and the move
+is still **owed**: it is a genuine core refactor with two callers to re-point and
+belongs in its own commit rather than riding a UI increment.
+- Images (elements panel, service-editor thumbnails): PNG data URIs per crop.
+  The crop-not-whole-frame policy and the BGRX rule carry over; the
+  sixel/half-block machinery does not. The encoder is `screen/png.py` (stdlib
+  zlib, already in the layer, and it already writes the capture's undefined
+  fourth byte as opaque alpha), so the GUI needs neither Pillow nor anything out
+  of `tui/graphics.py`.
 - The `/identify` and region-picker overlays keep the existing tkinter child-process
   mechanism unchanged — the GUI is in-process Python and shells out the same way.
 - Startup: the window mounts immediately; everything slow (SSH connect, MCP starts)
@@ -336,7 +347,9 @@ step:
 4. ✅ sidebar / status / state rail — **parity increment 2**, with the harness
    log pane and the keys those surfaces report on.
 5. ✅ window tabs / delegation / summary — **parity increment 3**.
-6. ⬜ elements panel
+6. ✅ elements panel — **parity increment 4**, with the chat-region picker and
+   `/identify` (the two surfaces the panel is useless without: nothing is
+   searched until a window is drawn).
 7. ⬜ service editor
 8. ⬜ settings / help / modals
 9. ⬜ SSH connect dialog
@@ -451,7 +464,8 @@ is also where the CHAT WINDOW block grows the sub-agent's readiness note. The
 "Set chat region..." button toasts: calibration lands with the elements panel.
 (Both halves of that sentence were made good by increment 3: the picker edits
 whichever window the tab bar has selected, and the CHAT WINDOW block carries the
-sub-agent's readiness note.)
+sub-agent's readiness note. The region button stopped toasting in increment 4 —
+it runs the real `--pick-region` child now.)
 
 **Parity increment 3** — the WINDOW TABS, the DELEGATION VIEWS and the SESSION
 SUMMARY, against `docs/design/ui-briefs/tabs-delegation-summary.md`. Nothing new
@@ -500,6 +514,73 @@ for most of a session. Deferred deliberately: the top-level `u`/`l`/`t`
 bindings (they belong to `modals-keys-esc.md`, increment 8), and any N-window
 chrome — one master and one sub-agent is the current real contract (brief §4 of
 the ambiguities).
+
+**Parity increment 4** — the ELEMENTS COLUMN, the CHAT-REGION PICKER and
+`/identify`, against `docs/design/ui-briefs/elements-panel.md`. The three land
+together because the column is a picture of searches that only happen inside a
+drawn window, and until this increment the GUI could not draw one.
+
+- `{type: "elements"}` carries **one row per `TemplateKind`**, in
+  `RUNTIME_KINDS` order, each with its `label`, its `state`
+  (`resting`/`missing`/`found`), the verdict `text` and — on a found row — a
+  `png` **data URI**. The three states are the brief's and are not
+  interchangeable: a kind ABSENT from a tick's map has never been searched (its
+  service has no capture of it) and keeps whatever its row said; present-and-null
+  was searched and is not on screen; present-and-crop carries the diff and the
+  picture. All seven rows are searched every tick regardless of which finish
+  signals are ticked — the column is a picture of what the tool can SEE, not of
+  what the automation decides from — and `window` names the LIVE window, which
+  parts company with the selected tab for the whole of a delegation.
+- **PNG data URIs replace the entire sixel/half-block machinery** (brief §7).
+  What carries over is the crop policy (the matched rectangle only, cut on the
+  poller thread that captured the frame, via the `crop_elements` seam) and the
+  **BGRX-not-BGRA** rule. The GUI needs no Pillow for either: `screen/png.py`
+  already encodes a capture as RGBA with the undefined fourth byte written as
+  OPAQUE alpha, which is exactly the rule — read as alpha, that byte is zero and
+  every crop encodes invisible. No mode readout line exists here, deliberately
+  (a recorded divergence: it described sixel vs half-block, and a page can
+  always show real pixels).
+- **F7 is the one page-side toggle that tells Python.** F3 and F8 are pure
+  show/hide; this one is too, but the encoder is gated on it — a PNG per matched
+  appearance twice a second for a column nobody is looking at is the only part
+  of this surface that is not free. The crops keep being cut and kept while it is
+  hidden, so opening the column paints the CURRENT tick rather than the next one,
+  and a crop whose bytes are unchanged is not re-encoded.
+- **The picker and `/identify` reuse the child-process overlays unchanged**
+  (`screen/picker.py`: `--pick-region`, and `--show-identify` fed JSON on stdin).
+  Both brackets are the TUI's: the detectors are suspended for the whole visit
+  (a fullscreen window over the browser they watch is the sustained delta that
+  arms the finish trigger on staleness alone), only one such child may be up at
+  a time, the target slot is frozen when the overlay opens rather than re-read
+  after it closes, and the poller is rebuilt only when the window just drawn is
+  the one it is watching. `/identify` searches with the poller's own tolerance
+  and matcher, captures BEFORE the overlay exists, and toasts its summary after
+  it is down.
+- **The GUI window is NOT minimised around either overlay** — tried without
+  first, as planned, and kept: the overlay is fullscreen-topmost across the whole
+  virtual desktop, so it is over this window either way (the TUI leaves its
+  terminal up for the same reason), and a restore would fight the user for focus
+  right after they drew a box around their browser. `window.minimize()` stays
+  unused.
+
+One **core change** was needed and it is the smallest one available:
+`crop(image, x, y, w, h)` — the cutter, a pure function over a captured buffer —
+moved from `tui/pixels.py` to `screen/capture.py`, which owns `RegionImage`.
+`tui.pixels` re-exports it, so every existing caller and test is untouched;
+`screen` gained no new dependency (the move is stdlib-only, and no Pillow came
+with it), so `tests/test_layering.py` needed no allowance. `region_to_pil` and
+the rest of `tui/graphics.py` did NOT move: they are the sixel path's, and this
+shell has no use for them.
+
+Two things landed alongside because the picker made them reachable: the
+sub-agent's **one-shot "slot ready" toast** (`MainScreen._after_calibration`'s
+half that a repaint cannot carry — the delegate tool is baked in at bootstrap,
+so a window that just became ready reaches the model on the next `/new`), and
+the sidebar's "Set chat region..." button becoming real, which was increment 2's
+last standing toast. Deferred deliberately: the service editor behind F2
+(increment 7) — the appearance-summary lines still name the door rather than the
+key — and any GUI-native overlay, which the brief's open question 1 leaves to the
+child process on purpose.
 
 ## 4. SSH connect dialog (GUI-only surface)
 

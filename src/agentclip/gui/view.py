@@ -20,21 +20,23 @@ thread contract, and all of them do one thing: ``bridge.send``, which is
 non-blocking and ordered by construction (``gui/bridge.py``). Nothing here
 touches the page directly.
 
-**What this slice reduces, honestly.** Slice 2 is the first live conversation,
-not parity, so a handful of ``ChatView`` methods are implemented smaller than
-the TUI's rather than left as a silent ``pass`` that would strand a controller
-flow. Each one says so at its own definition and they are listed together in
-``docs/design/gui.md`` §2: what is left of that list is the ``/identify``
-overlay and the elements crops (kinds, not pictures). Everything a *turn*
-passes through - the transcript, the gate, the delivery, the watcher, the
-prompts - is the real thing, and so are the sidebar, the status bar's ten
-segments and the harness log pane (parity increment 2) and the window tabs,
-the per-window transcripts and the session summary (parity increment 3).
+**Nothing here is reduced scope any more.** Slice 2 shipped a handful of
+``ChatView`` methods implemented smaller than the TUI's rather than as a silent
+``pass`` that would strand a controller flow, each saying so at its own
+definition; ``docs/design/gui.md`` §2 lists them and that list is now empty.
+Everything a *turn* passes through - the transcript, the gate, the delivery, the
+watcher, the prompts - is the real thing, and so are the sidebar, the status
+bar's ten segments and the harness log pane (increment 2), the window tabs, the
+per-window transcripts and the session summary (increment 3), and the ELEMENTS
+column, the chat-region picker and ``/identify`` (increment 4). What is left of
+the parity backlog is whole SURFACES this shell does not have yet - the service
+editor, settings/help/modals, the SSH connect dialog.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import itertools
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass
@@ -60,9 +62,12 @@ from agentclip.engine.engine import Decision, Engine, PendingAction
 from agentclip.gui.bridge import Bridge
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
-from agentclip.screen.capture import CaptureError, RegionImage, capture_region
-from agentclip.screen.detector import ScreenDetector, build_detector
+from agentclip.screen.capture import CaptureError, RegionImage, capture_region, crop
+from agentclip.screen.detector import RUNTIME_KINDS, ScreenDetector, Sighting, build_detector
 from agentclip.screen.focus import foreground_window
+from agentclip.screen.identify import IdentifiedElement, identify_elements, summarise
+from agentclip.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
+from agentclip.screen.png import PngError, encode_png
 from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.profile_store import load_profile
 from agentclip.screen.region import ScreenRegion
@@ -186,6 +191,58 @@ STALE_UNSET = "no chat region - staleness check disabled"
 STALE_CALIBRATED = "watching the chat region"
 STALE_UNTICKED = "stillness not watched for this service"
 STALE_OFF = "finish detection off - nothing can decide a reply finished"
+
+# == the ELEMENTS column ======================================================
+# The third column (F7): one row per appearance the tool can recognise, showing
+# the pixels it last matched. ``ui-briefs/elements-panel.md`` is the contract;
+# §7 is what this shell does NOT carry over - the whole sixel/half-block
+# machinery, the cell-grid budgets and the "which renderer" readout are terminal
+# adaptations, and a page has one rendering path: an <img> per row, fed a PNG
+# data URI. What DOES carry over is the crop policy (the matched rectangle only,
+# cut on the thread that captured the frame), the BGRX rule (``screen.png``
+# writes the undefined fourth byte as opaque alpha rather than reading it as
+# one, which is what keeps a crop from encoding as fully transparent) and the
+# three-state row contract below.
+
+# Every kind, in the detector's own report order, so a row can never be mistaken
+# for a picture of another row's search (``screen.detector.RUNTIME_KINDS`` ==
+# ``tui.widgets.elements.ELEMENT_ORDER``).
+ELEMENT_ORDER: tuple[TemplateKind, ...] = RUNTIME_KINDS
+
+# The same words ``TemplateKind.label`` uses wherever the user is asked to
+# capture one - a row labelled differently from the button that filled it is a
+# row about something else (``tui/widgets/elements.py:ELEMENT_LABEL``).
+ELEMENT_LABEL: dict[TemplateKind, str] = {
+    TemplateKind.SEND_READY: "send button",
+    TemplateKind.BUSY: "busy icon",
+    TemplateKind.IDLE: "idle icon",
+    TemplateKind.COPY: "copy button",
+    TemplateKind.CHATBOX_INITIAL: "start chat box",
+    TemplateKind.CHATBOX_ONGOING: "ongoing chat box",
+    TemplateKind.NEW_CHAT: "new-chat button",
+}
+
+# Three row states, and the distinction is the panel's whole point: "nothing has
+# been looked for" and "we looked and it is not there" are opposite readings of
+# the same blank space. A row that STAYS resting says something precise - this
+# window's service has no capture of that appearance - because everything
+# captured is searched twice a second whatever the automation is doing.
+ELEMENT_RESTING = "no match yet"
+ELEMENT_MISSING = "not on screen"
+
+# The state literal each row crosses with, which is what the page colours from.
+STATE_RESTING = "resting"
+STATE_MISSING = "missing"
+STATE_FOUND = "found"
+
+# What the user is asked to draw for a window: the TUI's ``_CHAT_REGION_PROMPT``,
+# spelled again for the reason every display string in this module is. Generous
+# rather than tight - everything else is recognised inside it, including the
+# new-chat button, which most chat sites park in a sidebar.
+CHAT_REGION_PROMPT = (
+    "Drag a box around the WHOLE browser window hosting the chat - including its "
+    "sidebar, so the New Chat button is inside it · Esc cancels"
+)
 
 REGION_UNSET = "not set - alt-tab to the chat yourself"
 # The CHAT WINDOW block's readiness line, per SELECTED window - ``tui/widgets/
@@ -444,6 +501,64 @@ def _distinct_rects(
     return kept
 
 
+@dataclass(frozen=True, slots=True)
+class ElementCrop:
+    """One matched appearance: the pixels that matched, and how well.
+
+    ``tui/messages.py:ElementCrop``, and deliberately the same two fields - but
+    the image here is the crop UNTOUCHED, at the size the screenshot has it. The
+    TUI sizes a crop in the worker because its two renderers want two different
+    things (an exact cell grid, or raw pixels); a page has one rendering path and
+    CSS to fit with, so there is nothing to decide on this side of the bridge
+    (elements-panel.md §4.4, §7).
+    """
+
+    image: RegionImage
+    diff: float
+
+
+def element_crop(scene: RegionImage, sighting: Sighting | None) -> ElementCrop | None:
+    """Cut a verified match out of the frame it was found in. Worker-side.
+
+    ``None`` in, ``None`` out - "nothing matched" and "the match is too
+    degenerate to draw" are the same row, and there is nothing useful to tell
+    apart (``MainScreen._element_crop``).
+    """
+    if sighting is None:
+        return None
+    template, match = sighting.template, sighting.match
+    cut = crop(scene, match.x, match.y, template.width, template.height)
+    if cut.width <= 0 or cut.height <= 0:
+        return None
+    return ElementCrop(cut, match.diff)
+
+
+def element_png(image: RegionImage) -> str:
+    """One crop as a ``data:`` URI an ``<img>`` can be pointed straight at.
+
+    ``screen.png.encode_png`` is the whole conversion, and it is the reason this
+    shell needs no Pillow: it already reads a capture as BGRX and writes the
+    undefined fourth byte as OPAQUE alpha rather than as transparency, which is
+    the one rule that has to survive into any new renderer - read as alpha, that
+    byte is zero and every crop encodes as an invisible rectangle
+    (elements-panel.md §6.3).
+
+    ``""`` for anything that cannot be encoded (a truncated buffer, a zero-area
+    cut). The row still says ``found`` with its diff: the search DID match, and
+    blanking the verdict because the picture failed would report the opposite.
+    """
+    try:
+        return "data:image/png;base64," + base64.b64encode(encode_png(image)).decode("ascii")
+    except PngError:
+        return ""
+
+
+def found_line(diff: float) -> str:
+    """What a matched row says under its name: the same number the sidebar's
+    verdict line reports, next to the picture it is a number about."""
+    return f"found · {diff:.1%}"
+
+
 class GuiView:
     """``ChatView`` + ``AutomationView`` + ``AutomationHost``, over the bridge."""
 
@@ -522,9 +637,38 @@ class GuiView:
             poll_interval_ms=config.clipboard.poll_interval_ms,
             accepts=looks_like_protocol,
             on_clipboard_captured=self._clipboard_captured,
+            crop_elements=self._crop_elements,
             has_appearance=self._live_has,
             on_fire=self._fire_auto_copy,
         )
+        # -- the ELEMENTS column ---------------------------------------------
+        # What each row is currently showing, and the three-state contract in
+        # one data structure: a kind ABSENT has never been searched (its service
+        # has no capture of it), present-and-None was searched and not found,
+        # present-and-crop was found. Written by the poller thread through
+        # ``paint_elements``, read by it and by the loop thread when the column
+        # is opened - one whole-dict rebind per tick rather than an in-place
+        # edit, so a reader either sees the old tick or the new one.
+        self._elements: dict[TemplateKind, ElementCrop | None] = {}
+        # Is the column on screen? The page owns the F7 flip (it is show/hide of
+        # one element, like F3 and F8) and TELLS this side, because encoding a
+        # PNG nobody can see is the one part of the panel that is not free. The
+        # crops keep being cut and kept while it is hidden, so opening it paints
+        # the CURRENT tick rather than the one after it (elements-panel.md §3.1).
+        self._elements_open = False
+        # The last PNG per kind, keyed by the exact pixels it was made from:
+        # the poller re-cuts the same still icon frame after frame, and the
+        # comparison is a bytes equality over an icon (§6.8).
+        self._element_pngs: dict[TemplateKind, tuple[RegionImage, str]] = {}
+        # Whether the sub-agent window was ready last time anything readiness
+        # depends on changed, so the "you must /new for it" toast fires once
+        # rather than on every repaint (``MainScreen._delegation_ready``).
+        self._delegation_ready = False
+        # One fullscreen child process at a time - the region picker and
+        # ``/identify`` share it, exactly as ``MainScreen._refuse_second_picker``
+        # does, because cancelling a task cannot take a blocking child process
+        # down and two stacked overlays are unusable.
+        self._picker_open = False
         # The detector the current poller run watches through, and the run
         # itself. Mirrors ``MainScreen._detector`` / ``_detector_worker``.
         self._detector: ScreenDetector | None = None
@@ -609,6 +753,11 @@ class GuiView:
         self._push_tabs()
         self._push_sidebar()
         self._push_mcp()
+        # A fresh page draws the ELEMENTS column hidden, whatever it was doing
+        # before the load, so the encoder is told the truth before the rows go
+        # out - a reload is the one moment this flag can be stale.
+        self._elements_open = False
+        self._push_elements()
         self._bridge.send("armed", armed=self._automation.os_armed)
 
     def submit_text(self, text: str) -> None:
@@ -740,6 +889,9 @@ class GuiView:
         self._automation.close_reply_gate()
         self._automation.forget_pending_insert()
         self._automation.set_loop_state(LoopState.IDLE, "session reset")
+        # The calibrations survive ``/new``, so the readiness that was already
+        # true is still true and its one-shot toast must not re-fire.
+        self._delegation_ready = self.delegation_available()
         self._automation.log_harness(
             KIND_SESSION,
             "session reset: the transcript is cleared, the calibrations and this log are not",
@@ -1233,17 +1385,196 @@ class GuiView:
             return
         self.notify("new browser chat opened")
 
+    # == the two fullscreen child processes ====================================
+    # The region picker and ``/identify`` are the same shape and share one
+    # mutual-exclusion flag: a translucent, always-on-top tkinter window in a
+    # CHILD PROCESS (``screen/picker.py``), because neither shell can host
+    # tkinter - the TUI owns a terminal and this one owns a WebView2 message
+    # pump, and tkinter wants an event loop and the main thread. That mechanism
+    # is shell-agnostic and carries over verbatim (gui.md §2).
+    #
+    # The GUI window is deliberately NOT minimised around either of them. The
+    # overlay spans the whole virtual desktop and is topmost, so it is over this
+    # window either way, and the TUI leaves its terminal up for the same reason;
+    # minimising would also cost a restore that can steal focus back from the
+    # browser the user just drew a box around.
+
+    def _refuse_second_picker(self) -> bool:
+        """True (and toast) when an overlay is already up.
+
+        Cancelling a task cannot kill a blocking child process, so the only safe
+        guard against stacked fullscreen overlays is refusing the second ask
+        (``MainScreen._refuse_second_picker``).
+        """
+        if self._picker_open:
+            self.notify("a region picker is already open - finish it or press Esc first")
+            return True
+        self._picker_open = True
+        return False
+
+    def set_chat_region(self) -> None:
+        """The sidebar's "Set chat region..." button: draw the chatbot window.
+
+        The target slot is decided HERE, when the overlay opens, and travels
+        with the flow - see ``_pick_chat_region``.
+        """
+        if self._refuse_second_picker():
+            return
+        self._schedule(self._pick_chat_region(self._automation.calibrating_slot))
+
+    async def _pick_chat_region(self, slot: AgentSlot) -> None:
+        """Run the draw-a-box overlay and adopt what was drawn as ``slot``'s window.
+
+        ``MainScreen._pick_chat_region``, minus Textual. Three things it keeps
+        exactly:
+
+        * the slot is a PARAMETER rather than a read of ``calibrating_slot`` on
+          the way out, because the overlay blocks for as long as the user takes
+          to drag a box and the pointer moves on its own meanwhile (a delegated
+          run's focus selects the sub-agent tab). What was selected when the
+          picker opened is what the user was answering;
+        * the detectors are suspended for the whole visit: this overlay is a
+          fullscreen window thrown over the very browser they watch, and an
+          overlay appearing and vanishing is precisely the sustained large delta
+          that arms the finish trigger on staleness alone (§3.4e);
+        * the poller is rebuilt only when the window just drawn is the one it is
+          watching - drawing the sub-agent's window mid-session is the normal way
+          to reach delegation, and rebuilding around it would re-aim a poller at
+          a window the automation is not driving.
+        """
+        self.suspend_detectors()
+        try:
+            region = await asyncio.to_thread(
+                pick_region, prompt=self._slot_prompt(CHAT_REGION_PROMPT, slot)
+            )
+        except ScreenPickError as exc:
+            self.notify(str(exc), severity="error")
+            return
+        else:
+            if region is None:
+                self.notify("chat region unchanged (selection cancelled)")
+                return
+            self._automation.set_calibration(slot, region)
+            # Only when the tab it belongs to is still the one on screen: the
+            # sidebar shows ONE window's calibration, and writing this one's box
+            # into a column describing the other is the same mix-up in the other
+            # direction.
+            if slot is self._automation.calibrating_slot:
+                self._push_sidebar()
+            self._after_calibration()
+            if slot is self._automation.live_slot:
+                self._start_detector_worker()
+            self.notify(
+                f"chat region set ({region.describe()}) - the chatbot window; "
+                "everything is recognised inside it"
+            )
+        finally:
+            self._picker_open = False
+            # After the adoption above, so the common case (the live window was
+            # the one drawn) restarted the poller already and this is the no-op
+            # ``resume_detectors`` is written to be.
+            self.resume_detectors()
+
+    def _after_calibration(self) -> None:
+        """Tell the user ONCE when the sub-agent window becomes usable.
+
+        ``MainScreen._after_calibration``, minus its sidebar repaint (the
+        caller's ``_push_sidebar`` already carries the readiness line). The
+        one-shot matters because the delegate tool is baked into the bootstrap:
+        a window that just became ready reaches the model on the next ``/new``
+        and not before, which is not something a readiness line says.
+        """
+        ready = self.delegation_available()
+        if ready and not self._delegation_ready:
+            self.notify("sub-agent slot ready - /new to give the model the delegate tool")
+        self._delegation_ready = ready
+
+    def _slot_prompt(self, prompt: str, slot: AgentSlot) -> str:
+        """Both windows share the picker, so the sub-agent's prompts have to say
+        out loud which window the user is being asked to draw on."""
+        if slot is AgentSlot.SUBAGENT:
+            return f"SUB-AGENT window · {prompt}"
+        return prompt
+
     def show_identify_overlay(self) -> None:
-        """REDUCED SCOPE (gui.md §2): ``/identify`` draws a fullscreen overlay
-        over the live chat window through a child process. The mechanism is
-        shell-agnostic and carries over unchanged, but it needs a calibrated
-        window to identify inside and this shell cannot draw one yet - so it
-        says so rather than putting an empty overlay on the user's screen."""
-        self.notify(
-            "/identify is not wired into the GUI yet - it needs a drawn chat window,"
-            " which lands with the calibration surface",
-            severity="warning",
-        )
+        """``/identify``: box every part of the live chat window we can recognise.
+
+        The debug view of the whole recognition model - everything the
+        automation does is "find this captured appearance inside that drawn
+        rectangle", and this draws the search's actual answer on the actual
+        screen, next to the actual buttons. The LIVE window, not the selected
+        tab: what is boxed has to be what the automation would act on.
+        """
+        if self._refuse_second_picker():
+            return
+        self._schedule(self._identify_live_window())
+
+    async def _identify_live_window(self) -> None:
+        """Capture the live chat region, work out what is in it, draw the answer.
+
+        The capture happens FIRST and exactly once, before any overlay exists:
+        the overlay covers the browser, so a frame taken with it up would be
+        identified as part of the chat window. The search runs with the same
+        tolerance and matcher the poller uses (``live_search``) - an overlay
+        that searched with different settings would answer a question nobody
+        asked (elements-panel.md §4.5).
+        """
+        try:
+            region = self._automation.live.chat_region
+            if region is None:
+                self.notify(
+                    'no chat window drawn for this tab - use "Set chat region..." first; '
+                    "there is nothing to identify inside yet",
+                    severity="warning",
+                )
+                return
+            try:
+                scene = await asyncio.to_thread(capture_region, region)
+            except CaptureError as exc:
+                self.notify(f"could not capture the chat window: {exc}", severity="error")
+                return
+            tolerance, matcher = self._automation.live_search()
+            elements: list[IdentifiedElement] = await asyncio.to_thread(
+                identify_elements,
+                region,
+                self.profile_for(self._automation.live_slot),
+                scene,
+                tolerance=tolerance,
+                matcher=matcher,
+            )
+            self.suspend_detectors()
+            try:
+                await asyncio.to_thread(draw_identify_overlay, elements)
+            except ScreenPickError as exc:
+                self.notify(str(exc), severity="error")
+                return
+            finally:
+                self.resume_detectors()
+            # After the overlay is down, so the summary is readable rather than
+            # painted behind it.
+            self.notify(summarise(elements))
+        finally:
+            self._picker_open = False
+
+    def suspend_detectors(self) -> None:
+        """Stop polling (and disarm the trigger) while an overlay owns the screen.
+
+        ``MainScreen.suspend_detectors``: a fullscreen child process thrown over
+        the browser the detectors watch is a sustained large delta, which is
+        precisely what arms the auto-copy on staleness alone. Left running, the
+        overlay closing would then read the settled screen as a finished
+        response and fire the copy flow at a chat nobody sent anything to.
+        """
+        self._stop_detector_worker()
+        self._automation.reset_finish_trigger()
+
+    def resume_detectors(self) -> None:
+        """Restart polling after ``suspend_detectors``. A no-op when something
+        already restarted it, so the guaranteed call in a caller's ``finally``
+        cannot cost a second rebuild of a poller that is already watching the
+        right window."""
+        if self._detector_worker is None:
+            self._start_detector_worker()
 
     def toggle_harness_log(self) -> None:
         """``/log`` and F8: the same show/hide, two ways to ask for one thing.
@@ -1597,14 +1928,120 @@ class GuiView:
         self._bridge.send("detection", kind="STALE", label="", text=text)
 
     def paint_elements(self, crops: Mapping[TemplateKind, object]) -> None:
-        """REDUCED SCOPE (gui.md §2): the kinds this tick recognised, not their
-        pictures. No ``crop_elements`` is wired in, so what arrives here is the
-        controller's uncut mapping of sightings - which is the honest thing to
-        route while there is no elements panel to draw into. PNG data URIs per
-        crop are the panel increment's job."""
-        self._bridge.send(
-            "elements", kinds=[kind.name for kind, seen in crops.items() if seen is not None]
-        )
+        """One tick's recognitions into the ELEMENTS column.
+
+        The ``isinstance`` is the port's opacity being cashed in: a crop is
+        whatever the shell that cut it made, so the automation layer routes the
+        mapping without a type for it and this end recognises its own - it cut
+        them itself, in ``_crop_elements``, on the thread now calling this. A
+        controller wired with no ``crop_elements`` at all routes raw sightings
+        instead, and they read here as "searched, nothing to draw" rather than
+        as a crash.
+
+        A kind ABSENT from ``crops`` keeps whatever its row last said: the
+        detector searches every calibrated kind on every frame, so the only
+        reason a tick says nothing about one is that the live window's service
+        has no capture of it, and a tick that never looked must not blank a row
+        (elements-panel.md §4.2). Present-and-``None`` is the opposite claim -
+        the search ran and found nothing - and it clears the picture.
+        """
+        merged = dict(self._elements)
+        for kind, crop_obj in crops.items():
+            if kind not in ELEMENT_LABEL:
+                # The floor under a TemplateKind added to the enum and not to
+                # the label table: a lost row rather than a crashed poll tick.
+                continue
+            merged[kind] = crop_obj if isinstance(crop_obj, ElementCrop) else None
+        self._elements = merged
+        self._push_elements()
+
+    def _crop_elements(
+        self,
+        scene: RegionImage,
+        sightings: Mapping[TemplateKind, Sighting | None],
+    ) -> Mapping[TemplateKind, object]:
+        """One tick's recognitions, cut down to pictures before they cross.
+
+        The poller thread's one question of this shell, and it does work rather
+        than routing: the cut runs HERE, on the thread that captured the frame,
+        because what should reach a UI is an icon per appearance and not a whole
+        chat window (``MainScreen._crop_elements``, whose implementation this
+        is). Touches no page state and reads nothing mutable.
+        """
+        return {kind: element_crop(scene, sighting) for kind, sighting in sightings.items()}
+
+    def set_elements_visible(self, visible: bool) -> None:
+        """F7 told us the column opened or closed.
+
+        The flip itself never leaves the page - it is show/hide of one element,
+        like F3 and F8 - and this is the half that has to cross: while the
+        column is hidden no PNG is encoded, and opening it repaints from the
+        crops the poller kept meanwhile, so the first frame a user sees is the
+        current one rather than the next tick's (elements-panel.md §3.1).
+        """
+        was_open = self._elements_open
+        self._elements_open = visible
+        if visible and not was_open:
+            self._push_elements()
+
+    def _push_elements(self) -> None:
+        """The column, whole: one row per kind, in the detector's report order.
+
+        Whole rather than per-kind because a row's state is only readable
+        against the others - the two chat-box rows are EXPECTED to disagree, and
+        seven partial writes have seven ways to be half-painted. Raised from the
+        poller thread, so it does what every paint here does: build and queue.
+        """
+        crops = self._elements
+        live_window = _WINDOW_NAMES[
+            SUBAGENT_WINDOW if self._automation.live_slot is AgentSlot.SUBAGENT else MASTER_WINDOW
+        ]
+        rows: list[dict[str, Any]] = []
+        for kind in ELEMENT_ORDER:
+            row: dict[str, Any] = {"kind": kind.name, "label": ELEMENT_LABEL[kind]}
+            if kind not in crops:
+                row["state"] = STATE_RESTING
+                row["text"] = ELEMENT_RESTING
+            elif crops[kind] is None:
+                row["state"] = STATE_MISSING
+                row["text"] = ELEMENT_MISSING
+            else:
+                found = crops[kind]
+                assert found is not None  # narrowed by the branch above
+                row["state"] = STATE_FOUND
+                row["text"] = found_line(found.diff)
+                if self._elements_open:
+                    png = self._element_png(kind, found.image)
+                    if png:
+                        row["png"] = png
+            rows.append(row)
+        self._bridge.send("elements", window=live_window, rows=rows)
+
+    def _element_png(self, kind: TemplateKind, image: RegionImage) -> str:
+        """This row's crop as a data URI, re-encoded only when the pixels moved.
+
+        The TUI leaves a row showing the same bytes alone rather than re-drawing
+        it; the same idea, one layer earlier - the encode is what costs here, not
+        the paint, and a still icon re-cut twice a second is the common case
+        (elements-panel.md §6.8).
+        """
+        cached = self._element_pngs.get(kind)
+        if cached is not None and cached[0] == image:
+            return cached[1]
+        png = element_png(image)
+        self._element_pngs[kind] = (image, png)
+        return png
+
+    def _clear_elements(self) -> None:
+        """Back to "no match yet", every row - a detector rebuild happened.
+
+        The heading may have just been repointed at the other window, and a crop
+        cut from the old one under the new one's name is a straightforward lie
+        (``ElementsPanel.clear``). The rows refill on the new run's first tick.
+        """
+        self._elements = {}
+        self._element_pngs.clear()
+        self._push_elements()
 
     def show_paste_flash(self, text: str, *, retry: bool = False) -> None:
         self._bridge.send("flash", show=True, text=text, retry=retry)
@@ -1842,6 +2279,10 @@ class GuiView:
         self.paint_detection(TemplateKind.COPY, COPY_RESTING)
         self.paint_stale(stale_line)
         self._push_sidebar()  # the heading names the window these lines are about
+        # The ELEMENTS column is bound by this block's ownership rule (tui.md
+        # §3.4e): it describes the LIVE window, only the detector machinery
+        # writes it, and a rebuild may have just repointed it at the other one.
+        self._clear_elements()
 
     def _live_has(self, kind: TemplateKind) -> bool:
         """Has the LIVE window's service a capture of ``kind``? Called on the

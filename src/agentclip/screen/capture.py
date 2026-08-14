@@ -3,6 +3,11 @@
 Feeds the busy detector (screen.busy): the calibration snapshot and every later
 probe both come from here. Same physical-pixel coordinate space as the overlay
 and the focus click, so ``make_dpi_aware`` runs first.
+
+:func:`crop` is here for the same reason :class:`RegionImage` is: it is the one
+operation every consumer of a captured frame performs on it - cutting a matched
+rectangle back out - and it belongs beside the buffer rather than inside
+whichever UI happens to draw the result (both shells do now).
 """
 
 from __future__ import annotations
@@ -205,3 +210,41 @@ def capture_region(region: ScreenRegion) -> RegionImage:
         raise CaptureError(f"screen capture failed: {exc}") from exc
     finally:
         user32.ReleaseDC(None, screen_dc)
+
+
+def crop(image: RegionImage, x: int, y: int, width: int, height: int) -> RegionImage:
+    """The ``width x height`` rectangle of ``image`` at ``(x, y)``, clamped to it.
+
+    The cutter both ELEMENTS panels are built on: a template search answers
+    *where* the appearance is (``screen.template.RegionMatch``, scene-local),
+    and this turns that answer back into the handful of pixels that actually
+    matched, so a UI can show the user the thing the detector recognised instead
+    of a coordinate. It lives here, beside the type it cuts, because it is a
+    pure function over a captured buffer with nothing terminal (and nothing
+    graphical) about it - it was ``tui.pixels.crop`` while the TUI was the only
+    shell, and the two shells may not import each other.
+
+    Clamped rather than checked, and empty rather than raised, for the same
+    reason ``tui.pixels.downsample`` is: this runs on a poll timer over a
+    rectangle a moving browser produced, and the caller's answer to every
+    degenerate case - a match reported off the edge of a frame, a zero-size
+    request, a truncated buffer - is the same one it already has for "there was
+    no match". The returned image is whatever part of the request the source
+    really holds, so its ``width``/``height`` may be smaller than asked for and
+    zero when the rectangle and the image do not overlap at all.
+    """
+    src_w, src_h = image.width, image.height
+    if src_w <= 0 or src_h <= 0 or len(image.pixels) < src_w * src_h * 4:
+        return RegionImage(0, 0, b"")
+    left, top = max(0, x), max(0, y)
+    right, bottom = min(src_w, x + width), min(src_h, y + height)
+    out_w, out_h = right - left, bottom - top
+    if out_w <= 0 or out_h <= 0:
+        return RegionImage(0, 0, b"")
+    src = image.pixels
+    out = bytearray(out_w * out_h * 4)
+    for row in range(out_h):
+        start = ((top + row) * src_w + left) * 4
+        offset = row * out_w * 4
+        out[offset : offset + out_w * 4] = src[start : start + out_w * 4]
+    return RegionImage(out_w, out_h, bytes(out))

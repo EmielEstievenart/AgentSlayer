@@ -261,6 +261,12 @@ class GuiRunner:
     def set_service(self, key: str) -> None:
         self.schedule_call(self.view.set_service, key)
 
+    def set_chat_region(self) -> None:
+        self.schedule_call(self.view.set_chat_region)
+
+    def set_elements_visible(self, visible: bool) -> None:
+        self.schedule_call(self.view.set_elements_visible, visible)
+
     def select_window(self, window: str) -> None:
         self.schedule_call(self.view.select_window, window)
 

@@ -123,7 +123,8 @@ src/agentclip/
 │   ├── region.py          # ScreenRegion dataclass + the "left top width height" wire format
 │   ├── overlay.py         # draw-a-box tkinter overlay; runs in a CHILD process (--pick-region)
 │   ├── picker.py          # spawns the child (works frozen and from source), parses its stdout
-│   ├── capture.py         # GDI BitBlt/GetDIBits screen-region grab (ctypes) -> RegionImage
+│   ├── capture.py         # GDI BitBlt/GetDIBits screen-region grab (ctypes) -> RegionImage,
+│   │                      #   plus crop(): the matched rectangle back out of a frame (both shells)
 │   ├── focus.py           # Windows SetCursorPos+SendInput click/scroll into a region; window focus snap-back (ctypes)
 │   ├── hover.py           # cursor-stop geometry for the hover scan (icons that only render under the pointer)
 │   ├── busy.py            # diff_fraction + the BusyState/BusyProbe vocabulary every detector answers in
@@ -146,7 +147,8 @@ src/agentclip/
     │                      # for a repaint), plus AutoCopyRequested. No probe messages: the poller
     │                      # feeds AutomationController.consume_* in its own call stack
     ├── graphics.py        # can this terminal draw sixels? probed ONCE from cli.main, before Textual (tui.md §1.7)
-    ├── pixels.py          # the half-block renderer: pure functions over RegionImage, the no-sixel fallback
+    ├── pixels.py          # the half-block renderer: pure functions over RegionImage, the no-sixel
+    │                      # fallback; re-exports screen.capture.crop, which used to live here
     ├── screens/
     │   ├── main.py        # the ChatView + AutomationView + AutomationHost adapter: tabs,
     │   │                  #   transcripts, sidebar routing, and the scheduling the automation

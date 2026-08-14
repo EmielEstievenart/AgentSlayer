@@ -43,9 +43,9 @@ exercised - ordering included - by a test with a list in it.
 whatever that type carries; ``json.dumps`` runs with ``ensure_ascii``, so every
 payload is ASCII on the wire no matter what the model wrote. The producer is
 always :class:`~agentclip.gui.view.GuiView` and the consumer is always
-``app.js``'s ``dispatch``. Five families are pinned here because they are the
+``app.js``'s ``dispatch``. Six families are pinned here because they are the
 ones a renderer has to get exactly right; the rest (``state``, ``toast``,
-``modal``, ``flash``, ``elements``, ``payload``, ``armed``, ``composer_reset``,
+``modal``, ``flash``, ``payload``, ``armed``, ``composer_reset``,
 ``transcript_clear``, ``modal_close``, ``toggle``) are each raised at one place
 in ``gui/view.py``, next to the port method they answer.
 
@@ -110,6 +110,36 @@ The sidebar's remaining blocks and the log::
     {type: "mcp", rows: [{name: str, state: str, line: str}, ...]}
     {type: "harness", kind: str, time: str, text: str, line: str}
     {type: "toggle", what: "log"}                           # /log, from Python
+
+The ELEMENTS column - one row per appearance the tool can recognise, showing the
+pixels it last matched (``ui-briefs/elements-panel.md``)::
+
+    {type: "elements", window: "MASTER"|"SUB-AGENT",
+     rows: [{kind: str,            # the TemplateKind name, in RUNTIME_KINDS order
+             label: str,           # "copy button" - the capture button's own words
+             state: "resting"|"missing"|"found",
+             text: str,            # "no match yet" / "not on screen" / "found · 1.2%"
+             png: str}, ...]}      # a data: URI - ONLY on a found row, and only
+                                   # while the column is open
+
+The three states are the brief's and they are not interchangeable: **resting**
+is "nothing has been searched for this kind at all", which after a rebuild means
+the live window's service has no capture of it; **missing** is "searched this
+tick, not on screen"; **found** carries the diff and the picture. All seven rows
+are searched every tick regardless of which finish signals the service ticks -
+the column is a picture of what the tool can SEE, not of what the automation is
+deciding from. ``window`` names the LIVE window (the one being driven), which is
+not the selected tab for the whole of a delegation, and a detector rebuild sends
+every row back to ``resting`` rather than showing the old window's crops under
+the new one's name.
+
+``png`` is a PNG data URI encoded on the Python side from the matched rectangle
+only, with the capture's undefined fourth byte written as opaque alpha
+(``screen/png.py``) - the BGRX-not-BGRA rule, which is the difference between a
+crop and an invisible one. It is ABSENT while the column is hidden: the rows
+still cross (so the state is current the instant F7 opens it) and only the
+encoding is skipped. Nothing about sixel, half blocks or a renderer readout
+carries over - a page has one rendering path and this is it (brief §7).
 
 The window tabs and the per-window transcripts - one tab per browser WINDOW,
 one persistent transcript per tab (``ui-briefs/tabs-delegation-summary.md``)::
@@ -311,6 +341,10 @@ class JsCalls(Protocol):
     def reinstruct(self) -> None: ...
     def retry_insert(self) -> None: ...
     def set_service(self, key: str) -> None: ...
+    def set_chat_region(self) -> None: ...
+    # F7's other half: the page owns the show/hide, this side owns the pixels
+    # (see the ``elements`` family above).
+    def set_elements_visible(self, visible: bool) -> None: ...
     # The window tabs. Both are pure view-side navigation - no controller call
     # is made for either - but they still cross here, because the page is where
     # the click happens and the SELECTION lives in the view.
@@ -406,6 +440,19 @@ class JsApi:
     def service(self, key: str = "") -> None:
         """The sidebar's service picker - it edits the SELECTED window."""
         self._safely(lambda: self._calls.set_service(key))
+
+    def set_region(self) -> None:
+        """The sidebar's region button: draw the box around the SELECTED
+        window's browser. A fullscreen child process does the drawing, so the
+        answer comes back minutes later and through the sidebar, not from
+        here."""
+        self._safely(self._calls.set_chat_region)
+
+    def elements(self, visible: bool = False) -> None:
+        """F7 flipped the ELEMENTS column. The show/hide itself never leaves the
+        page; this is what stops the crops being encoded for a column nobody is
+        looking at (``ui-briefs/elements-panel.md`` §3.1)."""
+        self._safely(lambda: self._calls.set_elements_visible(bool(visible)))
 
     def window(self, key: str = "") -> None:
         """A window tab was clicked: show that window and point the sidebar at

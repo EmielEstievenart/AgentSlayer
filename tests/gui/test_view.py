@@ -23,6 +23,7 @@ from agentclip.automation.host import AutomationHost
 from agentclip.automation.loop_state import LoopState
 from agentclip.automation.view import AutomationView
 from agentclip.engine.engine import Decision, PendingAction, Phase, StatusSnapshot
+from agentclip.gui.bridge import JsApi
 from agentclip.gui.view import GuiView
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.profile import TemplateKind
@@ -285,6 +286,111 @@ def test_the_third_button_is_offered_on_exactly_the_tuis_terms(harness: Harness)
     assert harness.flush().last("gate")["always_label"] == "Always: calls like this one"
 
 
+def test_a_diff_preview_is_labelled_as_one_for_the_page_to_colour(harness: Harness) -> None:
+    """The page colours the diff by hand (no libraries), but WHICH renderer runs
+    is decided here - the same branch ``ActionPanel.preview_renderable`` takes."""
+    harness.view.show_gate(gate_action(), "1/1", "")
+    event = harness.flush().last("gate")
+    assert event["preview_kind"] == "diff"
+    assert event["preview_body"] == "--- a\n+++ b\n@@\n-old\n+new"
+    assert event["preview_head"] == ""
+
+
+def test_a_brand_new_file_arrives_under_its_banner(harness: Harness) -> None:
+    """A new file is all addition; the banner and the file are separate fields
+    so the page can draw one as a heading and the other as numbered lines."""
+    harness.view.show_gate(
+        gate_action(preview="NEW FILE src/x.py (2 lines)\nimport os\nprint(os)"),
+        "1/1",
+        "",
+    )
+    event = harness.flush().last("gate")
+    assert event["preview_kind"] == "new_file"
+    assert event["preview_head"] == "NEW FILE src/x.py (2 lines)"
+    assert event["preview_body"] == "import os\nprint(os)"
+
+
+def test_a_command_gate_carries_the_line_and_the_models_stated_reason(
+    harness: Harness,
+) -> None:
+    """Approving a command is a judgement about intent, not just syntax - so the
+    model's own justification rides right under the command it justifies."""
+    action = PendingAction(
+        call=call("run_command", command="npm run build", reason="  the build   is stale ",
+                  timeout="120"),
+        kind="command",
+        preview="npm run build\nreason: the build is stale\ncwd: /p",
+        auto_reason=None,
+    )
+    harness.view.show_gate(action, "1/1", "")
+    event = harness.flush().last("gate")
+    assert event["preview_kind"] == "command"
+    assert event["preview_head"] == "$ npm run build"
+    assert event["reason"] == "reason: the build is stale"
+    assert event["note"] == "not on the allowlist - approve to run once in the project root"
+    assert event["timeout"] == "120"
+
+
+def test_a_ruleset_command_gate_says_no_rule_allows_it_rather_than_no_allowlist(
+    harness: Harness,
+) -> None:
+    harness.view.show_gate(
+        gate_action("command", always_pattern="npm *", call=call("run_command", command="npm ci")),
+        "1/1",
+        "",
+    )
+    assert harness.flush().last("gate")["note"] == "no rule allows this - approve to run it once"
+
+
+def test_an_mcp_gate_shows_the_engines_preview_not_the_decoy_command(
+    harness: Harness,
+) -> None:
+    """Params are model-authored: a decoy ``command:`` riding an mcp call must
+    not repaint the gate as a harmless shell line (main-chat.md section 6). The
+    args come in full because for mcp the args ARE the semantics."""
+    action = PendingAction(
+        call=call("mcp", tool="github.create_issue", args='{"title": "x"}', command="git status"),
+        kind="command",
+        preview='github.create_issue {"title": "x"}',
+        auto_reason=None,
+    )
+    harness.view.show_gate(action, "1/1", "")
+    event = harness.flush().last("gate")
+    assert event["preview_kind"] == "mcp"
+    assert event["preview_head"] == 'github.create_issue {"title": "x"}'
+    assert event["preview_body"] == '{"title": "x"}'
+    assert "git status" not in event["preview_head"]
+
+
+def test_an_overlong_reason_is_clipped_rather_than_shipped_whole(harness: Harness) -> None:
+    action = gate_action("command", call=call("run_command", command="ls", reason="x" * 400))
+    harness.view.show_gate(action, "1/1", "")
+    reason = harness.flush().last("gate")["reason"]
+    assert reason.endswith("…")
+    assert len(reason) < 220
+
+
+def test_the_hint_names_which_stop_asking_answer_the_third_button_is(
+    harness: Harness,
+) -> None:
+    """"Always allow" without saying always allow WHAT is not something to press
+    blind, and the two modes buy different things (a remembered pattern until
+    restart, or auto-accepted edits for the session)."""
+    view = harness.view
+    view.show_gate(gate_action("command"), "1/1", "")
+    assert harness.flush().last("gate")["hint"] == "press y to approve · n to reject"
+
+    view.show_gate(gate_action("edit"), "1/1", "")
+    assert "auto-accept edits this session" in harness.flush().last("gate")["hint"]
+
+    view.show_gate(gate_action("command", always_pattern="git commit *"), "1/1", "")
+    hint = harness.flush().last("gate")["hint"]
+    assert "a to always allow git commit * (until AgentClip restarts)" in hint
+
+    view.show_gate(gate_action("auto", always_pattern="*"), "1/1", "")
+    assert "always allow calls like this one" in harness.flush().last("gate")["hint"]
+
+
 def test_a_sub_agents_gate_says_whose_call_it_is(harness: Harness) -> None:
     harness.view.render_state(session_view(session_role="subagent", session_title="rename"))
     harness.view.show_gate(gate_action(), "1/1", "")
@@ -378,7 +484,14 @@ def test_the_call_family_is_safe_from_a_worker_thread(harness: Harness) -> None:
     thread.join()
 
     recorder = harness.flush()
-    assert recorder.of_type("run_call")[0]["phase"] == "started"
+    assert recorder.of_type("run_call")[0] == {
+        "type": "run_call",
+        "phase": "started",
+        "call_id": 1,
+        "tool": "run_command",
+        "detail": "pytest -q",
+        "streams": True,
+    }
     assert recorder.of_type("run_call")[-1] == {
         "type": "run_call",
         "phase": "finished",
@@ -387,6 +500,42 @@ def test_the_call_family_is_safe_from_a_worker_thread(harness: Harness) -> None:
     }
     chunks = [event["chunk"] for event in recorder.of_type("run_output")]
     assert chunks == [f"line {i}\n" for i in range(20)]
+
+
+def test_only_a_run_command_row_is_expandable(harness: Harness) -> None:
+    """``streams`` is what makes ctrl+o do anything, and it is decided here for
+    a row the panel never planned - exactly as ``RunPanel.call_started`` does.
+    Expanding a write_file row would open an empty pane and teach the user the
+    key does nothing."""
+    harness.view.call_started(7, "write_file", "src/x.py")
+    harness.view.call_started(8, "run_command", "pytest -q")
+    started = harness.flush().of_type("run_call")
+    assert [event["streams"] for event in started] == [False, True]
+
+
+def test_a_cancel_from_the_page_reaches_the_controller(harness: Harness) -> None:
+    """ctrl+x's whole round trip: the page asks, the shell forwards, and the
+    turn still finishes and reports back - it is not an abort."""
+    spy = ControllerSpy()
+    harness.view._controller = spy  # type: ignore[assignment]
+    # Straight onto the view: the runner's marshalling is tests/gui/test_runner's.
+    api = JsApi(harness.view)
+    api.cancel()
+    assert spy.cancels == 1
+
+
+def test_the_pages_gate_and_composer_calls_land_on_the_same_doors(harness: Harness) -> None:
+    """``JsApi`` is a marshalling shim, not a second controller: every method
+    forwards to the call the TUI's key bindings make."""
+    spy = ControllerSpy()
+    harness.view._controller = spy  # type: ignore[assignment]
+    api = JsApi(harness.view)
+    harness.view.show_gate(gate_action("edit"), "1/1", "")
+    api.decide("approve", "")
+    api.decide("reject", "wrong file")
+    api.submit("a follow-up")
+    assert spy.decisions == [(Decision.APPROVE, None), (Decision.REJECT, "wrong file")]
+    assert spy.messages == ["a follow-up"]
 
 
 # == toasts ====================================================================

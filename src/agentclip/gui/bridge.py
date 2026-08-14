@@ -38,6 +38,53 @@ loop - the same loop the session controller lives on.
 Nothing in this module imports pywebview, or knows a window exists. The sink is
 a plain ``Callable[[str], None]``, which is what lets the whole bridge be
 exercised - ordering included - by a test with a list in it.
+
+**The event vocabulary.** Every event is a JSON object with a ``type`` and
+whatever that type carries; ``json.dumps`` runs with ``ensure_ascii``, so every
+payload is ASCII on the wire no matter what the model wrote. The producer is
+always :class:`~agentclip.gui.view.GuiView` and the consumer is always
+``app.js``'s ``dispatch``. Two families are pinned here because they are the
+ones a renderer has to get exactly right; the rest (``transcript``, ``state``,
+``status``, ``toast``, ``modal``, ``flash``, ``detection``, ``elements``,
+``harness``, ``payload``, ``armed``, ``focus_session``, ``composer_reset``,
+``transcript_clear``, ``modal_close``) are each raised at one place in
+``gui/view.py``, next to the port method they answer.
+
+The approval gate - ``show_gate`` / ``hide_gate``::
+
+    {type: "gate", open: false}
+    {type: "gate", open: true,
+     title: str,           # "APPROVE · call 2/5 · run_command npm test"
+     position: str,        # "2/5"
+     queue: str,           # "✓1 read_file  ▶2 run_command", two spaces between
+     tool: str, target: str, kind: "edit"|"command"|"auto",
+     preview: str,         # the engine's preview, verbatim
+     preview_kind: "diff"|"new_file"|"command"|"mcp"|"text",
+     preview_head: str,    # "$ npm test" / the NEW FILE banner / "" for a diff
+     preview_body: str,    # the diff, the new file, the mcp args, ""
+     reason: str,          # the model's own justification, or ""
+     note: str,            # why this is being asked at all, or ""
+     timeout: str,         # run_command's, when it set one
+     auto_reason: str, always_pattern: str|None,
+     always_label: str,    # "" when there is no third answer to offer
+     hint: str}            # the keys line, in the ActionPanel's words
+
+The run panel - ``start_working`` / ``stop_working`` and the three
+WORKER-THREAD methods (``docs/design/ui-briefs/main-chat.md`` §4)::
+
+    {type: "run", running: false}
+    {type: "run", running: true, label: str,
+     calls: [{call_id: int, tool: str, detail: str,
+              streams: bool, glyph: str}, ...]}   # the whole plan, up front
+    {type: "run_call", phase: "started", call_id: int, tool: str,
+     detail: str, streams: bool}
+    {type: "run_call", phase: "finished", call_id: int, glyph: str}
+    {type: "run_output", call_id: int, chunk: str}   # the DELTA, never the buffer
+
+``run_call``/``run_output`` may name a ``call_id`` the plan never mentioned and
+may re-resolve one that is already finished, so the page treats both as upserts;
+``run_output`` chunks are deltas and the page owns the accumulation, bounded per
+call, exactly as ``tui/widgets/run_panel.py`` says.
 """
 
 from __future__ import annotations

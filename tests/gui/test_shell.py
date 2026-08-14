@@ -73,6 +73,21 @@ def test_no_asset_reaches_the_network(name: str) -> None:
     assert "https://" not in text
 
 
+@pytest.mark.parametrize("name", ASSET_NAMES)
+def test_no_asset_fetches_anything_at_runtime_either(name: str) -> None:
+    """The URL check above catches a CDN written into the source; this catches
+    the same thing arriving at runtime.
+
+    No build step and no npm means every renderer here is hand-written - the
+    markdown, the diff colouring, the spinner - and the moment one of them is
+    "just one library away" the page stops being a local file that can be read
+    end to end (docs/design/gui.md section 2).
+    """
+    text = asset_text(name)
+    for reach in ("fetch(", "XMLHttpRequest", "import(", "importScripts", "WebSocket", "//cdn"):
+        assert reach not in text, f"{name} reaches outside itself: {reach}"
+
+
 def test_the_entry_url_is_a_local_file_carrying_the_version() -> None:
     with asset_dir() as assets:
         url = entry_url(assets)

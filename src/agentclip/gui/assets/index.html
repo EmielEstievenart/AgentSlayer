@@ -35,11 +35,24 @@
         <p class="empty">Describe a task below to start a session.</p>
       </main>
 
-      <!-- The run panel: one row per planned call while a turn executes. -->
+      <!-- The run panel: one row per planned call while a turn executes, the
+           spinner that says the turn is alive, and the running command's tail
+           behind ctrl+o (main-chat.md section 3, "Run panel"). The spinner is a
+           CSS animation rather than the TUI's braille frames - a shell idiom,
+           and one less thing painted per 100ms. -->
       <section class="run" id="run" hidden>
-        <div class="run-head"><span id="run-label"></span></div>
+        <div class="run-head">
+          <span class="spinner" id="run-spinner"></span>
+          <span id="run-label"></span>
+          <span class="hint" id="run-cancel">ctrl+x to cancel</span>
+        </div>
         <ol class="run-rows" id="run-rows"></ol>
-        <pre class="run-tail" id="run-tail" hidden></pre>
+        <div class="run-tail-wrap" id="run-tail-wrap" hidden>
+          <div class="run-tail-head">
+            OUTPUT <span class="hint">live · ctrl+o hides</span>
+          </div>
+          <pre class="run-tail" id="run-tail"></pre>
+        </div>
       </section>
 
       <!-- The approval gate. A panel, never a modal: the user needs the
@@ -47,7 +60,7 @@
       <section class="gate" id="gate" hidden>
         <div class="gate-title" id="gate-title"></div>
         <div class="gate-queue" id="gate-queue"></div>
-        <pre class="gate-preview" id="gate-preview"></pre>
+        <div class="gate-preview" id="gate-preview"></div>
         <div class="gate-actions">
           <button id="gate-approve" type="button">Approve (y)</button>
           <button id="gate-always" type="button" hidden></button>
@@ -56,6 +69,7 @@
         </div>
         <div class="gate-reject" id="gate-reject-row" hidden>
           <input id="gate-note" type="text" placeholder="why? (optional) - Enter confirms, Esc cancels" />
+          <button id="gate-note-send" type="button">Send rejection</button>
         </div>
       </section>
 

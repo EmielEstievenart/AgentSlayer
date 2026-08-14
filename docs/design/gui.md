@@ -328,9 +328,17 @@ calibration and there are two real callers.
 ## 3. Increment order (after phase 0)
 
 Serial, one implementer per increment, both shells launching + tests green at each
-step: shell + transcript/composer (proves the bridge) → approval gate → run panel →
-sidebar/status/state rail → window tabs/delegation/summary → elements panel →
-service editor → settings/help/modals → SSH connect dialog.
+step:
+
+1. ✅ shell + transcript/composer (proves the bridge) — slices 1 and 2 below.
+2. ✅ approval gate — **parity increment 1**, with (3).
+3. ✅ run panel — **parity increment 1**, with (2).
+4. ⬜ sidebar / status / state rail
+5. ⬜ window tabs / delegation / summary
+6. ⬜ elements panel
+7. ⬜ service editor
+8. ⬜ settings / help / modals
+9. ⬜ SSH connect dialog
 
 Shipped so far: **slice 1** (`63e3c76`) — the window over the packaged page, no
 bridge. **Slice 2** — the bridge, the runner's loop, `GuiView` against all three
@@ -341,6 +349,42 @@ watcher's ingest, `task_done`), `ask_user` answers on the composer, and the four
 blocking prompts are ugly-but-correct modals. `cli.py` builds the clipboard
 provider, the MCP runtime and the engine factory ABOVE the shell fork now, so
 both frontends are handed the same objects.
+
+**Parity increment 1** — the MAIN CHAT surface is whole in both shells: items 2
+and 3 above, against `docs/design/ui-briefs/main-chat.md`'s ActionPanel and
+RunPanel sections. Nothing new crossed the ports; what changed is that the
+*decisions* the TUI's two widgets make now cross with the data, so the page
+renders instead of sniffing:
+
+- the gate event carries a `preview_kind` (`diff` / `new_file` / `command` /
+  `mcp` / `text`) with `preview_head`/`preview_body`/`reason`/`note`/`timeout`,
+  plus the keys `hint`. Those are `ActionPanel.preview_renderable`'s branches,
+  taken on the Python side because "an mcp call carrying a decoy `command:`
+  must not repaint the gate as a harmless shell line" is a safety rule, not a
+  rendering style. The page owns only the colouring: the unified diff is
+  coloured **by hand** in `app.js` (`+`/`-`/`@@`/file-header line classes, HTML
+  escaped first, long lines never wrapped), a new file gets the NEW FILE banner
+  and CSS-counter line numbers, and the queue strip becomes one chip per call in
+  the run panel's glyph alphabet. The middle "stop asking" button is unchanged
+  in *when* it appears (`always_label`, slice 2) and now says in the hint which
+  of the two things pressing it buys.
+- `call_started` carries `streams`, so a row the plan never mentioned becomes
+  expandable on exactly the terms `RunPanel.call_started` gives it.
+- the run panel grew the spinner (a CSS animation, not braille frames), the
+  glyph-coded rows, the `ctrl+x` cancel hint and the tail behind `ctrl+o` — the
+  brief's rules kept exactly: only the *currently streaming* call, collapsed the
+  instant it finishes, deltas accumulated page-side and bounded per call, and
+  nothing painted while the pane is closed. Row **windowing is deliberately not
+  ported** (`_MAX_ROWS = 8` is terminal real estate; this panel scrolls), per
+  main-chat.md §7.
+- keyboard: `y`/`n`/`a`/`x` are inert while a text box has focus — the brief's
+  one safety mechanism — and `ctrl+x`/`ctrl+o` fire regardless, which is what
+  the TUI buys with `priority=True`.
+
+Still deferred, and named so nobody reads them as done: the composer's
+slash-command popup, the transcript's 500-event prune, and every `MainScreen`
+binding that is not on this surface (`u`/`i`/`c`/`e`/`l`/`t`, `shift+tab`) —
+they land with increment 4, which is where the rail that shows their state is.
 
 ## 4. SSH connect dialog (GUI-only surface)
 

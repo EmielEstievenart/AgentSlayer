@@ -82,6 +82,10 @@ _BUSY_POLL_S = 0.5
 # search answers is "one, or more than one?" (see ``find_all``).
 _MAX_MATCHES = 8
 
+# Where a model's stated reason is clipped at the gate. The tools layer's own
+# number (``tools/shell.py``), spelled here with ``_reason_line``.
+_REASON_PREVIEW_CHARS = 200
+
 # The browser windows the automation drives, as the AutomationController keys
 # them. Opaque strings down there by design; the GUI has no tab bar yet, so it
 # names the same two the TUI does and shows one transcript for both.
@@ -145,6 +149,26 @@ def _call_target(call: ToolCall) -> str:
     )
 
 
+def _reason_line(call: ToolCall) -> str:
+    """The model's own justification, as the gate shows it - or ``""``.
+
+    ``agentclip.tools.shell.reason_line``, spelled again here for the same
+    reason ``_distinct_rects`` below is: this shell may not import that layer
+    (tests/test_layering.py gives ``agentclip.gui`` the engine's VALUE types and
+    no tool code), and the alternative - widening the allowance so a view can
+    reach a display helper - would open the whole tools package to a frontend.
+    Six lines and a name that says where the original lives is the cheaper
+    duplication. It moves down beside the other shared display text if a third
+    caller ever appears.
+    """
+    flat = " ".join(call.params.get("reason", "").split())
+    if not flat:
+        return ""
+    if len(flat) > _REASON_PREVIEW_CHARS:
+        flat = flat[: _REASON_PREVIEW_CHARS - 1].rstrip() + "…"
+    return f"reason: {flat}"
+
+
 def _gate_target(call: ToolCall) -> str:
     """The gate title's target: the param the VERDICT was computed from.
 
@@ -157,6 +181,64 @@ def _gate_target(call: ToolCall) -> str:
     if call.tool == "mcp":
         return call.params.get("tool", "")
     return call.params.get("path", "")
+
+
+def _preview_fields(action: PendingAction) -> dict[str, str]:
+    """What the gate's body IS, so the page can render it instead of sniffing it.
+
+    ``ActionPanel.preview_renderable``'s branches, kept on this side of the
+    bridge: the decision "this preview is a unified diff / a brand-new file /
+    a shell line and its reason" is the same decision in both shells, and the
+    page's job is the colouring. Five kinds, and every one of them names the
+    same three fields so the renderer has no optional-field arithmetic to do:
+
+    - ``command`` - ``preview_head`` is ``$ <command>``, ``reason`` the model's
+      justification, ``note`` why it is being asked at all, ``timeout`` if set.
+    - ``mcp`` - every other command-kind tool. ``preview_head`` is the
+      ENGINE's one-line preview and ``preview_body`` the full args: params are
+      model-authored, and a decoy ``command: git status`` riding an mcp call
+      must not repaint the gate as a harmless shell line (main-chat.md §6).
+    - ``new_file`` - ``preview_head`` is the NEW FILE banner, ``preview_body``
+      the whole file.
+    - ``diff`` - ``preview_body`` is the unified diff, for the page to colour.
+    - ``text`` - anything else, verbatim.
+    """
+    call = action.call
+    fields = {
+        "preview_kind": "text",
+        "preview_head": "",
+        "preview_body": action.preview,
+        "reason": "",
+        "note": "",
+        "timeout": "",
+    }
+    if action.kind == "command":
+        fields["reason"] = _reason_line(call)
+        if call.tool != "run_command":
+            fields["preview_kind"] = "mcp"
+            fields["preview_head"] = action.preview
+            fields["preview_body"] = call.params.get("args", "")
+            fields["note"] = "no rule allows this - approve to run it once"
+            return fields
+        fields["preview_kind"] = "command"
+        fields["preview_head"] = f"$ {call.params.get('command') or action.preview}"
+        fields["preview_body"] = ""
+        fields["note"] = (
+            "no rule allows this - approve to run it once"
+            if action.always_pattern is not None
+            else "not on the allowlist - approve to run once in the project root"
+        )
+        fields["timeout"] = call.params.get("timeout", "")
+        return fields
+    first, _, rest = action.preview.partition("\n")
+    if first.startswith("NEW FILE"):
+        fields["preview_kind"] = "new_file"
+        fields["preview_head"] = first
+        fields["preview_body"] = rest
+        return fields
+    if action.preview.lstrip().startswith(("---", "+++", "@@")):
+        fields["preview_kind"] = "diff"
+    return fields
 
 
 def _distinct_rects(
@@ -560,6 +642,10 @@ class GuiView:
             # for a run_command gate without a pattern - commands stay
             # allowlist-or-prompt (tui.md §2.4).
             always_label=self._always_label(action),
+            hint=self._gate_hint(action),
+            # WHAT the preview is, decided here so the page can render it and
+            # not have to guess (``_preview_fields``).
+            **_preview_fields(action),
         )
 
     def hide_gate(self) -> None:
@@ -578,6 +664,23 @@ class GuiView:
             what = "calls like this one" if action.always_pattern == "*" else action.always_pattern
             return f"Always: {what}"
         return "Approve + auto-edits" if action.kind == "edit" else ""
+
+    @staticmethod
+    def _gate_hint(action: PendingAction) -> str:
+        """The keys line, in the ActionPanel's own words.
+
+        Composed here rather than in JS because the third answer means two
+        different things (remember a pattern until restart / auto-accept edits
+        for this session) and a user about to press a key that stops a question
+        being asked should read which one they are buying.
+        """
+        hint = "press y to approve · n to reject"
+        if action.always_pattern is not None:
+            what = "calls like this one" if action.always_pattern == "*" else action.always_pattern
+            return f"{hint} · a to always allow {what} (until AgentClip restarts)"
+        if action.kind == "edit":
+            return f"{hint} · a to approve + auto-accept edits this session"
+        return hint
 
     def start_working(self, label: str, calls: Sequence[RunCall] = ()) -> None:
         self._bridge.send(
@@ -608,7 +711,17 @@ class GuiView:
     # except that the queue is the JS bridge rather than Textual's message pump.
 
     def call_started(self, call_id: int, tool: str, detail: str) -> None:
-        self._bridge.send("run_call", phase="started", call_id=call_id, tool=tool, detail=detail)
+        # ``streams`` is decided here, not on the page: it is what makes a row
+        # expandable, and ``RunPanel.call_started`` answers it the same way for
+        # a row the panel never planned (only run_command produces a live tail).
+        self._bridge.send(
+            "run_call",
+            phase="started",
+            call_id=call_id,
+            tool=tool,
+            detail=detail,
+            streams=tool == "run_command",
+        )
 
     def call_finished(self, call_id: int, glyph: str) -> None:
         self._bridge.send("run_call", phase="finished", call_id=call_id, glyph=glyph)

@@ -579,33 +579,12 @@ def main(argv: list[str] | None = None) -> int:
 
     launch.data_root.mkdir(parents=True, exist_ok=True)
     prune_sessions(launch.data_root, config.backup.keep_sessions)
-    # The fork between the two shells (docs/design/gui.md section 0). It sits
-    # here, after everything about WHERE the session runs is settled and before
-    # the first TUI-only step: the sixel probe below is a question for a
-    # terminal the GUI does not have, and asking it on this path would be a
-    # stray escape sequence written at a window nobody is looking at. What the
-    # GUI shell grows next (the clipboard provider, the MCP runtime, the engine
-    # factory) is shell-agnostic and will rise ABOVE this branch as it lands;
-    # this slice opens the window and nothing else. Imported inside the
-    # function because pywebview is the optional `gui` extra - a TUI launch must
-    # not pay for the import, and an install without the extra must still run.
-    if args.gui:
-        from agentclip.gui.shell import run_gui
-
-        try:
-            return run_gui(launch)
-        finally:
-            # The same hand-back the TUI path does below: a --ssh launch has a
-            # live connection open by now whichever shell it was headed for.
-            close = getattr(launch.host, "close", None)
-            if close is not None:
-                close()
-    # BEFORE app.run(), and this is the only place it may happen: probing asks
-    # the terminal questions over stdin/stdout, and once Textual starts its own
-    # reader thread the answers go to Textual instead - which is exactly how the
-    # ELEMENTS column ends up silently drawing blocks on a terminal that can do
-    # sixel (tui.graphics, tui.md 1.7).
-    probe_terminal()
+    # The clipboard backend and the MCP runtime are shell-agnostic - both shells
+    # drive the same AutomationController and the same engine factory - so they
+    # are built ABOVE the fork, exactly as gui.md section 0 said they would rise
+    # as the GUI grew. The sixel probe is the one step that is NOT: it asks a
+    # terminal questions over stdin/stdout, and there is no terminal on the GUI
+    # path, so it stays below the branch.
     provider = select_provider(config.clipboard.provider)
     # The MCP runtime: built ONCE per process, the same lifetime as skill
     # discovery (docs/design/mcp.md section 3). Every configured server goes in
@@ -625,12 +604,57 @@ def main(argv: list[str] | None = None) -> int:
             remote_target=launch.host.name if config.remote.is_remote() else "",
         )
         # Kick the connects off NOW, not at the first session build: they
-        # overlap the terminal probe, the TUI mount and the user typing their
-        # task, so the first bootstrap usually lists real tools instead of the
-        # guaranteed-empty listing a build-time kick-off produced (the connect
-        # has not begun when the catalog snapshot is taken microseconds later).
-        # Still non-blocking - a slow server delays nothing.
+        # overlap the terminal probe, the shell's first paint and the user
+        # typing their task, so the first bootstrap usually lists real tools
+        # instead of the guaranteed-empty listing a build-time kick-off produced
+        # (the connect has not begun when the catalog snapshot is taken
+        # microseconds later). Still non-blocking - a slow server delays nothing.
         mcp_manager.ensure_started()
+    # The fork between the two shells (docs/design/gui.md section 0). It sits
+    # here, after everything about WHERE the session runs is settled and before
+    # the first TUI-only step. Imported inside the function because pywebview is
+    # the optional `gui` extra - a TUI launch must not pay for the import, and
+    # an install without the extra must still run.
+    #
+    # The engine factory is built the same way for both, with the same
+    # arguments; only the "read the live Config" closure differs, because the
+    # GUI has no service editor yet and so nothing that can rebind one
+    # mid-run (the TUI's reads app.app_config, which the editor reassigns).
+    if args.gui:
+        from agentclip.gui.shell import run_gui
+
+        try:
+            return run_gui(
+                launch,
+                provider=provider,
+                engine_factory=make_engine_factory(
+                    lambda: config,
+                    launch.project_root,
+                    host=launch.host,
+                    os_name=launch.os_name,
+                    data_root=(
+                        launch.data_root if launch.data_root != launch.project_root else None
+                    ),
+                    home=launch.home,
+                    mcp_manager=mcp_manager,
+                ),
+                mcp_manager=mcp_manager,
+            )
+        finally:
+            # The same hand-back the TUI path does below: a --ssh launch has a
+            # live connection open by now whichever shell it was headed for, and
+            # so has the MCP runtime.
+            if mcp_manager is not None:
+                mcp_manager.close()
+            close = getattr(launch.host, "close", None)
+            if close is not None:
+                close()
+    # BEFORE app.run(), and this is the only place it may happen: probing asks
+    # the terminal questions over stdin/stdout, and once Textual starts its own
+    # reader thread the answers go to Textual instead - which is exactly how the
+    # ELEMENTS column ends up silently drawing blocks on a terminal that can do
+    # sixel (tui.graphics, tui.md 1.7).
+    probe_terminal()
     app = AgentClipApp(
         config=config,
         provider=provider,

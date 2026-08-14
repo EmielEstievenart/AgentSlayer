@@ -7,34 +7,75 @@
       Loaded from a file:// URL by agentclip.gui.shell. Everything is local and
       self-contained: no CDN, no fonts, no network of any kind. app.js is a
       classic script rather than an ES module because a file:// origin cannot
-      load module scripts (docs/design/gui.md section 2).
+      load module scripts (docs/design/gui.md section 2), and it is NOT deferred:
+      it installs window.agentclip.receive at parse time so an event the bridge
+      sends before the DOM is ready is buffered rather than lost.
     -->
     <title>AgentClip</title>
     <link rel="stylesheet" href="app.css" />
+    <script src="app.js"></script>
   </head>
   <body>
     <div class="shell">
       <header class="titlebar">
         <span class="mark">AgentClip</span>
-        <span class="pill" id="state">no session</span>
+        <span class="pill" id="phase">no session</span>
+        <span class="pill" id="loop">IDLE</span>
+        <span class="pill" id="service"></span>
         <span class="spacer"></span>
+        <span class="pill warn" id="armed" hidden>DISARMED</span>
         <span class="version" id="version"></span>
       </header>
 
+      <!-- The "your move" banner the automation raises when a payload is
+           waiting on the user's Ctrl+V or Enter. -->
+      <div class="flash" id="flash" hidden></div>
+
       <main class="transcript" id="transcript">
-        <p class="empty">The transcript appears here once the bridge lands.</p>
+        <p class="empty">Describe a task below to start a session.</p>
       </main>
 
+      <!-- The run panel: one row per planned call while a turn executes. -->
+      <section class="run" id="run" hidden>
+        <div class="run-head"><span id="run-label"></span></div>
+        <ol class="run-rows" id="run-rows"></ol>
+        <pre class="run-tail" id="run-tail" hidden></pre>
+      </section>
+
+      <!-- The approval gate. A panel, never a modal: the user needs the
+           transcript visible behind the diff (main-chat.md section 6). -->
+      <section class="gate" id="gate" hidden>
+        <div class="gate-title" id="gate-title"></div>
+        <div class="gate-queue" id="gate-queue"></div>
+        <pre class="gate-preview" id="gate-preview"></pre>
+        <div class="gate-actions">
+          <button id="gate-approve" type="button">Approve (y)</button>
+          <button id="gate-always" type="button" hidden></button>
+          <button id="gate-reject" type="button">Reject (n)</button>
+          <span class="hint" id="gate-hint"></span>
+        </div>
+        <div class="gate-reject" id="gate-reject-row" hidden>
+          <input id="gate-note" type="text" placeholder="why? (optional) - Enter confirms, Esc cancels" />
+        </div>
+      </section>
+
       <footer class="composer">
-        <textarea
-          id="composer"
-          rows="3"
-          disabled
-          placeholder="GUI shell slice 1 &mdash; bridge lands next"
-        ></textarea>
+        <textarea id="composer" rows="3" disabled placeholder="no session"></textarea>
         <button id="send" type="button" disabled>Send</button>
       </footer>
     </div>
-    <script src="app.js" defer></script>
+
+    <!-- Toasts stack here and expire on their own. -->
+    <div class="toasts" id="toasts"></div>
+
+    <!-- One modal at a time: confirm / prompt_text / show_summary, plus the
+         payload block park_off_clipboard falls back to. -->
+    <div class="scrim" id="scrim" hidden>
+      <div class="modal">
+        <div class="modal-title" id="modal-title"></div>
+        <div class="modal-body" id="modal-body"></div>
+        <div class="modal-actions" id="modal-actions"></div>
+      </div>
+    </div>
   </body>
 </html>

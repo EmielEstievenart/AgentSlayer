@@ -207,7 +207,13 @@ compatibility seams the Pilot suites patch.
   own RULES entry (the TUI's reach minus Textual, plus `webview`), adds it to
   `CLIP_SCREEN_IMPORTERS`, keeps it OUT of the textual exemption, and names two
   boundary tests: `test_gui_never_imports_textual`,
-  `test_pywebview_only_in_the_gui_shell`.
+  `test_pywebview_only_in_the_gui_shell`. Slice 2 added `agentclip.engine` to
+  that entry, and only for its VALUE types: `Decision` is what an approval
+  answer IS (the same call the TUI makes), `PendingAction` is what a gate is
+  handed, `Engine` is what the factory `cli.py` builds returns. A shell that
+  could not name them would have to re-declare vocabulary its own controller
+  already speaks — which is the drift the ports exist to prevent — and
+  `agentclip.app` already depends on that layer, so the direction is unchanged.
 - The assets are located with `importlib.resources` (`files("agentclip.gui") /
   "assets"`, materialized by `as_file` for the lifetime of the window loop), never
   `__file__` — so a wheel, a source checkout and the PyInstaller extraction all
@@ -222,6 +228,92 @@ compatibility seams the Pilot suites patch.
 - Bridge: Python→JS via pywebview `evaluate_js` fed from a thread-safe queue (the
   GUI's implementation of the view-port thread contract); JS→Python via pywebview's
   `js_api` object whose methods call the same controller methods the TUI calls.
+  **Shipped in slice 2 (`agentclip/gui/bridge.py`), with the pywebview facts the
+  plan had assumed rather than checked.** `Window.evaluate_js` *is* safe to call
+  from any thread — the WebView2 backend marshals the script onto the WinForms
+  UI thread with `Control.Invoke` — but it then **blocks the caller** on a
+  semaphore until the script has run (`webview/platforms/edgechromium.py`). So
+  the queue is not there for safety, it is there for the two things safety does
+  not buy: a paint raised on the detector poller must not stall that tick behind
+  a UI round trip, and two threads calling `evaluate_js` concurrently interleave
+  in whatever order the scheduler picks — which is exactly the hazard phase 0
+  slice 5b paid for with the paint-epoch filter. **One FIFO, one drainer thread,
+  never interleaved**, so ordering is structural rather than re-proved per event
+  family. Two consequences worth naming: the drainer inherits page-readiness for
+  free (`evaluate_js` waits on pywebview's `_pywebviewready`, so events queued
+  before first paint are delivered late and in order rather than lost), and the
+  sink is a plain `Callable[[str], None]`, so the entire bridge — ordering
+  included, under real threads — is testable with a list. Going the other way,
+  pywebview runs each `js_api` method on a **fresh thread per call**
+  (`webview/util.py:js_bridge_call`), so every one of them is a one-line marshal
+  onto the GUI's loop and the page never touches controller state.
+
+### The GUI's concurrency model (slice 2, `agentclip/gui/runner.py`)
+
+`SessionController` is asyncio to the bone and the TUI hands it Textual's loop.
+pywebview has none to hand: `webview.start()` runs a native message pump on the
+MAIN thread and blocks there. So the GUI brings its own, and this is the shape
+every later increment is built on:
+
+- **one dedicated thread runs one asyncio loop** for the whole app run. Every
+  session flow, blocking prompt and OS-acting sequence lives on it;
+  `GuiView.spawn` is `GuiRunner.schedule`, which checks the calling thread
+  (`create_task` on the loop, `run_coroutine_threadsafe` off it) because a flow
+  spawning another flow is already on the loop;
+- the **main thread does nothing but `webview.start()`**;
+- the **bridge's drainer** is the only caller of `evaluate_js`; the **js_api
+  threads** only marshal;
+- the **watcher and detector threads are unchanged** — the AutomationController
+  has always owned them, and this shell starts/stops them exactly as
+  `MainScreen` does;
+- **shutdown is the TUI's quit path in the same order**: stop what touches the
+  machine (watcher, poller, by name), cancel every task on the loop (the
+  equivalent of Textual cancelling a screen's workers on unmount), stop the
+  loop, join, then let the bridge flush what it still owes the page. Every wait
+  is bounded. It hangs off `webview.start()` RETURNING rather than off the
+  window's `closing` event, deliberately: `closing` runs on the window's own
+  thread and the drainer parks inside `evaluate_js` waiting on that very thread,
+  so tearing down from there would make the two wait on each other.
+
+### Two GUI-side decisions the TUI has no equivalent for
+
+- **Enter sends, Shift+Enter is a newline.** The TUI uses `ctrl+j` for the
+  newline because Enter is its send key inside a Textual `TextArea`; the GUI
+  uses the web-native convention every chat composer has. A deliberate
+  shell-idiom difference, recorded here so it is not read as drift.
+- **`AutomationHost.park_off_clipboard` has no OSC-52 to fall back to.** The
+  TUI writes the terminal escape (§0); a WebView2 window has nothing like it,
+  and writing back through the page's own clipboard would be the same refused
+  write one layer up. The GUI's honest equivalent is to **show** the payload in
+  a selectable `<pre>` block with a toast saying the copy is theirs to make (and
+  naming `.agentclip/sessions/<id>/outbound/` as the other way to it).
+
+### Slice 2's reduced-scope port methods (the parity backlog)
+
+Everything a *turn* passes through is the real thing — transcript, gate,
+delivery, clipboard watcher, blocking prompts, `render_state`. These four are
+implemented smaller than the TUI's, each saying so at its own definition and in
+a toast where a user could otherwise be left staring at nothing:
+
+1. **Window tabs / session views.** `open_session_view` / `focus_session_view` /
+   `finish_session_view` render into ONE transcript with a `── task: … ──`
+   divider and a `· sub-agent ‹title›` label rather than minting a tab. The
+   controller's contract (open → focus → … → finish, single-flight) is satisfied
+   as written; the tab bar is a later increment.
+2. **`toggle_harness_log`.** The decision log is written (it is the
+   AutomationController's deque) and each entry reaches the page as a `harness`
+   event; the pane that draws it lands with the state rail. Toasts meanwhile.
+3. **`show_identify_overlay`.** The tkinter child-process mechanism carries over
+   unchanged, but `/identify` needs a *drawn* chat window and this shell has no
+   calibration surface yet. Toasts rather than putting an empty overlay up.
+4. **`paint_elements`.** Routes the KINDS a tick recognised, not their pictures:
+   no `crop_elements` is wired in, so PNG data URIs per crop land with the
+   elements panel.
+
+One duplication is tracked with them: `gui/view.py:_distinct_rects` and
+`find_all` are `MainScreen`'s, spelled again because the two shells may not
+import each other. They move down into `agentclip.automation` when the GUI grows
+calibration and there are two real callers.
 - Images (elements panel, service-editor thumbnails): PNG data URIs per crop. The
   BGRX→RGB rule and crop-not-whole-frame policy carry over from `tui/graphics.py`;
   the sixel/half-block machinery does not.
@@ -239,6 +331,16 @@ Serial, one implementer per increment, both shells launching + tests green at ea
 step: shell + transcript/composer (proves the bridge) → approval gate → run panel →
 sidebar/status/state rail → window tabs/delegation/summary → elements panel →
 service editor → settings/help/modals → SSH connect dialog.
+
+Shipped so far: **slice 1** (`63e3c76`) — the window over the packaged page, no
+bridge. **Slice 2** — the bridge, the runner's loop, `GuiView` against all three
+ports, and with them the first three items above at working-minimum: a task typed
+in the composer runs a whole turn (transcript, approval gate with y/n + a reject
+note, run rows with live output, the outbound parked on the clipboard, the
+watcher's ingest, `task_done`), `ask_user` answers on the composer, and the four
+blocking prompts are ugly-but-correct modals. `cli.py` builds the clipboard
+provider, the MCP runtime and the engine factory ABOVE the shell fork now, so
+both frontends are handed the same objects.
 
 ## 4. SSH connect dialog (GUI-only surface)
 

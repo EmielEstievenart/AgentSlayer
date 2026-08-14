@@ -1,10 +1,12 @@
 """Open the GUI window and run its loop until the user closes it.
 
-Slice 1 of the GUI shell (docs/design/gui.md section 3): the window exists and
-renders the packaged page, and nothing else. No bridge, no controllers - the
-next slice puts a ``js_api`` object and an ``evaluate_js`` queue behind this
-same entry point, which is why ``run_gui`` already takes the ``Launch``
-``cli.main`` built rather than the pieces this slice happens to need (none).
+Slice 2 of the GUI shell (docs/design/gui.md section 3): the window is wired to
+the real controllers. What lives here is only the pywebview-shaped part of that
+- create the window, hand it the ``js_api`` object, point the bridge at its
+``evaluate_js``, run the native pump on the main thread, and tear everything
+down when it returns. The concurrency model behind it (one asyncio loop on its
+own thread) is :mod:`agentclip.gui.runner`; the ports it drives are
+:mod:`agentclip.gui.view`.
 
 Everything pywebview is imported INSIDE functions: the ``gui`` extra is
 optional, so importing this module must stay free for a TUI launch and must not
@@ -15,14 +17,19 @@ from __future__ import annotations
 
 import platform
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from importlib.resources import as_file, files
 from pathlib import Path
 from typing import Protocol
 
 from agentclip import __version__
+from agentclip.app.types import EngineRequest
+from agentclip.clip.base import ClipboardProvider
 from agentclip.config import Config
+from agentclip.engine.engine import Engine
+from agentclip.gui.runner import GuiRunner
+from agentclip.gui.view import McpStatusSource
 
 WINDOW_TITLE = "AgentClip"
 WINDOW_SIZE = (1200, 800)
@@ -127,12 +134,37 @@ def webview2_missing() -> bool:
     return bool(renderer) and renderer != "edgechromium"
 
 
-def run_gui(launch: LaunchLike) -> int:
+def run_gui(
+    launch: LaunchLike,
+    *,
+    provider: ClipboardProvider,
+    engine_factory: Callable[[EngineRequest], Engine],
+    mcp_manager: McpStatusSource | None = None,
+) -> int:
     """Open the window, run the GUI loop, return an exit code when it closes.
 
-    ``launch`` is unused in this slice - the window has no session behind it
-    yet - and is taken anyway so the wiring in ``cli.main`` is the one the next
-    slice keeps.
+    The three keyword arguments are the shell-agnostic pieces ``cli.main``
+    builds for both frontends - the clipboard backend, the per-session engine
+    factory and the process-wide MCP runtime. They are handed IN rather than
+    built here for the reason the module docstring gives: choosing a clipboard
+    backend and wiring an engine factory are launch questions, not window
+    questions, and a second construction site is a second thing to drift.
+
+    Order matters and is the design's (gui.md section 2). The window is created
+    with the ``js_api`` object first, because pywebview injects the API into the
+    page at load; the bridge is pointed at its ``evaluate_js`` second, because
+    the window has to exist to have one; the loop thread starts third, before
+    the native pump takes the main thread for good; and the controllers start on
+    the page's ``loaded`` event, so the very first thing the page paints is the
+    "describe the task" prompt rather than a frame of nothing.
+
+    The teardown hangs off ``webview.start()`` RETURNING rather than off the
+    window's ``closing`` event, deliberately: ``closing`` runs on the window's
+    own thread, and the bridge's drainer parks inside ``evaluate_js`` waiting on
+    that very thread - tearing down from there would make the two wait on each
+    other for as long as the join allows. Once the pump has returned there is no
+    such knot, and a window that closed is exactly the moment the TUI's quit
+    path does its own unwinding.
     """
     try:
         import webview
@@ -143,24 +175,37 @@ def run_gui(launch: LaunchLike) -> int:
         print(MISSING_WEBVIEW2, file=sys.stderr)
         return 2
 
+    runner = GuiRunner(
+        config=launch.config,
+        provider=provider,
+        engine_factory=engine_factory,
+        project_root=launch.project_root,
+        mcp_manager=mcp_manager,
+    )
     width, height = WINDOW_SIZE
     with asset_dir() as assets:
         try:
-            webview.create_window(
+            window = webview.create_window(
                 WINDOW_TITLE,
                 url=entry_url(assets),
                 width=width,
                 height=height,
                 min_size=MIN_WINDOW_SIZE,
                 background_color=WINDOW_BACKGROUND,
+                js_api=runner.js_api,
             )
+            runner.attach(window.evaluate_js, on_close=window.destroy)
+            window.events.loaded += runner.page_loaded
+            runner.start()
             # Blocks until the last window is closed. Everything slow belongs
-            # AFTER first paint (gui.md section 2), which is why nothing is
-            # built above this line.
+            # AFTER first paint (gui.md section 2), which is why the controllers
+            # start on `loaded` rather than above this line.
             webview.start()
         except Exception as exc:  # pywebview's WebViewException and friends
             print(f"agentclip: the GUI shell could not start: {exc}", file=sys.stderr)
             print(f"agentclip: if this is about the web engine, see {WEBVIEW2_DOWNLOAD}",
                   file=sys.stderr)
             return 2
+        finally:
+            runner.stop()
     return 0

@@ -16,7 +16,10 @@ from pathlib import Path
 import pytest
 
 from agentclip import __version__, cli
+from agentclip.app.types import EngineRequest
+from agentclip.clip.base import select_provider
 from agentclip.config import load_config
+from agentclip.engine.engine import Engine
 from agentclip.gui.shell import (
     ASSET_DIR,
     ASSET_NAMES,
@@ -34,6 +37,11 @@ from agentclip.hosts.local import LocalHost
 
 def asset_text(name: str) -> str:
     return files(ASSET_PACKAGE).joinpath(ASSET_DIR, name).read_text(encoding="utf-8")
+
+
+def _no_engine(request: EngineRequest) -> Engine:
+    """An engine factory for the paths that never reach a session start."""
+    raise AssertionError("no engine should be built on this path")
 
 
 # == the packaged page ========================================================
@@ -104,7 +112,14 @@ def test_missing_pywebview_names_the_extra(
     """None in sys.modules is exactly what a missing package feels like to
     `import webview` - and the answer must be a sentence, not a traceback."""
     monkeypatch.setitem(sys.modules, "webview", None)
-    assert run_gui(_launch(Path.cwd())) == 2
+    assert (
+        run_gui(
+            _launch(Path.cwd()),
+            provider=select_provider("manual"),
+            engine_factory=_no_engine,
+        )
+        == 2
+    )
     err = capsys.readouterr().err
     assert "gui extra" in err
     assert "uv sync --extra gui" in err
@@ -141,12 +156,22 @@ def test_gui_launch_runs_the_shell_and_never_probes_the_terminal(
     """
     launch = _launch(tmp_path)
     seen: list[object] = []
+    kwargs: dict[str, object] = {}
     monkeypatch.setattr(cli, "local_launch", lambda args: launch)
     monkeypatch.setattr(cli, "probe_terminal", lambda: seen.append("probe"))
-    monkeypatch.setattr("agentclip.gui.shell.run_gui", lambda given: seen.append(given) or 0)
+    monkeypatch.setattr(
+        "agentclip.gui.shell.run_gui",
+        lambda given, **rest: (seen.append(given), kwargs.update(rest))[0] or 0,
+    )
 
     assert cli.main(["--gui", "--project", str(tmp_path)]) == 0
     assert seen == [launch]
+    # ...and it is handed the shell-agnostic pieces the TUI path builds too, so
+    # the two frontends cannot end up on two clipboard backends or two engine
+    # factories (docs/design/gui.md section 0).
+    assert kwargs["provider"] is not None
+    assert callable(kwargs["engine_factory"])
+    assert kwargs["mcp_manager"] is None  # no servers configured in a tmp project
 
 
 def test_without_the_flag_the_tui_path_still_probes(
@@ -157,7 +182,10 @@ def test_without_the_flag_the_tui_path_still_probes(
     monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
     probed: list[str] = []
     monkeypatch.setattr(cli, "probe_terminal", lambda: probed.append("probe"))
-    monkeypatch.setattr(cli, "select_provider", lambda name: _stop_here())
+    # The provider and the MCP runtime are built ABOVE the fork now (both shells
+    # need them), so the TUI path is cut off at the first thing that is really
+    # Textual's.
+    monkeypatch.setattr(cli, "AgentClipApp", lambda **kwargs: _stop_here())
 
     with pytest.raises(_Stop):
         cli.main(["--project", str(tmp_path)])

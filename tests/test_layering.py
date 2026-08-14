@@ -149,6 +149,15 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.automation",
                 "agentclip.clip",
                 "agentclip.config",
+                # The engine's VALUE types, and only ever as values: `Decision`
+                # is what an approval answer IS (the same call the TUI makes),
+                # `PendingAction` is what a gate is handed, and `Engine` is the
+                # return type of the factory cli.py builds. A shell that could
+                # not name them would have to re-declare the vocabulary its own
+                # controller already speaks - which is exactly the drift the
+                # ports exist to prevent. `agentclip.app` already depends on
+                # this layer, so nothing about the direction changes.
+                "agentclip.engine",
                 "agentclip.gui",
                 "agentclip.protocol",
                 "agentclip.screen",

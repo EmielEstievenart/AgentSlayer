@@ -18,11 +18,11 @@ import pytest
 
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import Engine
+from agentclip.engine.store.backups import BackupStore
+from agentclip.engine.store.session import SessionStore
 from agentclip.executor.tools.registry import ToolRegistry, default_registry
 from agentclip.executor.tools.sandbox import Workspace
 from agentclip.protocol.composer import Composer
-from agentclip.store.backups import BackupStore
-from agentclip.store.session import SessionStore
 
 UTILS_PY = '''"""Utility helpers."""
 

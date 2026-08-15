@@ -1877,7 +1877,7 @@ class GuiView:
         composes both lines and awaits ``ChatView.confirm``, so the dialog that
         opens here is the same dialog the TUI opens, word for word. There is no
         preview API to list the individual files - the engine only knows what it
-        restored *after* it has restored it (``store/backups.py:UndoReport``) -
+        restored *after* it has restored it (``engine/store/backups.py:UndoReport``) -
         so "what this restores" is the sentence the controller writes.
         """
         if not self._settled(

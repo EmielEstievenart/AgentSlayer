@@ -101,9 +101,20 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
+    # engine.store: session + backup persistence. It lives INSIDE the engine
+    # package but keeps its own narrower allowance, so it must come before the
+    # ``agentclip.engine`` rule below (first match wins) - otherwise the store
+    # would silently inherit the engine's wider one.
     (
-        "agentclip.store",
-        frozenset({"agentclip", "agentclip.config", "agentclip.executor.hosts", "agentclip.store"}),
+        "agentclip.engine.store",
+        frozenset(
+            {
+                "agentclip",
+                "agentclip.config",
+                "agentclip.engine.store",
+                "agentclip.executor.hosts",
+            }
+        ),
     ),
     ("agentclip.driver.clip", frozenset({"agentclip", "agentclip.driver.clip"})),
     ("agentclip.driver.screen", frozenset({"agentclip", "agentclip.driver.screen"})),
@@ -114,11 +125,11 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip",
                 "agentclip.config",
                 "agentclip.engine",
+                "agentclip.engine.store",
                 "agentclip.executor.hosts",
                 "agentclip.executor.permissions",
                 "agentclip.executor.tools",
                 "agentclip.protocol",
-                "agentclip.store",
             }
         ),
     ),
@@ -132,8 +143,8 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.app",
                 "agentclip.config",
                 "agentclip.engine",
+                "agentclip.engine.store",
                 "agentclip.protocol",
-                "agentclip.store",
             }
         ),
     ),

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from agentclip.store.backups import BackupStore, UndoReport
+from agentclip.engine.store.backups import BackupStore, UndoReport
 
 
 @pytest.fixture()

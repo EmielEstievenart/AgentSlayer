@@ -17,6 +17,8 @@ from agentclip.config import Config, default_remote_state_dir, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.screen.matchers import MATCHERS, select_matcher
 from agentclip.engine.engine import Engine
+from agentclip.engine.store.backups import BackupStore
+from agentclip.engine.store.session import SessionStore, prune_sessions
 from agentclip.executor.hosts.base import Host
 from agentclip.executor.hosts.connect import (
     STEP_CONNECT,
@@ -39,8 +41,6 @@ from agentclip.executor.tools.skills import Skill, discover_skills
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.names import generate_chat_name
 from agentclip.protocol.spec import render_spec
-from agentclip.store.backups import BackupStore
-from agentclip.store.session import SessionStore, prune_sessions
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.graphics import probe_terminal
 

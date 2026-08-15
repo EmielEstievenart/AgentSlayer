@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agentclip import __version__
-from agentclip.store.session import SessionStore, prune_sessions
+from agentclip.engine.store.session import SessionStore, prune_sessions
 
 
 def _sessions_dir(root: Path) -> Path:

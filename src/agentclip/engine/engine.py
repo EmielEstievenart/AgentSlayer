@@ -36,6 +36,8 @@ from agentclip.config import Config
 from agentclip.engine.approval import DENY_VERDICTS, ApprovalPolicy, PermissionMode
 from agentclip.engine.results import fit_results
 from agentclip.engine.states import Decision, EngineStateError, Phase, can_transition
+from agentclip.engine.store.backups import BackupStore, UndoReport
+from agentclip.engine.store.session import SessionStore
 from agentclip.executor.hosts.base import Host
 from agentclip.executor.hosts.local import LocalHost
 from agentclip.executor.permissions import PermissionRule
@@ -52,8 +54,6 @@ from agentclip.protocol.types import (
     ToolCall,
     ToolResult,
 )
-from agentclip.store.backups import BackupStore, UndoReport
-from agentclip.store.session import SessionStore
 
 _MUTATING_TOOLS = frozenset({"write_file", "edit_file", "delete_file"})
 

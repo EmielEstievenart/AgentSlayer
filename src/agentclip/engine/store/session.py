@@ -10,10 +10,10 @@ Layout::
             ├── meta.json          # {schema, started, service, agentclip_version, root}
             ├── transcript.jsonl   # append-only audit log, one JSON object per line
             ├── outbound/turn-NNNN.txt
-            └── backups/...        # owned by store.backups.BackupStore
+            └── backups/...        # owned by engine.store.backups.BackupStore
 
 No session resume in MVP: the transcript is audit-only; backups remain undoable
-from disk after a restart (see store.backups).
+from disk after a restart (see engine.store.backups).
 
 The tree always lives on the LOCAL disk - it is AgentClip's own state, not the
 project's. In a remote session ``<project root>`` is on the far machine, so the

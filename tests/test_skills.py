@@ -10,6 +10,8 @@ import pytest
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import Engine, NewTurn, Send
 from agentclip.engine.states import Phase
+from agentclip.engine.store.backups import BackupStore
+from agentclip.engine.store.session import SessionStore
 from agentclip.executor.hosts import FakeHost
 from agentclip.executor.tools.registry import ToolContext, default_registry
 from agentclip.executor.tools.sandbox import Workspace
@@ -21,8 +23,6 @@ from agentclip.executor.tools.skills import (
 )
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.types import ToolCall
-from agentclip.store.backups import BackupStore
-from agentclip.store.session import SessionStore
 
 GREET_SKILL = """\
 ---

@@ -82,6 +82,15 @@ from agentclip.driver.screen.profile_store import load_profile
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot, can_delegate, missing
 from agentclip.engine.engine import Decision, Engine, PendingAction
+from agentclip.executor.hosts.connect import (
+    PASSWORD_ATTEMPTS,
+    ConnectedRemote,
+    ConnectError,
+    ConnectPrompts,
+    StepEvent,
+    connect_remote,
+    ssh_config_aliases,
+)
 from agentclip.gui.bridge import Bridge
 from agentclip.gui.remote import (
     ConnectDialog,
@@ -92,15 +101,6 @@ from agentclip.gui.remote import (
     saved_rows,
 )
 from agentclip.gui.service_editor import ServiceEditor, kind_of, png_data_uri
-from agentclip.hosts.connect import (
-    PASSWORD_ATTEMPTS,
-    ConnectedRemote,
-    ConnectError,
-    ConnectPrompts,
-    StepEvent,
-    connect_remote,
-    ssh_config_aliases,
-)
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 
@@ -449,7 +449,7 @@ class McpStatusSource(Protocol):
     """What this view needs of the process-wide ``McpManager``.
 
     Structural, and stated with ``Any`` rather than ``McpServerStatus``, because
-    ``agentclip.gui`` may not import ``agentclip.mcp`` (tests/test_layering.py):
+    ``agentclip.gui`` may not import ``agentclip.executor.mcp`` (tests/test_layering.py):
     the GUI only ever reads a status row's ``name``/``state``/``detail`` and
     hands them to a toast. Displaying MCP properly is a later increment.
     """
@@ -481,7 +481,7 @@ def _call_target(call: ToolCall) -> str:
 def _reason_line(call: ToolCall) -> str:
     """The model's own justification, as the gate shows it - or ``""``.
 
-    ``agentclip.tools.shell.reason_line``, spelled again here rather than
+    ``agentclip.executor.tools.shell.reason_line``, spelled again here rather than
     imported: this shell may not import that layer (tests/test_layering.py gives
     ``agentclip.gui`` the engine's VALUE types and no tool code), and the
     alternative - widening the allowance so a view can reach a display helper -

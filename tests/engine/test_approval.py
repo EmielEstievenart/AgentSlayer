@@ -22,9 +22,9 @@ from agentclip.config import ApprovalConfig
 from agentclip.engine.approval import ApprovalPolicy
 from agentclip.engine.engine import Engine, NewTurn, Send
 from agentclip.engine.states import Decision
-from agentclip.permissions import PermissionRule, default_rules, rules_from_config
+from agentclip.executor.permissions import PermissionRule, default_rules, rules_from_config
+from agentclip.executor.tools.registry import ToolContext, ToolRegistry, ToolSpec
 from agentclip.protocol.types import ToolCall, ToolResult
-from agentclip.tools.registry import ToolContext, ToolRegistry, ToolSpec
 
 
 def make_call(tool: str, **params: str) -> ToolCall:
@@ -42,7 +42,7 @@ def _mcp_handler(ctx: ToolContext, call: ToolCall) -> ToolResult:
     return ToolResult(call_id=call.id, status="ok", body="", tool=call.tool)
 
 
-# The real spec lives in agentclip/tools/mcp_tools.py; the policy reads nothing
+# The real spec lives in agentclip/executor/tools/mcp_tools.py; the policy reads nothing
 # off it but the name and the approval kind, so a stand-in keeps these tests
 # about the permission wiring (docs/design/mcp.md section 4).
 MCP_SPEC = ToolSpec("mcp", "command", _mcp_handler, None, "")

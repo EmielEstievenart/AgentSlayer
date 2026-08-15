@@ -12,10 +12,10 @@ import pytest
 from agentclip.app.types import EngineRequest
 from agentclip.cli import _MCP_SECTION6_SCAFFOLD, _MCP_TASK_FALLBACK, make_engine_factory
 from agentclip.config import Config, load_config
-from agentclip.mcp.client import McpManager
-from agentclip.mcp.types import McpLocalServer
+from agentclip.executor.mcp.client import McpManager
+from agentclip.executor.mcp.types import McpLocalServer
+from agentclip.executor.tools.registry import default_registry
 from agentclip.protocol.spec import render_spec
-from agentclip.tools.registry import default_registry
 
 
 @pytest.fixture
@@ -77,7 +77,7 @@ def test_a_pinned_chat_name_wins_over_the_generator(build) -> None:
 # == MCP catalog sizing (docs/design/mcp.md section 5: the budget rule) ========
 #
 # These go through the REAL McpManager over the SDK's in-process transport
-# (the `_inproc_targets` seam, exactly like tests/mcp/test_client.py): real
+# (the `_inproc_targets` seam, exactly like tests/executor/mcp/test_client.py): real
 # protocol, real cached tool listing, no subprocess. The budget arithmetic is
 # exercised by writing a project .agentclip.toml whose service budget is
 # derived from a measured MCP-free spec, so the tests hold as the spec prose

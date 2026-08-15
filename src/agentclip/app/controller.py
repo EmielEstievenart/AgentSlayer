@@ -274,8 +274,8 @@ def _budget_body(exc: BudgetExceeded) -> str:
 class McpStatusLine(Protocol):
     """One MCP server's status row, as `/mcp` reads it.
 
-    Structural on purpose: the real rows are ``agentclip.mcp.types
-    .McpServerStatus``, but the app layer does not import ``agentclip.mcp``
+    Structural on purpose: the real rows are ``agentclip.executor.mcp.types
+    .McpServerStatus``, but the app layer does not import ``agentclip.executor.mcp``
     (test_layering.py RULES - mcp is a leaf below config, and this layer's
     only use for it is four read-only fields). Read-only properties so the
     frozen dataclass satisfies it.
@@ -376,7 +376,7 @@ class SessionController:
         self._view = view
         # Where /mcp reads its listing, or None when the app runs without an
         # MCP manager. A supplier of duck-typed rows rather than the manager
-        # itself, so this layer stays clear of agentclip.mcp (see
+        # itself, so this layer stays clear of agentclip.executor.mcp (see
         # McpStatusLine); the TUI passes McpManager.statuses, bound.
         self._mcp_statuses = mcp_statuses
 

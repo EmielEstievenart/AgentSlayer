@@ -60,7 +60,7 @@ from agentclip.driver.automation.harness_log import HarnessEntry
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import TemplateKind
-from agentclip.mcp.types import McpServerStatus
+from agentclip.executor.mcp.types import McpServerStatus
 
 
 class ClipboardCaptured(Message):

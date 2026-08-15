@@ -63,7 +63,7 @@ from collections.abc import Sequence
 from typing import Literal
 
 from agentclip.config import ApprovalConfig
-from agentclip.permissions import (
+from agentclip.executor.permissions import (
     PERMISSION_MODES,
     PermissionMode,
     PermissionRule,
@@ -74,8 +74,8 @@ from agentclip.permissions import (
     permission_target,
     rules_json,
 )
+from agentclip.executor.tools.registry import ToolSpec
 from agentclip.protocol.types import ToolCall
-from agentclip.tools.registry import ToolSpec
 
 Verdict = Literal["auto", "needs_approval", "deny", "deny_plan", "deny_unattended"]
 

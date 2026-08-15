@@ -20,6 +20,7 @@ from agentclip.app.types import EngineRequest
 from agentclip.config import load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.engine.engine import Engine
+from agentclip.executor.hosts.local import LocalHost
 from agentclip.gui.shell import (
     ASSET_DIR,
     ASSET_NAMES,
@@ -32,7 +33,6 @@ from agentclip.gui.shell import (
     entry_url,
     run_gui,
 )
-from agentclip.hosts.local import LocalHost
 
 
 def asset_text(name: str) -> str:

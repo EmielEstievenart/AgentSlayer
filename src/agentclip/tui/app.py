@@ -25,7 +25,7 @@ from agentclip.config import (
 )
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.engine import Engine
-from agentclip.mcp.client import McpManager
+from agentclip.executor.mcp.client import McpManager
 from agentclip.tui.screens.confirm import ConfirmScreen
 from agentclip.tui.screens.help import HelpScreen
 from agentclip.tui.screens.main import MainScreen

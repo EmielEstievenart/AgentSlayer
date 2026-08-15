@@ -152,7 +152,7 @@ async def test_mcp_lists_every_server_with_state_tools_and_detail(
     asked before a session as readily as during one)."""
 
     @dataclass(frozen=True)
-    class Row:  # duck-typed McpStatusLine - the app layer never imports agentclip.mcp
+    class Row:  # duck-typed McpStatusLine - the app layer never imports agentclip.executor.mcp
         name: str
         state: str
         detail: str = ""

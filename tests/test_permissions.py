@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from agentclip import permissions
-from agentclip.permissions import (
+from agentclip.executor import permissions
+from agentclip.executor.permissions import (
     TOOL_PERMISSIONS,
     PermissionRule,
     always_pattern,

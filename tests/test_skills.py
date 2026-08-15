@@ -10,19 +10,19 @@ import pytest
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import Engine, NewTurn, Send
 from agentclip.engine.states import Phase
-from agentclip.hosts import FakeHost
-from agentclip.protocol.composer import Composer
-from agentclip.protocol.types import ToolCall
-from agentclip.store.backups import BackupStore
-from agentclip.store.session import SessionStore
-from agentclip.tools.registry import ToolContext, default_registry
-from agentclip.tools.sandbox import Workspace
-from agentclip.tools.skills import (
+from agentclip.executor.hosts import FakeHost
+from agentclip.executor.tools.registry import ToolContext, default_registry
+from agentclip.executor.tools.sandbox import Workspace
+from agentclip.executor.tools.skills import (
     Skill,
     discover_skills,
     make_skill_spec,
     skill_search_roots,
 )
+from agentclip.protocol.composer import Composer
+from agentclip.protocol.types import ToolCall
+from agentclip.store.backups import BackupStore
+from agentclip.store.session import SessionStore
 
 GREET_SKILL = """\
 ---
@@ -229,7 +229,7 @@ def test_folder_scan_order_follows_the_hosts_case_rule(case_sensitive: bool, fir
     """Which skill wins a name clash inside one root is decided by scan order,
     and that order is the FILES' machine's - ASCII where names compare
     verbatim, case-folded where they do not - never the operator's PC's."""
-    from agentclip.tools.skills import _load_root
+    from agentclip.executor.tools.skills import _load_root
 
     host = FakeHost("/project", case_sensitive=case_sensitive)
     root = Path("/project/.claude/skills")

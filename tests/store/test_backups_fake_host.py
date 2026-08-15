@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agentclip.hosts.fake import FakeHost
+from agentclip.executor.hosts.fake import FakeHost
 from agentclip.store.backups import BackupStore
 
 ROOT = "/project"

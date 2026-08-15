@@ -102,7 +102,7 @@ from agentclip.driver.automation.loop_state import LOOP_TRANSITIONS, LoopState
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot, SlotCalibration, can_delegate, missing
-from agentclip.mcp.types import McpServerStatus
+from agentclip.executor.mcp.types import McpServerStatus
 
 _HINT = "F3 hides this column · F7 elements · F5 armed · F2 settings · F1 help"
 

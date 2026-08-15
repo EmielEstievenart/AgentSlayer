@@ -56,7 +56,7 @@ def test_subagent_is_told_it_cannot_delegate_further() -> None:
     flat = " ".join(render("subagent").split())
     assert "You cannot hand work to a further sub-agent of your own" in flat
     # ...and the catalog it is handed never advertises the tool (see
-    # tests/tools/test_registry_roles.py); the spec text only reinforces it.
+    # tests/executor/tools/test_registry_roles.py); the spec text only reinforces it.
     assert "tool=delegate" not in render("subagent")
 
 

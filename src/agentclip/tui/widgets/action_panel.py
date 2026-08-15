@@ -28,7 +28,7 @@ from textual.message import Message
 from textual.widgets import Button, Input, Static
 
 from agentclip.engine.engine import PendingAction
-from agentclip.tools.shell import reason_line
+from agentclip.executor.tools.shell import reason_line
 
 
 def preview_renderable(action: PendingAction) -> RenderableType:

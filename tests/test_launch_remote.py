@@ -17,8 +17,8 @@ import pytest
 from agentclip import cli
 from agentclip.app.types import EngineRequest
 from agentclip.config import Config, load_config
-from agentclip.hosts import FakeHost
-from agentclip.hosts.ssh import SshError
+from agentclip.executor.hosts import FakeHost
+from agentclip.executor.hosts.ssh import SshError
 
 REMOTE_ROOT = "/home/dev/app"
 
@@ -77,7 +77,7 @@ def host(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeSshHost:
     """Whatever SshHost cli would build, it gets this one instead."""
     made = FakeSshHost()
     made.add_dir(REMOTE_ROOT)
-    monkeypatch.setattr("agentclip.hosts.ssh.SshHost", lambda *a, **kw: made)
+    monkeypatch.setattr("agentclip.executor.hosts.ssh.SshHost", lambda *a, **kw: made)
     monkeypatch.setattr(
         "agentclip.config.default_global_config_path", lambda: tmp_path / "no-global.toml"
     )
@@ -236,7 +236,7 @@ def test_no_root_anywhere_is_refused_before_connecting(
 
 def test_a_failed_connection_is_reported_and_fatal(args, monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
-        "agentclip.hosts.ssh.SshHost", lambda *a, **kw: FakeSshHost(fail="connect")
+        "agentclip.executor.hosts.ssh.SshHost", lambda *a, **kw: FakeSshHost(fail="connect")
     )
     monkeypatch.setattr(
         "agentclip.config.default_global_config_path", lambda: tmp_path / "no-global.toml"
@@ -247,7 +247,7 @@ def test_a_failed_connection_is_reported_and_fatal(args, monkeypatch, tmp_path, 
 
 def test_a_box_that_cannot_be_probed_is_fatal(args, monkeypatch, tmp_path, capsys) -> None:
     monkeypatch.setattr(
-        "agentclip.hosts.ssh.SshHost", lambda *a, **kw: FakeSshHost(fail="probe")
+        "agentclip.executor.hosts.ssh.SshHost", lambda *a, **kw: FakeSshHost(fail="probe")
     )
     monkeypatch.setattr(
         "agentclip.config.default_global_config_path", lambda: tmp_path / "no-global.toml"
@@ -260,7 +260,7 @@ def test_a_missing_remote_root_is_fatal_and_closes_the_link(
     args, monkeypatch, tmp_path, capsys
 ) -> None:
     empty = FakeSshHost("/elsewhere")
-    monkeypatch.setattr("agentclip.hosts.ssh.SshHost", lambda *a, **kw: empty)
+    monkeypatch.setattr("agentclip.executor.hosts.ssh.SshHost", lambda *a, **kw: empty)
     monkeypatch.setattr(
         "agentclip.config.default_global_config_path", lambda: tmp_path / "no-global.toml"
     )

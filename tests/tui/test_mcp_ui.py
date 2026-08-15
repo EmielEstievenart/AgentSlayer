@@ -1,6 +1,6 @@
 """Pilot tests for the MCP TUI surface (docs/design/mcp.md section 6).
 
-The manager itself is covered in tests/mcp; what is pinned here is the screen's
+The manager itself is covered in tests/executor/mcp; what is pinned here is the screen's
 half of the contract, against a stub that is nothing but the ``McpStatusSource``
 shape (``statuses()`` + ``set_status_hook`` - no SDK, no loop thread):
 
@@ -33,7 +33,7 @@ from textual.widgets import Static
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.clip.fake import FakeClipboard
-from agentclip.mcp.types import McpServerStatus
+from agentclip.executor.mcp.types import McpServerStatus
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen
 from agentclip.tui.widgets.sidebar import mcp_row_id

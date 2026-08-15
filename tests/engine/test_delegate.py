@@ -12,14 +12,14 @@ import pytest
 
 from agentclip.engine.engine import AskUser, Delegate, Done, Engine, NewTurn, Send
 from agentclip.engine.states import Decision, EngineStateError, Phase
-from agentclip.protocol.types import ToolCall
-from agentclip.tools.registry import (
+from agentclip.executor.tools.registry import (
     ToolContext,
     ToolRegistry,
     ToolSpec,
     default_registry,
     tool_handler,
 )
+from agentclip.protocol.types import ToolCall
 
 # Same local alias as tests/engine/test_cancel.py: the conftest fixture is
 # injected by name, only the annotation is spelled out here.

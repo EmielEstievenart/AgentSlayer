@@ -48,10 +48,10 @@ from pathlib import Path
 import platformdirs
 import tomli_w
 
-from agentclip.hosts.base import Host
-from agentclip.mcp.config import McpTarget, load_mcp_servers
-from agentclip.mcp.types import McpConfig, McpServers
-from agentclip.permissions import (
+from agentclip.executor.hosts.base import Host
+from agentclip.executor.mcp.config import McpTarget, load_mcp_servers
+from agentclip.executor.mcp.types import McpConfig, McpServers
+from agentclip.executor.permissions import (
     PERMISSION_MODES,
     PermissionRule,
     default_rules,
@@ -824,7 +824,7 @@ def _mcp_target(
 
     Spelled as capabilities rather than as the Host itself because that module
     is a stdlib-only leaf below this one (tests/test_layering.py): it may not
-    import agentclip.hosts, so it is handed the three things it does with a
+    import agentclip.executor.hosts, so it is handed the three things it does with a
     machine. ``_expand_home`` goes along as one of them, which is what keeps
     ``~`` meaning the same thing for an MCP ``{file:~/token}`` as it does for
     the permission ruleset read out of the very same file.
@@ -1063,7 +1063,7 @@ def load_config(
         permission, project_root, warnings, host, home
     )
 
-    # MCP servers ride the same opencode.json, parsed by agentclip.mcp.config
+    # MCP servers ride the same opencode.json, parsed by agentclip.executor.mcp.config
     # (stdlib-only, so this import is unconditional). The paths are resolved
     # HERE and handed down - the loader owns parsing, not file discovery - which
     # is also what lets the test suite's default_opencode_config_path patch

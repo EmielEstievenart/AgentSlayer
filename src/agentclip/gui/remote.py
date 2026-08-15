@@ -9,7 +9,7 @@ failure do, and what the target-owns-its-policy banner says - and
 coroutine, and draw.
 
 The sequence itself is NOT here. It is
-:func:`agentclip.hosts.connect.connect_remote`, the same function
+:func:`agentclip.executor.hosts.connect.connect_remote`, the same function
 ``cli.remote_launch`` drives; this object is what stands between it and a human
 who would rather not retype a shell command (``docs/design/ui-briefs/
 ssh-connect.md`` §1).
@@ -25,7 +25,7 @@ from typing import Any, Protocol
 from agentclip.app.types import EngineRequest
 from agentclip.config import Config, RemoteTarget
 from agentclip.engine.engine import Engine
-from agentclip.hosts.connect import (
+from agentclip.executor.hosts.connect import (
     CONNECT_STEPS,
     STEP_LABELS,
     ConnectedRemote,
@@ -160,7 +160,7 @@ def policy_lines(config: Config, target_label: str) -> list[str]:
 
     The stdio test is ``no url`` rather than ``isinstance(McpLocalServer)``:
     this shell reads MCP through duck-typing everywhere it touches it
-    (``gui/view.py:_mcp_line``), which is what keeps ``agentclip.mcp`` out of
+    (``gui/view.py:_mcp_line``), which is what keeps ``agentclip.executor.mcp`` out of
     its import graph.
     """
     lines: list[str] = []

@@ -25,7 +25,7 @@ from agentclip.config import ApprovalConfig, load_config
 from agentclip.engine.approval import PERMISSION_MODES, ApprovalPolicy, normalize_mode
 from agentclip.engine.engine import Engine, NewTurn, Send
 from agentclip.engine.states import Decision
-from agentclip.tools.registry import ToolRegistry
+from agentclip.executor.tools.registry import ToolRegistry
 
 from .test_approval import (
     ASK_ONLY_RULESET,

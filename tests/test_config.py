@@ -39,7 +39,7 @@ from agentclip.config import (
     save_services,
     save_theme,
 )
-from agentclip.permissions import default_rules, evaluate
+from agentclip.executor.permissions import default_rules, evaluate
 
 
 @pytest.fixture

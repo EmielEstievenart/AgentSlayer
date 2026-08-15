@@ -6,7 +6,7 @@ whatever it had, every later call says explicitly that it never ran, and the
 turn still ends through the normal Send path so the results get pasted back.
 
 A fake slow tool stands in for run_command here (the real subprocess kill is
-covered in tests/tools/test_shell.py); it blocks exactly like a long command,
+covered in tests/executor/tools/test_shell.py); it blocks exactly like a long command,
 polling the same ctx.cancelled() flag.
 """
 
@@ -18,8 +18,7 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from agentclip.engine.engine import Done, Engine, NewTurn, Phase, Send
-from agentclip.protocol.types import ToolCall
-from agentclip.tools.registry import (
+from agentclip.executor.tools.registry import (
     ToolContext,
     ToolError,
     ToolRegistry,
@@ -27,6 +26,7 @@ from agentclip.tools.registry import (
     default_registry,
     tool_handler,
 )
+from agentclip.protocol.types import ToolCall
 
 # The conftest make_engine fixture (its EngineFactory alias lives there, but
 # `tests` is not an importable package - so spell the callable out).

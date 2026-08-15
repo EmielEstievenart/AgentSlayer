@@ -258,7 +258,7 @@ from agentclip.driver.screen.template import (
     find_lowest_with_best_miss,
 )
 from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnapshot
-from agentclip.mcp.types import McpServerStatus
+from agentclip.executor.mcp.types import McpServerStatus
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.tui.messages import (

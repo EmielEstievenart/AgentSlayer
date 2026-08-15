@@ -36,9 +36,11 @@ from agentclip.config import Config
 from agentclip.engine.approval import DENY_VERDICTS, ApprovalPolicy, PermissionMode
 from agentclip.engine.results import fit_results
 from agentclip.engine.states import Decision, EngineStateError, Phase, can_transition
-from agentclip.hosts.base import Host
-from agentclip.hosts.local import LocalHost
-from agentclip.permissions import PermissionRule
+from agentclip.executor.hosts.base import Host
+from agentclip.executor.hosts.local import LocalHost
+from agentclip.executor.permissions import PermissionRule
+from agentclip.executor.tools.registry import ToolContext, ToolRegistry, ToolSpec, error_result
+from agentclip.executor.tools.sandbox import Workspace
 from agentclip.protocol.composer import BudgetExceeded, Composer
 from agentclip.protocol.names import normalize_chat_name
 from agentclip.protocol.parser import normalize, normalized_hash, parse_reply
@@ -52,8 +54,6 @@ from agentclip.protocol.types import (
 )
 from agentclip.store.backups import BackupStore, UndoReport
 from agentclip.store.session import SessionStore
-from agentclip.tools.registry import ToolContext, ToolRegistry, ToolSpec, error_result
-from agentclip.tools.sandbox import Workspace
 
 _MUTATING_TOOLS = frozenset({"write_file", "edit_file", "delete_file"})
 
@@ -398,7 +398,7 @@ class Engine:
 
         The same thread contract as set_progress_hook, and the same wiring
         moment; it lands on the ToolContext, where ``run_command`` picks it up
-        (see :attr:`agentclip.tools.registry.ToolContext.on_output`).
+        (see :attr:`agentclip.executor.tools.registry.ToolContext.on_output`).
         """
         self._ctx.on_output = hook
 

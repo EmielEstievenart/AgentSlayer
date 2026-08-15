@@ -38,37 +38,38 @@ STDLIB = frozenset(sys.stdlib_module_names)
 RULES: list[tuple[str, frozenset[str]]] = [
     # permissions: a stdlib-only leaf below config, so the same rule model can be
     # loaded by config.py and applied by engine/approval.py.
-    ("agentclip.permissions", frozenset()),
+    ("agentclip.executor.permissions", frozenset()),
     # hosts.connect: the ONE module in the seam that reads configuration, and it
-    # must come before the ``agentclip.hosts`` rule below (first match wins) so
-    # the allowance is this file's alone. It is the remote CONNECT SEQUENCE
-    # (docs/design/ui-briefs/ssh-connect.md §2), whose first and last steps ARE
-    # config loads: the LOCAL config names the target, and the REMOTE project's
-    # is read back through the host that was just dialled. Both shells drive it -
-    # cli.remote_launch with terminal prompts, the GUI's dialog with modals - so
-    # it cannot live in either of them without the other re-deriving it. The
-    # direction is still one-way at run time: nothing in agentclip/hosts/
-    # __init__.py imports this module, so config's own ``from agentclip.hosts.
-    # base import Host`` never pulls it in, and the rest of the seam stays the
-    # stdlib-and-paramiko leaf the diagram above describes.
+    # must come before the ``agentclip.executor.hosts`` rule below (first match
+    # wins) so the allowance is this file's alone. It is the remote CONNECT
+    # SEQUENCE (docs/design/ui-briefs/ssh-connect.md §2), whose first and last
+    # steps ARE config loads: the LOCAL config names the target, and the REMOTE
+    # project's is read back through the host that was just dialled. Both shells
+    # drive it - cli.remote_launch with terminal prompts, the GUI's dialog with
+    # modals - so it cannot live in either of them without the other re-deriving
+    # it. The direction is still one-way at run time: nothing in
+    # agentclip/executor/hosts/__init__.py imports this module, so config's own
+    # ``from agentclip.executor.hosts.base import Host`` never pulls it in, and
+    # the rest of the seam stays the stdlib-and-paramiko leaf the diagram above
+    # describes.
     (
-        "agentclip.hosts.connect",
-        frozenset({"agentclip.config", "agentclip.hosts", "paramiko"}),
+        "agentclip.executor.hosts.connect",
+        frozenset({"agentclip.config", "agentclip.executor.hosts", "paramiko"}),
     ),
     # hosts: the OS seam (this PC's subprocess/fs, or a machine over SSH). A
     # leaf like permissions, so tools/store/engine can all resolve their file
     # and command access through the same object. Stdlib-only except for the
     # one third-party client the remote implementation IS - and that one is
     # confined to hosts/ssh.py (see test_paramiko_only_in_the_ssh_host).
-    ("agentclip.hosts", frozenset({"agentclip.hosts", "paramiko"})),
+    ("agentclip.executor.hosts", frozenset({"agentclip.executor.hosts", "paramiko"})),
     # mcp: OpenCode's mcp block (types + reader + client runtime). A leaf like
     # permissions and for the same reason: config.py LOADS the servers where
     # config lives, tools invoke them where handlers live, and only a leaf both
     # import can be true of both. The optional SDK is imported lazily inside
     # client.py functions, so it never shows up at module level here; the
-    # ToolSpecs live in agentclip/tools/mcp_tools.py, NOT in this package,
+    # ToolSpecs live in agentclip/executor/tools/mcp_tools.py, NOT in this package,
     # precisely so mcp never has to import tools (docs/design/mcp.md section 2).
-    ("agentclip.mcp", frozenset({"agentclip.mcp"})),
+    ("agentclip.executor.mcp", frozenset({"agentclip.executor.mcp"})),
     # config: reads the project's .agentclip.toml, which in a remote session is
     # on the remote machine - hence the Host seam, one leaf below it.
     (
@@ -77,32 +78,32 @@ RULES: list[tuple[str, frozenset[str]]] = [
             {
                 "platformdirs",
                 "tomli_w",
-                "agentclip.hosts",
-                "agentclip.permissions",
+                "agentclip.executor.hosts",
+                "agentclip.executor.permissions",
                 # Only the stdlib-only submodules: the client runtime (and the
                 # SDK behind it) stays out of config's import graph by listing
                 # the two leaves rather than the package.
-                "agentclip.mcp.types",
-                "agentclip.mcp.config",
+                "agentclip.executor.mcp.types",
+                "agentclip.executor.mcp.config",
             }
         ),
     ),
     ("agentclip.protocol", frozenset({"agentclip.config", "agentclip.protocol"})),
     (
-        "agentclip.tools",
+        "agentclip.executor.tools",
         frozenset(
             {
                 "agentclip.config",
-                "agentclip.hosts",
-                "agentclip.mcp",
+                "agentclip.executor.hosts",
+                "agentclip.executor.mcp",
+                "agentclip.executor.tools",
                 "agentclip.protocol.types",
-                "agentclip.tools",
             }
         ),
     ),
     (
         "agentclip.store",
-        frozenset({"agentclip", "agentclip.config", "agentclip.hosts", "agentclip.store"}),
+        frozenset({"agentclip", "agentclip.config", "agentclip.executor.hosts", "agentclip.store"}),
     ),
     ("agentclip.driver.clip", frozenset({"agentclip", "agentclip.driver.clip"})),
     ("agentclip.driver.screen", frozenset({"agentclip", "agentclip.driver.screen"})),
@@ -113,11 +114,11 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip",
                 "agentclip.config",
                 "agentclip.engine",
-                "agentclip.hosts",
-                "agentclip.permissions",
+                "agentclip.executor.hosts",
+                "agentclip.executor.permissions",
+                "agentclip.executor.tools",
                 "agentclip.protocol",
                 "agentclip.store",
-                "agentclip.tools",
             }
         ),
     ),
@@ -179,7 +180,6 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 # ports exist to prevent. `agentclip.app` already depends on
                 # this layer, so nothing about the direction changes.
                 "agentclip.engine",
-                "agentclip.gui",
                 # The OS seam, and only for the surface increment 7 built: the
                 # connect dialog IS the construction of a remote host
                 # (`hosts.connect`), and the sidebar's link indicator reads the
@@ -187,7 +187,8 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 # reason - deciding which machine a session runs on is a launch
                 # question, and this shell is now one of the two places a human
                 # answers it (docs/design/ui-briefs/ssh-connect.md).
-                "agentclip.hosts",
+                "agentclip.executor.hosts",
+                "agentclip.gui",
                 "agentclip.protocol",
                 "webview",
             }
@@ -302,7 +303,7 @@ def test_paramiko_only_in_the_ssh_host() -> None:
     imports - must stay clear, so a local session never loads a crypto stack it
     has no use for.
     """
-    allowed = SRC / "hosts" / "ssh.py"
+    allowed = SRC / "executor" / "hosts" / "ssh.py"
     for path in all_modules():
         if path == allowed:
             continue

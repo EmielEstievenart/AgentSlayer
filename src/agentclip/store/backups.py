@@ -46,8 +46,8 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from agentclip.hosts.base import Host
-from agentclip.hosts.local import LocalHost
+from agentclip.executor.hosts.base import Host
+from agentclip.executor.hosts.local import LocalHost
 
 _SCHEMA = 1
 _MANIFEST = "manifest.json"

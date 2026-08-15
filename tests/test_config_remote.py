@@ -10,8 +10,8 @@ from pathlib import Path
 import pytest
 
 from agentclip.config import RemoteTarget, load_config
-from agentclip.hosts import FakeHost
-from agentclip.permissions import PermissionRule, evaluate
+from agentclip.executor.hosts import FakeHost
+from agentclip.executor.permissions import PermissionRule, evaluate
 
 # The remote user's home, and the ruleset OpenCode keeps under it on every
 # platform - which in a remote session is resolved from `home`, not this PC's.

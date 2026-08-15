@@ -17,8 +17,8 @@ from agentclip.config import Config, default_remote_state_dir, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.screen.matchers import MATCHERS, select_matcher
 from agentclip.engine.engine import Engine
-from agentclip.hosts.base import Host
-from agentclip.hosts.connect import (
+from agentclip.executor.hosts.base import Host
+from agentclip.executor.hosts.connect import (
     STEP_CONNECT,
     STEP_ENV,
     STEP_ROOT,
@@ -30,22 +30,22 @@ from agentclip.hosts.connect import (
     parse_environment,
     remote_environment,
 )
-from agentclip.hosts.local import LocalHost
-from agentclip.mcp.client import McpManager
+from agentclip.executor.hosts.local import LocalHost
+from agentclip.executor.mcp.client import McpManager
+from agentclip.executor.tools.mcp_tools import make_mcp_specs
+from agentclip.executor.tools.registry import ToolRegistry, default_registry
+from agentclip.executor.tools.sandbox import Workspace
+from agentclip.executor.tools.skills import Skill, discover_skills
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.names import generate_chat_name
 from agentclip.protocol.spec import render_spec
 from agentclip.store.backups import BackupStore
 from agentclip.store.session import SessionStore, prune_sessions
-from agentclip.tools.mcp_tools import make_mcp_specs
-from agentclip.tools.registry import ToolRegistry, default_registry
-from agentclip.tools.sandbox import Workspace
-from agentclip.tools.skills import Skill, discover_skills
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.graphics import probe_terminal
 
 if TYPE_CHECKING:  # paramiko rides in with SshHost, so the real import stays lazy
-    from agentclip.hosts.ssh import SshHost
+    from agentclip.executor.hosts.ssh import SshHost
 
 # -- MCP catalog sizing (docs/design/mcp.md section 5: the budget rule) --------
 
@@ -551,7 +551,7 @@ def remote_launch(args: argparse.Namespace) -> Launch | int:
     """Connect, authenticate and probe BEFORE the TUI starts (design 7).
 
     A thin wrapper now: the sequence lives in
-    :func:`agentclip.hosts.connect.connect_remote` so the GUI's connect dialog
+    :func:`agentclip.executor.hosts.connect.connect_remote` so the GUI's connect dialog
     drives the identical one (docs/design/ui-briefs/ssh-connect.md). What stays
     here is what a terminal launch IS - the two blocking prompts, the stderr
     wording, and exit code 2 for every fatal step. Order matters and is the

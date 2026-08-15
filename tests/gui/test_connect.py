@@ -4,9 +4,9 @@
 gui.md`` §4 holds the six ratified answers. What is exercised here is everything
 this shell DECIDES - the picker's two sources, when Connect may be pressed, the
 checklist's four row states, the three ways out of a failure, the save offer and
-the target-owns-policy banner - with :func:`agentclip.hosts.connect.connect_remote`
+the target-owns-policy banner - with :func:`agentclip.executor.hosts.connect.connect_remote`
 replaced by a script. The sequence itself is pinned next door
-(``tests/hosts/test_connect.py``), which is the point of it living down there.
+(``tests/executor/hosts/test_connect.py``), which is the point of it living down there.
 """
 
 from __future__ import annotations
@@ -22,6 +22,16 @@ import pytest
 from agentclip.cli import make_engine_factory
 from agentclip.config import Config, RemoteTarget, load_config
 from agentclip.driver.clip.base import select_provider
+from agentclip.executor.hosts.connect import (
+    CONNECT_STEPS,
+    STEP_CONNECT,
+    STEP_PROBE,
+    STEP_RESOLVE,
+    STEP_ROOT,
+    ConnectedRemote,
+    ConnectError,
+    StepEvent,
+)
 from agentclip.gui.bridge import Bridge
 from agentclip.gui.remote import (
     APPROVAL_LOCAL,
@@ -33,16 +43,6 @@ from agentclip.gui.remote import (
     saved_rows,
 )
 from agentclip.gui.view import GuiView
-from agentclip.hosts.connect import (
-    CONNECT_STEPS,
-    STEP_CONNECT,
-    STEP_PROBE,
-    STEP_RESOLVE,
-    STEP_ROOT,
-    ConnectedRemote,
-    ConnectError,
-    StepEvent,
-)
 from tests.gui.conftest import Harness, Recorder, settle
 
 REMOTE_ROOT = "/home/dev/app"

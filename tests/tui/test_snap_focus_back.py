@@ -21,8 +21,8 @@ import time
 
 import pytest
 
-import agentclip.screen.focus as focus_mod
-from agentclip.screen.focus import REFOCUS_ATTEMPTS, focus_window_verified
+import agentclip.driver.screen.focus as focus_mod
+from agentclip.driver.screen.focus import REFOCUS_ATTEMPTS, focus_window_verified
 
 OURS = 4242  # AgentClip's terminal
 THEIRS = 999  # the browser, still holding on

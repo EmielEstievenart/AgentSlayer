@@ -34,9 +34,9 @@ from textual.pilot import Pilot
 
 from agentclip.app.types import SessionRef
 from agentclip.cli import make_engine_factory
-from agentclip.clip.fake import FakeClipboard
 from agentclip.config import Config, GeneralConfig, load_config
-from agentclip.screen.slot import AgentSlot
+from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.tui.widgets.window_tabs import WindowTab

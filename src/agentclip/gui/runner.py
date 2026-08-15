@@ -53,8 +53,8 @@ from pathlib import Path
 from typing import Any
 
 from agentclip.app.types import EngineRequest
-from agentclip.clip.base import ClipboardProvider
 from agentclip.config import Config
+from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.engine import Engine
 from agentclip.gui.bridge import Bridge, EmitFn, JsApi
 from agentclip.gui.remote import RemoteConnect

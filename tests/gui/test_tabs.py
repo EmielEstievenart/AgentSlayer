@@ -17,6 +17,7 @@ import asyncio
 import pytest
 
 from agentclip.app.types import SessionRef
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.engine.engine import Phase
 from agentclip.gui.bridge import JsApi
 from agentclip.gui.view import (
@@ -25,7 +26,6 @@ from agentclip.gui.view import (
     SUBAGENT_WINDOW,
     GuiView,
 )
-from agentclip.screen.slot import AgentSlot
 from tests.gui.conftest import Harness, settle
 from tests.gui.test_chrome import KeySpy, api_of
 from tests.gui.test_view import session_view, snapshot

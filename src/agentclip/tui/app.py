@@ -15,7 +15,6 @@ from textual.binding import Binding
 from textual.theme import Theme
 
 from agentclip.app.types import EngineRequest
-from agentclip.clip.base import ClipboardProvider
 from agentclip.config import (
     DEFAULT_THEME,
     Config,
@@ -24,6 +23,7 @@ from agentclip.config import (
     save_services,
     save_theme,
 )
+from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.engine import Engine
 from agentclip.mcp.client import McpManager
 from agentclip.tui.screens.confirm import ConfirmScreen

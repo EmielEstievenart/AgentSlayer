@@ -30,13 +30,13 @@ from textual.widgets import Button, Static
 
 import agentclip.tui.screens.service_editor as editor_mod
 from agentclip.cli import make_engine_factory
-from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
-from agentclip.screen.capture import CaptureError, RegionImage
-from agentclip.screen.picker import ScreenPickError
-from agentclip.screen.profile import TemplateKind
-from agentclip.screen.profile_store import ProfileStoreError, load_profile
-from agentclip.screen.region import ScreenRegion
+from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.screen.capture import CaptureError, RegionImage
+from agentclip.driver.screen.picker import ScreenPickError
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.profile_store import ProfileStoreError, load_profile
+from agentclip.driver.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import SUBAGENT_WINDOW
 from agentclip.tui.screens.service_editor import (
@@ -716,7 +716,7 @@ async def test_a_capture_is_shared_by_both_slots_and_survives_new(
 ) -> None:
     """Appearances describe the service, so the slot picker does not change
     them and a session teardown does not clear them."""
-    from agentclip.screen.slot import AgentSlot
+    from agentclip.driver.screen.slot import AgentSlot
 
     _patch_picker(monkeypatch)
     app = _make_app(tmp_path, profile_root)

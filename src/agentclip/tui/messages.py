@@ -12,7 +12,7 @@ the UI thread handles, and the run panel is only ever touched from the loop.
 
 **The paint family** is the third and largest group, and it runs the other way
 round: not a background thread reporting a FACT, but the
-:class:`~agentclip.automation.controller.AutomationController` asking for a
+:class:`~agentclip.driver.automation.controller.AutomationController` asking for a
 REPAINT from whichever thread it happens to be on. Since the consumer moved onto
 the poller thread (docs/design/gui.md §1, slice 5b) that thread is usually not
 the UI's, and every ``AutomationView`` method MainScreen implements is therefore
@@ -56,11 +56,11 @@ from dataclasses import dataclass
 from textual.message import Message
 from textual.notifications import SeverityLevel
 
-from agentclip.automation.harness_log import HarnessEntry
-from agentclip.automation.loop_state import LoopState
+from agentclip.driver.automation.harness_log import HarnessEntry
+from agentclip.driver.automation.loop_state import LoopState
+from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.profile import TemplateKind
 from agentclip.mcp.types import McpServerStatus
-from agentclip.screen.capture import RegionImage
-from agentclip.screen.profile import TemplateKind
 
 
 class ClipboardCaptured(Message):
@@ -191,7 +191,7 @@ class PaintHarnessEntry(Message):
 class PaintDetection(Message):
     """One appearance's line in the sidebar's DETECTION block, already phrased.
 
-    ``text`` comes out of ``agentclip.automation.finish`` - the shell never
+    ``text`` comes out of ``agentclip.driver.automation.finish`` - the shell never
     chooses the wording, or the two shells would phrase the same reading
     differently (automation/view.py).
 

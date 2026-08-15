@@ -109,12 +109,12 @@
   // truth; this is a view of it that happens to keep its own copy, because the
   // bridge is one-way and a pane revealed after an hour must show the whole
   // tail rather than whatever arrived since. Bounded at the deque's own number
-  // (agentclip/automation/harness_log.py, HARNESS_LOG_MAX): a debugging tail,
+  // (agentclip/driver/automation/harness_log.py, HARNESS_LOG_MAX): a debugging tail,
   // not an archive.
   var LOG_MAX = 500;
   var logEntries = [];
   var logOpen = false;
-  // agentclip.automation.harness_log.EMPTY_LOG_LINE - a log that explains its
+  // agentclip.driver.automation.harness_log.EMPTY_LOG_LINE - a log that explains its
   // own silence, so "nothing has happened" is never read as "nothing works".
   var EMPTY_LOG_LINE =
     "nothing logged yet - the harness writes here as it moves through the loop " +

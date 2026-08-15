@@ -21,8 +21,10 @@ from typing import Any
 
 import pytest
 
-from agentclip.automation.harness_log import HARNESS_LOG_MAX, KIND_GATE
-from agentclip.automation.loop_state import LOOP_TRANSITIONS, LoopState
+from agentclip.driver.automation.harness_log import HARNESS_LOG_MAX, KIND_GATE
+from agentclip.driver.automation.loop_state import LOOP_TRANSITIONS, LoopState
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.engine.engine import Phase
 from agentclip.gui.bridge import JsApi
 from agentclip.gui.view import (
@@ -32,8 +34,6 @@ from agentclip.gui.view import (
     STALE_UNSET,
     GuiView,
 )
-from agentclip.screen.profile import TemplateKind
-from agentclip.screen.slot import AgentSlot
 from tests.gui.conftest import Harness
 from tests.gui.test_view import ControllerSpy, session_view, snapshot
 

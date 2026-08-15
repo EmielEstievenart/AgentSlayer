@@ -3,7 +3,7 @@
 A native window (WebView2 on Windows) rendering the hand-written HTML/CSS/JS in
 ``assets/``, with Python in the same process - so this shell drives exactly the
 same :class:`~agentclip.app.SessionController` and
-:class:`~agentclip.automation.AutomationController` the Textual TUI drives, and
+:class:`~agentclip.driver.automation.AutomationController` the Textual TUI drives, and
 neither shell owns any behavior the other cannot have
 (docs/design/gui.md sections 0 and 2).
 

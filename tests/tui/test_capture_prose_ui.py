@@ -27,12 +27,12 @@ from textual.pilot import Pilot
 
 import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
-from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
-from agentclip.screen.capture import RegionImage
-from agentclip.screen.profile import TemplateKind
-from agentclip.screen.region import ScreenRegion
-from agentclip.screen.template import RegionMatch
+from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.template import RegionMatch
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen
 

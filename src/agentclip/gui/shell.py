@@ -25,8 +25,8 @@ from typing import Any, Protocol
 
 from agentclip import __version__
 from agentclip.app.types import EngineRequest
-from agentclip.clip.base import ClipboardProvider
 from agentclip.config import Config
+from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.engine import Engine
 from agentclip.gui.remote import RemoteConnect
 from agentclip.gui.runner import GuiRunner

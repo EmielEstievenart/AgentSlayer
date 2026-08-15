@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 from PIL import Image as PILImage
 
-from agentclip.screen.capture import RegionImage
+from agentclip.driver.screen.capture import RegionImage
 from agentclip.tui import graphics as graphics_mod
 from agentclip.tui.graphics import (
     CROP_MAX_ROWS,

@@ -17,8 +17,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agentclip.cli import make_engine_factory
-from agentclip.clip.base import select_provider
 from agentclip.config import Config
+from agentclip.driver.clip.base import select_provider
 from agentclip.gui.runner import GuiRunner
 from tests.gui.conftest import Recorder
 

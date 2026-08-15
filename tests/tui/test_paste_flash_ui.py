@@ -26,11 +26,11 @@ from textual.widgets import Static
 
 import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
-from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
-from agentclip.screen.busy import BusyProbe, BusyState
-from agentclip.screen.region import ScreenRegion
-from agentclip.screen.stale import StaleProbe, StaleState
+from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.screen.busy import BusyProbe, BusyState
+from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.stale import StaleProbe, StaleState
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.messages import ClipboardCaptured
 from agentclip.tui.screens.main import MainScreen

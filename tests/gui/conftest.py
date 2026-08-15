@@ -1,7 +1,7 @@
 """A GUI shell with no window behind it, so the whole event vocabulary is testable.
 
 The same bargain the two suites next door make (``tests/app`` fakes the
-``ChatView``, ``tests/automation`` fakes the ``AutomationView``): here the fake
+``ChatView``, ``tests/driver/automation`` fakes the ``AutomationView``): here the fake
 is the *sink*. :class:`agentclip.gui.bridge.Bridge` takes its ``evaluate_js`` as
 a plain ``Callable[[str], None]``, so a list is a perfectly good window - and
 what lands in it is the exact JavaScript a real WebView2 would have run, which
@@ -23,8 +23,8 @@ from typing import Any
 import pytest
 
 from agentclip.cli import make_engine_factory
-from agentclip.clip.base import select_provider
 from agentclip.config import Config, load_config
+from agentclip.driver.clip.base import select_provider
 from agentclip.gui.bridge import Bridge, payload_of
 from agentclip.gui.view import GuiView
 

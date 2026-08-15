@@ -80,7 +80,7 @@ delegate(task*, context)
   would otherwise flood your own context.
 ===CLIP:CALL id=1 tool=delegate===
 task << EOT
-Read every file under src/agentclip/screen/ and report, in <=25 lines, how a
+Read every file under src/agentclip/driver/screen/ and report, in <=25 lines, how a
 region capture reaches the template matcher. Quote exact function names.
 EOT
 ===CLIP:END==="""

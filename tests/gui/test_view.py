@@ -1,6 +1,6 @@
 """GuiView: every port method, and what the page is told about it.
 
-``tests/app`` pins what the session controller DECIDES and ``tests/automation``
+``tests/app`` pins what the session controller DECIDES and ``tests/driver/automation``
 what the automation decides; this pins the third thing - that the GUI's adapter
 turns each of those decisions into a well-formed event, and that the handful of
 methods this slice implements smaller than the TUI's say so out loud rather than
@@ -19,15 +19,15 @@ import pytest
 
 from agentclip.app.types import SessionRef, SessionSpec
 from agentclip.app.view import ChatView, RunCall, SessionView
-from agentclip.automation.host import AutomationHost
-from agentclip.automation.loop_state import LoopState
-from agentclip.automation.view import AutomationView
+from agentclip.driver.automation.host import AutomationHost
+from agentclip.driver.automation.loop_state import LoopState
+from agentclip.driver.automation.view import AutomationView
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.engine.engine import Decision, PendingAction, Phase, StatusSnapshot
 from agentclip.gui.bridge import JsApi
 from agentclip.gui.view import MASTER_WINDOW, SUBAGENT_WINDOW, GuiView
 from agentclip.protocol.types import Outbound, ToolCall
-from agentclip.screen.profile import TemplateKind
-from agentclip.screen.slot import AgentSlot
 from tests.gui.conftest import Harness, settle
 
 

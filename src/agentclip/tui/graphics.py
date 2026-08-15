@@ -34,7 +34,7 @@ from dataclasses import dataclass
 
 from PIL import Image as PILImage
 
-from agentclip.screen.capture import RegionImage
+from agentclip.driver.screen.capture import RegionImage
 
 # The cell size textual-image itself falls back to when the terminal will not
 # say (VT340). Used for the same reason: it has to be *some* number, and every

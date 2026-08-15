@@ -66,12 +66,12 @@ from agentclip.config import (
     default_services,
     normalize_finish_signals,
 )
-from agentclip.screen.capture import CaptureError, RegionImage, capture_region
-from agentclip.screen.matchers import opencv_available
-from agentclip.screen.picker import ScreenPickError, pick_region
-from agentclip.screen.png import PngError, encode_png
-from agentclip.screen.profile import ServiceProfile, TemplateKind
-from agentclip.screen.profile_store import (
+from agentclip.driver.screen.capture import CaptureError, RegionImage, capture_region
+from agentclip.driver.screen.matchers import opencv_available
+from agentclip.driver.screen.picker import ScreenPickError, pick_region
+from agentclip.driver.screen.png import PngError, encode_png
+from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile_store import (
     ProfileStoreError,
     delete_profile,
     drop_template,

@@ -24,6 +24,15 @@ from typing import Any
 
 import pytest
 
+from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.detector import RUNTIME_KINDS, Sighting
+from agentclip.driver.screen.identify import IdentifiedElement
+from agentclip.driver.screen.picker import ScreenPickError
+from agentclip.driver.screen.png import decode_png
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
+from agentclip.driver.screen.template import RegionMatch, Template
 from agentclip.gui.bridge import JsApi
 from agentclip.gui.view import (
     ELEMENT_LABEL,
@@ -38,15 +47,6 @@ from agentclip.gui.view import (
     element_crop,
     element_png,
 )
-from agentclip.screen.capture import RegionImage
-from agentclip.screen.detector import RUNTIME_KINDS, Sighting
-from agentclip.screen.identify import IdentifiedElement
-from agentclip.screen.picker import ScreenPickError
-from agentclip.screen.png import decode_png
-from agentclip.screen.profile import TemplateKind
-from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import AgentSlot
-from agentclip.screen.template import RegionMatch, Template
 from tests.gui.conftest import Harness, settle
 
 ASSETS = Path(__file__).resolve().parents[2] / "src" / "agentclip" / "gui" / "assets"

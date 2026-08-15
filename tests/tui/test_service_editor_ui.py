@@ -41,7 +41,6 @@ from textual.widgets import (
 import agentclip.tui.screens.main as main_mod
 import agentclip.tui.screens.service_editor as service_editor_mod
 from agentclip.cli import make_engine_factory
-from agentclip.clip.fake import FakeClipboard
 from agentclip.config import (
     DEFAULT_DELIVERY,
     DEFAULT_FINISH_SIGNALS,
@@ -52,11 +51,12 @@ from agentclip.config import (
     Config,
     load_config,
 )
-from agentclip.screen.capture import RegionImage
-from agentclip.screen.profile import TemplateKind
-from agentclip.screen.profile_store import load_profile, profile_dir, save_template
-from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import AgentSlot
+from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.profile_store import load_profile, profile_dir, save_template
+from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.graphics import TerminalGraphics, set_terminal_graphics
 from agentclip.tui.pixels import HALF_BLOCK
@@ -1453,7 +1453,7 @@ async def test_a_ticked_signal_with_nothing_captured_warns_until_it_is_captured(
     busy appearance runs nothing at all - invisible until an auto-copy never
     fires, hence the inline warning next to the tick that caused it."""
     import agentclip.tui.screens.service_editor as editor_mod
-    from agentclip.screen.region import ScreenRegion
+    from agentclip.driver.screen.region import ScreenRegion
 
     box = ScreenRegion(10, 10, 32, 32)
     monkeypatch.setattr(editor_mod, "pick_region", lambda prompt=None: box)

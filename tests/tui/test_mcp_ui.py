@@ -31,8 +31,8 @@ from textual.pilot import Pilot
 from textual.widgets import Static
 
 from agentclip.cli import make_engine_factory
-from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
+from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.mcp.types import McpServerStatus
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen

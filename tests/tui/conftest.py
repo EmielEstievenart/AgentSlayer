@@ -44,10 +44,10 @@ from pathlib import Path
 import pytest
 from textual.pilot import Pilot
 
-from agentclip.screen.capture import RegionImage
-from agentclip.screen.profile import TemplateKind
-from agentclip.screen.profile_store import save_template
-from agentclip.screen.slot import AgentSlot
+from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.profile_store import save_template
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from rich.style import Style
 
-from agentclip.screen.capture import RegionImage
+from agentclip.driver.screen.capture import RegionImage
 from agentclip.tui.pixels import (
     HALF_BLOCK,
     crop,

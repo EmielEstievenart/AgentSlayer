@@ -88,21 +88,21 @@ from textual.message import Message
 from textual.timer import Timer
 from textual.widgets import Button, Select, Static
 
-from agentclip.automation import delivery as _delivery
-from agentclip.automation.finish import SEND_READY_ARMED as SEND_READY_ARMED
-from agentclip.automation.finish import SEND_READY_HOLDING as SEND_READY_HOLDING
-from agentclip.automation.finish import SEND_READY_OVERRIDDEN as SEND_READY_OVERRIDDEN
-from agentclip.automation.finish import SEND_READY_RELEASED as SEND_READY_RELEASED
-from agentclip.automation.finish import SEND_READY_RESTING as SEND_READY_RESTING
-from agentclip.automation.finish import SEND_READY_SEEN as SEND_READY_SEEN
-from agentclip.automation.finish import SEND_READY_STUCK as SEND_READY_STUCK
-from agentclip.automation.finish import SEND_READY_TIMEOUT as SEND_READY_TIMEOUT
-from agentclip.automation.loop_state import LOOP_TRANSITIONS, LoopState
 from agentclip.config import Config
+from agentclip.driver.automation import delivery as _delivery
+from agentclip.driver.automation.finish import SEND_READY_ARMED as SEND_READY_ARMED
+from agentclip.driver.automation.finish import SEND_READY_HOLDING as SEND_READY_HOLDING
+from agentclip.driver.automation.finish import SEND_READY_OVERRIDDEN as SEND_READY_OVERRIDDEN
+from agentclip.driver.automation.finish import SEND_READY_RELEASED as SEND_READY_RELEASED
+from agentclip.driver.automation.finish import SEND_READY_RESTING as SEND_READY_RESTING
+from agentclip.driver.automation.finish import SEND_READY_SEEN as SEND_READY_SEEN
+from agentclip.driver.automation.finish import SEND_READY_STUCK as SEND_READY_STUCK
+from agentclip.driver.automation.finish import SEND_READY_TIMEOUT as SEND_READY_TIMEOUT
+from agentclip.driver.automation.loop_state import LOOP_TRANSITIONS, LoopState
+from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot, SlotCalibration, can_delegate, missing
 from agentclip.mcp.types import McpServerStatus
-from agentclip.screen.profile import ServiceProfile, TemplateKind
-from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import AgentSlot, SlotCalibration, can_delegate, missing
 
 _HINT = "F3 hides this column · F7 elements · F5 armed · F2 settings · F1 help"
 
@@ -147,7 +147,7 @@ def state_row_id(state: LoopState) -> str:
 
 
 # The four things this banner can say moved down with the delivery that CHOOSES
-# between them (agentclip.automation.delivery): the automation port takes finished
+# between them (agentclip.driver.automation.delivery): the automation port takes finished
 # words and is told where to put them, so the wording is decided once below both
 # shells rather than twice above them. They stay reachable under this widget's
 # names, which is where it and the suites already reach for them.
@@ -260,7 +260,7 @@ PROBE_UNCAPTURED = "ticked but not captured - F2"
 
 # The send gate's line (tui.md 3.4b) is re-exported from the imports above rather
 # than spelled here: the gate itself is the AutomationController's, so the words
-# it puts on that line live with it (agentclip.automation.finish) and both shells
+# it puts on that line live with it (agentclip.driver.automation.finish) and both shells
 # say the same thing. Eight states, because "nothing is happening" has to be told
 # apart from "this service cannot do it at all" - and because the three ways the
 # gate can let go WITHOUT seeing the button vanish are three different things to

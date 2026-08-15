@@ -24,10 +24,10 @@ from textual.widgets import Button, Static
 
 import agentclip.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
-from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
-from agentclip.screen.picker import ScreenPickError
-from agentclip.screen.region import ScreenRegion
+from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.screen.picker import ScreenPickError
+from agentclip.driver.screen.region import ScreenRegion
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MainScreen
 

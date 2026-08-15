@@ -34,7 +34,7 @@ from rich.color import Color
 from rich.style import Style
 from rich.text import Text
 
-from agentclip.screen.capture import RegionImage, crop
+from agentclip.driver.screen.capture import RegionImage, crop
 
 # Re-exported, not defined here any more. ``crop`` is the cutter both element
 # panels are built on - the matched rectangle out of the frame it was found in -

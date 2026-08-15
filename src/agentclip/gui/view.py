@@ -3,7 +3,7 @@
 The GUI's ``MainScreen``. It is the same arrangement, structurally and for the
 same reasons (``docs/design/gui.md`` §0/§1): the session orchestration lives in
 :class:`~agentclip.app.SessionController` and the browser automation in
-:class:`~agentclip.automation.controller.AutomationController`, and this object
+:class:`~agentclip.driver.automation.controller.AutomationController`, and this object
 is the *view* - it owns both controllers, implements ``ChatView`` for the first,
 ``AutomationView`` + ``AutomationHost`` for the second, and turns every call
 into an event on the JS bridge. State flows one way (the controller pushes a
@@ -49,16 +49,6 @@ from agentclip.app import SessionController, SessionSpec, SessionView
 from agentclip.app.commands import COMMANDS
 from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import RunCall, Severity
-from agentclip.automation.controller import AutomationController, DetectorPoller
-from agentclip.automation.harness_log import (
-    KIND_ARMED,
-    KIND_CLIPBOARD,
-    KIND_SESSION,
-    HarnessEntry,
-)
-from agentclip.automation.loop_state import LOOP_TRANSITIONS, LoopState
-from agentclip.automation.ops import ElementClick
-from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.config import (
     VALID_GUI_THEMES,
     Config,
@@ -72,6 +62,25 @@ from agentclip.config import (
     save_remote_target,
     save_services,
 )
+from agentclip.driver.automation.controller import AutomationController, DetectorPoller
+from agentclip.driver.automation.harness_log import (
+    KIND_ARMED,
+    KIND_CLIPBOARD,
+    KIND_SESSION,
+    HarnessEntry,
+)
+from agentclip.driver.automation.loop_state import LOOP_TRANSITIONS, LoopState
+from agentclip.driver.automation.ops import ElementClick
+from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
+from agentclip.driver.screen.capture import CaptureError, RegionImage, capture_region, crop
+from agentclip.driver.screen.detector import RUNTIME_KINDS, ScreenDetector, Sighting, build_detector
+from agentclip.driver.screen.focus import foreground_window
+from agentclip.driver.screen.identify import IdentifiedElement, identify_elements, summarise
+from agentclip.driver.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
+from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile_store import load_profile
+from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot, can_delegate, missing
 from agentclip.engine.engine import Decision, Engine, PendingAction
 from agentclip.gui.bridge import Bridge
 from agentclip.gui.remote import (
@@ -94,15 +103,6 @@ from agentclip.hosts.connect import (
 )
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
-from agentclip.screen.capture import CaptureError, RegionImage, capture_region, crop
-from agentclip.screen.detector import RUNTIME_KINDS, ScreenDetector, Sighting, build_detector
-from agentclip.screen.focus import foreground_window
-from agentclip.screen.identify import IdentifiedElement, identify_elements, summarise
-from agentclip.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
-from agentclip.screen.profile import ServiceProfile, TemplateKind
-from agentclip.screen.profile_store import load_profile
-from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import AgentSlot, can_delegate, missing
 
 # The finish-detector poll cadence, the TUI's own (tui/screens/main.py). Spelled
 # here rather than imported: the two shells may not import each other, and this
@@ -488,7 +488,7 @@ def _reason_line(call: ToolCall) -> str:
     would open the whole tools package to a frontend. Six lines and a name that
     says where the original lives is the cheaper duplication. It moves down
     beside the other shared display text if a third caller ever appears - which
-    is the route ``_distinct_rects`` took into ``agentclip.automation``.
+    is the route ``_distinct_rects`` took into ``agentclip.driver.automation``.
     """
     flat = " ".join(call.params.get("reason", "").split())
     if not flat:

@@ -182,7 +182,7 @@ DEFAULT_SCROLL_ACTION = SCROLL_WHEEL
 # Spelled out here rather than imported from screen.matchers: config is a
 # stdlib-only leaf that may not import the screen layer (architecture.md 0),
 # exactly as VALID_THEMES is spelled out rather than asked of Textual.
-# tests/screen/test_matchers.py asserts the two lists agree.
+# tests/driver/screen/test_matchers.py asserts the two lists agree.
 MATCHER_ANCHORS = "anchors"
 MATCHER_OPENCV = "opencv"
 MATCHERS: tuple[str, ...] = (MATCHER_ANCHORS, MATCHER_OPENCV)
@@ -198,7 +198,7 @@ DEFAULT_MATCHER = MATCHER_ANCHORS
 # many pixels may be that different, and the second is a property of the kind of
 # control being looked for (an icon sitting on whatever text is behind it needs
 # a looser one than a chat box). The value below must match
-# screen.template.DEFAULT_TOLERANCE - asserted by tests/screen/test_matchers.py.
+# screen.template.DEFAULT_TOLERANCE - asserted by tests/driver/screen/test_matchers.py.
 DEFAULT_TOLERANCE = 24
 TOLERANCE_MIN = 0
 TOLERANCE_MAX = 64

@@ -65,7 +65,7 @@ than a chat window - and ``_live_has``, which reads immutable state only.
 The OS-ACTING SEQUENCES went the same way (gui.md §1, slice 6): the auto-copy
 harvest, the find-then-click primitive under every programmatic click, the hover
 scan and the two calls that move the automation between browser windows are
-coroutines on the AutomationController now, reaching ``agentclip.screen``
+coroutines on the AutomationController now, reaching ``agentclip.driver.screen``
 directly. What is left here is the two things a shell really owns - SCHEDULING
 (``run_worker``, still the same group and exclusivity) and the handful of
 answers only this screen has, which cross as ``AutomationHost``: which service a
@@ -141,7 +141,7 @@ new-chat click lands in the master's window. Two genuinely distinct matches
 are therefore a refusal, never a coin toss.
 
 Every one of those calibrations belongs to an *agent slot*
-(:mod:`agentclip.screen.slot`), not to the screen: MASTER is the chat the
+(:mod:`agentclip.driver.screen.slot`), not to the screen: MASTER is the chat the
 session runs in, SUBAGENT the second window a delegated sub-agent gets. The slot
 is the storage key behind a window tab (``_WINDOW_SLOTS``) - that mapping is the
 seam an N-window bar plugs into, and it is why the readiness rules and the
@@ -150,7 +150,7 @@ say what happens to which slot - *calibrating* is the selected tab, *live* is
 what the automation drives right now - because the user must be able to
 calibrate (and watch) the sub-agent window while the master chat is mid-turn.
 Both of them, and the calibrations they point at, are the
-:class:`~agentclip.automation.controller.AutomationController`'s (``_automation``
+:class:`~agentclip.driver.automation.controller.AutomationController`'s (``_automation``
 below): they are shared automation state, not one shell's, and this screen
 reaches them through it. ``start_browser_chat``/``end_browser_chat`` - the
 controller's since slice 6, delegated to from here - are the
@@ -197,40 +197,36 @@ from textual.widgets import Button, Collapsible, Footer, Input
 from agentclip.app import SessionController, SessionSpec, SessionView
 from agentclip.app.types import EngineRequest, SessionRef
 from agentclip.app.view import RunCall, Severity
-from agentclip.automation import delivery as _delivery
-from agentclip.automation import flow as _flow
-from agentclip.automation.controller import AutomationController, DetectorPoller
-from agentclip.automation.finish import (
+from agentclip.config import (
+    Config,
+    ServicePreset,
+    save_active_services,
+)
+from agentclip.driver.automation import delivery as _delivery
+from agentclip.driver.automation import flow as _flow
+from agentclip.driver.automation.controller import AutomationController, DetectorPoller
+from agentclip.driver.automation.finish import (
     SEND_ARM_MIN_DIFF,
     SEND_ARM_TICKS,
     SEND_GATE_SEEN_TIMEOUT_TICKS,
     SEND_GATE_TIMEOUT_TICKS,
     SendGate,
 )
-from agentclip.automation.harness_log import (
+from agentclip.driver.automation.harness_log import (
     HARNESS_LOG_MAX,
     KIND_ARMED,
     KIND_CLIPBOARD,
     KIND_SESSION,
     HarnessEntry,
 )
-from agentclip.automation.loop_state import LoopState
-from agentclip.automation.ops import ElementClick, ScreenOps
-from agentclip.clip.base import ClipboardProvider, ClipboardUnavailable
-from agentclip.clip.chunking import STREAM_CHUNK_CHARS
-from agentclip.clip.watcher import SelfWriteSet
-from agentclip.config import (
-    Config,
-    ServicePreset,
-    save_active_services,
-)
-from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnapshot
-from agentclip.mcp.types import McpServerStatus
-from agentclip.protocol.parser import looks_like_protocol
-from agentclip.protocol.types import Outbound, ToolCall
-from agentclip.screen.capture import CaptureError, RegionImage, capture_region
-from agentclip.screen.detector import ScreenDetector, Sighting, build_detector
-from agentclip.screen.focus import (
+from agentclip.driver.automation.loop_state import LoopState
+from agentclip.driver.automation.ops import ElementClick, ScreenOps
+from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
+from agentclip.driver.clip.chunking import STREAM_CHUNK_CHARS
+from agentclip.driver.clip.watcher import SelfWriteSet
+from agentclip.driver.screen.capture import CaptureError, RegionImage, capture_region
+from agentclip.driver.screen.detector import ScreenDetector, Sighting, build_detector
+from agentclip.driver.screen.focus import (
     click_region,
     focus_window_verified,
     foreground_window,
@@ -240,27 +236,31 @@ from agentclip.screen.focus import (
     send_paste,
     send_scroll_key,
 )
-from agentclip.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
-from agentclip.screen.identify import IdentifiedElement, identify_elements, summarise
-from agentclip.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
-from agentclip.screen.presence import PresenceTracker
-from agentclip.screen.profile import ServiceProfile, TemplateKind
-from agentclip.screen.profile_store import load_profile
-from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import (
+from agentclip.driver.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
+from agentclip.driver.screen.identify import IdentifiedElement, identify_elements, summarise
+from agentclip.driver.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
+from agentclip.driver.screen.presence import PresenceTracker
+from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile_store import load_profile
+from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import (
     AgentSlot,
     SlotCalibration,
     can_delegate,
     missing,
 )
-from agentclip.screen.stale import StaleTracker
-from agentclip.screen.template import (
+from agentclip.driver.screen.stale import StaleTracker
+from agentclip.driver.screen.template import (
     CandidateSource,
     RegionMatch,
     Template,
     find_all_in_region,
     find_lowest_with_best_miss,
 )
+from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnapshot
+from agentclip.mcp.types import McpServerStatus
+from agentclip.protocol.parser import looks_like_protocol
+from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.tui.messages import (
     AutoCopyRequested,
     CallFinished,
@@ -314,7 +314,7 @@ if TYPE_CHECKING:  # only for the action_settings hand-off; importing it for rea
 # Finish-detector poll cadence (tests monkeypatch this to something tiny).
 _BUSY_POLL_S = 0.5
 # The finish decision's four tunables are the AutomationController's now
-# (agentclip.automation.finish) and are imported above rather than spelled here.
+# (agentclip.driver.automation.finish) and are imported above rather than spelled here.
 # They stay reachable under this module's names on purpose: the Pilot suites read
 # them to size a probe sequence and patch one of them to shrink a two-minute gate
 # budget, and this screen hands the values it can see to the controller at
@@ -325,7 +325,7 @@ _BUSY_POLL_S = 0.5
 # is why ``_MainScreenOps`` reads it per call rather than at import.
 _NEW_CHAT_SETTLE_S = 0.4
 # The delivery's beats moved down with the sequence that paces itself by them
-# (agentclip.automation.delivery, which documents what each one is FOR). They
+# (agentclip.driver.automation.delivery, which documents what each one is FOR). They
 # stay reachable - and PATCHABLE - under this module's names, because that is
 # where the Pilot suites shrink them: ``_MainScreenOps`` reads all three per
 # call, so a monkeypatch here still bites exactly as it did when the paste path
@@ -338,7 +338,7 @@ PASTE_SETTLE_DELAY = _delivery.PASTE_SETTLE_DELAY
 _SUBMIT_SETTLE_S = _delivery.SUBMIT_SETTLE_S
 _STREAM_CHUNK_SETTLE_S = _delivery.STREAM_CHUNK_SETTLE_S
 # The auto-copy harvest's own tuning numbers moved down with the sequence that
-# reads them (agentclip.automation.flow). They stay reachable under this
+# reads them (agentclip.driver.automation.flow). They stay reachable under this
 # module's names because the Pilot suites size their assertions off them - how
 # many snap rounds a miss gets, how big the flick is, where the keyboard snap's
 # focus click lands.
@@ -455,8 +455,8 @@ class _MainScreenOps(ScreenOps):
 
     ``_poll_capture``'s reason, generalised to the whole hand the automation
     puts on the machine. The OS-acting sequences live in the
-    AutomationController now and reach ``agentclip.screen`` through
-    :class:`~agentclip.automation.ops.ScreenOps`; the default implementation
+    AutomationController now and reach ``agentclip.driver.screen`` through
+    :class:`~agentclip.driver.automation.ops.ScreenOps`; the default implementation
     calls those functions directly, which is right for the app and wrong for
     this shell's test suites - they patch every one of them at
     ``agentclip.tui.screens.main``'s scope, because that is where the code used
@@ -737,7 +737,7 @@ class MainScreen(Screen[None]):
         #   once, shared by both slots and persisted across runs.
         self._automation = AutomationController(
             view=self,
-            # The other half of the seam (agentclip.automation.host): what the
+            # The other half of the seam (agentclip.driver.automation.host): what the
             # OS-acting sequences down there still have to ASK this shell -
             # which service the live window is on and what it looks like, where
             # an appearance is on screen, and the two acts a harvest ends in
@@ -3614,7 +3614,7 @@ class MainScreen(Screen[None]):
     # The counterpart of the AutomationView block: those are paints going down
     # to up, these are the four questions and the two acts the OS-acting
     # sequences in the AutomationController cannot answer for themselves
-    # (agentclip/automation/host.py). Each is one line onto a private this
+    # (agentclip/driver/automation/host.py). Each is one line onto a private this
     # screen already had, which is also what keeps the late binding the Pilot
     # suites rely on: they stub ``_find_all``, ``_verified_copy_click`` and
     # ``_start_detector_worker`` on the CLASS, and the lookup happens here, per

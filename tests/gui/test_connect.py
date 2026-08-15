@@ -20,8 +20,8 @@ from typing import Any
 import pytest
 
 from agentclip.cli import make_engine_factory
-from agentclip.clip.base import select_provider
 from agentclip.config import Config, RemoteTarget, load_config
+from agentclip.driver.clip.base import select_provider
 from agentclip.gui.bridge import Bridge
 from agentclip.gui.remote import (
     APPROVAL_LOCAL,

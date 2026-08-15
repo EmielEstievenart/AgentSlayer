@@ -38,6 +38,11 @@ from agentclip.config import (
     load_config,
     save_services,
 )
+from agentclip.driver.screen.capture import CaptureError, RegionImage
+from agentclip.driver.screen.picker import ScreenPickError
+from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile_store import ProfileStoreError, load_profile, save_template
+from agentclip.driver.screen.region import ScreenRegion
 from agentclip.gui.bridge import JsApi
 from agentclip.gui.service_editor import (
     NEW_SENTINEL,
@@ -52,11 +57,6 @@ from agentclip.gui.service_editor import (
     templates_line,
 )
 from agentclip.gui.view import PROBE_UNCAPTURED, PROFILE_HINT, STALE_OFF, GuiView
-from agentclip.screen.capture import CaptureError, RegionImage
-from agentclip.screen.picker import ScreenPickError
-from agentclip.screen.profile import ServiceProfile, TemplateKind
-from agentclip.screen.profile_store import ProfileStoreError, load_profile, save_template
-from agentclip.screen.region import ScreenRegion
 from tests.gui.conftest import Harness, settle
 
 MODULE = "agentclip.gui.service_editor"

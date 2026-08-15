@@ -102,16 +102,16 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
         return
 
     # The overlay guards are platform-independent (the picker shells out).
-    monkeypatch.setattr("agentclip.screen.picker.pick_region", _blocked_pick_region)
+    monkeypatch.setattr("agentclip.driver.screen.picker.pick_region", _blocked_pick_region)
     monkeypatch.setattr(
-        "agentclip.screen.picker.draw_identify_overlay", _blocked_identify_overlay
+        "agentclip.driver.screen.picker.draw_identify_overlay", _blocked_identify_overlay
     )
     # ...and the drawing itself, which the identify CHILD calls in-process: a
     # test that exercises the `--show-identify` entry point (cli.main, or the
     # child function directly) would otherwise open a real Tk window right here,
     # with no child process in between to keep it away from the test runner.
     monkeypatch.setattr(
-        "agentclip.screen.overlay.run_identify_overlay", _blocked_identify_overlay
+        "agentclip.driver.screen.overlay.run_identify_overlay", _blocked_identify_overlay
     )
     # ...and again at main.py's bound names, which are the seam every caller uses.
     monkeypatch.setattr(

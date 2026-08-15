@@ -18,8 +18,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Button, Select, Static
 
 from agentclip.cli import make_engine_factory
-from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
+from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.messages import ClipboardCaptured
 from agentclip.tui.screens.confirm import ConfirmScreen

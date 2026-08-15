@@ -17,8 +17,8 @@ import pytest
 
 from agentclip import __version__, cli
 from agentclip.app.types import EngineRequest
-from agentclip.clip.base import select_provider
 from agentclip.config import load_config
+from agentclip.driver.clip.base import select_provider
 from agentclip.engine.engine import Engine
 from agentclip.gui.shell import (
     ASSET_DIR,

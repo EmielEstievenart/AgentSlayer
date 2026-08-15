@@ -13,8 +13,9 @@ from typing import TYPE_CHECKING, Any
 
 from agentclip import __version__
 from agentclip.app.types import EngineRequest
-from agentclip.clip.base import select_provider
 from agentclip.config import Config, default_remote_state_dir, load_config
+from agentclip.driver.clip.base import select_provider
+from agentclip.driver.screen.matchers import MATCHERS, select_matcher
 from agentclip.engine.engine import Engine
 from agentclip.hosts.base import Host
 from agentclip.hosts.connect import (
@@ -34,7 +35,6 @@ from agentclip.mcp.client import McpManager
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.names import generate_chat_name
 from agentclip.protocol.spec import render_spec
-from agentclip.screen.matchers import MATCHERS, select_matcher
 from agentclip.store.backups import BackupStore
 from agentclip.store.session import SessionStore, prune_sessions
 from agentclip.tools.mcp_tools import make_mcp_specs
@@ -814,10 +814,10 @@ def _pick_region_child(prompt: str | None = None) -> int:
     a broken environment (no tkinter, no display) is exit 1 with the reason on
     stderr, which screen.picker surfaces as a ScreenPickError.
     """
-    from agentclip.screen.region import format_region
+    from agentclip.driver.screen.region import format_region
 
     try:
-        from agentclip.screen.overlay import run_overlay
+        from agentclip.driver.screen.overlay import run_overlay
 
         region = run_overlay(prompt)
     except Exception as exc:  # anything here means "picker unavailable"
@@ -837,7 +837,7 @@ def _show_identify_child(payload: str) -> int:
     toasts that instead of leaving the user staring at a screen where nothing
     happened.
     """
-    from agentclip.screen.identify import parse_payload
+    from agentclip.driver.screen.identify import parse_payload
 
     try:
         elements = parse_payload(payload)
@@ -845,7 +845,7 @@ def _show_identify_child(payload: str) -> int:
         print(f"identify overlay got a bad payload: {exc}", file=sys.stderr)
         return 1
     try:
-        from agentclip.screen.overlay import run_identify_overlay
+        from agentclip.driver.screen.overlay import run_identify_overlay
 
         run_identify_overlay(elements)
     except Exception as exc:  # anything here means "overlay unavailable"

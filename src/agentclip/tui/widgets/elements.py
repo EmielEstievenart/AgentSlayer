@@ -74,9 +74,9 @@ from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import Static
 
-from agentclip.screen.capture import RegionImage
-from agentclip.screen.detector import RUNTIME_KINDS
-from agentclip.screen.profile import TemplateKind
+from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.detector import RUNTIME_KINDS
+from agentclip.driver.screen.profile import TemplateKind
 from agentclip.tui.graphics import (
     TerminalGraphics,
     crop_picture,

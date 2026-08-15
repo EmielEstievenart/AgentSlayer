@@ -104,8 +104,8 @@ RULES: list[tuple[str, frozenset[str]]] = [
         "agentclip.store",
         frozenset({"agentclip", "agentclip.config", "agentclip.hosts", "agentclip.store"}),
     ),
-    ("agentclip.clip", frozenset({"agentclip", "agentclip.clip"})),
-    ("agentclip.screen", frozenset({"agentclip", "agentclip.screen"})),
+    ("agentclip.driver.clip", frozenset({"agentclip", "agentclip.driver.clip"})),
+    ("agentclip.driver.screen", frozenset({"agentclip", "agentclip.driver.screen"})),
     (
         "agentclip.engine",
         frozenset(
@@ -142,14 +142,14 @@ RULES: list[tuple[str, frozenset[str]]] = [
     # import textual, app, or tui: a shell depends on the automation, never the
     # other way round.
     (
-        "agentclip.automation",
+        "agentclip.driver.automation",
         frozenset(
             {
                 "agentclip",
-                "agentclip.automation",
                 "agentclip.config",
-                "agentclip.clip",
-                "agentclip.screen",
+                "agentclip.driver.automation",
+                "agentclip.driver.clip",
+                "agentclip.driver.screen",
             }
         ),
     ),
@@ -166,9 +166,10 @@ RULES: list[tuple[str, frozenset[str]]] = [
             {
                 "agentclip",
                 "agentclip.app",
-                "agentclip.automation",
-                "agentclip.clip",
                 "agentclip.config",
+                "agentclip.driver.automation",
+                "agentclip.driver.clip",
+                "agentclip.driver.screen",
                 # The engine's VALUE types, and only ever as values: `Decision`
                 # is what an approval answer IS (the same call the TUI makes),
                 # `PendingAction` is what a gate is handed, and `Engine` is the
@@ -188,7 +189,6 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 # answers it (docs/design/ui-briefs/ssh-connect.md).
                 "agentclip.hosts",
                 "agentclip.protocol",
-                "agentclip.screen",
                 "webview",
             }
         ),
@@ -201,13 +201,13 @@ RULES: list[tuple[str, frozenset[str]]] = [
 # toolkit (see test_gui_never_imports_textual).
 UI_MODULES = ("agentclip.cli", "agentclip.__main__", "agentclip.tui")
 
-# Modules allowed to import agentclip.clip / agentclip.screen: the UI shells -
-# both of them - plus the automation core they share (which is made of exactly
-# those seams).
-CLIP_SCREEN_IMPORTERS = (*UI_MODULES, "agentclip.gui", "agentclip.automation")
+# Modules allowed to import agentclip.driver.clip / agentclip.driver.screen: the
+# UI shells - both of them - plus the automation core they share (which is made
+# of exactly those seams).
+CLIP_SCREEN_IMPORTERS = (*UI_MODULES, "agentclip.gui", "agentclip.driver.automation")
 
 # OS side-effect layers (clipboard, screen overlay/click): only CLIP_SCREEN_IMPORTERS.
-OS_LAYERS = ("agentclip.clip", "agentclip.screen")
+OS_LAYERS = ("agentclip.driver.clip", "agentclip.driver.screen")
 
 
 def module_name(path: Path) -> str:
@@ -354,7 +354,9 @@ def test_engine_never_imports_ui_or_clipboard() -> None:
         for imported in module_level_imports(path):
             root = imported.split(".")[0]
             assert root != "textual", f"{path.name} imports textual"
-            assert not _matches(imported, "agentclip.clip"), f"{path.name} imports agentclip.clip"
+            assert not _matches(
+                imported, "agentclip.driver.clip"
+            ), f"{path.name} imports agentclip.driver.clip"
             assert not _matches(imported, "agentclip.tui"), f"{path.name} imports agentclip.tui"
 
 
@@ -365,7 +367,7 @@ def test_automation_never_imports_textual_or_app() -> None:
     import - or a reach back up into app/tui - would weld it to today's
     frontend and leave the pywebview GUI nothing to share.
     """
-    automation_files = sorted((SRC / "automation").rglob("*.py"))
+    automation_files = sorted((SRC / "driver" / "automation").rglob("*.py"))
     assert automation_files
     for path in automation_files:
         for imported in module_level_imports(path):
@@ -383,5 +385,7 @@ def test_app_never_imports_clip_textual_or_tui() -> None:
         for imported in module_level_imports(path):
             root = imported.split(".")[0]
             assert root != "textual", f"{path.name} imports textual"
-            assert not _matches(imported, "agentclip.clip"), f"{path.name} imports agentclip.clip"
+            assert not _matches(
+                imported, "agentclip.driver.clip"
+            ), f"{path.name} imports agentclip.driver.clip"
             assert not _matches(imported, "agentclip.tui"), f"{path.name} imports agentclip.tui"

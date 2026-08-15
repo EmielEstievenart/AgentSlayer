@@ -3,7 +3,7 @@
 ``tests/conftest.py::_no_real_os_input`` is the one fixture whose failure is
 silent and expensive: nothing goes red, a Ctrl+V just lands in the user's
 editor. So it gets tests of its own - each one calls the real
-``agentclip.screen.focus`` entry point (not a patched alias) and asserts the
+``agentclip.driver.screen.focus`` entry point (not a patched alias) and asserts the
 gate answered instead of the desktop.
 
 These call the OS layer unmocked on purpose, which means they must NOT run when
@@ -17,8 +17,8 @@ import sys
 
 import pytest
 
-from agentclip.screen import focus, overlay, picker
-from agentclip.screen.region import ScreenRegion
+from agentclip.driver.screen import focus, overlay, picker
+from agentclip.driver.screen.region import ScreenRegion
 
 REGION = ScreenRegion(40, 40, 20, 20)
 

@@ -28,17 +28,17 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
 
-import agentclip.screen.detector as detector_mod
+import agentclip.driver.screen.detector as detector_mod
 import agentclip.tui.screens.main as main_mod
 from agentclip.app.types import SessionRef
 from agentclip.cli import make_engine_factory
-from agentclip.clip.fake import FakeClipboard
 from agentclip.config import load_config
-from agentclip.screen.busy import BusyProbe, BusyState
-from agentclip.screen.capture import CaptureError, RegionImage
-from agentclip.screen.profile import TemplateKind
-from agentclip.screen.region import ScreenRegion
-from agentclip.screen.slot import AgentSlot, can_finish
+from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.screen.busy import BusyProbe, BusyState
+from agentclip.driver.screen.capture import CaptureError, RegionImage
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot, can_finish
 from agentclip.tui.app import AgentClipApp
 from agentclip.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.tui.widgets.sidebar import (

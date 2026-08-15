@@ -1382,3 +1382,52 @@ def save_active_services(service: str, subagent_service: str, path: Path | None 
         with suppress(OSError):
             os.remove(tmp_name)
         raise
+
+
+def save_remote_target(target: RemoteTarget, path: Path | None = None) -> None:
+    """Persist one machine as a ``[remote.<name>]`` table in the GLOBAL config.
+
+    What the GUI's connect dialog offers after a successful manual connect
+    (docs/design/gui.md section 4 ruling 1). The global file and never the
+    project's: the project config lives on the TARGET in a remote session, and a
+    target definition is inherently a host-PC fact - it is how this machine finds
+    that one, not something the project has an opinion about.
+
+    Same atomic write and the same "only this table is touched" contract as
+    :func:`save_theme`; ``path`` is injectable for the same reason. Exactly four
+    keys can be written and **no secret is among them**: the password that
+    worked lives in ``SshHost._password`` for the life of the process and reaches
+    no file, ever (gui.md section 4 ruling 2). A key at its default is left out
+    rather than written blank, so a saved target reads like one a human wrote.
+    """
+    location = path if path is not None else default_global_config_path()
+    discard_warnings: list[str] = []
+    data = _read_toml(location, discard_warnings)
+
+    name = target.name or target.host
+    entry: dict[str, object] = {}
+    if target.host and target.host != name:
+        entry["host"] = target.host
+    if target.user:
+        entry["user"] = target.user
+    if target.port:
+        entry["port"] = target.port
+    if target.root:
+        entry["root"] = target.root
+
+    remote_table = dict(data.get("remote", {}))
+    remote_table[name] = entry
+
+    data = dict(data)
+    data["remote"] = remote_table
+
+    location.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=location.parent, prefix=f".{location.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(data, f)
+        os.replace(tmp_name, location)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(tmp_name)
+        raise

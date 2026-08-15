@@ -169,6 +169,10 @@ streams at exactly the local one's resolution.
 IdentityFile), then agent + default keys, then up to three password attempts
 through the caller's callback. Keyboard-interactive 2FA is whatever paramiko's
 own fallback does; a dedicated prompt path for it was not built and is untested.
+(As of the GUI wave `SshHost` accepts a `keyboard_prompt` callback and
+`hosts/connect.py` carries it, so a UI can supply one - but `_authenticate`
+still does not call it, and a TODO there says what wiring it would cost. The
+sentence above is unchanged in substance: the path is plumbed, not built.)
 `known_hosts` is honored and an unknown key is offered with its SHA256
 fingerprint — never auto-added, and never trusted when there is no callback to
 ask.
@@ -286,8 +290,11 @@ hold.
   `project_root` — a remote path handed to a local `subprocess`. Dropping stdio
   support in remote sessions removes that hazard rather than papering over it.
 - Config load order gains a step: the ruleset and MCP blocks can only be read
-  *after* connect, alongside the existing remote `.agentclip.toml` read
-  (`cli.py:478`), not during the boot load that selects the target.
+  *after* connect, alongside the existing remote `.agentclip.toml` read, not
+  during the boot load that selects the target. Both loads now live in
+  `agentclip/hosts/connect.py:connect_remote` - steps 1 and 6 of the sequence -
+  which `cli.remote_launch` and the GUI's connect dialog both drive, so the
+  order is stated once (docs/design/ui-briefs/ssh-connect.md).
 - The permission-source string shown in the TUI must name the machine, not just the
   path — `dev-box:~/.config/opencode/opencode.json` — or two identical-looking
   paths become indistinguishable in a screenshot.

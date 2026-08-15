@@ -452,6 +452,38 @@ class SessionController:
         """Kick off the session: prompt for a task, then run the loop."""
         self._spawn_flow(self._session_flow())
 
+    def rebind(
+        self,
+        config: Config,
+        engine_factory: Callable[[EngineRequest], Engine],
+        project_root: Path,
+    ) -> bool:
+        """Point the NEXT session at a different machine. Returns whether it took.
+
+        :meth:`update_config`'s bigger sibling, and the whole of "one session,
+        one host" from this layer's side (docs/design/remote-ssh.md decision 4):
+        the GUI's connect dialog dials a box, builds an engine factory over that
+        host, and hands the three things a session is assembled from over
+        together, because on a remote session they change together - the root is
+        a path on the target, the config was read off the target, and the factory
+        carries the Host itself. Splitting them would let a session be built from
+        two machines' answers.
+
+        Refused while a session is live. A conversation's Engine, workspace jail
+        and learned paths all belong to the machine it started on, so the caller
+        ends it first (``request_new_session``) - which is exactly what
+        "host-hopping = new session" means, expressed as a precondition rather
+        than as a silent swap under a running turn. A controller parked on
+        ``prompt_new_session`` needs nothing else: the flow reads these three
+        attributes when it builds, which has not happened yet.
+        """
+        if self._session_active:
+            return False
+        self._config = config
+        self._engine_factory = engine_factory
+        self._project_root = project_root
+        return True
+
     def update_config(self, config: Config) -> None:
         """Swap in a freshly-edited Config (service editor save).
 

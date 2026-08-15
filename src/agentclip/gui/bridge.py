@@ -105,7 +105,10 @@ The sidebar's remaining blocks and the log::
 
     {type: "sidebar", project: str, services: [[key, label], ...], service: str,
      service_label: str, profile_note: str, locked: bool, region: str,
-     slot_note: str, detection_title: str}
+     slot_note: str, detection_title: str,
+     remote: str,             # the target, "" on a local session
+     remote_lines: [str],     # target, link state, reconnect count, ruleset
+     can_connect: bool}       # is there a way to go remote in this build?
     {type: "detection", kind: str, label: str, text: str}   # kind "STALE" too
     {type: "mcp", rows: [{name: str, state: str, line: str}, ...]}
     {type: "harness", kind: str, time: str, text: str, line: str}
@@ -198,6 +201,38 @@ as a ``data:`` URI, encoded by the same ``screen/png.py`` the elements column
 uses and only when the profile is re-read (a capture, a clear, a forget, a
 selection) - never per keystroke. All seven rows are always present whether or
 not anything is captured.
+
+The SSH CONNECT DIALOG - the one surface with no TUI equivalent, and the only
+one whose event is a picture of a SEQUENCE running somewhere else
+(``ui-briefs/ssh-connect.md``)::
+
+    {type: "connect", open: false}
+    {type: "connect", open: true,
+     phase: "form"|"running"|"failed"|"done",
+     target: str, root: str, preview: str,   # "connecting as dev@box:2222"
+     saved: [{key, name, detail, root}, ...],     # [remote.<name>] tables
+     aliases: [{key, name, detail, root}, ...],   # ~/.ssh/config Host entries
+     error: str,                             # why Connect cannot be pressed
+     steps: [{step, label, state, note}, ...],    # ALL SIX, always, in order
+     failed_step: str, failure: str,
+     policy: [str], connected: str,          # the target-owns-policy banner
+     can_save: bool, save_name: str, saved_note: str,
+     busy: bool}
+
+``steps`` carries every one of the six whatever has happened, because the
+checklist's contract is that a stage after a failure stays **pending** rather
+than being skipped-with-a-checkmark (brief §3.4) - a row that vanished would
+say the opposite. The four states are ``pending``/``running``/``ok``/``failed``
+and ``note`` is the sentence that beat produced, which is the SAME string the
+terminal path prints (``hosts/connect.py``, ``StepEvent``). ``policy`` is the
+one thing this dialog says that no other surface does: which machine's ruleset
+is about to govern the session, stated because the alternative is a user whose
+host-PC ``opencode.json`` silently stopped applying.
+
+The three questions a dial can ask ride the ORDINARY ``modal`` family, with
+their own ``modal`` values (``connect_password`` / ``connect_hostkey`` /
+``connect_keyboard``): a password prompt is a flow parked on an answer exactly
+as ``confirm`` is, and one modal implementation is the rule (gui.md §3).
 
 The slash-command registry and the appearance, both pushed once per page load
 (``GuiView.start`` and ``page_ready``) because both are things the page needs to
@@ -430,6 +465,19 @@ class JsCalls(Protocol):
     # ctrl+q. The window's own close button reaches the same decision through
     # ``GuiRunner.window_closing`` instead, which cannot come through here.
     def request_quit(self) -> None: ...
+    # The SSH connect dialog (``ui-briefs/ssh-connect.md``) - the one surface
+    # with no TUI equivalent. One method per intent, as the editor family below
+    # has: the form, the checklist and the three ways out of a failure are all
+    # decisions on a Python-side model (``gui/remote.py``), so a page asking for
+    # something this shell does not do fails at the bridge.
+    def open_connect(self) -> None: ...
+    def connect_select(self, key: str) -> None: ...
+    def connect_fields(self, target: str, root: str) -> None: ...
+    def connect_start(self) -> None: ...
+    def connect_edit(self) -> None: ...
+    def connect_cancel(self) -> None: ...
+    def connect_save(self, name: str) -> None: ...
+    def reconnect_now(self) -> None: ...
     # The service editor (F2). One method per intent for the reason the key
     # family above has one: the modal's state is a MODEL on the Python side
     # (``gui/service_editor.py``) and every press is a call on it, so a page
@@ -585,6 +633,51 @@ class JsApi:
     def quit(self) -> None:
         """ctrl+q: close the window, asking first when a turn is in flight."""
         self._safely(self._calls.request_quit)
+
+    # -- the SSH connect dialog -----------------------------------------------
+    # The GUI-only surface. What crosses is intent, never the sequence: the six
+    # steps, their order and every failure mode are ``hosts/connect.py``'s, the
+    # same function ``cli.remote_launch`` drives with getpass.
+
+    def connect_open(self) -> None:
+        """The sidebar's "Connect to remote..." button. Also how the brief's
+        "reconnect to a different target" is offered - there is no separate
+        switch action, because connecting IS a new session (decision 4)."""
+        self._safely(self._calls.open_connect)
+
+    def connect_select(self, key: str = "") -> None:
+        """A picker row: a saved ``[remote.<name>]`` target or a ~/.ssh/config
+        alias. Prefills the form and connects nothing."""
+        self._safely(lambda: self._calls.connect_select(key))
+
+    def connect_fields(self, target: str = "", root: str = "") -> None:
+        """A keystroke in the form, as the WHOLE candidate. No repaint follows -
+        the page owns its inputs while they hold the caret."""
+        self._safely(lambda: self._calls.connect_fields(target, root))
+
+    def connect_start(self) -> None:
+        """"Connect", and "Retry" - one call, because a retry IS a fresh attempt
+        at the same values (every failure closes the host it built)."""
+        self._safely(self._calls.connect_start)
+
+    def connect_edit(self) -> None:
+        """"Edit": back to the form with the attempted values in it."""
+        self._safely(self._calls.connect_edit)
+
+    def connect_cancel(self) -> None:
+        """"Cancel"/"Close": drop the dialog, keep the window - which is the
+        whole point of the surface (ssh-connect.md §1: no relaunch)."""
+        self._safely(self._calls.connect_cancel)
+
+    def connect_save(self, name: str = "") -> None:
+        """"Save this target": one ``[remote.<name>]`` table in the GLOBAL
+        config, and no secret in it (gui.md §4 rulings 1 and 2)."""
+        self._safely(lambda: self._calls.connect_save(name))
+
+    def reconnect_now(self) -> None:
+        """The link indicator's button: spend the lazy re-dial early. The same
+        ``_ensure`` the next operation would have called, never a second path."""
+        self._safely(self._calls.reconnect_now)
 
     # -- the service editor (F2) ----------------------------------------------
     # The modal is drawn by the page and DECIDED on the Python side: the working

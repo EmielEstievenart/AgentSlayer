@@ -16,6 +16,7 @@ from pathlib import Path
 import paramiko
 import pytest
 
+from agentclip.hosts.connect import PASSWORD_ATTEMPTS
 from agentclip.hosts.ssh import (
     CONNECTION_LOST_EXIT,
     SshError,
@@ -386,6 +387,19 @@ def test_authentication_failure_is_an_ssherror_naming_the_target(tmp_path: Path)
     with pytest.raises(SshError) as caught:
         host.connect()
     assert "authentication failed for dev@box" in str(caught.value)
+
+
+def test_a_wrong_password_is_asked_for_exactly_three_times(tmp_path: Path) -> None:
+    """``_PASSWORD_ATTEMPTS``, pinned where it is enforced. No caller may extend
+    it: a UI-level retry loop would call connect() from scratch and double-count
+    ``reconnects`` (docs/design/ui-briefs/ssh-connect.md §2), and the GUI's
+    dialog says "attempt n of 3" from the copy in hosts/connect.py."""
+    FakeSSHClient.connect_errors = [paramiko.AuthenticationException("no")] * 8
+    asked: list[str] = []
+    host = make_host(tmp_path, password_prompt=lambda text: asked.append(text) or "wrong")
+    with pytest.raises(SshError):
+        host.connect()
+    assert len(asked) == PASSWORD_ATTEMPTS == 3
 
 
 def test_a_declined_password_prompt_stops_asking(tmp_path: Path) -> None:

@@ -5,12 +5,11 @@ from __future__ import annotations
 import argparse
 import getpass
 import platform
-import re
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agentclip import __version__
 from agentclip.app.types import EngineRequest
@@ -18,6 +17,18 @@ from agentclip.clip.base import select_provider
 from agentclip.config import Config, default_remote_state_dir, load_config
 from agentclip.engine.engine import Engine
 from agentclip.hosts.base import Host
+from agentclip.hosts.connect import (
+    STEP_CONNECT,
+    STEP_ENV,
+    STEP_ROOT,
+    ConnectedRemote,
+    ConnectError,
+    ConnectPrompts,
+    StepEvent,
+    connect_remote,
+    parse_environment,
+    remote_environment,
+)
 from agentclip.hosts.local import LocalHost
 from agentclip.mcp.client import McpManager
 from agentclip.protocol.composer import Composer
@@ -385,6 +396,25 @@ class Launch:
     home: Path
 
 
+@dataclass(frozen=True, slots=True)
+class GuiRuntime:
+    """A :class:`Launch` after everything derived from it has been built.
+
+    What the GUI's connect dialog gets back when it goes remote mid-window
+    (``gui/remote.py:RemoteRuntime``, structurally): the config read off the
+    target, the engine factory over its host, and the MCP runtime built from ITS
+    servers. The TUI has no equivalent because its launch cannot change - the
+    process is already inside ``app.run()`` by the time a user could ask.
+    """
+
+    project_root: Path
+    config: Config
+    engine_factory: Callable[[EngineRequest], Engine]
+    mcp_manager: McpManager | None
+    host: Host
+    target: str
+
+
 def local_launch(args: argparse.Namespace) -> Launch | int:
     """The ordinary session: this PC's project, this PC's OS. Errors return 2."""
     try:
@@ -424,135 +454,84 @@ def confirm_host_key(hostname: str, keytype: str, fingerprint: str) -> bool:
     return answer.strip().lower() in ("yes", "y")
 
 
-# A `printenv` line that is unmistakably one variable: a POSIX name, an "=",
-# and everything after it. Anything else is dropped - see _parse_environment.
-_ENV_LINE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-
-
 def _parse_environment(text: str) -> dict[str, str]:
-    """``printenv`` output as a mapping, conservatively.
+    """``printenv`` output as a mapping - :func:`hosts.connect.parse_environment`.
 
-    Only lines that ARE a name=value pair count. printenv writes each value
-    raw, newlines and all, with nothing marking where one ends - so from this
-    side a multi-line value's continuation lines are indistinguishable from
-    junk (a shell notice, a login banner, the stderr of a profile script). A
-    guess either way is worse than a miss: stapling a stray line onto a token,
-    or splitting one, hands a corrupted secret to a server that will fail
-    somewhere far from here. Dropping the unreadable costs at most a rare
-    multi-line variable, and an absent one already substitutes empty.
+    Kept as a name here because it is what the launch tests call; the rule it
+    encodes moved down with the sequence it belongs to.
     """
-    return {
-        match.group(1): match.group(2)
-        for line in text.splitlines()
-        if (match := _ENV_LINE_RE.match(line))
-    }
+    return parse_environment(text)
 
 
 def _remote_environment(host: SshHost) -> dict[str, str]:
-    """The target's login-shell environment, read once, at connect.
+    """The target's login-shell environment, with the complaint on stderr.
 
-    It is what ``{env:...}`` in that machine's MCP config means: whoever wrote
-    ``{env:API_TOKEN}`` into a file over there exported it over there
-    (docs/design/remote-ssh.md, "the target owns its policy"). A launch-time
-    probe like ``probe_os``, and for the same reason - the answer cannot change
-    under a session, and every later reader wants it already there.
-
-    Unlike probe_os this is not fatal: an unusable answer means empty, which is
-    exactly what an unset variable already substitutes to. `spawn` already runs
-    everything through ``bash -lc``, so the bare command IS the login shell's
-    own view; prefixing it again would nest a second shell.
+    The read itself is :func:`hosts.connect.remote_environment`, which hands
+    back a (mapping, complaint) pair because it has no stream to write to. This
+    is the terminal's half of that pair, unchanged: an unusable answer is a note
+    and an empty environment, never a failed launch.
     """
-    code, out = host.run_blocking("printenv")
-    environment = _parse_environment(out) if code == 0 else {}
-    if not environment:
-        print(
-            f"agentclip: {host.target} did not answer 'printenv' usefully (exit {code});"
-            " {env:...} in its MCP config will be empty",
-            file=sys.stderr,
-        )
+    environment, complaint = remote_environment(host)
+    if complaint:
+        print(f"agentclip: {complaint}", file=sys.stderr)
     return environment
+
+
+def _print_step(event: StepEvent) -> None:
+    """The connect sequence's progress, on the streams it has always used.
+
+    Three of the eighteen (step, state) pairs say anything on this path, and
+    each keeps the stream it had before the sequence moved: the "connecting to
+    ..." line is stderr (it is progress, not output), the "<box> is Linux, ...
+    working in ..." line is stdout (it is the launch reporting where the session
+    landed), and a failed step says nothing here at all - ``remote_launch``
+    prints its message once, next to the exit code it returns.
+    """
+    if event.step == STEP_CONNECT and event.state == "running":
+        print(f"agentclip: {event.note}", file=sys.stderr)
+    elif event.step == STEP_ROOT and event.state == "ok":
+        print(f"agentclip: {event.note}")
+    elif event.step == STEP_ENV and event.state == "ok" and event.note:
+        print(f"agentclip: {event.note}", file=sys.stderr)
 
 
 def remote_launch(args: argparse.Namespace) -> Launch | int:
     """Connect, authenticate and probe BEFORE the TUI starts (design 7).
 
-    Order matters and is the design's: CLI flags + the LOCAL global config name
-    the target; the connection is made and the remote root checked; only then is
-    the REMOTE project's ``.agentclip.toml`` read, through the host, into the
-    config the session actually runs on. Every failure here is fatal and
-    explained on stderr - a half-connected session is not a thing.
+    A thin wrapper now: the sequence lives in
+    :func:`agentclip.hosts.connect.connect_remote` so the GUI's connect dialog
+    drives the identical one (docs/design/ui-briefs/ssh-connect.md). What stays
+    here is what a terminal launch IS - the two blocking prompts, the stderr
+    wording, and exit code 2 for every fatal step. Order matters and is the
+    design's: CLI flags + the LOCAL global config name the target; the
+    connection is made and the remote root checked; only then is the REMOTE
+    project's ``.agentclip.toml`` read, through the host, into the config the
+    session actually runs on. Every failure here is fatal and explained on
+    stderr - a half-connected session is not a thing.
     """
-    from agentclip.hosts.ssh import SshError, SshHost
-
-    local_root = Path(args.project).resolve()
-    boot = load_config(
-        local_root,
-        service_override=args.service,
-        remote_target=args.ssh,
-        remote_root=args.remote_root,
-    )
-    target = boot.remote.selected()
-    assert target is not None  # remote_launch is only called with --ssh
-    if not target.root:
-        print(
-            f"agentclip: --ssh {args.ssh!r} needs a project root on the remote machine:"
-            " pass --remote-root, or give the saved target a root.",
-            file=sys.stderr,
-        )
-        return 2
-
-    host = SshHost(
-        target.host,
-        user=target.user,
-        port=target.port,
-        password_prompt=ask_password,
-        host_key_prompt=confirm_host_key,
-    )
     try:
-        print(f"agentclip: connecting to {target.host}...", file=sys.stderr)
-        host.connect()
-        os_name = host.probe_os()
-    except SshError as exc:
-        print(f"agentclip: {exc}", file=sys.stderr)
-        return 2
-
-    try:
-        remote_root = host.realpath(Path(target.root), strict=True)
-        root_stat = host.stat(remote_root)
-    except OSError as exc:
-        print(f"agentclip: cannot use {target.root!r} on {host.target}: {exc}", file=sys.stderr)
-        host.close()
-        return 2
-    if root_stat is None or not root_stat.is_dir:
-        print(
-            f"agentclip: --remote-root is not a directory on {host.target}: {target.root}",
-            file=sys.stderr,
-        )
-        host.close()
-        return 2
-
-    print(f"agentclip: {host.target} is {os_name}, working in {remote_root.as_posix()}")
-    # Resolved before the config load, not after it: the remote home is what
-    # ``~`` means for the rest of this session, and the permission ruleset the
-    # load reads lives under it (docs/design/remote-ssh.md, "the target owns its
-    # policy"). Skills take the same pair further down.
-    home = host.home_dir()
-    environment = _remote_environment(host)
-    return Launch(
-        project_root=remote_root,
-        config=load_config(
-            remote_root,
+        remote = connect_remote(
+            args.ssh,
+            args.remote_root,
+            local_root=Path(args.project).resolve(),
             service_override=args.service,
-            remote_target=args.ssh,
-            remote_root=args.remote_root,
-            host=host,
-            home=home,
-            environ=environment,
-        ),
-        host=host,
-        os_name=os_name,
-        data_root=default_remote_state_dir(host.target, remote_root.as_posix()),
-        home=home,
+            prompts=ConnectPrompts(password=ask_password, host_key=confirm_host_key),
+            on_step=_print_step,
+        )
+    except ConnectError as err:
+        print(f"agentclip: {err.message}", file=sys.stderr)
+        return 2
+    return Launch(
+        project_root=remote.project_root,
+        config=remote.config,
+        host=remote.host,
+        os_name=remote.os_name,
+        # The same pure function ``connect_remote`` already applied (and the
+        # same answer, off the same two values it carries), called again at the
+        # seam this module owns: ``Launch`` is cli's shape, and both of its
+        # launches resolve their state dir here.
+        data_root=default_remote_state_dir(remote.host.target, remote.project_root.as_posix()),
+        home=remote.home,
     )
 
 
@@ -565,7 +544,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.list_matchers:
         return _list_matchers()
 
-    launch = remote_launch(args) if args.ssh else local_launch(args)
+    # WHERE the session runs, decided before either shell exists - except on the
+    # one path where it is decided AFTER: ``--gui --ssh`` no longer blocks the
+    # launch on a terminal dial. The window opens on this PC and the connect
+    # dialog runs the identical sequence in-app, with a checklist and a retry
+    # (docs/design/ui-briefs/ssh-connect.md; gui.md §2's "everything slow happens
+    # after first paint"). The TUI keeps the launch-time flow verbatim: it cannot
+    # prompt once Textual owns the terminal, which is the whole reason for the
+    # carve-out.
+    pending_connect = (args.ssh, args.remote_root) if (args.gui and args.ssh) else None
+    if args.ssh and pending_connect is None:
+        launch = remote_launch(args)
+    else:
+        launch = local_launch(args)
     if isinstance(launch, int):
         return launch
     config = launch.config
@@ -593,8 +584,15 @@ def main(argv: list[str] | None = None) -> int:
     # servers (or [mcp] enabled=false, which loads none) there is NO manager at
     # all: the factory and the app hold None and behave exactly as before MCP
     # existed.
+    #
+    # A launch with a connect PENDING builds none of it: those servers would be
+    # this PC's, read from this PC's opencode.json, for a session that is about
+    # to belong to another machine - and "the host PC's file is not consulted at
+    # all in a remote session" is the rule, not a preference
+    # (docs/design/remote-ssh.md, "the target owns its policy"). The runtime the
+    # connect builds carries the target's instead.
     mcp_manager: McpManager | None = None
-    if config.mcp.enabled and config.mcp_servers.servers:
+    if config.mcp.enabled and config.mcp_servers.servers and pending_connect is None:
         # The host's name, not a bare flag: in a remote session it is what the
         # refused stdio servers and the "dialed from this PC" note are ABOUT,
         # and a status line that names the box beats one that says "remote".
@@ -624,12 +622,68 @@ def main(argv: list[str] | None = None) -> int:
     # shells therefore build the next session's Engine from whatever the editor
     # last saved, and neither touches a session already in flight.
     if args.gui:
+        from agentclip.gui.remote import RemoteConnect
         from agentclip.gui.shell import run_gui
 
         live_config = [config]
+        # What the process currently OWNS, as opposed to what it was launched
+        # with: an in-app connect replaces both, and the teardown below has to
+        # close what is live rather than what was true at startup.
+        owned: dict[str, Any] = {"mcp": mcp_manager, "host": launch.host}
 
         def adopt_config(edited: Config) -> None:
             live_config[0] = edited
+
+        def build_runtime(remote: ConnectedRemote) -> GuiRuntime:
+            """A successful in-app connect, turned into a session's ingredients.
+
+            Everything ``main`` does above for a launch, done again for the box
+            that was just dialled - the session tree, the pruning, the MCP
+            runtime against the TARGET's servers, and an engine factory over the
+            remote host, root, OS name and home. It lives here rather than in
+            the shell for the reason ``run_gui`` is handed its factory at all:
+            how a session is BUILT is a launch question, and a second
+            construction site is a second thing to drift.
+
+            The previous host and MCP runtime are closed as the new ones take
+            over - one session, one host (remote-ssh.md decision 4), and a link
+            nobody can reach any more is a socket, not a session.
+            """
+            live_config[0] = remote.config
+            remote.data_root.mkdir(parents=True, exist_ok=True)
+            prune_sessions(remote.data_root, remote.config.backup.keep_sessions)
+            manager: McpManager | None = None
+            if remote.config.mcp.enabled and remote.config.mcp_servers.servers:
+                manager = McpManager(
+                    remote.config.mcp_servers.servers,
+                    remote.project_root,
+                    remote_target=remote.host.name,
+                )
+                manager.ensure_started()
+            previous, owned["mcp"] = owned["mcp"], manager
+            if previous is not None:
+                previous.close()
+            old_host, owned["host"] = owned["host"], remote.host
+            if old_host is not None and old_host is not remote.host:
+                closer = getattr(old_host, "close", None)
+                if closer is not None:
+                    closer()
+            return GuiRuntime(
+                project_root=remote.project_root,
+                config=remote.config,
+                engine_factory=make_engine_factory(
+                    lambda: live_config[0],
+                    remote.project_root,
+                    host=remote.host,
+                    os_name=remote.os_name,
+                    data_root=remote.data_root,
+                    home=remote.home,
+                    mcp_manager=manager,
+                ),
+                mcp_manager=manager,
+                host=remote.host,
+                target=remote.host.target,
+            )
 
         try:
             return run_gui(
@@ -648,14 +702,21 @@ def main(argv: list[str] | None = None) -> int:
                     mcp_manager=mcp_manager,
                 ),
                 mcp_manager=mcp_manager,
+                host=launch.host,
+                remote=RemoteConnect(
+                    local_root=Path(args.project).resolve(),
+                    build=build_runtime,
+                    service_override=args.service,
+                    pending=pending_connect,
+                ),
             )
         finally:
-            # The same hand-back the TUI path does below: a --ssh launch has a
-            # live connection open by now whichever shell it was headed for, and
-            # so has the MCP runtime.
-            if mcp_manager is not None:
-                mcp_manager.close()
-            close = getattr(launch.host, "close", None)
+            # The same hand-back the TUI path does below, over what is LIVE: a
+            # --ssh launch has a connection open by now whichever shell it was
+            # headed for, and so does one the user dialled from the dialog.
+            if owned["mcp"] is not None:
+                owned["mcp"].close()
+            close = getattr(owned["host"], "close", None)
             if close is not None:
                 close()
     # BEFORE app.run(), and this is the only place it may happen: probing asks

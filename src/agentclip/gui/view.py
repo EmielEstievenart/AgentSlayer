@@ -63,16 +63,35 @@ from agentclip.config import (
     VALID_GUI_THEMES,
     Config,
     GuiConfig,
+    RemoteTarget,
     ServicePreset,
     default_global_config_path,
     default_profile_dir,
     save_active_services,
     save_gui_theme,
+    save_remote_target,
     save_services,
 )
 from agentclip.engine.engine import Decision, Engine, PendingAction
 from agentclip.gui.bridge import Bridge
+from agentclip.gui.remote import (
+    ConnectDialog,
+    RemoteConnect,
+    RemoteRuntime,
+    alias_rows,
+    policy_lines,
+    saved_rows,
+)
 from agentclip.gui.service_editor import ServiceEditor, kind_of, png_data_uri
+from agentclip.hosts.connect import (
+    PASSWORD_ATTEMPTS,
+    ConnectedRemote,
+    ConnectError,
+    ConnectPrompts,
+    StepEvent,
+    connect_remote,
+    ssh_config_aliases,
+)
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.screen.capture import CaptureError, RegionImage, capture_region, crop
@@ -237,6 +256,40 @@ QUIT_BODY = (
     "The current turn is incomplete and its results were never sent to the "
     "model. Per-turn backups are kept on disk."
 )
+
+# == the SSH connect dialog ===================================================
+# The one surface with no TUI equivalent (docs/design/gui.md §0: the TUI *cannot*
+# prompt before Textual owns the terminal, so its flow stays CLI flags plus
+# getpass). The sequence behind it is shared - ``hosts/connect.py``, the same one
+# ``cli.remote_launch`` drives - and everything below is what this shell says
+# about it.
+
+# The PROJECT block's persistent marker (gui.md §4 ruling 6): the banner at
+# connect time is a moment, this is the standing fact. It names the machine
+# because a path alone is ambiguous in a screenshot (remote-ssh.md,
+# "Consequences to handle").
+LINK_LIVE = "link live"
+LINK_LOST = "link lost - the next operation re-dials"
+LINK_RECONNECTS = "{count} reconnect(s) so far"
+RECONNECT_OK = "reconnected to {target}"
+RECONNECT_FAILED = "could not re-dial {target}: it will be tried again on the next operation"
+RECONNECT_LOCAL = "this session runs on this PC - there is nothing to re-dial"
+
+# The three questions a dial can ask, as this shell's modals. The host-key
+# wording is OpenSSH's own, because that is the design intent (``cli.py``'s
+# ``confirm_host_key``: "OpenSSH's own question, asked in OpenSSH's own words").
+HOST_KEY_TITLE = "The authenticity of host '{host}' can't be established."
+HOST_KEY_BODY = "{keytype} key fingerprint is {fingerprint}.\n\nContinue connecting?"
+PASSWORD_TITLE = "Password for {target}"
+# _PASSWORD_ATTEMPTS is hardcoded at three inside SshHost._authenticate and this
+# dialog does NOT add a fourth: a GUI-level retry loop would call connect() again
+# from scratch and double-count reconnects (ssh-connect.md §2).
+PASSWORD_HINT = "attempt {n} of {total} · Cancel gives up on password auth"
+
+CONNECT_BUSY = "a connect is already running"
+CONNECT_MID_TURN = "a turn is running - connecting would end this session"
+CONNECT_UNAVAILABLE = "this build has no way to go remote"
+CONNECT_DONE = "connected to {target} - this session's tools now run over there"
 
 # == the ELEMENTS column ======================================================
 # The third column (F7): one row per appearance the tool can recognise, showing
@@ -621,6 +674,8 @@ class GuiView:
         profile_root: Path | None = None,
         global_config_path: Path | None = None,
         mcp_manager: McpStatusSource | None = None,
+        host: Any = None,
+        remote: RemoteConnect | None = None,
         schedule: Callable[[Coroutine[Any, Any, Any]], None] | None = None,
         on_exit: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
@@ -749,6 +804,37 @@ class GuiView:
         # X while the dialog is open must not stack a second one behind it.
         self._quit_confirming = False
 
+        # -- going remote (increment 7) ---------------------------------------
+        # The machine this session's tools run on, and how a human changes it.
+        # ``_host`` is only ever READ here (the link indicator, the close on
+        # swap); everything that acts on it is below the seam. ``_remote`` is
+        # None in a build with no way to go remote - and in every test that does
+        # not ask for one - which is what makes the affordance absent rather
+        # than broken.
+        self._host = host
+        self._remote = remote
+        self._remote_target = (
+            str(getattr(host, "target", "")) if config.remote.is_remote() else ""
+        )
+        # The dialog's model while it is up, and None the rest of the time - the
+        # service editor's arrangement (``gui/remote.py`` holds every decision).
+        self._dialog: ConnectDialog | None = None
+        # The RemoteTarget that was actually dialled, for the save offer. Held
+        # rather than re-parsed: what the user typed and what the config layer
+        # resolved it to are not the same string.
+        self._dialled: RemoteTarget | None = None
+        self._connecting = False
+        # How many password prompts this attempt has raised, so the dialog can
+        # say "attempt 2 of 3" rather than looking like an unbounded loop. The
+        # LIMIT is not ours - it is ``SshHost._PASSWORD_ATTEMPTS``, and this only
+        # counts what that loop already decided to ask.
+        self._password_asked = 0
+        # Has the session controller been started yet? A ``--gui --ssh`` launch
+        # defers it: the first session belongs to the box, and starting one
+        # against this PC first would bootstrap a conversation the connect is
+        # about to throw away.
+        self._controller_started = False
+
         self._controller = SessionController(
             config,
             engine_factory,
@@ -796,6 +882,24 @@ class GuiView:
             self._push_mcp()
         for warning in self._config.warnings:
             self.notify(warning, severity="warning", timeout=8)
+        # ``--gui --ssh``: the window is already up (gui.md §2, "everything slow
+        # happens after first paint"), so the connect that used to block the
+        # launch runs HERE, in the dialog, with its fields filled from the flags.
+        # The controller waits: a session started against this PC first would be
+        # bootstrapped for the wrong machine and thrown away one step later.
+        pending = self._remote.pending if self._remote is not None else None
+        if pending is not None:
+            self.open_connect(target=pending[0], root=pending[1] or "")
+            self.connect_start()
+            return
+        self._start_controller()
+
+    def _start_controller(self) -> None:
+        """Start the session flow, once. Idempotent: a cancelled connect from a
+        ``--gui --ssh`` launch reaches this the second time round."""
+        if self._controller_started:
+            return
+        self._controller_started = True
         self._controller.start()
 
     def shutdown(self) -> None:
@@ -843,6 +947,11 @@ class GuiView:
         # under an open one gets it back rather than a window with a suspended
         # poller and no way to close it.
         self._push_editor()
+        # Same reason as the editor above: the connect dialog is a MODEL that
+        # outlives a reload, and a page that came back under an open one (or
+        # mid-checklist) must get it back rather than a window with a connect
+        # running behind nothing.
+        self._push_connect()
         self._bridge.send("armed", armed=self._automation.os_armed)
 
     def submit_text(self, text: str) -> None:
@@ -1269,6 +1378,13 @@ class GuiView:
                 else "the turn finished and the floor is back with you",
             )
         self._push_state_event()
+        # The link indicator lives in the sidebar and its truth is a flag on the
+        # host that only an OPERATION flips (the reconnect model is lazy by
+        # design - remote-ssh.md decision 5). A turn boundary is the moment most
+        # likely to have just done one, so the block is repainted from here
+        # rather than polled: nothing dials to keep a light green.
+        if self._remote_target:
+            self._push_sidebar()
         # Every StatusSnapshot-derived segment is this push's (mode, service,
         # out, turn, instr, edits) and so is the watch segment's whole
         # precedence, so the bar is recomposed here rather than only when the
@@ -1936,6 +2052,377 @@ class GuiView:
             self._quit_confirming = False
         if confirmed:
             self._on_exit()
+
+    # == going remote (the SSH connect dialog) =================================
+    # The GUI-only surface, against ``docs/design/ui-briefs/ssh-connect.md``.
+    # The sequence is NOT here and not this shell's: ``connect_remote`` is the
+    # same function the terminal launch drives, and what this section adds is
+    # the three things a terminal cannot give it - prompts that work while a UI
+    # owns the screen, progress that is visible, and a failure you can retry
+    # without re-running the binary.
+
+    def open_connect(self, target: str = "", root: str = "") -> None:
+        """Open the dialog: the saved targets, the ssh_config aliases, the form.
+
+        Both doors land here - the sidebar's "Connect to remote..." button and
+        the ``--gui --ssh`` launch, the latter with its flags pre-filled. Also
+        the brief's §4 "reconnect to a different target": there is no separate
+        switch action, because there is no mid-session switching to offer
+        (remote-ssh.md decision 4) - connecting ends the session and starts one
+        on the new box, which is what this dialog does.
+        """
+        if self._remote is None:
+            self.notify(CONNECT_UNAVAILABLE, severity="warning")
+            return
+        if self._connecting:
+            self.notify(CONNECT_BUSY, severity="warning")
+            return
+        saved = saved_rows(self._config)
+        self._dialog = ConnectDialog(
+            saved=saved,
+            aliases=alias_rows(self._ssh_aliases(), saved),
+            target=target,
+            root=root,
+        )
+        self._push_connect()
+
+    def _ssh_aliases(self) -> list[str]:
+        """``~/.ssh/config``'s literal Host entries. Never fatal: a machine with
+        no ssh_config, or an unreadable one, offers no aliases and says nothing
+        about it - the manual field still accepts everything ``--ssh`` does."""
+        remote = self._remote
+        path = remote.ssh_config_path if remote is not None else None
+        try:
+            return ssh_config_aliases(path)
+        except Exception:  # noqa: BLE001 - a picker section is never worth a crash
+            return []
+
+    def connect_select(self, key: str) -> None:
+        """A picker row: prefill the form. It does NOT connect (brief §3.2)."""
+        if self._dialog is None:
+            return
+        self._dialog.select(key)
+        self._push_connect()
+
+    def connect_fields(self, target: str, root: str) -> None:
+        """A keystroke in the form. No repaint: the page owns its own inputs
+        while they have the caret, exactly as the service editor's ``reload``
+        contract has it."""
+        if self._dialog is None:
+            return
+        self._dialog.set_fields(target, root)
+
+    def connect_start(self) -> None:
+        """"Connect", and "Retry" - the same press, because a retry IS a fresh
+        attempt at the same values.
+
+        The brief's §3.8 distinguishes retrying a failed ROOT check (which could
+        in principle reuse the live connection) from retrying a failed dial.
+        This shell does not: ``_abort`` closes the host on every failure, so
+        there is never a live connection to reuse and one path is honest where
+        two would be one path plus a claim.
+        """
+        dialog = self._dialog
+        if dialog is None or self._remote is None:
+            return
+        if self._connecting:
+            self.notify(CONNECT_BUSY, severity="warning")
+            return
+        if self.mid_turn:
+            self.notify(CONNECT_MID_TURN, severity="warning")
+            return
+        if not dialog.begin():
+            self._push_connect()
+            return
+        self._password_asked = 0  # a retry is a fresh attempt, and says so
+        self._connecting = True
+        self._push_connect()
+        self._schedule(self._connect_flow(dialog.target, dialog.root))
+
+    def connect_edit(self) -> None:
+        """"Edit": back to the form with the attempted values still in it -
+        the fix for the single most common real failure, a typo'd root."""
+        if self._dialog is None:
+            return
+        self._dialog.edit()
+        self._push_connect()
+
+    def connect_cancel(self) -> None:
+        """"Cancel"/"Close": drop the dialog. Never kills a connect in flight -
+        the prompts are what a user cancels, and each of them returning "give
+        up" is what ends an attempt (``PasswordPrompt``'s own contract)."""
+        if self._connecting:
+            self.notify(CONNECT_BUSY, severity="warning")
+            return
+        self._dialog = None
+        self._push_connect()
+        # A ``--gui --ssh`` launch that was cancelled has no session at all yet:
+        # the user is on this PC now, and the composer has to become usable.
+        self._start_controller()
+
+    def connect_save(self, name: str) -> None:
+        """"Save this target": one ``[remote.<name>]`` table, global file only.
+
+        gui.md §4 ruling 1. Nothing secret goes with it - see
+        ``config.save_remote_target``, which writes four keys and no password.
+        """
+        dialog = self._dialog
+        dialled = self._dialled
+        if dialog is None or dialled is None:
+            return
+        clean = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_.").strip("-")
+        if not clean:
+            return
+        try:
+            save_remote_target(replace(dialled, name=clean), self._global_config_path)
+        except OSError as exc:
+            self.notify(f"could not save the target: {exc}", severity="warning")
+            return
+        dialog.saved_as(clean)
+        self._push_connect()
+
+    def reconnect_now(self) -> None:
+        """The link indicator's button (gui.md §4 ruling 5).
+
+        Deliberately the SAME ``_ensure`` the next operation would have called
+        (``SshHost.reconnect``), not a second dial path: the model stays lazy
+        and reactive, and this only spends the cost early. On a live link it is
+        a no-op that says so.
+        """
+        reconnect = getattr(self._host, "reconnect", None)
+        if reconnect is None:
+            self.notify(RECONNECT_LOCAL, severity="warning")
+            return
+        self._schedule(self._reconnect_flow(reconnect))
+
+    async def _reconnect_flow(self, reconnect: Callable[[], bool]) -> None:
+        ok = await asyncio.to_thread(reconnect)
+        self.notify(
+            (RECONNECT_OK if ok else RECONNECT_FAILED).format(target=self._remote_target),
+            severity="information" if ok else "warning",
+        )
+        self._push_sidebar()
+
+    # -- the flow --------------------------------------------------------------
+
+    async def _connect_flow(self, target: str, root: str) -> None:
+        """Run the sequence off the loop, with this window answering its questions.
+
+        ``connect_remote`` is synchronous and blocking (it dials, it waits on a
+        server), so it goes to a worker thread - which puts its three prompt
+        callbacks on that thread too. Each one therefore hops back: the modal is
+        opened and awaited ON the loop and the worker parks on the answer, which
+        is the only arrangement in which a blocking auth flow and a single-
+        threaded UI can both be told the truth.
+        """
+        remote = self._remote
+        dialog = self._dialog
+        if remote is None or dialog is None:  # pragma: no cover - guarded by callers
+            return
+        loop = asyncio.get_running_loop()
+        prompts = ConnectPrompts(
+            password=lambda text: self._ask(loop, self._password_modal(text)),
+            host_key=lambda host, keytype, fingerprint: bool(
+                self._ask(loop, self._host_key_modal(host, keytype, fingerprint))
+            ),
+            keyboard_interactive=lambda title, instructions, fields: self._ask(
+                loop, self._keyboard_modal(title, instructions, fields)
+            ),
+        )
+
+        def report(event: StepEvent) -> None:
+            """The worker thread's half of the checklist: hand the beat over."""
+            loop.call_soon_threadsafe(self._connect_step, event)
+
+        try:
+            connected = await asyncio.to_thread(
+                connect_remote,
+                target,
+                root or None,
+                local_root=remote.local_root,
+                service_override=remote.service_override,
+                prompts=prompts,
+                on_step=report,
+                global_config_path=remote.global_config_path,
+            )
+        except ConnectError as err:
+            dialog.failed(err)
+            return
+        except Exception as exc:  # noqa: BLE001 - a dial can fail in ways paramiko owns
+            dialog.failed(ConnectError(dialog.failed_step or "connect", str(exc)))
+            return
+        finally:
+            self._connecting = False
+            self._push_connect()
+        await self._adopt_remote(remote.build(connected), connected)
+        dialog.succeeded(
+            connected=self._remote_target,
+            policy=policy_lines(self._config, self._remote_target),
+            can_save=not dialog.is_saved(),
+        )
+        self._push_connect()
+        self.notify(CONNECT_DONE.format(target=self._remote_target), timeout=8)
+
+    def _connect_step(self, event: StepEvent) -> None:
+        """One beat of the checklist, marshalled back onto the loop.
+
+        The reporter runs on the worker thread; the dialog's state is loop-owned
+        like every other model in this shell, so nothing mutates it from there.
+        """
+        if self._dialog is None:
+            return
+        self._dialog.step(event)
+        self._push_connect()
+
+    def _ask(self, loop: asyncio.AbstractEventLoop, coro: Coroutine[Any, Any, Any]) -> Any:
+        """Open a modal from the WORKER thread and block there for the answer.
+
+        The inverse of every other hop in this shell. ``None`` on any failure,
+        which is what each of the three callbacks reads as "give up" - so a
+        window closing under an open password prompt ends the attempt rather
+        than wedging a thread inside paramiko.
+        """
+        try:
+            return asyncio.run_coroutine_threadsafe(coro, loop).result()
+        except Exception:  # noqa: BLE001 - a cancelled loop is a cancelled prompt
+            coro.close()
+            return None
+
+    async def _password_modal(self, prompt: str) -> str | None:
+        """One password attempt. Three of these happen at most, and the count is
+        ``SshHost._PASSWORD_ATTEMPTS``' - this dialog adds no fourth."""
+        self._password_asked += 1
+        answer = await self._modal(
+            "connect_password",
+            title=PASSWORD_TITLE.format(target=prompt.removeprefix("password for ").rstrip(": ")),
+            hint=PASSWORD_HINT.format(n=self._password_asked, total=PASSWORD_ATTEMPTS),
+        )
+        return answer if isinstance(answer, str) and answer else None
+
+    async def _host_key_modal(self, host: str, keytype: str, fingerprint: str) -> bool:
+        """OpenSSH's own question. Never auto-accepted, never remembered by this
+        dialog: accepting writes the key through the same path ``ssh.py`` always
+        did, declining raises out of ``connect()`` (brief §3.6)."""
+        return bool(
+            await self._modal(
+                "connect_hostkey",
+                title=HOST_KEY_TITLE.format(host=host),
+                body=HOST_KEY_BODY.format(keytype=keytype, fingerprint=fingerprint),
+            )
+        )
+
+    async def _keyboard_modal(
+        self, title: str, instructions: str, fields: Sequence[tuple[str, bool]]
+    ) -> list[str] | None:
+        """The keyboard-interactive/2FA challenge: one field per prompt, masked
+        where the server said ``echo=False``.
+
+        **Not reachable yet**, and deliberately so: ``SshHost._authenticate``
+        still lets paramiko's own ``auth_interactive_dumb`` handle this path and
+        that one reads stdin (see the TODO there). The plumbing is whole from
+        here down so the day it is wired the dialog is already the contract
+        ``ssh-connect.md`` §3.7 designed against paramiko's handler.
+        """
+        answer = await self._modal(
+            "connect_keyboard",
+            title=title or "Two-factor authentication",
+            body=instructions,
+            fields=[{"prompt": text, "echo": bool(echo)} for text, echo in fields],
+        )
+        if not isinstance(answer, list):
+            return None
+        return [str(item) for item in answer]
+
+    # -- the session boundary --------------------------------------------------
+
+    async def _adopt_remote(self, runtime: RemoteRuntime, connected: ConnectedRemote) -> None:
+        """One session, one host: point everything at the machine just dialled.
+
+        The state a fresh ``--ssh`` launch lands in is a controller assembled
+        from the remote engine factory, the remote project root and the config
+        read off the target - so those three go over together, through
+        ``SessionController.rebind``, which is the core half of this increment.
+        Not a new controller: the live one is parked on ``prompt_new_session``
+        and reads all three when it BUILDS, which has not happened yet. Its
+        window tabs, their services and their calibrations survive for the same
+        reason ``/new`` keeps them - a browser window outlives the sessions run
+        in it, and the browser did not move.
+
+        A session already running is ended first (``request_new_session``, the
+        one door that knows how to do it), and ``rebind`` refuses under a live
+        one rather than trusting the caller - "host-hopping = new session"
+        expressed as a precondition rather than as a silent swap.
+        """
+        if self._mcp_manager is not None:
+            self._mcp_manager.set_status_hook(None)
+        self._project_root = runtime.project_root
+        self._config = runtime.config
+        self._host = runtime.host
+        self._remote_target = runtime.target
+        self._dialled = connected.target
+        self._mcp_manager = runtime.mcp_manager
+        self._mcp_announced.clear()
+        self._profiles.clear()
+        # cli.py's engine factory reads a cell it owns, and the one this runtime
+        # carries was built against the remote config - hand it over for the
+        # same reason the service editor does (``_adopt_config``).
+        self._on_config_change(runtime.config)
+        live = self._last_view is not None and self._last_view.session_active
+        if live:
+            # Ends the conversation that belongs to the OLD machine and leaves
+            # the controller parked on a fresh prompt. It runs as a flow, and
+            # ``_reset_session`` drops ``session_active`` on its first line - so
+            # the loop is yielded to before the rebind, which REFUSES under a
+            # live session rather than trusting this ordering.
+            self._controller.request_new_session()
+            for _ in range(3):
+                await asyncio.sleep(0)
+        self._controller.rebind(
+            runtime.config, runtime.engine_factory, runtime.project_root
+        )
+        self._automation.log_harness(
+            KIND_SESSION, f"connected to {runtime.target}: this session's tools run over there"
+        )
+        if self._mcp_manager is not None:
+            self._mcp_manager.set_status_hook(self._mcp_status_hook)
+            self._push_mcp()
+        self._push_tabs()
+        self._push_sidebar()
+        self._push_status()
+        self._push_state_event()
+        for warning in runtime.config.warnings:
+            self.notify(warning, severity="warning", timeout=8)
+        # A ``--gui --ssh`` launch deferred this so the first session would
+        # belong to the box rather than to this PC; every other road here has
+        # already started it and the call is free.
+        self._start_controller()
+
+    def _push_connect(self) -> None:
+        """The whole dialog in one event; ``open: false`` is the closed state."""
+        if self._dialog is None:
+            self._bridge.send("connect", open=False)
+            return
+        self._bridge.send("connect", **self._dialog.event())
+
+    def _remote_lines(self) -> list[str]:
+        """The PROJECT block's remote marker: the standing half of ruling 6.
+
+        Three facts, and each of them is one a user will otherwise go looking
+        for on the wrong machine: which box the tools run on, whether the link
+        is up, and where this session's permissions came from.
+        """
+        if not self._remote_target:
+            return []
+        live = bool(getattr(self._host, "connected", True))
+        lines = [self._remote_target, LINK_LIVE if live else LINK_LOST]
+        reconnects = int(getattr(self._host, "reconnects", 0) or 0)
+        if reconnects:
+            lines.append(LINK_RECONNECTS.format(count=reconnects))
+        lines.append(
+            self._config.permission_source
+            or f"no ruleset on {self._remote_target} - allowlist gate"
+        )
+        return lines
 
     def toggle_watch(self) -> None:
         """`w`: pause or resume the clipboard watcher.
@@ -3047,6 +3534,13 @@ class GuiView:
         self._bridge.send(
             "sidebar",
             project=_short_root(self._project_root),
+            # The PROJECT block's standing remote marker and its "reconnect now"
+            # button - the half of ruling 6 a toast cannot do, and the half of
+            # ruling 5 that is visible. Empty on a local session: a block
+            # answering a question nobody asked is worse than no block.
+            remote=self._remote_target,
+            remote_lines=self._remote_lines(),
+            can_connect=self._remote is not None,
             services=_service_options(self._config),
             service=service,
             service_label=(

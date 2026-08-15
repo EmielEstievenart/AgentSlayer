@@ -49,7 +49,7 @@ import stat as stat_module
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from types import TracebackType
@@ -74,6 +74,10 @@ _RECV_CHUNK = 65536
 # again only if the credentials that worked no longer do.
 PasswordPrompt = Callable[[str], str | None]  # prompt -> secret; None/"" = give up
 HostKeyPrompt = Callable[[str, str, str], bool]  # host, key type, fingerprint -> trust?
+# title, instructions, ((prompt, echo), ...) -> one answer per prompt; None = give up.
+# Paramiko's own ``auth_interactive`` handler contract, which is the shape a TOTP
+# challenge arrives in. Held, not yet called - see _authenticate.
+KeyboardPrompt = Callable[[str, str, Sequence[tuple[str, bool]]], list[str] | None]
 
 
 class SshError(Exception):
@@ -266,6 +270,7 @@ class SshHost:
         port: int = 0,
         password_prompt: PasswordPrompt | None = None,
         host_key_prompt: HostKeyPrompt | None = None,
+        keyboard_prompt: KeyboardPrompt | None = None,
         ssh_config_path: Path | None = None,
         known_hosts_path: Path | None = None,
     ) -> None:
@@ -274,6 +279,7 @@ class SshHost:
         self._port = port
         self._password_prompt = password_prompt
         self._host_key_prompt = host_key_prompt
+        self._keyboard_prompt = keyboard_prompt
         self._ssh_config_path = (
             ssh_config_path if ssh_config_path is not None else Path.home() / ".ssh" / "config"
         )
@@ -321,6 +327,24 @@ class SshHost:
     def close(self) -> None:
         with self._lock:
             self._drop_locked()
+
+    def reconnect(self) -> bool:
+        """Re-dial NOW rather than on the next operation. Never raises.
+
+        The reconnect model is lazy and stays lazy (design 5): nothing here
+        polls, and a dead link is discovered by the operation that needed it.
+        This is the same ``_ensure`` that operation would have called, exposed
+        so a standing UI can offer "reconnect now" without reaching into a
+        private method or opening a second dial path with its own bugs
+        (docs/design/gui.md §4 ruling 5). On a live link it is a no-op; on a
+        dead one it costs exactly what the next command would have cost.
+        """
+        try:
+            self._ensure()
+        except (SshError, OSError, paramiko.SSHException) as exc:
+            self.last_error = exc
+            return False
+        return True
 
     def mark_dead(self, exc: BaseException | None = None) -> None:
         """The link is gone: drop it, so the next operation re-dials (design 5)."""
@@ -396,7 +420,23 @@ class SshHost:
         self._identity_files = [str(Path(p).expanduser()) for p in entry.get("identityfile") or []]
 
     def _authenticate(self, client: paramiko.SSHClient) -> None:
-        """Agent and keys first; an interactive secret only once they are refused."""
+        """Agent and keys first; an interactive secret only once they are refused.
+
+        **Keyboard-interactive/2FA is still paramiko's own fallback, and still
+        untested** (docs/design/remote-ssh.md, "Auth, in practice"). When a
+        server refuses the password and offers ``keyboard-interactive``,
+        ``SSHClient._auth`` drops to ``Transport.auth_interactive_dumb``
+        (paramiko ``client.py:811``), whose default handler prints the prompts
+        and reads ``input()`` from stdin - which works in a bare shell and
+        nowhere else. ``self._keyboard_prompt`` is the seam that fixes it
+        (``ssh-connect.md`` §3.7 designs the dialog against paramiko's handler
+        contract, and ``gui.md`` §4 ruling 4 caps it at three attempts), and it
+        is deliberately NOT wired here: routing this path means bypassing
+        ``client.connect`` for ``transport.auth_interactive``, i.e. rebuilding
+        the auth flow, and there is no target in this suite that can prove the
+        result. TODO, needing a real 2FA box: call the prompt from here instead
+        of letting paramiko reach stdin.
+        """
         common = {
             "hostname": self._resolved_host,
             "port": self._resolved_port,

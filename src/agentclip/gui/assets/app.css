@@ -1551,3 +1551,238 @@ button:not(:disabled) {
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+/* == the SSH connect dialog (parity increment 7) ==========================
+   The service editor's frame, one surface over: a scrim, a raised panel, a
+   footer strip. What is different is that the middle is a picture of something
+   RUNNING somewhere else, so the checklist is the only part of this shell that
+   has to read as time passing - hence one row per step, in the sequence's own
+   order, with a state colour and nothing that moves except the running row. */
+.conn-scrim {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--scrim-deep);
+  z-index: 26;
+}
+
+.conn-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 96vw);
+  max-height: 92vh;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+}
+
+.conn-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.conn-body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.conn-cols {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 18px;
+}
+
+.conn-col {
+  min-width: 0;
+}
+
+.conn-col > .side-title:first-child {
+  margin-top: 0;
+}
+
+.conn-col input[type="text"] {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* The two picker sections. A row is a button so it is reachable by keyboard
+   without this dialog inventing a focus model of its own. */
+.conn-list {
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.conn-list:empty::after {
+  content: "none";
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.conn-row {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conn-row:hover {
+  border-color: var(--line);
+  background: var(--bg);
+}
+
+.conn-row-detail {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.conn-error:empty,
+.conn-failure:empty {
+  display: none;
+}
+
+.conn-error,
+.conn-failure {
+  margin-top: 8px;
+  color: var(--err);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+/* One row per step, all six, always. `pending` is the resting state and it is
+   what a row AFTER a failure keeps: a stage that vanished, or ticked, would say
+   the opposite of what happened (ssh-connect.md §3.4). */
+.conn-steps {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conn-step {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.conn-step-mark {
+  width: 1.4em;
+  flex: none;
+  text-align: center;
+}
+
+.conn-step-note {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.conn-step-pending {
+  color: var(--text-dim);
+}
+
+.conn-step-running .conn-step-mark {
+  color: var(--accent);
+}
+
+.conn-step-ok .conn-step-mark {
+  color: var(--ok);
+}
+
+.conn-step-failed {
+  color: var(--err);
+}
+
+/* The target-owns-its-policy banner. Deliberately not a toast: it is the one
+   thing about a remote session a user will otherwise discover by wondering why
+   their own rules stopped applying (remote-ssh.md, "the target owns its
+   policy"). */
+.conn-policy {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.conn-policy div {
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.conn-save {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.conn-save input[type="text"] {
+  width: 200px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.conn-footer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* The sidebar's standing remote marker. Bordered rather than plain text: it is
+   a fact about a different machine sitting in a column otherwise entirely about
+   this one. */
+.side-remote {
+  margin: 4px 0 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+}
+
+.side-remote div {
+  padding: 1px 0;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.side-remote div:first-child {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.side-remote-lost div:nth-child(2) {
+  color: var(--warn);
+}

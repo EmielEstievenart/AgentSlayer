@@ -58,6 +58,10 @@ src/agentclip/
 │   ├── base.py            # Host + ExecHandle Protocols (wait/peek/kill/drain), FileStat/DirEntry/ExecResult
 │   ├── local.py           # LocalHost: subprocess/os/pathlib, kill-tree per platform, reader thread → peek()
 │   ├── ssh.py             # SshHost: one Paramiko connection, exec channels + SFTP, lazy reconnect
+│   ├── connect.py         # the remote CONNECT SEQUENCE both shells drive: resolve → dial+auth →
+│   │                      #   probe → root → home/env → remote config. Prompts and progress are
+│   │                      #   injected (getpass+stderr for the CLI, modals+a checklist for the GUI);
+│   │                      #   the only module here that may import config (steps 1 and 6 are loads)
 │   └── fake.py            # FakeHost: in-memory filesystem + scripted commands, for tests
 │
 ├── protocol/
@@ -862,6 +866,9 @@ tests/
 │   ├── test_fake_host.py            # the in-memory twin behaves like a filesystem (symlinks included)
 │   ├── fake_paramiko.py             # an SSH server that is a dict: client/transport/channel/sftp
 │   ├── test_ssh_host.py             # posix paths, reconnect, unknown-outcome, auth ladder, sftp
+│   ├── test_connect.py              # the six-step connect sequence both shells drive: order, which
+│   │                                #   step each failure lands on, close-on-failure, the two
+│   │                                #   non-fatal steps, the picker's two target sources
 │   └── test_ssh_real.py             # @real_ssh: AGENTCLIP_SSH_TESTS=1 + AGENTCLIP_SSH_TARGET only
 ├── protocol/
 │   ├── golden/                      # pairs: NNN-name.input.txt + NNN-name.expected.json

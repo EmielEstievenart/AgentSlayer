@@ -137,6 +137,19 @@
           <div class="side-title">PROJECT</div>
           <div class="side-status" id="side-root"></div>
 
+          <!-- The standing half of "the target owns its policy" (gui.md 4,
+               ruling 6). The connect-time banner is a moment; this is the fact
+               that has to survive being forgotten - which box the tools run on,
+               whether the link is up, and whose ruleset is governing the
+               session. Absent entirely on a local session. "Reconnect now"
+               spends the LAZY re-dial early (ruling 5); it is the same _ensure
+               the next operation would have called, never a second path. -->
+          <div class="side-remote" id="side-remote" hidden>
+            <div class="side-status" id="side-remote-lines"></div>
+            <button id="reconnect-now" type="button">Reconnect now</button>
+          </div>
+          <button id="connect-remote" type="button" hidden>Connect to remote...</button>
+
           <!-- Absent - heading included - when the app has no MCP manager,
                which is most installs. -->
           <div id="mcp-block" hidden>
@@ -330,6 +343,82 @@
           <button id="svc-reset" type="button" hidden>Reset to default</button>
           <button id="svc-delete" type="button" hidden class="danger">Delete</button>
           <button id="svc-close" type="button">Close (esc)</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- The SSH CONNECT DIALOG (docs/design/ui-briefs/ssh-connect.md) - the one
+         surface with no TUI equivalent, because the TUI cannot prompt once
+         Textual owns the terminal. Four phases in one element: the picker+form,
+         the checklist while the six steps run, the checklist with a failure and
+         three ways out, and the success screen carrying the target-owns-policy
+         banner. The three questions a dial can ASK (password, host key, 2FA)
+         are not here - they are ordinary prompts on the modal below, because
+         each of them is a flow parked on an answer. -->
+    <div class="conn-scrim" id="conn-scrim" hidden>
+      <div class="conn-modal">
+        <div class="conn-head">
+          Connect to a remote machine
+          <span class="hint">one session, one host - connecting starts a new session</span>
+        </div>
+
+        <div class="conn-body">
+          <div class="conn-cols" id="conn-form">
+            <!-- Two sources, kept apart: a saved [remote.<name>] table knows
+                 which directory the project is in, an ~/.ssh/config alias only
+                 knows how to reach the machine. Selecting either PREFILLS the
+                 form - neither connects, so one Connect action does one thing. -->
+            <div class="conn-col conn-picker">
+              <div class="side-title">SAVED TARGETS</div>
+              <ol class="conn-list" id="conn-saved"></ol>
+              <div class="side-title">FROM ~/.ssh/config</div>
+              <ol class="conn-list" id="conn-aliases"></ol>
+            </div>
+
+            <div class="conn-col conn-fields">
+              <div class="side-title">Target</div>
+              <input
+                id="conn-target"
+                type="text"
+                placeholder="[user@]host[:port], a saved name, or an ssh alias"
+              />
+              <div class="side-status" id="conn-preview"></div>
+              <div class="side-title">Project root on the remote machine</div>
+              <input id="conn-root" type="text" placeholder="e.g. /home/dev/app" />
+              <!-- Validated only for being there: whether the path exists, and
+                   is a directory, needs a live SFTP session - so a bad root is
+                   a retry state and never a form error (brief 3.3). -->
+              <div class="conn-error" id="conn-error"></div>
+            </div>
+          </div>
+
+          <!-- All six rows, always, in the sequence's own order. A stage after
+               a failure stays PENDING rather than being skipped with a tick. -->
+          <ol class="conn-steps" id="conn-steps" hidden></ol>
+          <div class="conn-failure" id="conn-failure" hidden></div>
+
+          <!-- Shown once, after the last step, before the dialog closes: which
+               machine's ruleset governs this session, what stayed on this PC,
+               and any MCP server that was refused by name. -->
+          <div class="conn-policy" id="conn-policy" hidden></div>
+
+          <div class="conn-save" id="conn-save" hidden>
+            <div class="side-title">Save this target for next time</div>
+            <input id="conn-save-name" type="text" placeholder="name" />
+            <button id="conn-save-btn" type="button">Save</button>
+            <div class="side-status">
+              written to the global config.toml - never a password
+            </div>
+          </div>
+          <div class="side-status" id="conn-saved-note"></div>
+        </div>
+
+        <div class="conn-footer">
+          <span class="hint" id="conn-hint"></span>
+          <span class="spacer"></span>
+          <button id="conn-connect" type="button">Connect</button>
+          <button id="conn-edit" type="button" hidden>Edit</button>
+          <button id="conn-close" type="button">Cancel</button>
         </div>
       </div>
     </div>

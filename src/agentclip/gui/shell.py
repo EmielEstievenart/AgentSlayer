@@ -21,13 +21,14 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from importlib.resources import as_file, files
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from agentclip import __version__
 from agentclip.app.types import EngineRequest
 from agentclip.clip.base import ClipboardProvider
 from agentclip.config import Config
 from agentclip.engine.engine import Engine
+from agentclip.gui.remote import RemoteConnect
 from agentclip.gui.runner import GuiRunner
 from agentclip.gui.view import McpStatusSource
 
@@ -141,6 +142,8 @@ def run_gui(
     engine_factory: Callable[[EngineRequest], Engine],
     mcp_manager: McpStatusSource | None = None,
     on_config_change: Callable[[Config], None] | None = None,
+    host: Any = None,
+    remote: RemoteConnect | None = None,
 ) -> int:
     """Open the window, run the GUI loop, return an exit code when it closes.
 
@@ -156,6 +159,15 @@ def run_gui(
     and the engine factory - built above this call, over a closure cli.py owns -
     has to read it for the next session. The TUI's equivalent is that its
     closure reads the attribute its editor reassigns.
+
+    ``remote`` is the way back for the OTHER one, and the bigger of the two:
+    which machine the session runs on. It carries the two command-line facts the
+    connect sequence reads and the callable that turns a successful dial into a
+    whole new set of the arguments above (``gui/remote.py:RemoteConnect``).
+    ``None`` - which is what every caller but ``cli.main`` passes - simply means
+    this window cannot go remote, and the affordance is absent rather than
+    broken. ``host`` is what the session runs on TODAY, read only for the
+    sidebar's link indicator.
 
     Order matters and is the design's (gui.md section 2). The window is created
     with the ``js_api`` object first, because pywebview injects the API into the
@@ -191,6 +203,8 @@ def run_gui(
         engine_factory=engine_factory,
         project_root=launch.project_root,
         mcp_manager=mcp_manager,
+        host=host,
+        remote=remote,
         on_config_change=on_config_change,
     )
     width, height = WINDOW_SIZE

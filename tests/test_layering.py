@@ -13,7 +13,11 @@
      └──► hosts (to read the project's .agentclip.toml off the project's machine)
     hosts (leaf: the OS seam - config/tools/store/engine touch files and run
            commands only through it, so a remote host can take the local one's
-           place; paramiko lives in hosts/ssh.py and nowhere else)
+           place; paramiko lives in hosts/ssh.py and nowhere else. One
+           exception, hosts/connect.py: the remote connect sequence both shells
+           drive, whose first and last steps are config loads - it is the only
+           module here that may import config, and nothing in the package
+           imports IT, so the cycle never closes)
 
 Only module-level imports count: lazy third-party imports inside functions
 (e.g. copykitten in the clip providers) are allowed.
@@ -35,6 +39,22 @@ RULES: list[tuple[str, frozenset[str]]] = [
     # permissions: a stdlib-only leaf below config, so the same rule model can be
     # loaded by config.py and applied by engine/approval.py.
     ("agentclip.permissions", frozenset()),
+    # hosts.connect: the ONE module in the seam that reads configuration, and it
+    # must come before the ``agentclip.hosts`` rule below (first match wins) so
+    # the allowance is this file's alone. It is the remote CONNECT SEQUENCE
+    # (docs/design/ui-briefs/ssh-connect.md §2), whose first and last steps ARE
+    # config loads: the LOCAL config names the target, and the REMOTE project's
+    # is read back through the host that was just dialled. Both shells drive it -
+    # cli.remote_launch with terminal prompts, the GUI's dialog with modals - so
+    # it cannot live in either of them without the other re-deriving it. The
+    # direction is still one-way at run time: nothing in agentclip/hosts/
+    # __init__.py imports this module, so config's own ``from agentclip.hosts.
+    # base import Host`` never pulls it in, and the rest of the seam stays the
+    # stdlib-and-paramiko leaf the diagram above describes.
+    (
+        "agentclip.hosts.connect",
+        frozenset({"agentclip.config", "agentclip.hosts", "paramiko"}),
+    ),
     # hosts: the OS seam (this PC's subprocess/fs, or a machine over SSH). A
     # leaf like permissions, so tools/store/engine can all resolve their file
     # and command access through the same object. Stdlib-only except for the
@@ -159,6 +179,14 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 # this layer, so nothing about the direction changes.
                 "agentclip.engine",
                 "agentclip.gui",
+                # The OS seam, and only for the surface increment 7 built: the
+                # connect dialog IS the construction of a remote host
+                # (`hosts.connect`), and the sidebar's link indicator reads the
+                # host it made. cli.py has always named this layer for the same
+                # reason - deciding which machine a session runs on is a launch
+                # question, and this shell is now one of the two places a human
+                # answers it (docs/design/ui-briefs/ssh-connect.md).
+                "agentclip.hosts",
                 "agentclip.protocol",
                 "agentclip.screen",
                 "webview",

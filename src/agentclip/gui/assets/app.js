@@ -94,6 +94,17 @@
   var svcMatchers = {};
   var svcKinds = {};
   var svcOptions = "";
+  // The SSH connect dialog. Open/closed is mirrored here for the same reason
+  // `editorOpen` is: the form's text boxes may only be rewritten on a RELOAD,
+  // and "was it already open" is what tells a repaint which one it is.
+  var connectOpen = false;
+  var CONN_HINTS = {
+    form: "the root is checked on the box, after connecting - a bad one is a retry",
+    running: "cancel any prompt to give up on this attempt",
+    failed: "Retry re-runs the whole sequence; Edit puts the values back in the form",
+    done: "this session's tools, files and skills are on the remote machine now"
+  };
+
   // The harness decision log, page-side. The deque below is the source of
   // truth; this is a view of it that happens to keep its own copy, because the
   // bridge is one-way and a pane revealed after an hour must show the whole
@@ -850,6 +861,74 @@
       window.setTimeout(function () {
         input.focus();
       }, 0);
+    } else if (event.modal === "connect_password") {
+      // Mid-checklist, when agent/key auth was refused. Three of these happen
+      // at most and the hint says which one this is, because a wrong password
+      // must not feel like an unbounded loop (ssh-connect.md 3.5). Cancel
+      // returns null, which is `ask_password`'s own "give up" signal - never an
+      // exception, so _authenticate falls through to its ordinary SshError.
+      var secret = document.createElement("input");
+      secret.type = "password";
+      secret.id = "modal-input";
+      el.modalBody.appendChild(secret);
+      var go = document.createElement("button");
+      go.type = "button";
+      go.textContent = "Sign in";
+      go.addEventListener("click", function () {
+        answer(secret.value);
+      });
+      secret.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter") {
+          ev.preventDefault();
+          answer(secret.value);
+        }
+      });
+      el.modalActions.appendChild(go);
+      el.modalActions.appendChild(button("Cancel", null));
+      window.setTimeout(function () {
+        secret.focus();
+      }, 0);
+    } else if (event.modal === "connect_hostkey") {
+      // OpenSSH's own question, in OpenSSH's own words and with the SHA256
+      // fingerprint in the format `ssh-keygen -lf` prints - so a user checking
+      // it against another channel is comparing like with like. There is no
+      // "always trust": declining raises out of connect(), and nothing is
+      // written to known_hosts unless the answer is yes (3.6).
+      el.modalBody.appendChild(block("modal-text", escapeHtml(event.body || "")));
+      el.modalActions.appendChild(button("Yes, connect", true));
+      el.modalActions.appendChild(button("No", false));
+    } else if (event.modal === "connect_keyboard") {
+      // Keyboard-interactive/2FA: the server's own instructions verbatim, then
+      // one field per prompt tuple, masked where it said echo=false. Submitting
+      // sends every answer in order, which is paramiko's handler contract.
+      if (event.body) {
+        el.modalBody.appendChild(block("modal-text", escapeHtml(event.body)));
+      }
+      var fields = (event.fields || []).map(function (field) {
+        var label = document.createElement("div");
+        label.className = "modal-text";
+        label.textContent = field.prompt;
+        var box = document.createElement("input");
+        box.type = field.echo ? "text" : "password";
+        el.modalBody.appendChild(label);
+        el.modalBody.appendChild(box);
+        return box;
+      });
+      var submit = document.createElement("button");
+      submit.type = "button";
+      submit.textContent = "Submit";
+      submit.addEventListener("click", function () {
+        answer(
+          fields.map(function (box) {
+            return box.value;
+          })
+        );
+      });
+      el.modalActions.appendChild(submit);
+      el.modalActions.appendChild(button("Cancel", null));
+      window.setTimeout(function () {
+        if (fields.length) fields[0].focus();
+      }, 0);
     } else if (event.modal === "summary") {
       var rows = (event.rows || [])
         .map(function (pair) {
@@ -1104,6 +1183,26 @@
 
   function paintSidebar(event) {
     el.sideRoot.textContent = event.project || "";
+    // The PROJECT block's standing remote marker (gui.md 4, ruling 6) and the
+    // two buttons that belong with it. Both are absent - not disabled - when
+    // they would mean nothing: no remote session, or a build with no way to go
+    // remote at all.
+    var lines = event.remote_lines || [];
+    el.sideRemote.hidden = lines.length === 0;
+    el.sideRemote.classList.toggle("side-remote-lost", (lines[1] || "").indexOf("lost") === 0);
+    el.sideRemoteLines.innerHTML = "";
+    lines.forEach(function (line) {
+      var node = document.createElement("div");
+      node.textContent = line;
+      el.sideRemoteLines.appendChild(node);
+    });
+    // "Connect to remote..." doubles as the brief's "reconnect to a different
+    // target": there is no separate switch action, because connecting IS a new
+    // session (remote-ssh.md decision 4).
+    el.connectRemote.hidden = !event.can_connect;
+    el.connectRemote.textContent = event.remote
+      ? "Connect to another machine..."
+      : "Connect to remote...";
     el.sideServiceLabel.textContent = event.service_label || "";
     el.sideProfileNote.textContent = event.profile_note || "";
     el.sideRegion.textContent = event.region || "";
@@ -1426,6 +1525,147 @@
     svcBuilt = true;
   }
 
+
+  /* == the SSH connect dialog ==============================================
+     The one surface with no TUI equivalent. Everything it DECIDES is Python's
+     (gui/remote.py:ConnectDialog) - which targets exist, whether Connect may be
+     pressed, which row a failure landed on, what the policy banner says. This
+     side owns the drawing and one convenience: the "connecting as ..." preview
+     is recomputed locally per keystroke so it tracks the caret rather than the
+     round trip, using the SAME grammar the backend parses (config.py's
+     RemoteConfig.selected). */
+
+  function connParse(spec) {
+    var at = spec.lastIndexOf("@");
+    var user = at >= 0 ? spec.slice(0, at) : "";
+    var rest = at >= 0 ? spec.slice(at + 1) : spec;
+    var colon = rest.indexOf(":");
+    var host = colon >= 0 ? rest.slice(0, colon) : rest;
+    var port = colon >= 0 ? rest.slice(colon + 1) : "";
+    var base = user ? user + "@" + host : host;
+    if (port && /^[0-9]+$/.test(port) && port !== "22") base += ":" + port;
+    return base;
+  }
+
+  function connPreviewLocal() {
+    var spec = el.connTarget.value.trim();
+    el.connPreview.textContent = spec ? "connecting as " + connParse(spec) : "";
+  }
+
+  function connList(host, rows) {
+    host.innerHTML = "";
+    (rows || []).forEach(function (row) {
+      var item = document.createElement("li");
+      var pick = document.createElement("button");
+      pick.type = "button";
+      pick.className = "conn-row";
+      var name = document.createElement("div");
+      name.textContent = row.name;
+      var detail = document.createElement("div");
+      detail.className = "conn-row-detail";
+      detail.textContent = row.root ? row.detail + "  " + row.root : row.detail;
+      pick.appendChild(name);
+      pick.appendChild(detail);
+      pick.addEventListener("click", function () {
+        api("connect_select", row.key);
+      });
+      item.appendChild(pick);
+      host.appendChild(item);
+    });
+  }
+
+  // The four row states, and none of them is interchangeable: a stage AFTER a
+  // failure is pending, never skipped-with-a-tick (ssh-connect.md 3.4).
+  function connMark(state) {
+    if (state === "ok") return "✓";
+    if (state === "failed") return "✗";
+    if (state === "running") return "▶";
+    return "·";
+  }
+
+  function paintConnect(event) {
+    if (!event.open) {
+      connectOpen = false;
+      el.connScrim.hidden = true;
+      return;
+    }
+    var opening = !connectOpen;
+    connectOpen = true;
+    el.connScrim.hidden = false;
+
+    var form = event.phase === "form";
+    el.connForm.hidden = !form;
+    // The checklist appears with the first attempt and STAYS while the user
+    // edits: what went wrong is the reason they are back in the form.
+    el.connSteps.hidden = form && !event.failed_step;
+
+    // Only on a RELOAD of the form, never per repaint - the same rule the
+    // service editor's `reload` flag encodes, and the same reason.
+    if (opening || form) {
+      if (document.activeElement !== el.connTarget) el.connTarget.value = event.target || "";
+      if (document.activeElement !== el.connRoot) el.connRoot.value = event.root || "";
+    }
+    el.connPreview.textContent = event.preview ? "connecting as " + event.preview : "";
+    connList(el.connSaved, event.saved);
+    connList(el.connAliases, event.aliases);
+    el.connError.textContent = event.error || "";
+
+    el.connSteps.innerHTML = "";
+    (event.steps || []).forEach(function (row) {
+      var item = document.createElement("li");
+      item.className = "conn-step conn-step-" + row.state;
+      var mark = document.createElement("span");
+      mark.className = "conn-step-mark";
+      mark.textContent = connMark(row.state);
+      var text = document.createElement("span");
+      var label = document.createElement("div");
+      label.textContent = row.label;
+      text.appendChild(label);
+      if (row.note) {
+        var note = document.createElement("div");
+        note.className = "conn-step-note";
+        note.textContent = row.note;
+        text.appendChild(note);
+      }
+      item.appendChild(mark);
+      item.appendChild(text);
+      el.connSteps.appendChild(item);
+    });
+
+    el.connFailure.textContent = event.failure || "";
+    el.connFailure.hidden = !event.failure;
+
+    // Shown once, right after the last step and before the dialog closes: a
+    // user whose own opencode.json just stopped applying has to be told.
+    var policy = event.policy || [];
+    el.connPolicy.innerHTML = "";
+    el.connPolicy.hidden = policy.length === 0;
+    policy.forEach(function (line) {
+      var node = document.createElement("div");
+      node.textContent = line;
+      el.connPolicy.appendChild(node);
+    });
+
+    el.connSave.hidden = !event.can_save;
+    if (event.can_save && document.activeElement !== el.connSaveName) {
+      el.connSaveName.value = event.save_name || "";
+    }
+    el.connSavedNote.textContent = event.saved_note || "";
+
+    el.connConnect.hidden = event.phase === "done";
+    el.connConnect.disabled = Boolean(event.busy);
+    el.connConnect.textContent = event.phase === "failed" ? "Retry" : "Connect";
+    el.connEdit.hidden = event.phase !== "failed";
+    el.connClose.textContent = event.phase === "done" ? "Close" : "Cancel";
+    el.connClose.disabled = Boolean(event.busy);
+    el.connHint.textContent = CONN_HINTS[event.phase] || "";
+    if (opening) {
+      window.setTimeout(function () {
+        el.connTarget.focus();
+      }, 0);
+    }
+  }
+
   function paintEditor(event) {
     if (!event.open) {
       editorOpen = false;
@@ -1712,6 +1952,9 @@
       case "elements":
         paintElements(event);
         return;
+      case "connect":
+        paintConnect(event);
+        break;
       case "editor":
         paintEditor(event);
         return;
@@ -2057,6 +2300,29 @@
       rail: id("rail"),
       sideArmed: id("side-armed"),
       sideRoot: id("side-root"),
+      sideRemote: id("side-remote"),
+      sideRemoteLines: id("side-remote-lines"),
+      reconnectNow: id("reconnect-now"),
+      connectRemote: id("connect-remote"),
+      connScrim: id("conn-scrim"),
+      connForm: id("conn-form"),
+      connSaved: id("conn-saved"),
+      connAliases: id("conn-aliases"),
+      connTarget: id("conn-target"),
+      connPreview: id("conn-preview"),
+      connRoot: id("conn-root"),
+      connError: id("conn-error"),
+      connSteps: id("conn-steps"),
+      connFailure: id("conn-failure"),
+      connPolicy: id("conn-policy"),
+      connSave: id("conn-save"),
+      connSaveName: id("conn-save-name"),
+      connSaveBtn: id("conn-save-btn"),
+      connSavedNote: id("conn-saved-note"),
+      connHint: id("conn-hint"),
+      connConnect: id("conn-connect"),
+      connEdit: id("conn-edit"),
+      connClose: id("conn-close"),
       mcpBlock: id("mcp-block"),
       mcpRows: id("mcp-rows"),
       serviceSelect: id("service-select"),
@@ -2271,6 +2537,39 @@
     el.svcClose.addEventListener("click", function () {
       api("svc_close");
     });
+    // -- the SSH connect dialog's own wiring --------------------------------
+    // Both text boxes send the WHOLE form on any input and NOTHING comes back:
+    // the model owns the values, but repainting an input the caret is in would
+    // fight it - the service editor's `reload` contract, one dialog over.
+    el.connectRemote.addEventListener("click", function () {
+      api("connect_open");
+    });
+    el.reconnectNow.addEventListener("click", function () {
+      api("reconnect_now");
+    });
+    [el.connTarget, el.connRoot].forEach(function (input) {
+      input.addEventListener("input", function () {
+        connPreviewLocal();
+        api("connect_fields", el.connTarget.value, el.connRoot.value);
+      });
+    });
+    el.connConnect.addEventListener("click", function () {
+      // The form's values go with the press: an input event and a click can
+      // reach Python on two different threads, and the press must not race the
+      // keystroke that filled the box it is about.
+      api("connect_fields", el.connTarget.value, el.connRoot.value);
+      api("connect_start");
+    });
+    el.connEdit.addEventListener("click", function () {
+      api("connect_edit");
+    });
+    el.connClose.addEventListener("click", function () {
+      api("connect_cancel");
+    });
+    el.connSaveBtn.addEventListener("click", function () {
+      api("connect_save", el.connSaveName.value);
+    });
+
     // The log pane never scrolls its own way: reading the scroll position is
     // how "following" is decided, so the listener exists only to make the pane
     // focusable-by-wheel behave like any other scroll box.

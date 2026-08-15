@@ -352,7 +352,11 @@ step:
 7. ✅ service editor — **parity increment 5**.
 8. ✅ settings / help / modals — **parity increment 6**, with the slash popup,
    the whole key chain and the quit gate.
-9. ⬜ SSH connect dialog
+9. ✅ SSH connect dialog — **parity increment 7**.
+
+**The wave is complete.** Every surface in `docs/design/ui-briefs/` now exists in
+both shells, except the one that deliberately exists in only one (§0's carve-out,
+and item 9 above is it).
 
 Shipped so far: **slice 1** (`63e3c76`) — the window over the packaged page, no
 bridge. **Slice 2** — the bridge, the runner's loop, `GuiView` against all three
@@ -734,6 +738,79 @@ Two decisions recorded rather than smuggled:
   an app-wide reactive that Escape must revert; a class on `<body>` costs nothing
   to try, and there is no Save button to make "revert" mean anything.
 
+**Parity increment 7** — the SSH CONNECT DIALOG, against
+`docs/design/ui-briefs/ssh-connect.md` and the six rulings in §4 below. The last
+increment of the wave, the only GUI-only surface, and the only one that needed a
+change on BOTH sides of the shell boundary — because the thing it is a UI for
+was written into `cli.remote_launch`'s body.
+
+- **The eight-step sequence moved down, whole, into
+  `agentclip/hosts/connect.py`** (`connect_remote`), with exactly two things
+  injectable: who answers a question (`ConnectPrompts`) and who is told what is
+  happening (`on_step`). Everything else — the order, which steps are fatal,
+  every message, the close-on-failure — belongs to the sequence, because a
+  second copy of any of it is the drift the extraction exists to prevent.
+  `cli.remote_launch` is now a wrapper that supplies `getpass`/`input` and
+  prints the same notes to the same streams; **its stderr wording and its
+  exit-2s are unchanged**, and `tests/test_launch_remote.py` passes untouched.
+  The six steps are `resolve → connect+auth → probe → root → env → config`:
+  brief §3.4's five, with the target RESOLUTION given its own row rather than
+  hidden in the first tick (it is the step that fails most often, on a missing
+  `--remote-root`, and it fails before anything is dialled).
+- **`hosts/connect.py` is the one module in that package that may import
+  `config`**, and it has its own `RULES` entry saying so. Steps 1 and 6 ARE
+  config loads — the local config names the target, the remote one is read back
+  through the host — so a module that could not name that layer would have to
+  hand both halves back to its caller, which is exactly the shape that let the
+  GUI and the CLI drift. Nothing in `hosts/__init__.py` imports it, so the
+  direction never closes into a cycle and the seam still costs no paramiko.
+- **One core change, and it is small: `SessionController.rebind(config,
+  engine_factory, project_root)`.** The three things a session is assembled from
+  change TOGETHER when the machine changes, so they cross together; it is
+  refused while a session is live, which is "host-hopping = new session"
+  (remote-ssh.md decision 4) expressed as a precondition. No new controller is
+  built — the live one is parked on `prompt_new_session` and reads all three
+  when it BUILDS, which has not happened yet. What `/new` keeps, this keeps:
+  both window tabs, their services and their calibrations, because the browser
+  did not move.
+- **`--gui --ssh` no longer blocks the launch.** `cli.main` defers it: the
+  window opens on this PC and the dialog auto-opens pre-filled and runs the
+  identical sequence with a checklist. A launch with a connect pending builds
+  **no MCP runtime** — those servers would be this PC's, read from this PC's
+  `opencode.json`, for a session about to belong to another machine. The TUI's
+  launch-time flow is untouched, which is the §0 carve-out: it cannot prompt
+  once Textual owns the terminal.
+- `{type: "connect"}` carries the whole surface in one event, `open: false`
+  being the closed state — the service editor's shape, and its model lives in
+  `gui/remote.py` with no window in it for the same reason. All six checklist
+  rows cross on every push whatever has happened, because a stage after a
+  failure must stay **pending** rather than skipped-with-a-checkmark. The three
+  questions a dial can ask ride the ORDINARY `modal` family
+  (`connect_password` / `connect_hostkey` / `connect_keyboard`): each is a flow
+  parked on an answer, and one modal implementation is the rule.
+- **The prompts hop threads in the one direction nothing else in this shell
+  does.** `connect_remote` blocks, so it runs on a worker thread — which puts
+  its three callbacks there too. Each opens its modal ON the loop
+  (`run_coroutine_threadsafe`) and the worker parks on the answer. Anything that
+  fails returns `None`, which is `PasswordPrompt`'s own "give up" signal, so a
+  window closing under an open prompt ends the attempt instead of wedging a
+  thread inside paramiko.
+
+Two things are deliberately smaller than the brief's proposal, and say so:
+
+- **Retry always re-runs the whole sequence.** §3.8 imagined a failed root check
+  retrying from stage 4 on the live connection; `_abort` closes the host on
+  every failure, so there is never a connection to reuse. One honest path beats
+  one path plus a claim.
+- **Keyboard-interactive is plumbed, not wired.** `SshHost` takes a
+  `keyboard_prompt`, `ConnectPrompts` carries it, the dialog exists and its
+  contract is tested — but `_authenticate` still lets paramiko's own
+  `auth_interactive_dumb` (which reads stdin) have that path, and a TODO there
+  says so. Routing it means bypassing `client.connect` for
+  `transport.auth_interactive`, i.e. rebuilding the auth flow, and no target in
+  this suite can prove the result. The seam is whole so the day it is wired
+  nothing above it changes.
+
 ## 4. SSH connect dialog (GUI-only surface)
 
 Contract and flow: `docs/design/ui-briefs/ssh-connect.md`. The 8-step connect
@@ -748,6 +825,24 @@ changes. Ratified answers to that brief's open questions:
    button.
 6. "Target owns its policy" gets a connect-time banner **and** a persistent marker in
    the project block — the footgun stays visible, not one-time.
+
+Two of the six met reality on the way in, and the deviation is in the
+implementation rather than in the ruling:
+
+- **Ruling 3 could not be implemented the way brief §6 proposed.**
+  `paramiko.SSHConfig.get_hostnames()` does `entry["host"]` over every parsed
+  block, and a `Match` block has no `host` key — so it raises `KeyError` on any
+  `~/.ssh/config` that contains one (paramiko 4.0 `config.py:325`, verified).
+  The parse is still paramiko's; only the accessor is ours, reading past a block
+  that has no hostnames instead of tripping over it. Wildcards, `!` negations
+  and `Match` blocks are all hidden, which is what the ruling asked for.
+- **Ruling 5's manual button is `SshHost.reconnect()`**, a two-line method whose
+  whole body is the `_ensure()` the next operation would have called. That is
+  what keeps the model lazy: the button spends the re-dial early, it does not
+  introduce a second dial path with its own failure modes. The indicator itself
+  is rendered from the two facts that already crossed (`connected`,
+  `reconnects`) and is repainted at turn boundaries — nothing polls, because a
+  poll would be the app dialling to keep a light green.
 
 ## 5. Packaging (deferred, tracked)
 

@@ -57,6 +57,7 @@ from agentclip.clip.base import ClipboardProvider
 from agentclip.config import Config
 from agentclip.engine.engine import Engine
 from agentclip.gui.bridge import Bridge, EmitFn, JsApi
+from agentclip.gui.remote import RemoteConnect
 from agentclip.gui.view import GuiView, McpStatusSource
 
 # How long the loop thread gets to unwind before the window closes anyway. The
@@ -79,6 +80,8 @@ class GuiRunner:
         profile_root: Path | None = None,
         global_config_path: Path | None = None,
         mcp_manager: McpStatusSource | None = None,
+        host: Any = None,
+        remote: RemoteConnect | None = None,
         on_close: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
     ) -> None:
@@ -104,6 +107,8 @@ class GuiRunner:
             profile_root=profile_root,
             global_config_path=global_config_path,
             mcp_manager=mcp_manager,
+            host=host,
+            remote=remote,
             schedule=self.schedule,
             on_exit=self.request_close,
             on_config_change=on_config_change,
@@ -348,6 +353,34 @@ class GuiRunner:
 
     def request_quit(self) -> None:
         self.schedule_call(self.view.request_quit)
+
+    # The SSH connect dialog (increment 7). One-line marshals for the reason
+    # every method here is one: the dialog's state is a MODEL on the loop
+    # (``gui/remote.py``), and pywebview hands each of these a thread of its own.
+
+    def open_connect(self) -> None:
+        self.schedule_call(self.view.open_connect)
+
+    def connect_select(self, key: str) -> None:
+        self.schedule_call(self.view.connect_select, key)
+
+    def connect_fields(self, target: str, root: str) -> None:
+        self.schedule_call(self.view.connect_fields, target, root)
+
+    def connect_start(self) -> None:
+        self.schedule_call(self.view.connect_start)
+
+    def connect_edit(self) -> None:
+        self.schedule_call(self.view.connect_edit)
+
+    def connect_cancel(self) -> None:
+        self.schedule_call(self.view.connect_cancel)
+
+    def connect_save(self, name: str) -> None:
+        self.schedule_call(self.view.connect_save, name)
+
+    def reconnect_now(self) -> None:
+        self.schedule_call(self.view.reconnect_now)
 
     # The service editor (F2). Fourteen one-line marshals for the reason the
     # rest are one-line marshals: pywebview runs each js_api method on a thread

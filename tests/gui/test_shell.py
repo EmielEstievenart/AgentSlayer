@@ -259,6 +259,76 @@ def test_argparse_help_mentions_the_gui_shell() -> None:
     assert "GUI shell" in help_text
 
 
+# == the packaging smoke ======================================================
+
+
+def test_the_gui_smoke_flag_is_hidden() -> None:
+    """It is a build-script probe, not a user-facing feature - like
+    --pick-region and --show-identify beside it."""
+    args = cli.build_arg_parser().parse_args([])
+    assert args.gui_smoke is False
+    assert cli.build_arg_parser().parse_args(["--gui-smoke"]).gui_smoke is True
+    assert "--gui-smoke" not in cli.build_arg_parser().format_help()
+
+
+def test_the_gui_smoke_reports_ok_and_names_the_renderer(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """From source it proves only what it proves frozen: pywebview imports, all
+    three assets resolve through importlib.resources and are non-empty.
+
+    The renderer word is REPORTED, never asserted - `missing` means this
+    machine has no WebView2 runtime, which is a fact about the box and not
+    about the build, and the exit code stays 0 either way (scripts/build-exe.ps1
+    is what runs this against the frozen exe)."""
+    pytest.importorskip("webview", reason="the gui extra is not installed")
+
+    assert cli.main(["--gui-smoke"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("gui-smoke: ok renderer=")
+    assert out.split("renderer=")[1].strip() in {"edgechromium", "missing", "n/a"}
+
+
+def test_the_gui_smoke_fails_when_pywebview_is_gone(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The whole point of the check: a build that lost the extra must exit
+    non-zero at BUILD time rather than at the user's first --gui."""
+    monkeypatch.setitem(sys.modules, "webview", None)
+    assert cli.main(["--gui-smoke"]) == 2
+    assert "pywebview is not in this build" in capsys.readouterr().err
+
+
+def test_the_gui_smoke_runs_before_any_launch_is_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """It answers a question about the BUILD, so it must not need a project, a
+    config or a host - the frozen exe is run from wherever the build left it."""
+    pytest.importorskip("webview", reason="the gui extra is not installed")
+    monkeypatch.setattr(cli, "local_launch", lambda args: pytest.fail("resolved a launch"))
+    monkeypatch.setattr(cli, "remote_launch", lambda args: pytest.fail("resolved a launch"))
+    assert cli.main(["--gui-smoke"]) == 0
+
+
+def test_the_spec_ships_the_page_where_importlib_resources_will_look() -> None:
+    """The one packaging fact a from-source suite CAN check: that the spec
+    collects every asset shell.py promises, at the package-relative path the
+    resource reader resolves under _MEIPASS (docs/design/gui.md 5).
+
+    Read as text rather than executed - a spec is only a valid Python file
+    inside PyInstaller, which injects SPECPATH and the Analysis/EXE names.
+    """
+    spec = (Path(__file__).resolve().parents[2] / "packaging" / "agentclip.spec").read_text(
+        encoding="utf-8"
+    )
+    assert '"agentclip/gui/assets"' in spec, "the assets' destination is not the package path"
+    assert "gui_datas" in spec
+    assert "textual_datas + gui_datas" in spec, "the assets are collected but never handed to Analysis"
+    # The backend gui/shell.py's webview2_missing() reads, which nothing static
+    # reaches (webview/guilib.py picks it per platform at import time).
+    assert "webview.platforms.winforms" in spec
+
+
 def test_the_launch_protocol_matches_the_real_launch(tmp_path: Path) -> None:
     """LaunchLike is structural on purpose - cli sits ABOVE both shells, so the
     shell may not import the class it is handed. This is the cheap runtime half

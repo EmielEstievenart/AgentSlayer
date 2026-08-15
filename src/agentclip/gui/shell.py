@@ -56,10 +56,12 @@ MISSING_WEBVIEW2 = (
 )
 
 # The asset files the window needs; also what tests/gui checks is really
-# shipped. They live in agentclip/gui/assets/ as package data - hatchling puts
-# every file under src/agentclip in the wheel, but PyInstaller does not: when
-# the frozen exe grows the GUI, packaging/agentclip.spec needs this directory
-# added to `datas` or the window will open on nothing (docs/design/gui.md 5).
+# shipped, and what --gui-smoke reads back out of a frozen build. They live in
+# agentclip/gui/assets/ as package data - hatchling puts every file under
+# src/agentclip in the wheel, but PyInstaller collects only what a spec names,
+# so packaging/agentclip.spec adds this directory to `datas` AT THE
+# PACKAGE-RELATIVE PATH, which is what makes `asset_dir` below resolve inside
+# the onefile extraction (docs/design/gui.md 5).
 ASSET_PACKAGE = "agentclip.gui"
 ASSET_DIR = "assets"
 ENTRY_PAGE = "index.html"

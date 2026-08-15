@@ -66,9 +66,13 @@ To use `agentclip` from any directory without the checkout, freeze it into a sin
 .\scripts\build-exe.ps1
 ```
 
-This builds `dist\agentclip.exe` (PyInstaller onefile, ~15 MB, no Python needed to run it), smoke-tests it, and copies it to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`. Re-run it to update after changing the source. Useful flags: `-Clean` (fresh build), `-NoInstall` (build only), `-InstallDir <path>`.
+This builds `dist\agentclip.exe` (PyInstaller onefile, ~78 MB, no Python needed to run it), smoke-tests it, and copies it to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`. Re-run it to update after changing the source. Useful flags: `-Clean` (fresh build), `-NoInstall` (build only), `-InstallDir <path>`.
+
+The exe carries **both UI shells and every optional extra the desktop needs**: the TUI, the GUI shell (`agentclip.exe --gui`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. Nothing extra to install, which is most of the 78 MB. The build script proves all three against the exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`) and refuses to install one that fails.
 
 The build is driven by `packaging/agentclip.spec`; a onefile exe unpacks to `%TEMP%` on each launch, costing a second or two of startup.
+
+> If `agentclip --gui` says the gui extra is not installed, you are running a *different* `agentclip` — most likely a stale `uv tool install`. Run `where.exe agentclip`; the build script prints the same warning when it spots one, and `uv tool uninstall agentclip` clears it.
 
 ## Configuration
 

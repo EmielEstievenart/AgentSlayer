@@ -847,10 +847,49 @@ implementation rather than in the ruling:
   `reconnects`) and is repainted at turn boundaries — nothing polls, because a
   poll would be the app dialling to keep a light green.
 
-## 5. Packaging (deferred, tracked)
+## 5. Packaging
 
-The 78 MB onefile exe self-extracting on every launch is the dominant startup cost
-and is independent of UI framework. Decision deferred to after the shell increment:
-likely onedir + installer, or a slimmed onefile without the `cv` extra. The README's
-"~15 MB" claim is stale either way. GUI assets (html/css/js) ship as package data and
-must be added to the PyInstaller spec when `agentclip.gui` lands.
+**The exe ships both shells.** `packaging/agentclip.spec` and
+`scripts/build-exe.ps1` carry the `gui` extra now: the build syncs
+`--extra cv --extra gui` and refuses to build if either is unimportable, and the
+spec names what a lazy import hides. Four findings, because only one of them was
+the thing this section predicted:
+
+- **The page assets were the real gap, and they were the only one.** They are
+  collected to `agentclip/gui/assets` — the PACKAGE-relative path, not the
+  bundle root — because `gui/shell.py` resolves them with
+  `importlib.resources` (§2), and PyInstaller's `FrozenImporter` answers that by
+  looking under `sys._MEIPASS` at exactly that layout. Verified against a real
+  onefile build rather than assumed: the spec before this change produced an exe
+  that imported pywebview fine and then could not open `index.html`.
+- **pywebview needed no `datas` help.** pywebview and pythonnet each ship a
+  PyInstaller hook through the `pyinstaller40` entry point
+  (`webview/__pyinstaller/`, `pythonnet/_pyinstaller/`), which PyInstaller
+  discovers automatically; `pyinstaller-hooks-contrib` adds `hook-clr` and
+  `hook-clr_loader`. Between them the WebView2 interop DLLs, `webview/js/`,
+  `Python.Runtime.dll` and clr_loader's ffi DLLs all ride along. Nothing here
+  had to be written by hand, and onefile + pythonnet is not the incompatibility
+  it is sometimes reported to be — `interop_dll_path` has a `sys._MEIPASS`
+  branch, and the package-relative one it finds first works too.
+- **What the spec does add is REACHABILITY**, the same shape as `cv2` and
+  `copykitten`: `webview.platforms.winforms` is chosen per platform inside
+  `webview/guilib.py` at import time, and `edgechromium`/`mshtml` are chosen
+  below it off the EdgeUpdate registry keys — so the build box's own WebView2
+  state must not decide what a user's machine can render, and both are named.
+- **`--gui-smoke` is what keeps this honest** (`cli.py`, hidden, beside
+  `--pick-region`). It imports pywebview, READS all three assets back through
+  `importlib.resources`, runs `webview2_missing()` and prints
+  `gui-smoke: ok renderer=<edgechromium|missing|n/a>`. A build box without the
+  WebView2 runtime still exits 0 — the check is on the FREEZE, not the machine —
+  and `scripts/build-exe.ps1` runs it against the exe beside `--version` and
+  `--list-matchers`.
+
+Cost: **+49 KB** (77.5 MB), because pywebview and the .NET runtime were already
+being collected — `cli.py`'s `--gui` branch imports the shell inside a function
+and PyInstaller reads bytecode, so the graph already reached them. The assets are
+the whole delta.
+
+**Still open, unchanged:** the 78 MB onefile self-extracting on every launch is
+the dominant startup cost, is independent of UI framework, and the onedir +
+installer / slimmed-onefile decision has not been taken. The README's stale
+"~15 MB" claim is fixed.

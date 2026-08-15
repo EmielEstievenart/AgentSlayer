@@ -349,6 +349,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print which appearance-matcher backends this build can run, and exit",
     )
+    # Hidden: --list-matchers' twin for the GUI shell - does THIS build carry a
+    # working window? Run against the frozen exe by scripts/build-exe.ps1; see
+    # _gui_smoke for what it proves and what it deliberately does not.
+    parser.add_argument("--gui-smoke", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"agentclip {__version__}")
     return parser
 
@@ -374,6 +378,54 @@ def _list_matchers() -> int:
             print(f"  {name:<8} available")
         else:
             print(f"  {name:<8} NOT AVAILABLE - would fall back to {chosen.name!r}")
+    return 0
+
+
+def _gui_smoke() -> int:
+    """Say whether this BUILD can open the GUI window - without opening one.
+
+    ``--list-matchers``' twin, and it exists for the same reason (see its
+    docstring): the exe bundles an optional extra whose absence is silent at
+    runtime. ``--gui`` on a build that lost pywebview prints the "install the
+    gui extra" line a frozen user can do nothing about, and a build that kept
+    pywebview but lost the packaged page opens a window on nothing - neither
+    fails until somebody launches the GUI.
+
+    So this does the three things ``run_gui`` does before it has a window, in
+    the same order, and then stops: import ``webview`` (which drags in the
+    winforms backend, clr and the .NET runtime - the half PyInstaller can only
+    see because the spec names it), resolve the assets through
+    ``importlib.resources`` and read every one of them (the classic frozen-app
+    failure: the files are IN the archive but the resource reader cannot find
+    them under ``_MEIPASS``), and ask ``webview2_missing()``.
+
+    A machine without the WebView2 runtime still exits 0 and says so. What is
+    under test is the FREEZE, not the box the build ran on - a build server
+    with no Evergreen runtime must not be able to fail a packaging check, and
+    the renderer word is printed so the state is never merely assumed.
+    """
+    from agentclip.gui.shell import ASSET_NAMES, asset_dir, webview2_missing
+
+    try:
+        import webview  # noqa: F401
+    except ImportError as exc:
+        print(f"gui-smoke: pywebview is not in this build ({exc})", file=sys.stderr)
+        return 2
+    with asset_dir() as assets:
+        for name in ASSET_NAMES:
+            try:
+                text = (assets / name).read_text(encoding="utf-8")
+            except OSError as exc:
+                print(f"gui-smoke: asset {name} is not readable ({exc})", file=sys.stderr)
+                return 2
+            if not text.strip():
+                print(f"gui-smoke: asset {name} is empty", file=sys.stderr)
+                return 2
+    if platform.system() != "Windows":
+        renderer = "n/a"
+    else:
+        renderer = "missing" if webview2_missing() else "edgechromium"
+    print(f"gui-smoke: ok renderer={renderer}")
     return 0
 
 
@@ -543,6 +595,8 @@ def main(argv: list[str] | None = None) -> int:
         return _show_identify_child(sys.stdin.read())
     if args.list_matchers:
         return _list_matchers()
+    if args.gui_smoke:
+        return _gui_smoke()
 
     # WHERE the session runs, decided before either shell exists - except on the
     # one path where it is decided AFTER: ``--gui --ssh`` no longer blocks the

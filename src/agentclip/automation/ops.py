@@ -50,6 +50,7 @@ from agentclip.screen.template import (
     CandidateSource,
     RegionMatch,
     Template,
+    find_all_in_region,
     find_lowest_with_best_miss,
 )
 
@@ -131,6 +132,28 @@ class ScreenOps:
         """The bottom-most match of one image in one frame, plus the closest miss."""
         return find_lowest_with_best_miss(
             template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher
+        )
+
+    def all_matches(
+        self,
+        template: Template,
+        scene: RegionImage,
+        *,
+        tolerance: int,
+        max_diff: float,
+        limit: int,
+        matcher: CandidateSource | None,
+    ) -> list[RegionMatch]:
+        """Every match of one image in one frame, in reading order, at most
+        ``limit`` of them - the other half of the search model
+        (``flow.element_rects``)."""
+        return find_all_in_region(
+            template,
+            scene,
+            tolerance=tolerance,
+            max_diff=max_diff,
+            limit=limit,
+            matcher=matcher,
         )
 
     def hover_step_delay(self) -> float:

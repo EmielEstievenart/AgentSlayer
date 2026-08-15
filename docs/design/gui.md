@@ -314,13 +314,16 @@ a toast where a user could otherwise be left staring at nothing:
 implements is now the real one; what is left of the parity backlog is one whole
 SURFACE (the SSH dialog), not methods implemented smaller than their contract.
 
-One duplication is tracked with them: `gui/view.py:_distinct_rects` and
-`find_all` are `MainScreen`'s, spelled again because the two shells may not
-import each other. They were to move down into `agentclip.automation` "when the
-GUI grows calibration and there are two real callers" — increment 4 is that
-moment (a region can be drawn now, so `find_all` really runs here), and the move
-is still **owed**: it is a genuine core refactor with two callers to re-point and
-belongs in its own commit rather than riding a UI increment.
+~~One duplication is tracked with them: `gui/view.py:_distinct_rects` and
+`find_all`.~~ **Done, in its own commit.** The fold is
+`automation/flow.py:distinct_rects`, the union around it is `flow.element_rects`
+(the search passed in as `ScreenOps.all_matches`, the way `lowest_match_scored`
+already took `ScreenOps.lowest_match`), and the whole sequence — refusals,
+calibration lookup, capture, union, fold — is
+`AutomationController.find_all`. Both shells' `AutomationHost.find_all` is a
+one-liner onto it. The HOST method stays: it is the seam the Textual suites stub
+to put an appearance on an imaginary screen, so the sequences keep asking
+through `self._host` rather than calling the controller's own method.
 - Images (elements panel, service-editor thumbnails): PNG data URIs per crop.
   The crop-not-whole-frame policy and the BGRX rule carry over; the
   sixel/half-block machinery does not. The encoder is `screen/png.py` (stdlib

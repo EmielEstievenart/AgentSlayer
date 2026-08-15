@@ -69,9 +69,10 @@ coroutines on the AutomationController now, reaching ``agentclip.screen``
 directly. What is left here is the two things a shell really owns - SCHEDULING
 (``run_worker``, still the same group and exclusivity) and the handful of
 answers only this screen has, which cross as ``AutomationHost``: which service a
-window is on and what it looks like, where an appearance is right now
-(``_find_all``), handing a prose reply to the SESSION, and rebuilding the
-detector set after a retarget. The primitives themselves are reached through
+window is on and what it looks like, the seam the search for an appearance is
+asked through (``_find_all``, a one-liner onto the controller that the suites
+stub), handing a prose reply to the SESSION, and rebuilding the detector set
+after a retarget. The primitives themselves are reached through
 ``_MainScreenOps``, whose only job is to resolve THIS module's names per call so
 the suites' patches still bite.
 
@@ -259,8 +260,6 @@ from agentclip.screen.template import (
     Template,
     find_all_in_region,
     find_lowest_with_best_miss,
-    match_rect,
-    same_element,
 )
 from agentclip.tui.messages import (
     AutoCopyRequested,
@@ -418,32 +417,6 @@ class _SubRun:
     ok: bool = True
 
 
-# How many matches of one appearance are worth collecting. The question the
-# search answers is "one, or more than one?", so anything past a handful is the
-# same answer - and every extra candidate is a full pixel comparison.
-_MAX_MATCHES = 8
-
-
-def _distinct_rects(
-    region: ScreenRegion, found: list[tuple[Template, RegionMatch]]
-) -> list[ScreenRegion]:
-    """Scene-local matches as absolute rectangles, one per physical element.
-
-    Each match carries the image that produced it, because a kind holds several
-    (screen.profile) and a rectangle to click is the size of the image that
-    actually matched. Fed the whole union at once for the same reason: two
-    images of one control - a send button and its greyed-out twin - land on the
-    same pixels, and must fold into one rectangle rather than read as two
-    windows of the same service.
-    """
-    kept: list[ScreenRegion] = []
-    for template, match in found:
-        rect = match_rect(region, template, match)
-        if not any(same_element(rect, other) for other in kept):
-            kept.append(rect)
-    return kept
-
-
 def _element_crop(scene: RegionImage, sighting: Sighting | None) -> ElementCrop | None:
     """Cut a verified match out of the frame it was found in, panel-sized.
 
@@ -531,6 +504,25 @@ class _MainScreenOps(ScreenOps):
     ) -> tuple[RegionMatch | None, float | None]:
         return find_lowest_with_best_miss(
             template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher
+        )
+
+    def all_matches(
+        self,
+        template: Template,
+        scene: RegionImage,
+        *,
+        tolerance: int,
+        max_diff: float,
+        limit: int,
+        matcher: CandidateSource | None,
+    ) -> list[RegionMatch]:
+        return find_all_in_region(
+            template,
+            scene,
+            tolerance=tolerance,
+            max_diff=max_diff,
+            limit=limit,
+            matcher=matcher,
         )
 
     def hover_step_delay(self) -> float:
@@ -2082,69 +2074,19 @@ class MainScreen(Screen[None]):
     ) -> list[ScreenRegion]:
         """Every place ``kind`` is on screen right now, in absolute coordinates.
 
-        The one primitive behind every "is it there / click it" question. It
+        The one primitive behind every "is it there / click it" question: it
         looks *inside the drawn chat region* for the appearance THAT WINDOW's
-        own service captured, which is the whole point of the profile model: the
-        user drew one box per window, and everything inside it is recognised
-        rather than remembered, so moving or resizing the browser costs nothing.
-        Per window rather than per app because the two windows can be pointed at
-        two different services - a sub-agent chat whose copy icon looks nothing
-        like the master's is exactly the case this supports.
+        own service captured, answers with ALL the matches rather than the
+        first, and comes up empty rather than raising for every way it can
+        (``AutomationController.find_all``, whose implementation this was until
+        the GUI turned out to have spelled the identical search out - and a
+        shell may not import another shell).
 
-        All of them rather than the first, because that is the question callers
-        actually have to answer: an appearance is the SERVICE's, so a second
-        window of the same service inside (or overlapping) the drawn region
-        carries the same button, and clicking whichever match came back first
-        would click a different conversation's. Near-duplicate hits on one
-        physical element are folded away first (``_distinct_rects``), so a list
-        longer than one really does mean two elements - which is also what
-        keeps two IMAGES of one control (screen.profile's variant stacks) from
-        reading as two windows.
-
-        ``scene`` lets a caller that already captured the chat region reuse the
-        frame, so several appearances can be hunted in one picture of one
-        instant - which is why it may not be combined with ``slot``: the frame
-        was taken from one window, and translating its matches back through
-        another slot's rectangle would put them anywhere at all.
-
-        Empty - never raised - for every way this can come up empty: no chat
-        region drawn, no such appearance captured, the capture failed, or it
-        simply is not on screen.
+        The NAME stays here because it is what this shell's suites stub: a
+        stand-in ``_find_all`` is how a Pilot test puts a copy button on an
+        imaginary screen, and every sequence below still asks through the host.
         """
-        if scene is not None and slot is not None:
-            raise ValueError("_find_all takes a slot or a captured scene, never both")
-        target = slot if slot is not None else self._automation.live_slot
-        cal = self._automation.calibration(target)
-        region = cal.chat_region
-        if region is None:
-            return []
-        templates = self._profile_for(target).variants(kind)
-        if not templates:
-            return []
-        if scene is None:
-            try:
-                scene = await asyncio.to_thread(capture_region, region)
-            except CaptureError:
-                return []
-        # A plain OR-union over the kind's images: any of them being on screen
-        # means the control is. Sorted back into reading order across the union
-        # before the fold, so which image happened to be searched first cannot
-        # change which rectangle survives as a duplicate's representative.
-        tolerance, matcher = self._live_search()
-        found: list[tuple[Template, RegionMatch]] = []
-        for template in templates:
-            matches = await asyncio.to_thread(
-                find_all_in_region,
-                template,
-                scene,
-                tolerance=tolerance,
-                max_diff=kind.max_diff,
-                limit=_MAX_MATCHES,
-                matcher=matcher,
-            )
-            found.extend((template, match) for match in matches)
-        found.sort(key=lambda pair: (pair[1].y, pair[1].x))
-        return _distinct_rects(region, found)
+        return await self._automation.find_all(kind, slot, scene=scene)
 
     async def _chatbox_region(self) -> ScreenRegion | None:
         """Which chat input box to poke right now, or None if none is known

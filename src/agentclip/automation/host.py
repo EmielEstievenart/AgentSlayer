@@ -9,8 +9,12 @@ answers are made of state a shell owns and this layer does not:
   shell's ``Config``) and what it LOOKS like (a ``ServiceProfile`` read off disk
   into the shell's own cache) - the same reason ``has_appearance`` has always
   been a callback;
-* where an appearance is on screen right now (``find_all``), which is the one
-  search that already had a shell-side stand-in the suites substitute;
+* where an appearance is on screen right now (``find_all``), which is here for
+  the reason the copy click below is and no other: it is the one search that
+  already had a shell-side stand-in the suites substitute, and a sequence that
+  called past the shell could not be handed an imaginary screen.
+  :meth:`AutomationController.find_all` is the implementation both shells
+  delegate to - the search itself is no longer a shell's;
 * the two acts that end a harvest and cannot live here: handing a non-protocol
   reply to the SESSION (``agentclip.app`` is above this layer) and rebuilding
   the detector set around a window the automation has just moved to (which

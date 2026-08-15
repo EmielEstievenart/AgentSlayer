@@ -161,6 +161,7 @@ from agentclip.automation.flow import (
     SNAP_SETTLE_S,
     SNAP_WHEEL_DETENTS,
     above_chatbox,
+    element_rects,
     how_close,
     lowest_match,
     lowest_match_scored,
@@ -1913,6 +1914,71 @@ class AutomationController:
                 severity="warning",
             )
         return clicked
+
+    async def find_all(
+        self,
+        kind: TemplateKind,
+        slot: AgentSlot | None = None,
+        *,
+        scene: RegionImage | None = None,
+    ) -> list[ScreenRegion]:
+        """Every place ``kind`` is on screen right now, in absolute coordinates.
+
+        The one primitive behind every "is it there / click it" question. It
+        looks *inside the drawn chat region* for the appearance THAT WINDOW's
+        own service captured, which is the whole point of the profile model: the
+        user drew one box per window, and everything inside it is recognised
+        rather than remembered, so moving or resizing the browser costs nothing.
+        Per window rather than per app because the two windows can be pointed at
+        two different services - a sub-agent chat whose copy icon looks nothing
+        like the master's is exactly the case this supports.
+
+        All of them rather than the first, with near-duplicate hits on one
+        physical element folded away first (``flow.element_rects``), so a list
+        longer than one really does mean two elements.
+
+        ``scene`` lets a caller that already captured the chat region reuse the
+        frame, so several appearances can be hunted in one picture of one
+        instant - which is why it may not be combined with ``slot``: the frame
+        was taken from one window, and translating its matches back through
+        another slot's rectangle would put them anywhere at all.
+
+        Empty - never raised - for every way this can come up empty: no chat
+        region drawn, no such appearance captured, the capture failed, or it
+        simply is not on screen.
+
+        This is the implementation BOTH shells' ``AutomationHost.find_all``
+        delegates to (``verified_copy_click``'s arrangement exactly): each of
+        them had spelled the same search out, because a shell may not import
+        another shell. What stays a host method is the SEAM - the sequences
+        above still ask through ``self._host``, because that indirection is what
+        the Textual suites substitute to put appearances on an imaginary screen.
+        """
+        if scene is not None and slot is not None:
+            raise ValueError("find_all takes a slot or a captured scene, never both")
+        target = slot if slot is not None else self._live
+        region = self.calibration(target).chat_region
+        if region is None:
+            return []
+        templates = self._host.profile_for(target).variants(kind)
+        if not templates:
+            return []
+        if scene is None:
+            try:
+                scene = await asyncio.to_thread(self._ops.capture, region)
+            except CaptureError:
+                return []
+        tolerance, matcher = self.live_search()
+        return await asyncio.to_thread(
+            element_rects,
+            self._ops.all_matches,
+            templates,
+            scene,
+            region,
+            max_diff=kind.max_diff,
+            tolerance=tolerance,
+            matcher=matcher,
+        )
 
     async def chatbox_region(self) -> ScreenRegion | None:
         """Which chat input box to poke right now, or None if none is known.

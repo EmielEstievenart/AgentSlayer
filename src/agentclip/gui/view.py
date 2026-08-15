@@ -103,22 +103,11 @@ from agentclip.screen.profile import ServiceProfile, TemplateKind
 from agentclip.screen.profile_store import load_profile
 from agentclip.screen.region import ScreenRegion
 from agentclip.screen.slot import AgentSlot, can_delegate, missing
-from agentclip.screen.template import (
-    RegionMatch,
-    Template,
-    find_all_in_region,
-    match_rect,
-    same_element,
-)
 
 # The finish-detector poll cadence, the TUI's own (tui/screens/main.py). Spelled
 # here rather than imported: the two shells may not import each other, and this
 # is a number the detector composition needs, not a shared decision.
 _BUSY_POLL_S = 0.5
-
-# How many matches of one appearance are worth collecting - the question a
-# search answers is "one, or more than one?" (see ``find_all``).
-_MAX_MATCHES = 8
 
 # Where a model's stated reason is clipped at the gate. The tools layer's own
 # number (``tools/shell.py``), spelled here with ``_reason_line``.
@@ -165,7 +154,7 @@ WINDOW_STATE_GLYPH: dict[str, str] = {
 
 # == the sidebar's words ======================================================
 # Everything from here to ``_service_options`` is ``tui/widgets/sidebar.py``'s,
-# spelled again for the reason ``_reason_line`` and ``_distinct_rects`` are: the
+# spelled again for the reason ``_reason_line`` is: the
 # two shells may not import each other (tests/test_layering.py), and widening
 # that boundary so a frontend could reach another frontend's display strings
 # would be a worse trade than a block of literals with a comment saying where
@@ -492,14 +481,14 @@ def _call_target(call: ToolCall) -> str:
 def _reason_line(call: ToolCall) -> str:
     """The model's own justification, as the gate shows it - or ``""``.
 
-    ``agentclip.tools.shell.reason_line``, spelled again here for the same
-    reason ``_distinct_rects`` below is: this shell may not import that layer
-    (tests/test_layering.py gives ``agentclip.gui`` the engine's VALUE types and
-    no tool code), and the alternative - widening the allowance so a view can
-    reach a display helper - would open the whole tools package to a frontend.
-    Six lines and a name that says where the original lives is the cheaper
-    duplication. It moves down beside the other shared display text if a third
-    caller ever appears.
+    ``agentclip.tools.shell.reason_line``, spelled again here rather than
+    imported: this shell may not import that layer (tests/test_layering.py gives
+    ``agentclip.gui`` the engine's VALUE types and no tool code), and the
+    alternative - widening the allowance so a view can reach a display helper -
+    would open the whole tools package to a frontend. Six lines and a name that
+    says where the original lives is the cheaper duplication. It moves down
+    beside the other shared display text if a third caller ever appears - which
+    is the route ``_distinct_rects`` took into ``agentclip.automation``.
     """
     flat = " ".join(call.params.get("reason", "").split())
     if not flat:
@@ -579,25 +568,6 @@ def _preview_fields(action: PendingAction) -> dict[str, str]:
     if action.preview.lstrip().startswith(("---", "+++", "@@")):
         fields["preview_kind"] = "diff"
     return fields
-
-
-def _distinct_rects(
-    region: ScreenRegion, found: list[tuple[Template, RegionMatch]]
-) -> list[ScreenRegion]:
-    """Scene-local matches as absolute rectangles, one per physical element.
-
-    The TUI's ``_distinct_rects``, spelled again here rather than imported: the
-    two shells may not import each other, and this is the fold that stops two
-    IMAGES of one control reading as two windows of the same service. It moves
-    down into ``agentclip.automation`` the moment the GUI grows calibration and
-    there are two real callers of it (parity backlog, gui.md §2).
-    """
-    kept: list[ScreenRegion] = []
-    for template, match in found:
-        rect = match_rect(region, template, match)
-        if not any(same_element(rect, other) for other in kept):
-            kept.append(rect)
-    return kept
 
 
 @dataclass(frozen=True, slots=True)
@@ -3061,42 +3031,15 @@ class GuiView:
         physical element folded away: an appearance belongs to the SERVICE, so a
         second window of the same service inside the drawn region carries the
         same button, and clicking whichever match came back first would click a
-        different conversation's (``MainScreen._find_all``, whose implementation
-        this is).
+        different conversation's. The search is the controller's
+        (``AutomationController.find_all``); this shell, like the TUI, only has
+        to keep the host method the sequences ask through.
 
         Empty - never raised - for every way this comes up empty, which in this
         slice is always: the GUI has no calibration surface, so no chat region
         is ever drawn.
         """
-        if scene is not None and slot is not None:
-            raise ValueError("find_all takes a slot or a captured scene, never both")
-        target = slot if slot is not None else self._automation.live_slot
-        region = self._automation.calibration(target).chat_region
-        if region is None:
-            return []
-        templates = self.profile_for(target).variants(kind)
-        if not templates:
-            return []
-        if scene is None:
-            try:
-                scene = await asyncio.to_thread(capture_region, region)
-            except CaptureError:
-                return []
-        tolerance, matcher = self._automation.live_search()
-        found: list[tuple[Template, RegionMatch]] = []
-        for template in templates:
-            matches = await asyncio.to_thread(
-                find_all_in_region,
-                template,
-                scene,
-                tolerance=tolerance,
-                max_diff=kind.max_diff,
-                limit=_MAX_MATCHES,
-                matcher=matcher,
-            )
-            found.extend((template, match) for match in matches)
-        found.sort(key=lambda pair: (pair[1].y, pair[1].x))
-        return _distinct_rects(region, found)
+        return await self._automation.find_all(kind, slot, scene=scene)
 
     async def verified_copy_click(self, target: ScreenRegion) -> bool:
         return await self._automation.verified_copy_click(target)

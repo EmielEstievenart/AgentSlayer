@@ -16,7 +16,7 @@ answers are made of state a shell owns and this layer does not:
   :meth:`AutomationController.find_all` is the implementation both shells
   delegate to - the search itself is no longer a shell's;
 * the two acts that end a harvest and cannot live here: handing a non-protocol
-  reply to the SESSION (``agentclip.app`` is above this layer) and rebuilding
+  reply to the SESSION (``agentclip.shell.app`` is above this layer) and rebuilding
   the detector set around a window the automation has just moved to (which
   needs the profile cache and the shell's readout);
 * the verified copy click, which is here rather than inlined for one reason

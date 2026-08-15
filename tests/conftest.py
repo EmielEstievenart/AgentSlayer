@@ -115,10 +115,10 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
     )
     # ...and again at main.py's bound names, which are the seam every caller uses.
     monkeypatch.setattr(
-        "agentclip.tui.screens.main.pick_region", _blocked_pick_region, raising=False
+        "agentclip.shell.tui.screens.main.pick_region", _blocked_pick_region, raising=False
     )
     monkeypatch.setattr(
-        "agentclip.tui.screens.main.draw_identify_overlay",
+        "agentclip.shell.tui.screens.main.draw_identify_overlay",
         _blocked_identify_overlay,
         raising=False,
     )
@@ -161,7 +161,7 @@ def _half_block_terminal() -> Any:
     no terminal to draw sixels on. Reset rather than forbidden: declaring the
     verdict IS the documented way into that path.
     """
-    from agentclip.tui.graphics import NO_SIXEL, set_terminal_graphics
+    from agentclip.shell.tui.graphics import NO_SIXEL, set_terminal_graphics
 
     set_terminal_graphics(NO_SIXEL)
     yield

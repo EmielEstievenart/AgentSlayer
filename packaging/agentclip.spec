@@ -67,24 +67,24 @@ textual_image_hidden = [
 ]
 
 # The GUI shell's page (docs/design/gui.md S2 and S5). These three files are
-# package data under src/agentclip/gui/assets - hatchling puts everything below
-# src/agentclip into the wheel, but PyInstaller collects only what a spec names,
-# so without this the frozen `--gui` opens a window on nothing.
+# package data under src/agentclip/shell/gui/assets - hatchling puts everything
+# below src/agentclip into the wheel, but PyInstaller collects only what a spec
+# names, so without this the frozen `--gui` opens a window on nothing.
 #
 # The destination keeps the PACKAGE-RELATIVE path, which is the whole point:
 # gui/shell.py resolves the directory with ``importlib.resources``
-# (``files("agentclip.gui") / "assets"``), never ``__file__``, and PyInstaller's
-# FrozenImporter answers that by looking under sys._MEIPASS at exactly this
-# layout. Copy them to the bundle root instead and the exe would carry the page
-# and still fail to find it - which is why `--gui-smoke` READS all three out of
-# the frozen build rather than trusting that they were collected.
+# (``files("agentclip.shell.gui") / "assets"``), never ``__file__``, and
+# PyInstaller's FrozenImporter answers that by looking under sys._MEIPASS at
+# exactly this layout. Copy them to the bundle root instead and the exe would
+# carry the page and still fail to find it - which is why `--gui-smoke` READS
+# all three out of the frozen build rather than trusting they were collected.
 #
 # Globbed rather than listed: shell.py's ASSET_NAMES is the contract for what
 # must be there, and a spec holding a second copy of that list is a fourth asset
 # away from silently shipping three.
-GUI_ASSETS = os.path.join(SRC, "agentclip", "gui", "assets")
+GUI_ASSETS = os.path.join(SRC, "agentclip", "shell", "gui", "assets")
 gui_datas = [
-    (os.path.join(GUI_ASSETS, name), "agentclip/gui/assets")
+    (os.path.join(GUI_ASSETS, name), "agentclip/shell/gui/assets")
     for name in sorted(os.listdir(GUI_ASSETS))
     if os.path.isfile(os.path.join(GUI_ASSETS, name))
 ]
@@ -116,17 +116,18 @@ hiddenimports = (
     # REACHABILITY, which is exactly what a lazy import makes fragile.
     + ["cv2", "numpy"]
     # The GUI shell (docs/design/gui.md). Same lazy shape again, twice over:
-    # cli.py imports agentclip.gui.shell only under --gui, and that module
-    # imports `webview` inside its functions, so nothing static reaches any of
-    # this. And pywebview itself is dynamic below that line - webview/guilib.py
-    # picks a backend per platform at import time, so ``webview.platforms.
-    # winforms`` (which is the Windows one, and which then chooses between
-    # edgechromium and mshtml by reading the EdgeUpdate registry keys AT IMPORT)
-    # is reachable only by name. Both renderers are named because that choice
-    # belongs to the USER'S machine, not to the build box: an exe frozen here,
-    # where WebView2 is present, must still land on a Windows install where it
-    # is not - and gui/shell.py's webview2_missing() check reads winforms'
-    # verdict, so it has to be able to import that module either way.
+    # cli.py imports agentclip.shell.gui.shell only under --gui, and that
+    # module imports `webview` inside its functions, so nothing static reaches
+    # any of this. And pywebview is itself dynamic below that line -
+    # webview/guilib.py picks a backend per platform at import time, so
+    # ``webview.platforms.winforms`` (which is the Windows one, and which then
+    # chooses between edgechromium and mshtml by reading the EdgeUpdate
+    # registry keys AT IMPORT) is reachable only by name. Both renderers are
+    # named because that choice belongs to the USER'S machine, not to the build
+    # box: an exe frozen here, where WebView2 is present, must still land on a
+    # Windows install where it is not - and gui/shell.py's webview2_missing()
+    # check reads winforms' verdict, so it has to be able to import that module
+    # either way.
     #
     # Collection below that needs no help: pywebview and pythonnet each ship a
     # PyInstaller hook through the `pyinstaller40` entry point (webview/

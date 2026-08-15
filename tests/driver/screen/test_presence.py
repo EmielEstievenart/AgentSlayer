@@ -154,7 +154,7 @@ def test_reset_forgets_the_streak() -> None:
 # ``generating_now`` exists because the two are not the same claim: for the
 # whole settling window after a reset the VERDICT says "generating" with
 # nothing on screen behind it, and the TUI armed its auto-copy off exactly that
-# (tests/tui/test_finish_signal_ui.py pins the screen's half). Everything above
+# (tests/shell/tui/test_finish_signal_ui.py pins the screen's half). Everything above
 # this line is the verdict's behaviour and is deliberately unchanged.
 
 

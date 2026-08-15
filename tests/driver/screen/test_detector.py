@@ -13,7 +13,7 @@ AND the capture**. A captured stop button nobody ticked is searched, sighted and
 remembered every frame, and produces no verdict any consumer could act on.
 
 The consumers (the send gate, the auto-copy flow) are tested where they live,
-in tests/tui - here they are deliberately absent, because the point is that
+in tests/shell/tui - here they are deliberately absent, because the point is that
 this module cannot see them.
 """
 

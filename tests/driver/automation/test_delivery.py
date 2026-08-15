@@ -7,7 +7,7 @@ the banner whose move it is now. This is where the CHOICES are asserted - which
 of those two paths a payload takes, when the Enter tap happens, what the banner
 says, and what a re-delivery or a retry may do at all.
 
-The real TIMING stays with the Pilot suites next door (``tests/tui``): the settle
+The real TIMING stays with the Pilot suites next door (``tests/shell/tui``): the settle
 between the click and the paste is the one behaviour whose whole point is that it
 is a real beat on a real event loop, and a fake that returns 0.0 would assert
 nothing about it. So every beat here is shrunk to nothing on purpose, and what is

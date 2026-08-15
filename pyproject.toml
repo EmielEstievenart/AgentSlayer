@@ -37,12 +37,12 @@ cv = [
 mcp = [
     "mcp>=2,<3",
 ]
-# The GUI shell (agentclip.gui): a native window rendering the packaged
+# The GUI shell (agentclip.shell.gui): a native window rendering the packaged
 # HTML/CSS/JS frontend through the WebView2 runtime Windows already ships
 # (docs/design/gui.md section 2). An extra rather than a runtime dependency for
 # the same reason as the others: the TUI is the default shell and must not pay
-# for a GUI it never opens, so `agentclip.gui.shell` imports pywebview lazily
-# inside its functions and cli.py only reaches for the package on --gui.
+# for a GUI it never opens, so `agentclip.shell.gui.shell` imports pywebview
+# lazily inside its functions and cli.py only reaches for the package on --gui.
 gui = [
     "pywebview>=5.3,<6",
 ]

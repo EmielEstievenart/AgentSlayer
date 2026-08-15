@@ -7,7 +7,7 @@ drive the same core later.
 
 May import ``agentclip.driver.screen``, ``agentclip.driver.clip`` and
 ``agentclip.config`` (the OS seams the loop is made of); must never import
-``textual``, ``agentclip.app`` or ``agentclip.tui`` - a shell may depend on the
+``textual``, ``agentclip.shell.app`` or ``agentclip.shell.tui`` - a shell may depend on the
 automation, never the other way round (enforced by tests/test_layering.py).
 """
 

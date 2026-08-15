@@ -1,6 +1,6 @@
 """AutomationController: the UI-agnostic screen-automation core.
 
-Sibling of :class:`~agentclip.app.controller.SessionController` and the same
+Sibling of :class:`~agentclip.shell.app.controller.SessionController` and the same
 kind of object: the state and the decisions behind what AgentClip does *to* the
 browser chat window, lifted out of the Textual ``MainScreen`` so a second shell
 can drive the identical loop. It talks to the UI only through the

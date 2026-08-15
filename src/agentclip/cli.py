@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentclip import __version__
-from agentclip.app.types import EngineRequest
 from agentclip.config import Config, default_remote_state_dir, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.screen.matchers import MATCHERS, select_matcher
@@ -41,8 +40,9 @@ from agentclip.executor.tools.skills import Skill, discover_skills
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.names import generate_chat_name
 from agentclip.protocol.spec import render_spec
-from agentclip.tui.app import AgentClipApp
-from agentclip.tui.graphics import probe_terminal
+from agentclip.shell.app.types import EngineRequest
+from agentclip.shell.tui.app import AgentClipApp
+from agentclip.shell.tui.graphics import probe_terminal
 
 if TYPE_CHECKING:  # paramiko rides in with SshHost, so the real import stays lazy
     from agentclip.executor.hosts.ssh import SshHost
@@ -404,7 +404,7 @@ def _gui_smoke() -> int:
     with no Evergreen runtime must not be able to fail a packaging check, and
     the renderer word is printed so the state is never merely assumed.
     """
-    from agentclip.gui.shell import ASSET_NAMES, asset_dir, webview2_missing
+    from agentclip.shell.gui.shell import ASSET_NAMES, asset_dir, webview2_missing
 
     try:
         import webview  # noqa: F401
@@ -676,8 +676,8 @@ def main(argv: list[str] | None = None) -> int:
     # shells therefore build the next session's Engine from whatever the editor
     # last saved, and neither touches a session already in flight.
     if args.gui:
-        from agentclip.gui.remote import RemoteConnect
-        from agentclip.gui.shell import run_gui
+        from agentclip.shell.gui.remote import RemoteConnect
+        from agentclip.shell.gui.shell import run_gui
 
         live_config = [config]
         # What the process currently OWNS, as opposed to what it was launched

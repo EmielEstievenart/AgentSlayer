@@ -4,7 +4,7 @@ Since slice 6 the OS-acting sequences are the AutomationController's: the
 harvest that fires when the detectors agree a reply finished, the find-then-click
 primitive under it, the hover-scan fallback, and the two calls that move the
 automation between browser windows. This is where their RULES are asserted; the
-Pilot suites in ``tests/tui`` stay as the wiring check that the real screen is
+Pilot suites in ``tests/shell/tui`` stay as the wiring check that the real screen is
 still plugged into them.
 
 Two seams make that possible and neither is the paint port. The machine is

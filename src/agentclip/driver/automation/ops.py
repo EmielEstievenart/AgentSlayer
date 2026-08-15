@@ -12,7 +12,7 @@ is what "the controller imports the screen layer" means in practice.
 
 It exists as an OBJECT rather than as bare module calls for one reason, and it
 is the same one slice 4 gave ``_poll_capture``: the Textual suites monkeypatch
-these primitives at ``agentclip.tui.screens.main``'s scope, because that is
+these primitives at ``agentclip.shell.tui.screens.main``'s scope, because that is
 where they were imported when this code lived on the screen. A shell may
 therefore hand in a subclass whose methods resolve ITS module's names per call,
 and the sequence it drives is then stubbed exactly as it always was. Nothing

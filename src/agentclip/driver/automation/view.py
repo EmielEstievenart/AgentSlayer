@@ -1,6 +1,6 @@
 """The ``AutomationView`` port: the narrow interface the automation drives.
 
-Sibling of :mod:`agentclip.app.view`, and deliberately the same shape. Where
+Sibling of :mod:`agentclip.shell.app.view`, and deliberately the same shape. Where
 ``ChatView`` decouples the *session orchestration* from the UI, this decouples
 the *screen automation* - the half of AgentClip that watches a browser chat
 window, clicks it, pastes into it and harvests the reply.
@@ -57,7 +57,7 @@ from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.screen.profile import TemplateKind
 
 # Same vocabulary as ``ChatView.notify``'s, spelled again rather than imported:
-# the automation layer may not import ``agentclip.app`` (tests/test_layering.py),
+# the automation layer may not import ``agentclip.shell.app`` (tests/test_layering.py),
 # and three words is a cheaper duplication than a shared leaf package.
 Severity = Literal["information", "warning", "error"]
 

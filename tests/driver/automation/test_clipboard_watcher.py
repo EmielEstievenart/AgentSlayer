@@ -8,7 +8,7 @@ one with a genuine ``join``, because a watcher that only *looks* stopped is
 exactly the bug this slice could introduce and the one a mocked thread would
 hide. So the threads are real and every test joins its own.
 
-The Pilot suite in ``tests/tui/test_armed_ui.py`` stays as the wiring check -
+The Pilot suite in ``tests/shell/tui/test_armed_ui.py`` stays as the wiring check -
 that the real screen is still plugged into this.
 """
 

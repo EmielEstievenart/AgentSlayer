@@ -2,7 +2,7 @@
 
 What the switch DOES to the machine (the clipboard watcher it stops, the four
 chokepoints that consult it, the banner and the toast) is the shell's and is
-covered by ``tests/tui/test_armed_ui.py``. What is asserted here is the part
+covered by ``tests/shell/tui/test_armed_ui.py``. What is asserted here is the part
 that now lives below every shell: what the flag reads after a target, and that
 the view is told - which is the only way a second frontend could ever draw it.
 """

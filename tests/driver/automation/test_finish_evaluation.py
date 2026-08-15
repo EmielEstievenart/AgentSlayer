@@ -1,7 +1,7 @@
 """The finish decision, without a terminal: what fires the auto-copy flow.
 
-The rules asserted here are the ones ``tests/tui/test_finish_signal_ui.py`` and
-``tests/tui/test_stale_detector_ui.py`` assert through a real Textual app and a
+The rules asserted here are the ones ``tests/shell/tui/test_finish_signal_ui.py`` and
+``tests/shell/tui/test_stale_detector_ui.py`` assert through a real Textual app and a
 real sidebar. Those suites stay - they are the wiring check, and the only proof
 that the screen is still plugged into this object - but they pay a whole app
 boot per scenario for rules that are pure state. This is the same scenarios

@@ -3,7 +3,7 @@
 service-editor persistence path (``save_services``): TOML merge/validation, round-tripping
 through load_config, minimal-diff writes, and the atomic-write mechanics. No
 Textual here - the pilot tests for the editor UI itself live in
-tests/tui/test_service_editor_ui.py."""
+tests/shell/tui/test_service_editor_ui.py."""
 
 from __future__ import annotations
 
@@ -1000,7 +1000,7 @@ def test_save_theme_creates_missing_parent_dirs(tmp_path: Path) -> None:
 # -- the active service: remembering what the sidebar's picker was last on -----
 #
 # The TUI wiring (switching in the sidebar calls the saver) is a pilot test, in
-# tests/tui/test_slot_ui.py. Everything below is the file format and its
+# tests/shell/tui/test_slot_ui.py. Everything below is the file format and its
 # round-trip: what lands in [general], and what load_config makes of it next
 # launch.
 

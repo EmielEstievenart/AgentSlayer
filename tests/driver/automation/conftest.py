@@ -1,10 +1,10 @@
 """A headless AutomationView so the automation core can be driven in microseconds.
 
-The sibling of ``tests/app/conftest.py`` and the same bargain:
+The sibling of ``tests/shell/app/conftest.py`` and the same bargain:
 :class:`~agentclip.driver.automation.controller.AutomationController` talks to its UI
 through exactly one narrow port (:class:`agentclip.driver.automation.view.AutomationView`),
 so everything it decides is testable without a terminal, a browser window or a
-mouse. The Pilot suites in ``tests/tui/`` stay as the wiring check - that the
+mouse. The Pilot suites in ``tests/shell/tui/`` stay as the wiring check - that the
 real screen is still plugged into this - but the *rules* are asserted here.
 
 :class:`FakeAutomationView` records; it scripts nothing, because nothing on this

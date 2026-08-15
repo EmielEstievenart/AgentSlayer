@@ -15,10 +15,10 @@ from pathlib import Path
 import pytest
 
 from agentclip import cli
-from agentclip.app.types import EngineRequest
 from agentclip.config import Config, load_config
 from agentclip.executor.hosts import FakeHost
 from agentclip.executor.hosts.ssh import SshError
+from agentclip.shell.app.types import EngineRequest
 
 REMOTE_ROOT = "/home/dev/app"
 

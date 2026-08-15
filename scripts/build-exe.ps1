@@ -114,9 +114,9 @@ try {
 
     # --- smoke test ----------------------------------------------------------
 
-    # cli.py imports agentclip.tui.app, which transitively imports every screen
-    # and widget. A missing hidden import fails here, at build time, instead of
-    # the first time a modal is opened.
+    # cli.py imports agentclip.shell.tui.app, which transitively imports every
+    # screen and widget. A missing hidden import fails here, at build time,
+    # instead of the first time a modal is opened.
     Write-Step 'Smoke-testing the frozen binary'
     $version = & $DistExe --version 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0 -or -not $version.Trim()) {

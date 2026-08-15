@@ -2,7 +2,7 @@
 
 The sibling of ``test_clipboard_watcher.py`` and the same bargain: what the
 detectors SEE has its own unit tests (``tests/driver/screen/test_detector.py``), and
-what a probe MEANS is still the shell's (``tests/tui/``, unchanged by this
+what a probe MEANS is still the shell's (``tests/shell/tui/``, unchanged by this
 slice). What is asserted here is the half that just moved down from
 ``MainScreen``: *ownership of the producing thread*. Who is polling, what a
 reading carries on its way out, which run it belongs to, and that a stop really

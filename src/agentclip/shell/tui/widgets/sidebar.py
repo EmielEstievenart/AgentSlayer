@@ -29,7 +29,7 @@ six capture buttons with six status lines had grown into two thirds of a 32-cell
 column. What is left is:
 
 * **STATE** - an eight-line rail at the very top of the column, one row per
-  ``automation.loop_state.LoopState``: the browser-automation loop (idle, auto/manual
+  ``driver.automation.loop_state.LoopState``: the browser-automation loop (idle, auto/manual
   insert, wait send, wait generate, auto/manual copy, interpreting), NOT the
   engine's task phase. The active state gets a ``▶`` marker and bold/reverse
   styling, ``LOOP_TRANSITIONS[active]``'s legal next moves read at normal

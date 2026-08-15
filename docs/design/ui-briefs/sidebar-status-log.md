@@ -6,10 +6,10 @@ in sync. Describes BEHAVIOR framework-neutrally; Textual specifics are called ou
 separately in section 7 so they are not copied by accident.
 
 Primary sources: `docs/design/tui.md` §1.2, §1.3, §3.3, §3.3a (`/log`), §3.3b, §3.4a–h,
-§3.5; `src/agentclip/tui/widgets/sidebar.py`; `src/agentclip/tui/widgets/statusbar.py`;
-`src/agentclip/tui/widgets/log_pane.py`; `src/agentclip/tui/loop_state.py`;
-`src/agentclip/tui/harness_log.py`; `src/agentclip/tui/screens/main.py`;
-`src/agentclip/app/view.py` (the `ChatView` protocol).
+§3.5; `src/agentclip/shell/tui/widgets/sidebar.py`; `src/agentclip/shell/tui/widgets/statusbar.py`;
+`src/agentclip/shell/tui/widgets/log_pane.py`; `src/agentclip/driver/automation/loop_state.py`;
+`src/agentclip/driver/automation/harness_log.py`; `src/agentclip/shell/tui/screens/main.py`;
+`src/agentclip/shell/app/view.py` (the `ChatView` protocol).
 
 ---
 
@@ -214,7 +214,7 @@ repaints nor logs (main.py:1663-1664).
 - **Sub-agent rebadging** — during a delegation every field on the bar (mode,
   service, out, turn, edits, instr) describes the **sub-agent's** engine, not the
   master's, because `SessionView.snapshot` is whichever engine the controller
-  currently has focused (`app/view.py` `SessionView.session_role`). The status bar
+  currently has focused (`shell/app/view.py` `SessionView.session_role`). The status bar
   itself carries no separate "which session" badge in this segment set — the
   sub-agent context is signaled elsewhere (gate title prefix, panel focus), not by
   a status-bar segment. (Verify against the live app if a second front end wants an
@@ -253,7 +253,7 @@ for a keystroke *right now* (sidebar.py:16-22, tui.md:134-138).
 This is the section that matters most for the AutomationView-port split. Two
 distinct data sources feed this surface:
 
-**A. `ChatView` port calls** (core-driven, protocol in `src/agentclip/app/view.py`) —
+**A. `ChatView` port calls** (core-driven, protocol in `src/agentclip/shell/app/view.py`) —
 these WILL be part of the shared `SessionController` core and must be implemented by
 any new front end:
 
@@ -273,7 +273,7 @@ settable value even pre-session) — main.py:4990.
 
 **B. TUI-internal automation state** (currently NOT behind any port; this is the part
 slated for extraction behind the new `AutomationView` port) — driven directly by
-`MainScreen`'s own screen-automation machinery (`agentclip.screen.*`: the poller,
+`MainScreen`'s own screen-automation machinery (`agentclip.driver.screen.*`: the poller,
 `PresenceTracker`, `StaleTracker`, the send gate, the auto-copy flow, the clipboard
 focus/paste primitives) and NOT reachable through `ChatView`:
 

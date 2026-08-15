@@ -109,7 +109,7 @@ from agentclip.driver.screen.template import (
 # three a click uses on demand. All of them, because what gets searched is a
 # question about the profile and not about the automation - and because a row
 # that can never say anything is not a readout. Same tuple, same order, as
-# ``tui.widgets.elements.ELEMENT_ORDER``: the column is the picture of this list.
+# ``shell.tui.widgets.elements.ELEMENT_ORDER``: the column is the picture of this list.
 RUNTIME_KINDS: tuple[TemplateKind, ...] = (
     TemplateKind.SEND_READY,
     TemplateKind.BUSY,

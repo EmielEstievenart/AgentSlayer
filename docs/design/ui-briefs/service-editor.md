@@ -3,7 +3,7 @@
 Audience: engineers building a second frontend (pywebview/HTML/JS) to reach
 feature parity with the Textual TUI, and maintainers keeping both UIs in
 sync. This describes BEHAVIOR, framework-neutrally. The Textual
-implementation is `src/agentclip/tui/screens/service_editor.py` (1302
+implementation is `src/agentclip/shell/tui/screens/service_editor.py` (1302
 lines); the binding design doc is `docs/design/tui.md` §1.4 (lines
 192-296). Cross-references below are `file:line`.
 
@@ -319,7 +319,7 @@ edited and reset but never deleted.
 
 ### 4.2 `ServiceProfile` / `TemplateKind` (the captured-appearance model)
 
-Source: `src/agentclip/screen/profile.py`.
+Source: `src/agentclip/driver/screen/profile.py`.
 
 `TemplateKind` is a `StrEnum` of exactly 7 members (`profile.py:99-108`),
 in this declaration order (the order the editor lists them in):
@@ -358,7 +358,7 @@ appearances.
 
 ### 4.3 Where profiles are stored
 
-Source: `src/agentclip/screen/profile_store.py`. One folder per service
+Source: `src/agentclip/driver/screen/profile_store.py`. One folder per service
 under a `profile_root` directory:
 
 ```
@@ -394,7 +394,7 @@ doesn't understand) but still read as "nothing captured."
 
 A capture is a two-step flow:
 
-1. `pick_region(prompt: str) -> ScreenRegion | None` (`screen/picker.py`)
+1. `pick_region(prompt: str) -> ScreenRegion | None` (`driver/screen/picker.py`)
    — opens an OS-level, full-screen "drag a box" overlay (a **separate
    process**, not a widget), pre-filled with the per-`TemplateKind`
    instructional prompt text (`TemplateKind.prompt`, `profile.py:37-75`
@@ -402,7 +402,7 @@ A capture is a two-step flow:
    screen ONLY while the model is generating... avoid animated
    spinners"*). Returns `None` if the user cancels (Esc); raises
    `ScreenPickError` on a picker failure.
-2. `capture_region(region) -> RegionImage` (`screen/capture.py:27-31`,
+2. `capture_region(region) -> RegionImage` (`driver/screen/capture.py:27-31`,
    `137-199`) — grabs the live pixels of that screen region. `RegionImage`
    is `{width: int, height: int, <BGRX pixel bytes, top-down rows,
    width*height*4 long>}`. Raises `CaptureError` on failure.
@@ -544,9 +544,9 @@ the whole screen result is `None` ("nothing happened here at all",
 `service_editor.py:1297-1301`) and the caller does nothing.
 
 **Who applies it** — `AgentClipApp._open_service_editor`
-(`src/agentclip/tui/app.py:780-825`), called from the F2 binding /
+(`src/agentclip/shell/tui/app.py:780-825`), called from the F2 binding /
 sidebar "Edit services..." button (`action_settings`,
-`tui/app.py:762-778`):
+`shell/tui/app.py:762-778`):
 
 1. Before opening, suspends the finish-signal detector poller for the
    whole visit — capturing an appearance throws a fullscreen overlay over
@@ -677,7 +677,7 @@ built from (`tui.md:295`).
 These are implementation artifacts of the terminal UI and should be
 replaced by native GUI equivalents, not ported:
 
-- **Hand-built slider widget** (`tui/widgets/slider.py`). Textual ships no
+- **Hand-built slider widget** (`shell/tui/widgets/slider.py`). Textual ships no
   slider control, so the tolerance control here is a bespoke
   track+handle+numeric-readout widget with arrow-key nudging, shift-arrow
   for ±8 steps, home/end, and click-to-jump on the track. A GUI frontend
@@ -703,7 +703,7 @@ replaced by native GUI equivalents, not ported:
     construction; this entire constraint (and the "appearance column can
     never scroll" layout rule that follows from it) has no reason to
     exist outside a terminal.
-  - the 12×2-cell half-block averaging path (`tui/pixels.py`
+  - the 12×2-cell half-block averaging path (`shell/tui/pixels.py`
     `thumbnail`/`half_block_text`) — purely a "no real graphics
     available" degradation.
 - **`push_screen_wait` / worker hand-off requirement**: opening the editor
@@ -715,7 +715,7 @@ replaced by native GUI equivalents, not ported:
   `action_settings`/`action_close`/the forget-flow's confirm are all
   `def`s that immediately do `self.run_worker(self._async_version(),
   ...)` rather than being `async def` themselves
-  (`service_editor.py:1274-1284`, `1209-1213`; `tui/app.py:762-778`).
+  (`service_editor.py:1274-1284`, `1209-1213`; `shell/tui/app.py:762-778`).
   This two-step "sync entry point hands off to an async worker" dance is
   purely a Textual event-loop constraint. A GUI/JS frontend built on a
   single async event loop (or on promises/callbacks) can simply call an

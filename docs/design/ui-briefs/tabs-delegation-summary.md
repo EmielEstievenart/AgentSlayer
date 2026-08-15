@@ -2,15 +2,15 @@
 
 Audience: engineers building a second frontend (pywebview/HTML/JS) that must
 reach feature parity with the Textual TUI, and maintainers keeping both UIs in
-sync. The shared core is `SessionController` (`src/agentclip/app/controller.py`)
-driving a `ChatView` protocol (`src/agentclip/app/view.py`); this brief
+sync. The shared core is `SessionController` (`src/agentclip/shell/app/controller.py`)
+driving a `ChatView` protocol (`src/agentclip/shell/app/view.py`); this brief
 describes the **behavior** a second `ChatView` implementation must reproduce,
 not the Textual widgets that happen to implement it today.
 
 Primary sources: `docs/design/tui.md` §1.2, §1.5, §1.6, §3.4c, §3.4e;
-`src/agentclip/tui/widgets/window_tabs.py`; `src/agentclip/tui/screens/summary.py`;
-`src/agentclip/tui/screens/main.py`; `src/agentclip/app/view.py`;
-`src/agentclip/app/controller.py`; `src/agentclip/app/types.py`.
+`src/agentclip/shell/tui/widgets/window_tabs.py`; `src/agentclip/shell/tui/screens/summary.py`;
+`src/agentclip/shell/tui/screens/main.py`; `src/agentclip/shell/app/view.py`;
+`src/agentclip/shell/app/controller.py`; `src/agentclip/shell/app/types.py`.
 
 ---
 
@@ -126,7 +126,7 @@ controller via `focus_session_view`.
 ### 3.3 Master vs. sub-agent badge
 
 While a delegated run is in flight, `SessionView.session_role == "subagent"`
-(`app/view.py:88`) and every piece of chrome that reports "what is currently
+(`shell/app/view.py:88`) and every piece of chrome that reports "what is currently
 happening" is re-derived from the sub-agent's state, not the master's:
 
 - **Status bar watch segment**: rebadged `◆ SUB-AGENT · <phase text>`, style
@@ -175,7 +175,7 @@ with it (this happens as part of `_run_subagent`'s `finally`, §4).
 
 ## 4. Inputs from core
 
-The `ChatView` protocol (`src/agentclip/app/view.py`) is the whole contract.
+The `ChatView` protocol (`src/agentclip/shell/app/view.py`) is the whole contract.
 Methods relevant to this surface:
 
 ```python
@@ -209,7 +209,7 @@ class SessionView:
     session_role: Role = "master"      # "master" | "subagent"
     session_title: str = ""
 ```
-(`app/view.py:66–89`)
+(`shell/app/view.py:66–89`)
 
 ### `SessionRef` — the identity carried across the port
 
@@ -221,7 +221,7 @@ class SessionRef:
     title: str        # short label for the transcript tab/divider
     chat_name: str    # the generated chat name this session's replies must carry
 ```
-(`app/types.py:66–78`). `title` comes from `_short_title(req.task)` on the
+(`shell/app/types.py:66–78`). `title` comes from `_short_title(req.task)` on the
 controller side (a squeezed first line of the delegated task).
 
 ### Call sequence for one delegated run (controller → view)

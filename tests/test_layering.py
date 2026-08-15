@@ -1,26 +1,33 @@
 """Enforce the architecture's import direction with ast (architecture.md section 0).
 
-    tui ─┐                             tui & cli are the ONLY importers of textual
-    gui ─┴► clip                       gui is the ONLY importer of pywebview
-     ├──► automation ──► clip/screen   (the shared core, also a clip/screen importer)
-     └──► engine ──► tools ──► sandbox
-            │  └──► store
-            └──► protocol (leaf)
+Three named layers sit above the engine - SHELL (the UIs), DRIVER (what
+AgentClip does to the desktop chat app it operates) and EXECUTOR (permission-
+gated execution, reaching the machine through the Host seam):
+
+    SHELL  shell/tui ─┐                tui & cli are the ONLY importers of textual
+           shell/gui ─┴► driver/clip   gui is the ONLY importer of pywebview
+            ├──► shell/app ──► engine
+            └──► DRIVER: driver/automation ──► driver/clip, driver/screen
+                         (the shared core, also a clip/screen importer)
+    engine ──► EXECUTOR: executor/tools ──► sandbox
+      │  └──► engine/store
+      └──► protocol (leaf)
     config (leaf) ◄── imported by everyone
-     ├──► permissions (leaf: the rule model, also used by engine/approval)
-     ├──► mcp (leaf: opencode.json's mcp block - types/reader for config,
-     │         the client runtime for tools; docs/design/mcp.md)
-     └──► hosts (to read the project's .agentclip.toml off the project's machine)
-    hosts (leaf: the OS seam - config/tools/store/engine touch files and run
-           commands only through it, so a remote host can take the local one's
-           place; paramiko lives in hosts/ssh.py and nowhere else. One
-           exception, hosts/connect.py: the remote connect sequence both shells
+     ├──► executor/permissions (leaf: the rule model, also used by engine/approval)
+     ├──► executor/mcp (leaf: opencode.json's mcp block - types/reader for config,
+     │                  the client runtime for tools; docs/design/mcp.md)
+     └──► executor/hosts (to read the project's .agentclip.toml off its machine)
+    executor/hosts (leaf: the OS seam - config, executor/tools, engine/store and
+           engine touch files and run commands only through it, so a remote host
+           can take the local one's place; paramiko lives in
+           executor/hosts/ssh.py and nowhere else. One exception,
+           executor/hosts/connect.py: the remote connect sequence both shells
            drive, whose first and last steps are config loads - it is the only
            module here that may import config, and nothing in the package
            imports IT, so the cycle never closes)
 
 Only module-level imports count: lazy third-party imports inside functions
-(e.g. copykitten in the clip providers) are allowed.
+(e.g. copykitten in the driver's clip providers) are allowed.
 """
 
 from __future__ import annotations
@@ -32,9 +39,19 @@ from pathlib import Path
 SRC = Path(__file__).resolve().parent.parent / "src" / "agentclip"
 STDLIB = frozenset(sys.stdlib_module_names)
 
+# Names that match ONLY themselves, never as a package prefix: the root package
+# (whose __init__ is __version__) and the three layer packages of
+# architecture.md section 0, whose __init__.py files are a docstring and nothing
+# else. Listing them here is what lets the bare-layer RULES entries at the
+# bottom pin those four files import-free without swallowing everything
+# underneath them.
+EXACT_ONLY = frozenset(
+    {"agentclip", "agentclip.driver", "agentclip.executor", "agentclip.shell"}
+)
+
 # Per-layer allowed import roots beyond the stdlib. An entry matches the
-# imported module name exactly or as a package prefix, EXCEPT the bare
-# "agentclip" entry which matches only the root package itself (__version__).
+# imported module name exactly or as a package prefix, except for the EXACT_ONLY
+# names above.
 RULES: list[tuple[str, frozenset[str]]] = [
     # permissions: a stdlib-only leaf below config, so the same rule model can be
     # loaded by config.py and applied by engine/approval.py.
@@ -57,10 +74,11 @@ RULES: list[tuple[str, frozenset[str]]] = [
         frozenset({"agentclip.config", "agentclip.executor.hosts", "paramiko"}),
     ),
     # hosts: the OS seam (this PC's subprocess/fs, or a machine over SSH). A
-    # leaf like permissions, so tools/store/engine can all resolve their file
-    # and command access through the same object. Stdlib-only except for the
-    # one third-party client the remote implementation IS - and that one is
-    # confined to hosts/ssh.py (see test_paramiko_only_in_the_ssh_host).
+    # leaf like permissions, so executor/tools, engine/store and the engine can
+    # all resolve their file and command access through the same object.
+    # Stdlib-only except for the one third-party client the remote
+    # implementation IS - and that one is confined to executor/hosts/ssh.py
+    # (see test_paramiko_only_in_the_ssh_host).
     ("agentclip.executor.hosts", frozenset({"agentclip.executor.hosts", "paramiko"})),
     # mcp: OpenCode's mcp block (types + reader + client runtime). A leaf like
     # permissions and for the same reason: config.py LOADS the servers where
@@ -133,8 +151,9 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
-    # app: UI-agnostic orchestration layer. Drives the engine through the ChatView
-    # port; imports engine/protocol/store/config but NOT textual, clip, or tui.
+    # shell.app: the Shell's UI-agnostic orchestration layer. Drives the engine
+    # through the ChatView port; imports engine/engine.store/protocol/config but NOT
+    # textual, driver.clip, or shell.tui.
     (
         "agentclip.shell.app",
         frozenset(
@@ -148,11 +167,11 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
-    # automation: the screen-automation core both UI shells drive (Textual today,
-    # a pywebview GUI later). It IS the loop that watches and clicks the chat
-    # window, so it needs screen/clip the way tui and cli do - but it must never
-    # import textual, app, or tui: a shell depends on the automation, never the
-    # other way round.
+    # driver.automation: the Driver's core, which both UI shells drive (Textual
+    # today, a pywebview GUI later). It IS the loop that watches and clicks the
+    # chat window, so it needs driver.screen/driver.clip the way tui and cli do -
+    # but it must never import textual, shell.app, or shell.tui: a shell depends
+    # on the Driver, never the other way round.
     (
         "agentclip.driver.automation",
         frozenset(
@@ -192,7 +211,7 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.engine",
                 # The OS seam, and only for the surface increment 7 built: the
                 # connect dialog IS the construction of a remote host
-                # (`hosts.connect`), and the sidebar's link indicator reads the
+                # (`executor.hosts.connect`), and the sidebar's link indicator reads the
                 # host it made. cli.py has always named this layer for the same
                 # reason - deciding which machine a session runs on is a launch
                 # question, and this shell is now one of the two places a human
@@ -205,6 +224,16 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
+    # The three layer packages themselves. They come LAST, below every rule that
+    # names something inside them, because first match wins - and they are
+    # EXACT_ONLY, so they govern exactly one file each: driver/__init__.py,
+    # executor/__init__.py, shell/__init__.py. Each is a docstring saying what
+    # the layer is for and nothing else, which is the point: a layer package
+    # that re-exported its contents would make "import the shell" pull in
+    # Textual, pywebview and the whole OS seam at once.
+    ("agentclip.driver", frozenset()),
+    ("agentclip.executor", frozenset()),
+    ("agentclip.shell", frozenset()),
 ]
 
 # Modules allowed to import textual: the UI shells themselves and nothing else.
@@ -253,8 +282,8 @@ def module_level_imports(path: Path) -> set[str]:
 
 
 def _matches(imported: str, allowed: str) -> bool:
-    if allowed == "agentclip":  # bare root: __version__ only, not a wildcard
-        return imported == "agentclip"
+    if allowed in EXACT_ONLY:  # bare root / layer package: never a wildcard
+        return imported == allowed
     return imported == allowed or imported.startswith(allowed + ".")
 
 
@@ -286,10 +315,10 @@ def test_layer_rules() -> None:
 def test_only_tui_and_cli_import_clip_screen_or_textual() -> None:
     """Two allowances, deliberately different in width.
 
-    ``clip``/``screen`` are the OS seams the automation core is MADE of, so the
-    shared core may reach them alongside the UI shells. ``textual`` is one
+    ``driver.clip``/``driver.screen`` are the OS seams the Driver's core is MADE
+    of, so it may reach them alongside the UI shells. ``textual`` is one
     frontend's toolkit and stays scoped to the true shells - the moment the
-    automation imports it, the pywebview GUI can no longer drive it.
+    Driver imports it, the pywebview GUI can no longer drive it.
     """
     violations: list[str] = []
     for path in all_modules():
@@ -303,15 +332,18 @@ def test_only_tui_and_cli_import_clip_screen_or_textual() -> None:
             allowed = may_import_textual if is_textual else may_import_os_layers
             if (is_textual or is_os_import) and not allowed:
                 violations.append(f"{mod} imports {imported}")
-    assert not violations, "clip/screen/textual leaked outside tui/cli:\n" + "\n".join(violations)
+    assert not violations, (
+        "driver.clip/driver.screen/textual leaked outside the shells and cli:\n"
+        + "\n".join(violations)
+    )
 
 
 def test_paramiko_only_in_the_ssh_host() -> None:
     """The SSH client is one module's business.
 
-    hosts/ssh.py IS paramiko wearing the Host interface, so it imports it; every
-    other module - including hosts/base.py, which everything above the seam
-    imports - must stay clear, so a local session never loads a crypto stack it
+    executor/hosts/ssh.py IS paramiko wearing the Host interface, so it imports
+    it; every other module - including executor/hosts/base.py, which everything
+    above the seam imports - must stay clear, so a local session never loads a crypto stack it
     has no use for.
     """
     allowed = SRC / "executor" / "hosts" / "ssh.py"
@@ -348,7 +380,8 @@ def test_gui_never_imports_textual() -> None:
     A ``textual`` import here (or a reach into ``agentclip.shell.tui`` for a
     widget, a message, a helper) would make the GUI a Textual app in disguise
     and put the TUI's toolkit in the way of every GUI-only install. What the
-    shells share, they share BELOW themselves: app, automation, clip, screen.
+    shells share, they share BELOW themselves: shell.app, and the whole Driver -
+    automation, clip, screen.
     """
     gui_files = sorted((SRC / "shell" / "gui").rglob("*.py"))
     assert gui_files
@@ -362,7 +395,7 @@ def test_gui_never_imports_textual() -> None:
 
 
 def test_engine_never_imports_ui_or_clipboard() -> None:
-    engine_files = sorted((SRC / "engine").glob("*.py"))
+    engine_files = sorted((SRC / "engine").rglob("*.py"))
     assert engine_files
     for path in engine_files:
         for imported in module_level_imports(path):
@@ -377,11 +410,11 @@ def test_engine_never_imports_ui_or_clipboard() -> None:
 
 
 def test_automation_never_imports_textual_or_app() -> None:
-    """The shared automation core must outlive any one shell.
+    """The Driver's core must outlive any one shell.
 
-    It may touch screen/clip (it is the loop that drives them), but a Textual
-    import - or a reach back up into app/tui - would weld it to today's
-    frontend and leave the pywebview GUI nothing to share.
+    It may touch driver.screen/driver.clip (it is the loop that drives them), but
+    a Textual import - or a reach back up into shell.app/shell.tui - would weld it
+    to today's frontend and leave the pywebview GUI nothing to share.
     """
     automation_files = sorted((SRC / "driver" / "automation").rglob("*.py"))
     assert automation_files

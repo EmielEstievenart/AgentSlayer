@@ -453,7 +453,7 @@ class GuiRuntime:
     """A :class:`Launch` after everything derived from it has been built.
 
     What the GUI's connect dialog gets back when it goes remote mid-window
-    (``gui/remote.py:RemoteRuntime``, structurally): the config read off the
+    (``shell/gui/remote.py:RemoteRuntime``, structurally): the config read off the
     target, the engine factory over its host, and the MCP runtime built from ITS
     servers. The TUI has no equivalent because its launch cannot change - the
     process is already inside ``app.run()`` by the time a user could ask.
@@ -507,7 +507,7 @@ def confirm_host_key(hostname: str, keytype: str, fingerprint: str) -> bool:
 
 
 def _parse_environment(text: str) -> dict[str, str]:
-    """``printenv`` output as a mapping - :func:`hosts.connect.parse_environment`.
+    """``printenv`` output as a mapping - :func:`executor.hosts.connect.parse_environment`.
 
     Kept as a name here because it is what the launch tests call; the rule it
     encodes moved down with the sequence it belongs to.

@@ -8,10 +8,10 @@ Textual mechanics that implement it (priority bindings, focus routing,
 mistaken for contract.
 
 Primary sources: `docs/design/tui.md` (§§1.1, 1.3, 1.5, 2.4, 2.6a, 3.3a,
-3.3c, 3.4a, 3.5, 8, 9, 10); `src/agentclip/tui/screens/settings.py`,
+3.3c, 3.4a, 3.5, 8, 9, 10); `src/agentclip/shell/tui/screens/settings.py`,
 `help.py`, `confirm.py`, `text_entry.py`, `summary.py`, `main.py`;
-`src/agentclip/tui/app.py`; `src/agentclip/tui/widgets/composer.py`,
-`action_panel.py`; `src/agentclip/app/commands.py`, `controller.py`,
+`src/agentclip/shell/tui/app.py`; `src/agentclip/shell/tui/widgets/composer.py`,
+`action_panel.py`; `src/agentclip/shell/app/commands.py`, `controller.py`,
 `view.py`.
 
 ---
@@ -25,13 +25,13 @@ behavior, permission-mode cycling, the ARMED/DISARMED switch, and the
 bell/toast notification policy. It is the parity contract for a second
 frontend because almost none of it is optional chrome — `shift+tab`,
 `F5`, the `Esc` stages and the ask-user-wins-over-slash-parsing rule are
-load-bearing invariants the core (`app/controller.py`, `app/commands.py`)
+load-bearing invariants the core (`shell/app/controller.py`, `shell/app/commands.py`)
 was written to, not presentation choices a GUI is free to reinterpret.
 
 The one hard rule that must survive porting word-for-word: **while the
 composer is parked on an `ask_user` answer, whatever the user typed is
 delivered to the model verbatim — never parsed as a slash command.**
-(`app/controller.py:541-554`, `submit_message`). A GUI text box that ran
+(`shell/app/controller.py:541-554`, `submit_message`). A GUI text box that ran
 its own command-parsing before checking "are we in answer mode?" would
 silently eat a legitimate answer like `/etc/hosts` or `/no`.
 
@@ -51,9 +51,9 @@ AgentClipApp
 ├── HelpScreen[None]            # F1 / ?
 └── TextEntryScreen[str|None]   # manual-paste fallback for force-ingest
 ```
-(`docs/design/tui.md:14-19`; `src/agentclip/tui/app.py:29-33`)
+(`docs/design/tui.md:14-19`; `src/agentclip/shell/tui/app.py:29-33`)
 
-### 2.2 SettingsScreen (F4) — `src/agentclip/tui/screens/settings.py`
+### 2.2 SettingsScreen (F4) — `src/agentclip/shell/tui/screens/settings.py`
 
 A `ModalScreen[str | None]`. One `TabbedContent` with a single
 "Appearance" tab (deliberately over-structured for tabs that don't exist
@@ -80,11 +80,11 @@ staged edit. `Save` just hands back whatever theme is currently applied
 active when the screen opened (`_initial_theme`) before dismissing with
 `None` (`settings.py:91-93`).
 
-### 2.3 HelpScreen (F1 / `?`) — `src/agentclip/tui/screens/help.py`
+### 2.3 HelpScreen (F1 / `?`) — `src/agentclip/shell/tui/screens/help.py`
 
 A `ModalScreen[None]`, one scrolling block of prose plus one **generated**
 section. The chat-commands section (`commands_block()`, `help.py:25-29`)
-is rendered from `agentclip.app.commands.COMMANDS` — the exact same tuple
+is rendered from `agentclip.shell.app.commands.COMMANDS` — the exact same tuple
 that drives the slash-command popup, the `/help` note, and the
 "unknown command" hint — so a second frontend that renders its own help
 screen must pull from that same registry rather than hand-writing prose,
@@ -96,7 +96,7 @@ tabs, sub-agents, approval keys, permission mode, session keys, App
 (function-key) section, then a one-paragraph loop summary. Bindings:
 `escape`, `f1`, `q` all close it (`help.py:122`).
 
-### 2.4 ConfirmScreen — `src/agentclip/tui/screens/confirm.py`
+### 2.4 ConfirmScreen — `src/agentclip/shell/tui/screens/confirm.py`
 
 A `ModalScreen[bool]`, the generic y/n dialog. Constructor takes
 `(title, body="")`. Renders a title `Static`, an optional body `Static`,
@@ -111,12 +111,12 @@ this implies against the doc's own screen-inventory comment):
 
 | Use | Title | Body | Call site |
 |---|---|---|---|
-| Undo last turn | "Undo the most recent turn?" | explains restore + revert-notice copy | `app/controller.py:2070-2075` (`_undo_flow`) |
-| Quit mid-turn | "Quit mid-turn?" | explains the turn is incomplete, backups kept | `tui/app.py:861-867` (`_confirm_quit`) |
-| Discard invalid edit on close (Service Editor, F2) | "Discard the pending edit?" | names the validation error | `tui/screens/service_editor.py:1288-1294` |
-| Forget captured appearances (Service Editor, F2) | "Forget the `<key>` appearance?" | explains captured images are deleted | `tui/screens/service_editor.py:1225-1232` |
+| Undo last turn | "Undo the most recent turn?" | explains restore + revert-notice copy | `shell/app/controller.py:2070-2075` (`_undo_flow`) |
+| Quit mid-turn | "Quit mid-turn?" | explains the turn is incomplete, backups kept | `shell/tui/app.py:861-867` (`_confirm_quit`) |
+| Discard invalid edit on close (Service Editor, F2) | "Discard the pending edit?" | names the validation error | `shell/tui/screens/service_editor.py:1288-1294` |
+| Forget captured appearances (Service Editor, F2) | "Forget the `<key>` appearance?" | explains captured images are deleted | `shell/tui/screens/service_editor.py:1225-1232` |
 
-### 2.5 TextEntryScreen — `src/agentclip/tui/screens/text_entry.py`
+### 2.5 TextEntryScreen — `src/agentclip/shell/tui/screens/text_entry.py`
 
 A `ModalScreen[str | None]`, a multi-line `TextArea` fallback. Per its own
 docstring: "Follow-up messages and ask_user answers now go through the
@@ -128,7 +128,7 @@ can't eat them) submit; `escape` cancels (`text_entry.py:20-26`).
 `action_submit` dismisses with the typed text if non-empty (stripped),
 else `None` (`text_entry.py:44-46`).
 
-**The one live call site**: `app/controller.py:2111-2120`
+**The one live call site**: `shell/app/controller.py:2111-2120`
 (`_force_ingest_flow`) — when `i` (force-ingest) finds nothing on the
 clipboard (empty, or the clipboard provider is dead), it prompts
 `"Paste the model's reply"` / `"the clipboard had no text - paste the
@@ -137,13 +137,13 @@ provider-death case in §8 of `tui.md` — there is no separate modal for
 that; an unreadable clipboard just means `read_clipboard()` returns
 `None`, which routes into the same prompt.
 
-### 2.6 SummaryScreen (end session, `e`) — `src/agentclip/tui/screens/summary.py`
+### 2.6 SummaryScreen (end session, `e`) — `src/agentclip/shell/tui/screens/summary.py`
 
 A `ModalScreen[str]`, pushed on demand via `e` — **not** auto-pushed on
 `task_done` (the user may keep following up; `summary.py:1-5`). Renders a
 Rich `Table` of stats (turns, tool-call counts, files touched, chars
 copied both ways, sub-agent run count when applicable — built by
-`app/controller.py:2008-2023`, `_stats_rows`) plus the model's
+`shell/app/controller.py:2008-2023`, `_stats_rows`) plus the model's
 `task_done` summary text as `Markdown`. Bindings: `u` (undo last turn) →
 `dismiss("undo")`; `t` (new session) → `dismiss("new")`; `l` (export chat
 log) → `dismiss("export")`; `escape` → `dismiss("close")`
@@ -334,7 +334,7 @@ status push required (`main.py:2507-2524`).
 ## 4. Inputs from core
 
 Four blocking calls on the `ChatView` port
-(`src/agentclip/app/view.py:253-259`) that the controller `await`s
+(`src/agentclip/shell/app/view.py:253-259`) that the controller `await`s
 directly — a GUI implementation must provide async equivalents with
 these exact return semantics, since the controller's flow logic branches
 on them:
@@ -431,7 +431,7 @@ safety mechanism for text inputs; only chords and function keys are
 
 ### 5.2 Slash commands
 
-One registry, `agentclip/app/commands.py:67-108`, in **registry order**
+One registry, `agentclip/shell/app/commands.py:67-108`, in **registry order**
 (also popup order — order is a deliberate safety property: harmless/
 reversible commands first, `/yolo` last, so no stray keystroke near the
 top of the list can disable every approval gate):

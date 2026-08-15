@@ -7,11 +7,11 @@ mechanics are called out separately in §7 so they are not mistaken for product
 requirements.
 
 Primary sources: `docs/design/tui.md` §1.2, §1.7, §3.3a ("`/identify`"), §3.4e,
-§3.4f; `src/agentclip/tui/widgets/elements.py`; `src/agentclip/tui/graphics.py`;
-`src/agentclip/tui/pixels.py`; `src/agentclip/tui/messages.py`;
-`src/agentclip/tui/screens/main.py`; `src/agentclip/screen/identify.py`;
-`src/agentclip/screen/overlay.py`; `src/agentclip/screen/picker.py`;
-`src/agentclip/app/view.py`.
+§3.4f; `src/agentclip/shell/tui/widgets/elements.py`; `src/agentclip/shell/tui/graphics.py`;
+`src/agentclip/shell/tui/pixels.py`; `src/agentclip/shell/tui/messages.py`;
+`src/agentclip/shell/tui/screens/main.py`; `src/agentclip/driver/screen/identify.py`;
+`src/agentclip/driver/screen/overlay.py`; `src/agentclip/driver/screen/picker.py`;
+`src/agentclip/shell/app/view.py`.
 
 ---
 
@@ -57,7 +57,7 @@ sidebar"). Top to bottom:
    describe. `elements.elements_title()` / `ElementsPanel.show_window()`.
 2. **One row per `TemplateKind`**, all seven, in a fixed order
    (`elements.ELEMENT_ORDER == screen.detector.RUNTIME_KINDS`,
-   `src/agentclip/screen/detector.py:113-121`):
+   `src/agentclip/driver/screen/detector.py:113-121`):
    1. send button (`SEND_READY`)
    2. busy icon (`BUSY`)
    3. idle icon (`IDLE`)
@@ -93,7 +93,7 @@ A separate, full-desktop surface, not part of the main window at all:
 
 1. **Prompt line**, centred near the top: *"What AgentClip sees in the chat
    window · click or press any key to dismiss"* (`IDENTIFY_PROMPT`,
-   `screen/overlay.py:37`).
+   `driver/screen/overlay.py:37`).
 2. **One outlined rectangle per identified element**, each in a colour shared
    by every element of the same kind, assigned in first-appearance order
    (`_identify_colours`, `overlay.py:156-166`). The drawn chat region itself
@@ -116,7 +116,7 @@ A separate, full-desktop surface, not part of the main window at all:
 Dismissal (click anywhere, or any keypress) produces a **toast/summary
 message** back in the main UI once the overlay closes: either a count broken
 down by kind (*"identified 4 elements: copy×3, new-chat×1"*) or an explanation
-when nothing but the chat region matched (`screen/identify.py:141-157`,
+when nothing but the chat region matched (`driver/screen/identify.py:141-157`,
 `summarise()`).
 
 ---
@@ -188,7 +188,7 @@ when nothing but the chat region matched (`screen/identify.py:141-157`,
 ```
 RegionImage(width: int, height: int, pixels: bytes)
 ```
-`src/agentclip/screen/capture.py:27-32`. `pixels` is **BGRX**, top-down rows,
+`src/agentclip/driver/screen/capture.py:27-32`. `pixels` is **BGRX**, top-down rows,
 exactly `width * height * 4` bytes — 4 bytes per pixel, blue first, 4th byte
 **undefined** (not alpha). This is the on-the-wire crop format used
 everywhere in this surface.
@@ -196,9 +196,9 @@ everywhere in this surface.
 ### 4.2 `ElementCrop` / `ElementsMatched` — the panel's live feed
 
 ```
-ElementCrop(image: RegionImage, diff: float)          # tui/messages.py:169-183
+ElementCrop(image: RegionImage, diff: float)          # shell/tui/messages.py:169-183
 ElementsMatched(crops: Mapping[TemplateKind, ElementCrop | None], generation: int)
-                                                        # tui/messages.py:186-216
+                                                        # shell/tui/messages.py:186-216
 ```
 
 - `crops` maps each `TemplateKind` that was searched **this tick** to either
@@ -206,7 +206,7 @@ ElementsMatched(crops: Mapping[TemplateKind, ElementCrop | None], generation: in
   `None` (searched, not found). **A kind absent from the map** means "not
   searched this tick" (the live service is not calibrated for that kind at
   all) — the frontend must leave that row exactly as it last was, not blank
-  it (`tui/messages.py:186-200`).
+  it (`shell/tui/messages.py:186-200`).
 - A tick whose capture fails posts **no message at all** — a dropped frame is
   not evidence about anything and must not blank any row
   (`elements.py:267-276`; `tui.md` §1.7 last paragraph).
@@ -242,9 +242,9 @@ match **for whichever renderer is live**, still in the worker thread:
 
 - **Renderer-neutral (keep this in a GUI, it's not terminal policy):**
   - The crop cut from the frame is the **matched rectangle only** (icon-sized,
-    not the whole chat window) — `pixels.crop`, `src/agentclip/tui/pixels.py:126-158`.
+    not the whole chat window) — `pixels.crop`, `src/agentclip/shell/tui/pixels.py:126-158`.
   - BGRX→RGB conversion must treat the 4th byte as **ignored, not alpha**
-    (`tui/graphics.py:272-288`, `region_to_pil`, raw mode `"BGRX"` not
+    (`shell/tui/graphics.py:272-288`, `region_to_pil`, raw mode `"BGRX"` not
     `"BGRA"`) — reading it as alpha makes every crop render as fully
     transparent/invisible. **This rule must survive into any new renderer.**
   - Same-image-as-last-tick suppression (skip re-render when bytes are
@@ -267,7 +267,7 @@ match **for whichever renderer is live**, still in the worker thread:
 identify_elements(region: ScreenRegion, profile: ServiceProfile, scene: RegionImage,
                    *, tolerance: int, matcher: CandidateSource | None) -> list[IdentifiedElement]
 ```
-`src/agentclip/screen/identify.py:80-138`. Pure function: one already-captured
+`src/agentclip/driver/screen/identify.py:80-138`. Pure function: one already-captured
 frame in, every match out. `IdentifiedElement(label: str, rect: ScreenRegion, diff: float | None)`
 — `rect` is in **absolute screen pixels** (not scene-local), `diff` is `None`
 only for the synthetic chat-region entry (index 0, always present, labelled
@@ -327,17 +327,17 @@ poller would answer a question nobody asked").
    capture is enough. A tick is not required"). A GUI must not gate row
    visibility/searching on any "active detector" flag.
 2. **A row that's never had a capture stays at "no match yet" forever** —
-   this is the *only* remaining cause of that resting state (`tui/messages.py:194-197`).
+   this is the *only* remaining cause of that resting state (`shell/tui/messages.py:194-197`).
    It is a precise, actionable signal ("nobody ever captured this"), not a
    loading state.
 3. **BGRX, not BGRA.** The 4th captured byte is undefined; treating it as
-   alpha makes every crop transparent/invisible (`tui/graphics.py:272-278`).
-   Cite: `region_to_pil`, `src/agentclip/tui/graphics.py:284-288`.
+   alpha makes every crop transparent/invisible (`shell/tui/graphics.py:272-278`).
+   Cite: `region_to_pil`, `src/agentclip/shell/tui/graphics.py:284-288`.
 4. **Ghost filtering by `generation`.** Any consumer of `ElementsMatched` (or
    the finish-probe messages) must drop messages whose `generation` doesn't
    match the currently active detector run — cancelling a worker only raises
    a flag, it does not stop an in-flight tick from finishing and posting
-   (`main.py:3421-3431`, `_ghost`; `tui/messages.py:206-209`).
+   (`main.py:3421-3431`, `_ghost`; `shell/tui/messages.py:206-209`).
 5. **Live window vs. selected UI tab.** Both the Elements Panel and
    `/identify` describe the **live** (automation-driven) window, which during
    a delegation can differ from whichever window/tab the user currently has
@@ -363,7 +363,7 @@ poller would answer a question nobody asked").
    failed (`CaptureError`) posts **no** `ElementsMatched` message at all,
    rather than one with every kind mapped to `None` — a dropped frame must
    never be read as "searched and found nothing" (`elements.py:267-276`, and
-   the `ElementsMatched` docstring, `tui/messages.py:198-200`).
+   the `ElementsMatched` docstring, `shell/tui/messages.py:198-200`).
 8. **Suppressed repaint on unchanged pixels.** A row whose crop bytes are
    byte-identical to what it already displayed is left untouched rather than
    re-rendered — relevant to any GUI implementation choosing its own
@@ -384,7 +384,7 @@ poller would answer a question nobody asked").
 11. **Element-fold rule for `/identify`:** duplicate matches fold **only
     within one `TemplateKind`**, never across kinds — an appearance matching
     two different kinds at the same location is a real calibration problem
-    that must stay visible as two boxes, not be hidden (`screen/identify.py:96-100`).
+    that must stay visible as two boxes, not be hidden (`driver/screen/identify.py:96-100`).
 
 ---
 
@@ -395,12 +395,12 @@ adaptation layer. None of the following is a product requirement for a
 pywebview/HTML/JS frontend — a GUI has a native, universal way to display a
 bitmap and should use it directly.
 
-- **The "probe before Textual starts" dance.** `tui/graphics.py`'s whole
+- **The "probe before Textual starts" dance.** `shell/tui/graphics.py`'s whole
   reason for existing is that `textual_image`'s sixel auto-detection performs
   a live terminal round-trip (writes a DA1 escape sequence, reads the reply
   off stdin) that **must** happen before Textual claims the terminal's stdin
   reader, or the reply is silently swallowed and sixel support is
-  misdetected as absent (`tui/graphics.py:1-27`, `probe_terminal()`,
+  misdetected as absent (`shell/tui/graphics.py:1-27`, `probe_terminal()`,
   `graphics.py:135-177`). A GUI has no such race — it renders bitmaps
   natively — so there is nothing to probe and nothing to sequence before
   startup.
@@ -421,18 +421,18 @@ bitmap and should use it directly.
   browser's ordinary compositor like everything else on the page.
 - **Height-capping so sixel rows never scroll / cell-grid budget arithmetic**
   (`crop_rows`, `CROP_BOX_HEIGHT_PX`, `ELEMENT_CROP_COLS`/`ROWS`, the
-  half-block `fit_cells` 2-pixels-per-cell halving, `tui/graphics.py:206-269`,
-  `tui/pixels.py:53-69`). These exist solely to fit a raster image into a
+  half-block `fit_cells` 2-pixels-per-cell halving, `shell/tui/graphics.py:206-269`,
+  `shell/tui/pixels.py:53-69`). These exist solely to fit a raster image into a
   discrete character-cell grid without breaking terminal scroll semantics. A
   GUI lays out images with ordinary CSS (fixed row height in px/rem,
   `object-fit: contain`, no cell quantization) and this machinery has no
   equivalent to port — just pick a comfortable fixed row height.
-- **`half_block_text` / the whole `tui/pixels.py` averaging module.** This is
+- **`half_block_text` / the whole `shell/tui/pixels.py` averaging module.** This is
   purely the "every terminal that cannot do sixel" fallback (U+2580 glyphs,
   box-averaging to a 4×4-sample grid). A GUI can always render real bitmaps,
   so this fallback tier does not exist and should not be ported in any form.
 - **The upscale/Lanczos/NEAREST resampling policy in `fit_pixels`/`scale_crop`**
-  (`tui/graphics.py:222-308`) is tuned for *terminal cell* granularity (doubling
+  (`shell/tui/graphics.py:222-308`) is tuned for *terminal cell* granularity (doubling
   tiny icons so they're not sub-pixel in a coarse grid, padding to an exact
   cell box so `textual-image` doesn't re-stretch it). A GUI can pick its own,
   simpler scaling policy (e.g., CSS `image-rendering: pixelated` below some
@@ -459,8 +459,8 @@ paint pipeline).
    translucent overlay above **all** windows including non-AgentClip ones
    using only web technology — pywebview itself is just one more window. The
    brief describes the *behavior* (§2.2, §3.2) precisely so an implementer
-   can decide whether to keep shelling out to the existing `screen.overlay`/
-   `screen.picker` child-process mechanism (verbatim reuse — the "core" layer
+   can decide whether to keep shelling out to the existing `driver.screen.overlay`/
+   `driver.screen.picker` child-process mechanism (verbatim reuse — the "core" layer
    this brief was told to treat as shared) or build a GUI-native equivalent;
    this was not resolved by reading the code and needs a product decision.
 2. **Whether the mode-readout line (`crops · sixel` / `crops · half-block`)

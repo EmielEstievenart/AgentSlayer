@@ -8,38 +8,53 @@ Decisive design for codebase structure, config, persistence, sandboxing, and tes
 
 The **engine is sans-IO with respect to clipboard and UI**: it is a synchronous state machine that consumes *strings* (ingested text, user decisions, user answers) and returns *values* (outbound payload strings, pending actions, results). It performs filesystem and subprocess side effects only through the tool layer, never touches the clipboard, and never imports Textual.
 
+### The three named layers
+
+Above the engine the codebase is three packages, and they are the vocabulary the rest of these documents use:
+
+- **Shell** (`shell/`: `app/`, `tui/`, `gui/`) — the user-facing surfaces. `tui` is the Textual terminal app, `gui` the pywebview desktop window, and `app` is the UI-agnostic session controller both of them drive through the `ChatView` port. Two shells, one behaviour: neither may own anything the other cannot have.
+- **Driver** (`driver/`: `automation/`, `screen/`, `clip/`) — everything AgentClip does **to the desktop chat app it operates**. `automation` is the loop that watches, clicks, pastes and harvests the reply; `screen` and `clip` are the OS seams it is made of (capture, focus click, detection; clipboard providers and the watcher).
+- **Executor** (`executor/`: `tools/`, `hosts/`, `mcp/`, `permissions.py`) — permission-gated execution **on behalf of the agent**, reaching the machine only through the **Host seam**. `tools` is the catalogue the model may call, `permissions` decides which calls are allowed, `hosts` is the one route to files and commands (local or over SSH), and `mcp` bolts external servers onto the same catalogue.
+
+Below them sit `engine/` (the state machine and its `store/`), `protocol/` (the shared wire vocabulary) and `config.py` (the leaf everyone reads). A Shell may reach down into the Driver, the Executor and the engine; nothing below may reach back up.
+
 Dependency direction (imports may only point downward; enforced by a lint test, see §8):
 
 ```
-tui  ──►  clip (watcher/providers)
- ├──►  app         ──►  engine          (UI-agnostic session orchestration)
- └──►  automation  ──►  clip, screen    (UI-agnostic screen automation)
+SHELL  ──►  DRIVER, ENGINE           the UIs: shell/tui (Textual) | shell/gui (pywebview)
+ ├──►  shell/app  ──►  engine        (UI-agnostic session orchestration)
+ └──►  driver/automation             (UI-agnostic screen automation)
  │
  ▼
-engine  ──►  tools  ──►  sandbox (Workspace)
- │      ──►  store (session, backups)
+DRIVER ──►  driver/clip (watcher/providers), driver/screen (capture, click, detect)
+ │
+ ▼
+ENGINE ──►  EXECUTOR: executor/tools  ──►  sandbox (Workspace)
+ │      ──►  engine/store (session, backups)
  ▼
 protocol (parser, composer)   ──►  (nothing but stdlib)
  ▲
-config (leaf)  ◄── imported by everyone;  ──► hosts (reads the project's .agentclip.toml)
-hosts (leaf)   ◄── config, tools, store, engine: the OS seam
+config (leaf)  ◄── imported by everyone;  ──►  executor/hosts (reads the project's .agentclip.toml)
+EXECUTOR leaves: executor/hosts        ◄── config, tools, engine/store, engine: the OS seam
+                 executor/permissions  ◄── config, engine/approval: one rule model, two readers
+                 executor/mcp          ◄── config (the servers), tools (the client runtime)
 ```
 
-`clip` and `screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `tui`, `cli` and `automation`. `protocol`, `config` and `hosts` are leaves. `tools` never imports `engine`. Anything violating this is a bug.
+`driver/clip` and `driver/screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `shell/tui`, `shell/gui`, `cli` and `driver/automation`. `protocol`, `config`, `executor/hosts`, `executor/permissions` and `executor/mcp` are leaves. `executor/tools` never imports `engine`. Anything violating this is a bug.
 
-**`automation` is the second UI-agnostic layer**, added when the desktop GUI shell was decided (docs/design/gui.md §1) and extracted from `MainScreen` over phase 0. It is `app`'s sibling and its opposite number: `app` drives the *engine* through the `ChatView` port, `automation` drives the *screen* through the `AutomationView` port, and a UI shell is what plugs into both. Allowed imports: `agentclip.screen`, `agentclip.clip`, `agentclip.config`, itself. Banned: `textual`, `agentclip.app`, `agentclip.tui` — a shell depends on the automation, never the other way round.
+**`driver/automation` is the second UI-agnostic layer**, added when the desktop GUI shell was decided (docs/design/gui.md §1) and extracted from `MainScreen` over phase 0. It is `shell/app`'s sibling and its opposite number: `app` drives the *engine* through the `ChatView` port, `automation` drives the *screen* through the `AutomationView` port, and a UI shell is what plugs into both. Allowed imports: `agentclip.driver.screen`, `agentclip.driver.clip`, `agentclip.config`, itself. Banned: `textual`, `agentclip.shell.app`, `agentclip.shell.tui` — a shell depends on the Driver, never the other way round.
 
-That inverts what used to be true of the acting primitives, and the note in `app/view.py` that said so was reversed in the same wave: mouse clicks, synthetic keystrokes, focus snap-back, screen capture, the detector poll threads, the clipboard watcher AND the clipboard write are **not** called from a view layer any more. They are called from `AutomationController`, below every shell, so that two frontends cannot drift into two different automations. `os_armed` — the standing "do not touch the world" switch — lives there for the same reason; `ChatView.set_os_armed` only forwards the intent. What a shell still owns is scheduling (Textual's `run_worker`) and painting.
+That inverts what used to be true of the acting primitives, and the note in `shell/app/view.py` that said so was reversed in the same wave: mouse clicks, synthetic keystrokes, focus snap-back, screen capture, the detector poll threads, the clipboard watcher AND the clipboard write are **not** called from a view layer any more. They are called from `AutomationController`, below every shell, so that two frontends cannot drift into two different automations. `os_armed` — the standing "do not touch the world" switch — lives there for the same reason; `ChatView.set_os_armed` only forwards the intent. What a shell still owns is scheduling (Textual's `run_worker`) and painting.
 
 Three seams carry the split, and they are deliberately not one object (docs/design/gui.md §1):
 
 | seam | direction | thread contract |
 |---|---|---|
-| `automation/view.py:AutomationView` | controller → shell | paint-only, callable from the poller/watcher threads, must be non-blocking and thread-safe (the TUI posts a message; a GUI enqueues to its JS bridge) |
-| `automation/host.py:AutomationHost` | controller → shell | the handful of answers only a shell has (live preset/profile, `find_all`, the verified copy click, prose ingest, detector rebuild, the OSC-52 park-off-clipboard). Event-loop thread only — which is exactly why it is not folded into `AutomationView` |
-| `automation/ops.py:ScreenOps` | controller → OS | `agentclip.screen` behind one substitutable object, so the OS primitives stay off the paint port and a shell's test suite can patch them at its own module scope |
+| `driver/automation/view.py:AutomationView` | controller → shell | paint-only, callable from the poller/watcher threads, must be non-blocking and thread-safe (the TUI posts a message; a GUI enqueues to its JS bridge) |
+| `driver/automation/host.py:AutomationHost` | controller → shell | the handful of answers only a shell has (live preset/profile, `find_all`, the verified copy click, prose ingest, detector rebuild, the OSC-52 park-off-clipboard). Event-loop thread only — which is exactly why it is not folded into `AutomationView` |
+| `driver/automation/ops.py:ScreenOps` | controller → OS | `agentclip.driver.screen` behind one substitutable object, so the OS primitives stay off the paint port and a shell's test suite can patch them at its own module scope |
 
-`hosts` is the **OS seam**: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`mkdir`/`rmdir`/`stat`/`lstat`/`listdir`/`realpath`, plus the `case_sensitive` fact), carried on `ToolContext`. `LocalHost` is this PC; `SshHost` is a machine over SSH (docs/design/remote-ssh.md), chosen once at launch in `cli.py` and shared by the workspace jail, the tool context, the backup store and the engine — one session is one machine. Rule for new tools: write against Host primitives and it works everywhere. Process execution is `spawn` + an `ExecHandle` the caller polls (`wait`/`peek`/`kill`/`drain`), because cancellation, timeouts and the live output tail are policy above the seam, not OS access.
+`executor/hosts` is the **OS seam** the whole Executor is built on: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`mkdir`/`rmdir`/`stat`/`lstat`/`listdir`/`realpath`, plus the `case_sensitive` fact), carried on `ToolContext`. `LocalHost` is this PC; `SshHost` is a machine over SSH (docs/design/remote-ssh.md), chosen once at launch in `cli.py` and shared by the workspace jail, the tool context, the backup store and the engine — one session is one machine. Rule for new tools: write against Host primitives and it works everywhere. Process execution is `spawn` + an `ExecHandle` the caller polls (`wait`/`peek`/`kill`/`drain`), because cancellation, timeouts and the live output tail are policy above the seam, not OS access.
 
 ---
 
@@ -50,19 +65,8 @@ src/agentclip/
 ├── __init__.py            # __version__ only
 ├── __main__.py            # python -m agentclip → cli.main()
 ├── cli.py                 # argparse (--project, --service, --ssh, --remote-root, --version); connects
-│                          #   the host, builds Config, wires Engine + TUI
+│                          #   the host, builds Config, wires Engine + the chosen shell
 ├── config.py              # frozen dataclasses + TOML load/merge/validate (stdlib tomllib)
-├── permissions.py         # OpenCode's allow/ask/deny rule model: wildcard matcher, evaluate(), always_pattern()
-│
-├── hosts/                 # the OS seam: every file byte and every command goes through a Host
-│   ├── base.py            # Host + ExecHandle Protocols (wait/peek/kill/drain), FileStat/DirEntry/ExecResult
-│   ├── local.py           # LocalHost: subprocess/os/pathlib, kill-tree per platform, reader thread → peek()
-│   ├── ssh.py             # SshHost: one Paramiko connection, exec channels + SFTP, lazy reconnect
-│   ├── connect.py         # the remote CONNECT SEQUENCE both shells drive: resolve → dial+auth →
-│   │                      #   probe → root → home/env → remote config. Prompts and progress are
-│   │                      #   injected (getpass+stderr for the CLI, modals+a checklist for the GUI);
-│   │                      #   the only module here that may import config (steps 1 and 6 are loads)
-│   └── fake.py            # FakeHost: in-memory filesystem + scripted commands, for tests
 │
 ├── protocol/
 │   ├── types.py           # wire-level dataclasses (ToolCall, ParsedTurn, ParseIssue, Outbound)
@@ -70,118 +74,132 @@ src/agentclip/
 │   ├── composer.py        # bootstrap / results / chunk payload rendering + budget splitting
 │   └── spec.py            # protocol-spec text templates shown to the LLM (incl. per-service variants)
 │
-├── engine/
+├── engine/                # the session state machine and the session's own persistence
 │   ├── engine.py          # Engine: the session state machine (the only orchestrator)
 │   ├── states.py          # Phase enum + legal-transition table
 │   ├── approval.py        # ApprovalPolicy: permission rules (or the legacy allowlist), session escalation flags
-│   └── results.py         # ToolResult + middle-truncation to configured size caps
+│   ├── results.py         # ToolResult + middle-truncation to configured size caps
+│   └── store/
+│       ├── session.py     # SessionStore: .agentclip/ layout, transcript JSONL append, outbound dumps
+│       └── backups.py     # BackupStore: per-turn copy-on-first-touch snapshots, undo, retention
 │
-├── tools/
-│   ├── registry.py        # ToolRegistry: name → ToolSpec; render_catalog() for the bootstrap prompt
-│   ├── sandbox.py         # Workspace: project-root jail, host-resolved paths, exclusion rules
-│   ├── fs_tools.py        # read_file, write_file, edit_file, list_dir, glob, grep (pure-Python re scan)
-│   ├── shell.py           # run_command: host.spawn + poll slices, timeout/cancel kill, combined output,
-│                          # per-slice peek() diff → ctx.on_output (the TUI's live tail)
-│   └── meta.py            # ask_user, task_done (no side effects; engine interprets)
+├── executor/              # THE EXECUTOR: permission-gated execution, reaching the machine
+│   │                      #   only through the Host seam. Never imports engine or any shell
+│   ├── permissions.py     # OpenCode's allow/ask/deny rule model: wildcard matcher, evaluate(), always_pattern()
+│   ├── hosts/             # the OS seam: every file byte and every command goes through a Host
+│   │   ├── base.py        # Host + ExecHandle Protocols (wait/peek/kill/drain), FileStat/DirEntry/ExecResult
+│   │   ├── local.py       # LocalHost: subprocess/os/pathlib, kill-tree per platform, reader thread → peek()
+│   │   ├── ssh.py         # SshHost: one Paramiko connection, exec channels + SFTP, lazy reconnect
+│   │   ├── connect.py     # the remote CONNECT SEQUENCE both shells drive: resolve → dial+auth →
+│   │   │                  #   probe → root → home/env → remote config. Prompts and progress are
+│   │   │                  #   injected (getpass+stderr for the CLI, modals+a checklist for the GUI);
+│   │   │                  #   the only module here that may import config (steps 1 and 6 are loads)
+│   │   └── fake.py        # FakeHost: in-memory filesystem + scripted commands, for tests
+│   ├── mcp/               # external MCP servers behind the same catalogue (docs/design/mcp.md)
+│   └── tools/
+│       ├── registry.py    # ToolRegistry: name → ToolSpec; render_catalog() for the bootstrap prompt
+│       ├── sandbox.py     # Workspace: project-root jail, host-resolved paths, exclusion rules
+│       ├── fs_tools.py    # read_file, write_file, edit_file, list_dir, glob, grep (pure-Python re scan)
+│       ├── shell.py       # run_command: host.spawn + poll slices, timeout/cancel kill, combined output,
+│       │                  # per-slice peek() diff → ctx.on_output (the shells' live tail)
+│       └── meta.py        # ask_user, task_done (no side effects; engine interprets)
 │
-├── store/
-│   ├── session.py         # SessionStore: .agentclip/ layout, transcript JSONL append, outbound dumps
-│   └── backups.py         # BackupStore: per-turn copy-on-first-touch snapshots, undo, retention
-│
-├── clip/
-│   ├── base.py            # ClipboardProvider Protocol + select_provider()
-│   ├── copykitten_provider.py
-│   ├── pyperclip_provider.py
-│   ├── winseq.py          # ctypes GetClipboardSequenceNumber shim (≤15 lines)
-│   ├── watcher.py         # poll loop (plain function, thread-agnostic), self-write suppression
-│   └── fake.py            # FakeClipboard + ScriptedClipboard for tests
-│
-├── app/                   # UI-agnostic orchestration: drives the engine, never imports tui/clip/screen
-│   ├── controller.py      # SessionController: flows, gate/ask futures, delegation (nested sessions)
-│   ├── commands.py        # the chat slash-command registry: dispatch, /help and the popup read one tuple
-│   ├── view.py            # ChatView Protocol (the one UI seam) + SessionView snapshot + RunCall rows
-│   └── types.py           # SessionSpec, SessionRef, EngineRequest, SessionStats
-│
-├── automation/            # UI-agnostic screen automation: app's sibling, shared by both UI
-│   │                      #   shells. Imports screen/clip/config and NOTHING above (gui.md §1)
-│   ├── controller.py      # AutomationController: the armed switch, the slot pointers, the
-│   │                      #   clipboard watcher + detector poller threads, the probe consumer,
-│   │                      #   the finish decision, the OS-acting sequences, the delivery path
-│   ├── view.py            # AutomationView Protocol: the PAINT-only port (paint_loop_state,
-│   │                      #   paint_detection/stale/elements/armed, paste flash, notify).
-│   │                      #   Callable from the poller/watcher threads: never blocking
-│   ├── host.py            # AutomationHost Protocol: what only a shell can answer (live
-│   │                      #   preset/profile, find_all, verified copy click, prose ingest,
-│   │                      #   detector rebuild, park_off_clipboard). Event-loop thread only
-│   ├── ops.py             # ScreenOps: agentclip.screen behind one substitutable object,
-│   │                      #   plus ElementClick and the sequences' beats/offsets
-│   ├── finish.py          # the finish vocabulary: SendGate, the verdict folds, the phrasing
-│   ├── flow.py            # the auto-copy flow's geometry: lowest_match, above_chatbox, snap
-│   ├── delivery.py        # the paste banner's four wordings and the delivery beats
-│   ├── loop_state.py      # LoopState: where the browser-automation loop is (the STATE rail)
-│   └── harness_log.py     # HarnessEntry + the /log renderer: the decision log's vocabulary
-│
-├── screen/                # OS screen layer (like clip: imported ONLY by tui/cli/automation;
-│                          # stdlib-only AT MODULE LEVEL — cv2/numpy are lazy,
-│                          # function-body imports, see matchers.py)
-│   ├── region.py          # ScreenRegion dataclass + the "left top width height" wire format
-│   ├── overlay.py         # draw-a-box tkinter overlay; runs in a CHILD process (--pick-region)
-│   ├── picker.py          # spawns the child (works frozen and from source), parses its stdout
-│   ├── capture.py         # GDI BitBlt/GetDIBits screen-region grab (ctypes) -> RegionImage,
-│   │                      #   plus crop(): the matched rectangle back out of a frame (both shells)
-│   ├── focus.py           # Windows SetCursorPos+SendInput click/scroll into a region; window focus snap-back (ctypes)
-│   ├── hover.py           # cursor-stop geometry for the hover scan (icons that only render under the pointer)
-│   ├── busy.py            # diff_fraction + the BusyState/BusyProbe vocabulary every detector answers in
-│   ├── stale.py           # StaleTracker: frame-to-frame stability of a region -> StaleState
-│   ├── presence.py        # PresenceTracker: is this appearance on screen? de-bounced -> BusyProbe
-│   ├── png.py             # stdlib zlib/struct PNG encode/decode, for persisting templates
-│   ├── profile.py         # TemplateKind + ServiceProfile: what a SERVICE looks like (not where)
-│   ├── profile_store.py   # one folder of PNGs + a manifest per service; load never raises
-│   ├── slot.py            # AgentSlot (MASTER/SUBAGENT) + SlotCalibration: the drawn window per slot (= per tab)
-│   ├── matchers.py        # the pluggable HALF of a search: anchors | opencv candidate generation.
-│   │                      # cv2/numpy imported inside the function; falls back to anchors when absent
-│   └── template.py        # 2D search for an appearance: dual-ruler anchors + the SHARED verification
+├── driver/                # THE DRIVER: what AgentClip does TO the desktop chat app it
+│   │                      #   operates. Imports config and NOTHING above (gui.md §1)
+│   ├── automation/        # UI-agnostic screen automation: shell/app's sibling, shared by
+│   │   │                  #   both UI shells. Imports screen/clip/config only
+│   │   ├── controller.py  # AutomationController: the armed switch, the slot pointers, the
+│   │   │                  #   clipboard watcher + detector poller threads, the probe consumer,
+│   │   │                  #   the finish decision, the OS-acting sequences, the delivery path
+│   │   ├── view.py        # AutomationView Protocol: the PAINT-only port (paint_loop_state,
+│   │   │                  #   paint_detection/stale/elements/armed, paste flash, notify).
+│   │   │                  #   Callable from the poller/watcher threads: never blocking
+│   │   ├── host.py        # AutomationHost Protocol: what only a shell can answer (live
+│   │   │                  #   preset/profile, find_all, verified copy click, prose ingest,
+│   │   │                  #   detector rebuild, park_off_clipboard). Event-loop thread only
+│   │   ├── ops.py         # ScreenOps: agentclip.driver.screen behind one substitutable object,
+│   │   │                  #   plus ElementClick and the sequences' beats/offsets
+│   │   ├── finish.py      # the finish vocabulary: SendGate, the verdict folds, the phrasing
+│   │   ├── flow.py        # the auto-copy flow's geometry: lowest_match, above_chatbox, snap
+│   │   ├── delivery.py    # the paste banner's four wordings and the delivery beats
+│   │   ├── loop_state.py  # LoopState: where the browser-automation loop is (the STATE rail)
+│   │   └── harness_log.py # HarnessEntry + the /log renderer: the decision log's vocabulary
+│   ├── clip/
+│   │   ├── base.py        # ClipboardProvider Protocol + select_provider()
+│   │   ├── copykitten_provider.py
+│   │   ├── pyperclip_provider.py
+│   │   ├── winseq.py      # ctypes GetClipboardSequenceNumber shim (≤15 lines)
+│   │   ├── watcher.py     # poll loop (plain function, thread-agnostic), self-write suppression
+│   │   └── fake.py        # FakeClipboard + ScriptedClipboard for tests
+│   └── screen/            # OS screen layer (like clip: imported ONLY by the shells, cli and
+│       │                  # automation; stdlib-only AT MODULE LEVEL — cv2/numpy are lazy,
+│       │                  # function-body imports, see matchers.py)
+│       ├── region.py      # ScreenRegion dataclass + the "left top width height" wire format
+│       ├── overlay.py     # draw-a-box tkinter overlay; runs in a CHILD process (--pick-region)
+│       ├── picker.py      # spawns the child (works frozen and from source), parses its stdout
+│       ├── capture.py     # GDI BitBlt/GetDIBits screen-region grab (ctypes) -> RegionImage,
+│       │                  #   plus crop(): the matched rectangle back out of a frame (both shells)
+│       ├── focus.py       # Windows SetCursorPos+SendInput click/scroll into a region; window focus snap-back (ctypes)
+│       ├── hover.py       # cursor-stop geometry for the hover scan (icons that only render under the pointer)
+│       ├── busy.py        # diff_fraction + the BusyState/BusyProbe vocabulary every detector answers in
+│       ├── stale.py       # StaleTracker: frame-to-frame stability of a region -> StaleState
+│       ├── presence.py    # PresenceTracker: is this appearance on screen? de-bounced -> BusyProbe
+│       ├── png.py         # stdlib zlib/struct PNG encode/decode, for persisting templates
+│       ├── profile.py     # TemplateKind + ServiceProfile: what a SERVICE looks like (not where)
+│       ├── profile_store.py # one folder of PNGs + a manifest per service; load never raises
+│       ├── slot.py        # AgentSlot (MASTER/SUBAGENT) + SlotCalibration: the drawn window per slot (= per tab)
+│       ├── matchers.py    # the pluggable HALF of a search: anchors | opencv candidate generation.
+│       │                  # cv2/numpy imported inside the function; falls back to anchors when absent
+│       └── template.py    # 2D search for an appearance: dual-ruler anchors + the SHARED verification
 │                          # every backend is judged by (tui.md §3.4g)
 │
-└── tui/
-    ├── app.py             # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
-    ├── messages.py        # ClipboardCaptured, CallStarted/CallFinished/CallOutput (the engine worker
-    │                      # thread's bridge to the run panel), McpStatusChanged, and the PAINT family:
-    │                      # one message per AutomationView method (the automation's threads asking
-    │                      # for a repaint), plus AutoCopyRequested. No probe messages: the poller
-    │                      # feeds AutomationController.consume_* in its own call stack
-    ├── graphics.py        # can this terminal draw sixels? probed ONCE from cli.main, before Textual (tui.md §1.7)
-    ├── pixels.py          # the half-block renderer: pure functions over RegionImage, the no-sixel
-    │                      # fallback; re-exports screen.capture.crop, which used to live here
-    ├── screens/
-    │   ├── main.py        # the ChatView + AutomationView + AutomationHost adapter: tabs,
-    │   │                  #   transcripts, sidebar routing, and the scheduling the automation
-    │   │                  #   core hands back (run_worker); the automation itself is below it
-    │   ├── service_editor.py # F2: the whole per-service PROFILE editor (tui.md §1.4)
-    │   ├── settings.py    # F4: appearance/theme picker
-    │   ├── help.py        # F1 cheatsheet; its command section renders from app/commands.py
-    │   ├── summary.py     # end-of-session stats + what next (tui.md §1.5)
-    │   ├── confirm.py     # ConfirmScreen(ModalScreen[bool]): quit mid-turn, undo, forget captures
-    │   └── text_entry.py  # TextEntryScreen(ModalScreen[str | None]): one-line prompts
-    └── widgets/
-        ├── transcript.py  # VerticalScroll of per-message widgets, .anchor() pinning
-        ├── window_tabs.py # the two-row tab bar whose tabs ARE browser windows (tui.md §1.6)
-        ├── composer.py    # the docked chat box: Enter sends, and it drives the popup below
-        ├── command_popup.py # the slash-command list above the composer (tui.md §3.3a)
-        ├── action_panel.py  # the approval gate: title, diff/command body, buttons, reject input
-        ├── run_panel.py    # the RUN PANEL: one row per call while a turn executes + the running
-        │                    # command's live output, ctrl+o (tui.md §8a)
-        ├── running_bar.py   # the "Working... ctrl+x cancels" spinner line, the run panel's header
-        ├── sidebar.py     # the settings column: service, chat window, DETECTION (tui.md §1.3)
-        ├── elements.py    # the ELEMENTS column: the crops the detectors matched (tui.md §1.7)
-        ├── log_pane.py    # the full-width live harness decision log, /log + F8 (tui.md §3.3b)
-        └── statusbar.py   # docked Horizontal: watcher state, budget, service, phase
+└── shell/                 # THE SHELL: the two UIs and the controller they share
+    ├── app/               # UI-agnostic orchestration: drives the engine, never imports tui/clip/screen
+    │   ├── controller.py  # SessionController: flows, gate/ask futures, delegation (nested sessions)
+    │   ├── commands.py    # the chat slash-command registry: dispatch, /help and the popup read one tuple
+    │   ├── view.py        # ChatView Protocol (the one UI seam) + SessionView snapshot + RunCall rows
+    │   └── types.py       # SessionSpec, SessionRef, EngineRequest, SessionStats
+    ├── gui/               # the pywebview desktop shell: a native window over hand-written
+    │                      #   HTML/CSS/JS in assets/, Python in the same process (gui.md §2)
+    └── tui/
+        ├── app.py         # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
+        ├── messages.py    # ClipboardCaptured, CallStarted/CallFinished/CallOutput (the engine worker
+        │                  # thread's bridge to the run panel), McpStatusChanged, and the PAINT family:
+        │                  # one message per AutomationView method (the Driver's threads asking
+        │                  # for a repaint), plus AutoCopyRequested. No probe messages: the poller
+        │                  # feeds AutomationController.consume_* in its own call stack
+        ├── graphics.py    # can this terminal draw sixels? probed ONCE from cli.main, before Textual (tui.md §1.7)
+        ├── pixels.py      # the half-block renderer: pure functions over RegionImage, the no-sixel
+        │                  # fallback; re-exports driver.screen.capture.crop, which used to live here
+        ├── screens/
+        │   ├── main.py    # the ChatView + AutomationView + AutomationHost adapter: tabs,
+        │   │              #   transcripts, sidebar routing, and the scheduling the Driver
+        │   │              #   hands back (run_worker); the automation itself is below it
+        │   ├── service_editor.py # F2: the whole per-service PROFILE editor (tui.md §1.4)
+        │   ├── settings.py # F4: appearance/theme picker
+        │   ├── help.py    # F1 cheatsheet; its command section renders from shell/app/commands.py
+        │   ├── summary.py # end-of-session stats + what next (tui.md §1.5)
+        │   ├── confirm.py # ConfirmScreen(ModalScreen[bool]): quit mid-turn, undo, forget captures
+        │   └── text_entry.py # TextEntryScreen(ModalScreen[str | None]): one-line prompts
+        └── widgets/
+            ├── transcript.py  # VerticalScroll of per-message widgets, .anchor() pinning
+            ├── window_tabs.py # the two-row tab bar whose tabs ARE browser windows (tui.md §1.6)
+            ├── composer.py    # the docked chat box: Enter sends, and it drives the popup below
+            ├── command_popup.py # the slash-command list above the composer (tui.md §3.3a)
+            ├── action_panel.py  # the approval gate: title, diff/command body, buttons, reject input
+            ├── run_panel.py    # the RUN PANEL: one row per call while a turn executes + the running
+            │                    # command's live output, ctrl+o (tui.md §8a)
+            ├── running_bar.py   # the "Working... ctrl+x cancels" spinner line, the run panel's header
+            ├── sidebar.py     # the settings column: service, chat window, DETECTION (tui.md §1.3)
+            ├── elements.py    # the ELEMENTS column: the crops the detectors matched (tui.md §1.7)
+            ├── log_pane.py    # the full-width live harness decision log, /log + F8 (tui.md §3.3b)
+            └── statusbar.py   # docked Horizontal: watcher state, budget, service, phase
 ```
 
 ### Key signatures
 
 ```python
-# hosts/base.py ----------------------------------------------------------
+# executor/hosts/base.py ----------------------------------------------------------
 class ExecHandle(Protocol):
     """One running command, driven by run_command's polling loop above the seam."""
     def wait(self, timeout: float) -> ExecResult | None   # None = still running
@@ -315,7 +333,7 @@ class CallProgress:
 # dropped call. Done.result carries task_done's `result` param (a sub-agent's
 # deliverable) and is empty for an ordinary master session.
 
-# app/types.py -----------------------------------------------------------
+# shell/app/types.py -----------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class SessionSpec:
     """What the New-Session prompt returns: the task plus a service PER ROLE."""
@@ -342,7 +360,7 @@ class SessionRef:
 # A request object rather than a bare service key because role, catalog gating
 # and chat naming have to travel as plain data: the factory lives in `cli` (it
 # needs the tool/store/composer wiring) while the decision to spawn a sub-agent
-# is made in `app`, which must not import `screen` or `tui` to make it.
+# is made in `shell/app`, which must not import the Driver or `shell/tui` to make it.
 #
 # SessionSpec is the same seam for the OTHER half of "which service?". AgentClip
 # drives two browser windows and the user picks a service per window tab
@@ -353,7 +371,7 @@ class SessionRef:
 # they are true for, since both pickers lock while a session runs. The app layer
 # therefore still learns nothing about tabs, windows or slots.
 
-# tools/registry.py ------------------------------------------------------
+# executor/tools/registry.py ------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class ToolSpec:
     name: str
@@ -381,7 +399,7 @@ class ToolContext:
 # command's output is still the tail-capped ToolResult, so a None hook, a
 # non-streaming host and a listener that raises all cost the model nothing.
 
-# tools/sandbox.py -------------------------------------------------------
+# executor/tools/sandbox.py -------------------------------------------------------
 class Workspace:
     root: Path                               # Path(root).resolve(strict=True) at startup
     excludes: frozenset[str]
@@ -405,10 +423,11 @@ class ApprovalPolicy:
 Verdict = Literal["auto", "needs_approval", "deny", "deny_plan", "deny_unattended"]
 DENY_VERDICTS = frozenset({"deny", "deny_plan", "deny_unattended"})   # "was this refused?"
 # PermissionMode / PERMISSION_MODES / normalize_mode are re-exported here: they are
-# DEFINED in permissions.py (config.py reads them and cannot import this module), and
-# app/ + tui/ take them from here rather than reaching into the rule model.
+# DEFINED in executor/permissions.py (config.py reads them and cannot import this
+# module), and shell/app/ + shell/tui/ take them from here rather than reaching
+# into the rule model.
 
-# permissions.py (stdlib leaf, shared by config.py and approval.py) -------
+# executor/permissions.py (stdlib leaf, shared by config.py and approval.py)
 @dataclass(frozen=True, slots=True)
 class PermissionRule:
     permission: str; pattern: str; action: Literal["allow", "ask", "deny"]
@@ -423,7 +442,7 @@ def rules_from_config(obj) -> tuple[rules, warnings]         # OpenCode's fromCo
 def permission_target(tool, params, approval_kind) -> tuple[str, str]   # tool -> (key, resource)
 def always_pattern(key: str, resource: str) -> str           # "git commit *" / "*"
 
-# store/backups.py -------------------------------------------------------
+# engine/store/backups.py -------------------------------------------------------
 class BackupStore:
     def begin_turn(self, turn: int) -> None
     def snapshot_before_write(self, rel: str, abs_path: Path) -> None  # copy-on-first-touch
@@ -431,7 +450,7 @@ class BackupStore:
     def undo_turn(self, turn: int) -> UndoReport
     def prune(self, keep_sessions: int) -> None
 
-# clip/base.py -----------------------------------------------------------
+# driver/clip/base.py -----------------------------------------------------------
 class ClipboardProvider(Protocol):
     name: str
     def read_text(self) -> str | None        # None = non-text / empty / transient failure
@@ -441,7 +460,7 @@ class ClipboardProvider(Protocol):
 def select_provider(prefer: str = "auto") -> ClipboardProvider
 # order: Windows → copykitten (+winseq); Linux → copykitten, else pyperclip; none → ManualOnly sentinel
 
-# clip/watcher.py ---------------------------------------------------------
+# driver/clip/watcher.py ---------------------------------------------------------
 def watch(provider: ClipboardProvider, interval_ms: int,
           should_stop: Callable[[], bool],
           on_capture: Callable[[str], None],
@@ -469,7 +488,7 @@ The TUI wraps the engine: clipboard watcher thread → `post_message(ClipboardCa
 
 AgentClip reads the **same** permission file OpenCode does — `~/.config/opencode/opencode.json` on every platform, Windows included (`[permission] opencode_config` overrides the path, `[permission] enabled = false` switches it off). Only the top-level `"permission"` key is read: OpenCode's `agent`/`plugin` blocks name OpenCode agents, which have no AgentClip equivalent, and guessing a mapping would grant or refuse things the user never decided. The model can't reach the file either way — it lives outside the workspace.
 
-A rule is `(permission key, resource pattern, action)` with `action ∈ {allow, ask, deny}`. `permissions.py` (a stdlib leaf, shared by `config.py` and `engine/approval.py`) ports OpenCode's semantics verbatim:
+A rule is `(permission key, resource pattern, action)` with `action ∈ {allow, ask, deny}`. `executor/permissions.py` (a stdlib leaf, shared by `config.py` and `engine/approval.py`) ports OpenCode's semantics verbatim:
 
 - **Wildcard matching**, not glob and not regex: `*` crosses spaces *and* slashes, `?` is exactly one character, backslashes normalize to `/` on both sides, matching is whole-string anchored and case-insensitive on Windows. A pattern ending in `" *"` makes the arguments optional, so `ls *` matches a bare `ls`.
 - **Positional precedence**: the LAST matching rule wins — no specificity sorting. That is what lets a config say `"*": "ask"` and carve exceptions under it. No rule matching at all is an implicit `ask`.
@@ -491,7 +510,7 @@ A `deny` verdict never opens a gate: the call is pre-resolved as a `denied` resu
 
 ### Permission modes: the dial above both
 
-`ApprovalPolicy.mode` is session-scoped and says **what the user is doing right now**, above whatever the rules say about a given call. It can only ever refuse more, never allow more. `PermissionMode = Literal["plan", "ask", "unattended"]` lives in `permissions.py` (the leaf `config.py` reads and `approval.py` applies) and is re-exported from `engine/approval.py`, which is where `app`/`tui` import it from.
+`ApprovalPolicy.mode` is session-scoped and says **what the user is doing right now**, above whatever the rules say about a given call. It can only ever refuse more, never allow more. `PermissionMode = Literal["plan", "ask", "unattended"]` lives in `executor/permissions.py` (the leaf `config.py` reads and `approval.py` applies) and is re-exported from `engine/approval.py`, which is where `shell/app` and `shell/tui` import it from.
 
 | mode | what changes |
 |---|---|
@@ -778,7 +797,7 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
 |---|---|---|
 | `cv` | `opencv-python-headless>=4.10`, `numpy>=2` | the OpenCV matcher backend (tui.md §3.4g), opt in per service in the editor's MATCHING block. **Optional from source; BUNDLED in the shipped exe** |
 
-It earns its place because the alternative is worse than its weight: an exhaustive correlation sweep is the only thing that covers the anchors' residual quantisation blind spot, and that blind spot is a real, reproduced failure on a real chat UI. It is an *extra* rather than a hard runtime dependency because a from-source install must not be taxed ~40 MB for a feature most users leave off, and the built-in anchor search needs nothing at all. Three properties make it safe to be absent: `cv2`/`numpy` are imported **inside the function** (`screen/matchers.py`), so §0's stdlib-only rule for the screen layer still holds at module level and `tests/test_layering.py` passes unchanged (its AST checker explicitly permits function-body imports, the same allowance `clip/copykitten_provider.py` uses); selecting the backend without it installed **falls back to anchors and says so** in the editor rather than crashing or silently searching nothing; and the tests that exercise it skip cleanly. Install with `pip install agentclip[cv]` (or `uv sync --extra cv`).
+It earns its place because the alternative is worse than its weight: an exhaustive correlation sweep is the only thing that covers the anchors' residual quantisation blind spot, and that blind spot is a real, reproduced failure on a real chat UI. It is an *extra* rather than a hard runtime dependency because a from-source install must not be taxed ~40 MB for a feature most users leave off, and the built-in anchor search needs nothing at all. Three properties make it safe to be absent: `cv2`/`numpy` are imported **inside the function** (`driver/screen/matchers.py`), so §0's stdlib-only rule for the screen layer still holds at module level and `tests/test_layering.py` passes unchanged (its AST checker explicitly permits function-body imports, the same allowance `driver/clip/copykitten_provider.py` uses); selecting the backend without it installed **falls back to anchors and says so** in the editor rather than crashing or silently searching nothing; and the tests that exercise it skip cleanly. Install with `pip install agentclip[cv]` (or `uv sync --extra cv`).
 
 **The frozen exe bundles it, and this supersedes the earlier "keep the exe lean" reasoning.** That argument was made in the abstract and lost on contact with a user: the editor correctly reported *"OpenCV is not installed — install it with `pip install agentclip[cv]`"* inside `agentclip.exe`, where there is no environment to install into and the advice is unactionable. A knob that cannot be turned is not a lean build, it is a broken one — so the exe now carries the extra and the whole feature works out of the box. Consequences, all of them enforced rather than remembered:
 
@@ -849,27 +868,18 @@ testpaths = ["tests"]
 - Ship `packaging/hook-agentclip.py` (M4) with `hiddenimports = collect_submodules("textual.widgets")` — Textual lazy-loads widgets via module `__getattr__` and PyInstaller misses them.
 - The protocol-spec templates in `protocol/spec.py` are Python string constants, not data files, for the same reason.
 - copykitten's abi3 `.pyd`/`.so` is auto-collected; pyperclip is pure Python. Pillow is the one further binary dep, and PyInstaller ships a hook for it.
-- `textual_image` is named in `hiddenimports` (minus its bundled demo, which pulls the excluded `click`): `tui/graphics.py` reaches it only through lazy, guarded imports, so static analysis sees nothing and a missed collection fails **soft** — the probe would answer "no sixel" and the frozen exe would quietly draw half-blocks.
+- `textual_image` is named in `hiddenimports` (minus its bundled demo, which pulls the excluded `click`): `shell/tui/graphics.py` reaches it only through lazy, guarded imports, so static analysis sees nothing and a missed collection fails **soft** — the probe would answer "no sixel" and the frozen exe would quietly draw half-blocks.
 
 ---
 
 ## 8. Test strategy
 
 ```
-tests/
+tests/                               # mirrors src/agentclip: one directory per layer
 ├── conftest.py                      # tmp workspace fixture, default Config fixture, ScriptedLLM helper
-├── test_layering.py                 # imports each module, asserts dependency direction (no tui/clip
-│                                    #   imports inside engine/protocol/tools/store; no textual/app/tui
-│                                    #   inside automation) — enforces §0, generically and by name
-├── hosts/
-│   ├── test_local_host.py           # real files + real subprocesses: stat/listdir/realpath, kill+drain
-│   ├── test_fake_host.py            # the in-memory twin behaves like a filesystem (symlinks included)
-│   ├── fake_paramiko.py             # an SSH server that is a dict: client/transport/channel/sftp
-│   ├── test_ssh_host.py             # posix paths, reconnect, unknown-outcome, auth ladder, sftp
-│   ├── test_connect.py              # the six-step connect sequence both shells drive: order, which
-│   │                                #   step each failure lands on, close-on-failure, the two
-│   │                                #   non-fatal steps, the picker's two target sources
-│   └── test_ssh_real.py             # @real_ssh: AGENTCLIP_SSH_TESTS=1 + AGENTCLIP_SSH_TARGET only
+├── test_layering.py                 # imports each module, asserts dependency direction (no driver or
+│                                    #   shell imports inside engine/protocol/executor; no textual or
+│                                    #   shell inside the driver) — enforces §0, generically and by name
 ├── protocol/
 │   ├── golden/                      # pairs: NNN-name.input.txt + NNN-name.expected.json
 │   │   ├── 001-two-calls.input.txt
@@ -888,25 +898,42 @@ tests/
 │   ├── test_state_machine.py        # legal/illegal phase transitions, decide/execute ordering
 │   ├── test_roundtrip.py            # full headless loop: start_task → ScriptedLLM reply → approve →
 │   │                                #   execute → results payload → ... → task_done; asserts files on disk
-│   └── test_approval.py             # both modes: glob allowlist + deny tokens, and rule verdicts/deny/always
-├── tools/
-│   ├── test_sandbox.py              # ../escape, absolute POSIX + C:\ + UNC, drive letter, NUL,
-│   │                                #   symlink-out-of-root (skipif Windows without symlink privilege),
-│   │                                #   write-through-symlink-dir, excluded dirs (.git, .agentclip)
-│   ├── test_fs_tools.py             # edit_file uniqueness/no-match errors, read ranges, truncation caps
-│   ├── test_fs_tools_fake_host.py   # the same tools + jail over FakeHost: proof nothing bypasses the seam
-│   └── test_shell.py                # timeout kill, output cap, cwd=root; scripted-host cancel/timeout
-├── store/
-│   └── test_backups.py              # copy-on-first-touch idempotence, undo created/modified, prune,
+│   ├── test_approval.py             # both modes: glob allowlist + deny tokens, and rule verdicts/deny/always
+│   └── store/
+│       └── test_backups.py          # copy-on-first-touch idempotence, undo created/modified, prune,
 │                                    #   undo-from-disk-after-new-BackupStore (restart scenario)
-├── clip/
-│   └── test_watcher.py              # FakeClipboard: change detection, self-write suppression,
-│                                    #   non-protocol noise ignored, None (non-text) tolerated
-├── automation/                      # the screen-automation core, driven through FakeAutomationView:
+├── executor/
+│   ├── hosts/
+│   │   ├── test_local_host.py       # real files + real subprocesses: stat/listdir/realpath, kill+drain
+│   │   ├── test_fake_host.py        # the in-memory twin behaves like a filesystem (symlinks included)
+│   │   ├── fake_paramiko.py         # an SSH server that is a dict: client/transport/channel/sftp
+│   │   ├── test_ssh_host.py         # posix paths, reconnect, unknown-outcome, auth ladder, sftp
+│   │   ├── test_connect.py          # the six-step connect sequence both shells drive: order, which
+│   │   │                            #   step each failure lands on, close-on-failure, the two
+│   │   │                            #   non-fatal steps, the picker's two target sources
+│   │   └── test_ssh_real.py         # @real_ssh: AGENTCLIP_SSH_TESTS=1 + AGENTCLIP_SSH_TARGET only
+│   ├── mcp/                         # the opencode.json reader and the client runtime (mcp.md)
+│   └── tools/
+│       ├── test_sandbox.py          # ../escape, absolute POSIX + C:\ + UNC, drive letter, NUL,
+│       │                            #   symlink-out-of-root (skipif Windows without symlink privilege),
+│       │                            #   write-through-symlink-dir, excluded dirs (.git, .agentclip)
+│       ├── test_fs_tools.py         # edit_file uniqueness/no-match errors, read ranges, truncation caps
+│       ├── test_fs_tools_fake_host.py # the same tools + jail over FakeHost: nothing bypasses the seam
+│       └── test_shell.py            # timeout kill, output cap, cwd=root; scripted-host cancel/timeout
+├── driver/
+│   ├── clip/
+│   │   └── test_watcher.py          # FakeClipboard: change detection, self-write suppression,
+│   │                                #   non-protocol noise ignored, None (non-text) tolerated
+│   ├── screen/                      # the OS screen seam without a screen: capture, the detectors,
+│   │                                #   the matchers and the template search, on fixture pixels
+│   └── automation/                  # the Driver's core, driven through FakeAutomationView:
 │                                    #   no Textual, no terminal, no mouse. The threads are REAL
 │                                    #   (watcher, detector poller) and every test joins its own
-└── tui/
-    └── test_smoke.py                # ONE Pilot test: app boots with FakeClipboard injected, post
+└── shell/
+    ├── app/                         # the session controller against a fake ChatView: no UI at all
+    ├── gui/                         # the pywebview shell's Python side, driven without a window
+    └── tui/
+        └── test_smoke.py            # ONE Pilot test: app boots with FakeClipboard injected, post
                                      #   ClipboardCaptured(reply), approval modal appears, press "y",
                                      #   transcript shows result, status bar shows AWAITING_REPLY
 ```
@@ -918,10 +945,10 @@ Principles: the **engine round-trip never touches a real clipboard** — `Script
 ## 9. MVP cut — milestones
 
 **M1 — Headless engine + protocol (the product's brain, zero UI):**
-`config.py` (defaults + TOML merge), `protocol/` (parser with all tolerances, composer **single-payload only** — over-budget raises `BudgetExceeded`, no chunking), `tools/` (all ten tools + sandbox), `engine/` (full state machine, approval policy, APPROVE_ALL_EDITS flag), `store/session.py` (transcript JSONL), `store/backups.py` **write path only** (snapshots + manifests; no undo command yet — backups are safety-critical from the first file edit). Exit criterion: `test_roundtrip.py` green — a scripted multi-turn task that edits files and "runs" a command end-to-end.
+`config.py` (defaults + TOML merge), `protocol/` (parser with all tolerances, composer **single-payload only** — over-budget raises `BudgetExceeded`, no chunking), `executor/tools/` (all ten tools + sandbox), `engine/` (full state machine, approval policy, APPROVE_ALL_EDITS flag), `engine/store/session.py` (transcript JSONL), `engine/store/backups.py` **write path only** (snapshots + manifests; no undo command yet — backups are safety-critical from the first file edit). Exit criterion: `test_roundtrip.py` green — a scripted multi-turn task that edits files and "runs" a command end-to-end.
 
 **M2 — TUI happy path:**
-`clip/` providers + watcher thread, `tui/` main screen (transcript via `VerticalScroll`+`anchor()`, diff panel, status bar, task input, approve modal with y/n/a), manual "read clipboard now" hotkey fallback, copy-outbound-to-clipboard. One service preset chosen via config file. Exit criterion: a human completes a real task against ChatGPT web.
+`driver/clip/` providers + watcher thread, `shell/tui/` main screen (transcript via `VerticalScroll`+`anchor()`, diff panel, status bar, task input, approve modal with y/n/a), manual "read clipboard now" hotkey fallback, copy-outbound-to-clipboard. One service preset chosen via config file. Exit criterion: a human completes a real task against ChatGPT web.
 
 **M3 — Chunking, undo, settings:**
 Chunk protocol + ACK ingestion (`next_chunk`), `undo_turn` + retention pruning + TUI undo command, settings screen (`tomli-w` dependency added here), per-service fence-wrap behavior wired into composer, structured "resync/re-emit" payload on parse failure.
@@ -964,9 +991,9 @@ clipboard.write_text(step.outbound.chunks[0])        # results payload back to t
 6. Call `id`s unique per turn; results payloads reference them. Parse issues ⇒ the whole turn is non-executable (no partial execution of a half-parsed reply).
 
 **TUI designer must honor:**
-1. The engine API in §1 is the **complete** surface — no reaching into `tools/`, `store/`, or `protocol/` from `tui/`. Status bar reads `engine.status()` only.
+1. The engine API in §1 is the **complete** surface — no reaching into `executor/tools/`, `engine/store/`, or `protocol/` from `shell/tui/`. Status bar reads `engine.status()` only.
 2. The engine is synchronous and **not thread-safe**: call it from exactly one `@work(thread=True)` worker; never from the event loop (`execute()` runs subprocesses for minutes). The single exception is `request_cancel()` — it only sets a `threading.Event`, and is *meant* to be called from the UI thread while that worker is inside `execute()`. Cancelling is not an abort: the interrupted call gets a `code=cancelled` error result (with its partial output), the calls after it get `cancelled` skip results, and the turn finishes through the normal `Send` path so the model is told what happened.
-3. The watcher is a plain function (`clip/watcher.py`) — you own wrapping it in a thread worker and bridging via `post_message`; inject `FakeClipboard` in tests.
+3. The watcher is a plain function (`driver/clip/watcher.py`) — you own wrapping it in a thread worker and bridging via `post_message`; inject `FakeClipboard` in tests.
 4. Every outbound write must go through `SelfWriteSet.note(text)` before `provider.write_text` (self-detection suppression), and reads/writes should share one clipboard thread.
 5. Approval UX maps to exactly three `Decision` values (approve / reject / approve-all-edits-this-session); diff text arrives precomputed in `PendingAction.preview` — do not re-diff in the TUI.
 6. ASCII/BMP-only status chrome (`●`, `▶`, `✓`), no multi-codepoint emoji (Windows Terminal/conhost width bugs).

@@ -7,14 +7,15 @@ the decisions; the per-surface behavior contracts live in `docs/design/ui-briefs
 
 AgentClip becomes **one core with two UI shells**:
 
-- the existing Textual TUI (`agentclip.tui`) — stays, unchanged in behavior;
-- a new desktop GUI built on **pywebview + WebView2** (`agentclip.gui`) — a native
+- the existing Textual TUI (`agentclip.shell.tui`) — stays, unchanged in behavior;
+- a new desktop GUI built on **pywebview + WebView2** (`agentclip.shell.gui`) — a native
   window rendering an HTML/CSS/JS frontend, Python in-process.
 
 Both shells drive the same two UI-agnostic controllers:
 
-- `SessionController` via the `ChatView` port (`agentclip/app/view.py`) — exists today;
-- `AutomationController` via the `AutomationView` port (`agentclip/automation/view.py`)
+- `SessionController` via the `ChatView` port (`agentclip/shell/app/view.py`) — exists today;
+- `AutomationController` via the `AutomationView` port
+  (`agentclip/driver/automation/view.py`)
   — being extracted from `MainScreen` in phase 0 (see §2).
 
 Nothing above the shells may import `textual` or anything GUI-side; the layering is
@@ -36,8 +37,8 @@ as it always has been.
 ### Parity policy
 
 - The briefs in `docs/design/ui-briefs/` are the parity contract for both shells.
-- Features land **core-first**: new behavior goes into the engine/app/automation
-  layers, then each shell grows its view of it. A feature that only exists in one
+- Features land **core-first**: new behavior goes into the engine, `shell/app` and
+  the Driver, then each shell grows its view of it. A feature that only exists in one
   shell's view layer is a design smell and needs a written exception here.
 - The TUI keeps full parity for now. Whether it eventually freezes is a decision for
   after the GUI is proven — explicitly not decided in this wave.
@@ -57,25 +58,27 @@ as it always has been.
     clipboard that may not be where it went - which is what makes the streamed
     mode fall back to a single burst.
 
-## 1. The automation package (phase 0)
+## 1. The automation package — the Driver's core (phase 0)
 
 Decisions ratified from the extraction plan:
 
-- New package `agentclip.automation`, sibling of `app`, holding `AutomationController`
-  + the `AutomationView` protocol. Allowed imports: `agentclip.screen`,
-  `agentclip.clip`, `agentclip.config`, itself. Banned: `textual`, `agentclip.app`,
-  `agentclip.tui`. It is OS-coupled core, shared by both shells — the same flavor of
-  layer `screen/` and `clip/` already are.
+- New package `agentclip.driver.automation`, sibling of `shell/app`, holding
+  `AutomationController` + the `AutomationView` protocol. Allowed imports:
+  `agentclip.driver.screen`, `agentclip.driver.clip`, `agentclip.config`, itself.
+  Banned: `textual`, `agentclip.shell.app`, `agentclip.shell.tui`. It is OS-coupled
+  core, shared by both shells — the same flavor of layer `driver/screen` and
+  `driver/clip` already are, and with them it is what architecture.md §0 now names
+  the **Driver**.
 - **`AutomationView` is paint-only**: `paint_loop_state`, `paint_harness_entry`,
   `paint_detection`, `paint_stale`, `paint_elements`, `paint_armed`,
   paste-flash show/hide, `notify`.
   Same thread contract as `ChatView.call_*`: methods may be called from poller/watcher
   threads, implementations must be non-blocking and thread-safe (the TUI posts a
   message; the GUI enqueues to its JS bridge). No OS primitives on the port — the
-  controller imports `agentclip.screen.focus` etc. directly. No scheduling primitive
+  controller imports `agentclip.driver.screen.focus` etc. directly. No scheduling primitive
   on the port — the controller owns its own `threading.Thread`s.
 - **`os_armed` moves into `AutomationController`**, reversing the "view-owned" note in
-  `app/view.py:202-212`. With two shells, one shared armed flag below both is the only
+  `shell/app/view.py:202-212`. With two shells, one shared armed flag below both is the only
   non-drifting design. `ChatView.set_os_armed` stays; `MainScreen` passes through.
 - Probe ordering: the poller calls the busy→idle→stale decision sequence synchronously
   in one call stack per tick (the "closing message" invariant becomes trivially true —
@@ -83,8 +86,8 @@ Decisions ratified from the extraction plan:
 - The session/window bookkeeping duplication (`MainScreen._sessions`/`_sub_runs` vs
   `SessionController._active`/`_sub`) is **deferred** — it is transcript-display
   state, not automation. Follow-up ticket, not this wave's phase 0.
-- New no-Textual test suite `tests/automation/` (FakeAutomationView, mirroring
-  `tests/app/`); all existing `tests/tui/*_ui.py` Pilot tests are **kept** as the
+- New no-Textual test suite `tests/driver/automation/` (FakeAutomationView, mirroring
+  `tests/shell/app/`); all existing `tests/shell/tui/*_ui.py` Pilot tests are **kept** as the
   wiring/integration check. Probe-injection test seam:
   `AutomationController.feed_probe(...)` replaces posting `BusyProbed(...)` messages,
   converted in the same commit that removes the message path.
@@ -131,16 +134,18 @@ Slices (each one commit, suite green, layering test run first):
    exclusive=True)`) and hands the body in, because that name is what the Pilot
    suites stub. (a) The OS primitives stay off the view port as decided, but
    they are reached through one substitutable object,
-   `automation/ops.py:ScreenOps`, whose default implementation *is* the direct
-   `agentclip.screen` call — the Textual suites monkeypatch those names at
-   `tui/screens/main.py`'s scope, so the shell hands in a subclass that resolves
-   its own module's names per call (slice 4's `_poll_capture`, generalised).
+   `driver/automation/ops.py:ScreenOps`, whose default implementation *is* the
+   direct `agentclip.driver.screen` call — the Textual suites monkeypatch those
+   names at `shell/tui/screens/main.py`'s scope, so the shell hands in a
+   subclass that resolves its own module's names per call (slice 4's
+   `_poll_capture`, generalised).
    (b) What the sequences still have to ASK a shell is a second port,
-   `automation/host.py:AutomationHost` — the live preset/profile, `find_all`,
-   the verified copy click, the prose ingest (the session is `agentclip.app`,
-   above this layer), the detector rebuild. It is deliberately NOT folded into
-   `AutomationView`: that port's contract is "callable from a poller thread,
-   never blocking", and a host is only ever called from the event loop. Paints
+   `driver/automation/host.py:AutomationHost` — the live preset/profile,
+   `find_all`, the verified copy click, the prose ingest (the session is
+   `agentclip.shell.app`, above this layer), the detector rebuild. It is
+   deliberately NOT folded into `AutomationView`: that port's contract is
+   "callable from a poller thread, never blocking", and a host is only ever
+   called from the event loop. Paints
    the flow needed grew no new port methods — the copy-status line is
    `paint_detection(COPY, …)` and the harvest's crop is `paint_elements`, so
    both now carry the paint epoch. `_own_window` became `set_own_window` on the
@@ -159,7 +164,7 @@ Slices (each one commit, suite green, layering test run first):
    method, `park_off_clipboard(text)`: the controller writes, and hands a shell
    the payload it could not place. `clipboard_ok` stays exactly what §0 carved
    out - the answer to "how did this get parked", which only the STREAM path
-   reads. The banner's words moved into `automation/delivery.py` with the beats,
+   reads. The banner's words moved into `driver/automation/delivery.py` with the beats,
    for the port's own "text, not decisions" rule; the sidebar re-exports them.
    The two synthetic keystrokes and the delivery's three beats and one chunk
    size joined `ScreenOps`, which is what keeps the Pilot suites' patches biting
@@ -186,24 +191,24 @@ Slices (each one commit, suite green, layering test run first):
 **Phase 0 is complete** — `5e419cb` (slice 1) through this commit (slice 8) on
 `master`, i.e. `git log 5e419cb^..` filtered to "UI split phase 0": the
 automation brain lives below the shells, `architecture.md` §0/§1 carry
-`agentclip.automation` and its three seams, and `tui.md` points at where each
+`agentclip.driver.automation` and its three seams, and `tui.md` points at where each
 moved name went. What is left on `MainScreen` is the shell: tabs, transcripts,
 sidebar routing, the paint handlers, the `run_worker` scheduling, and the
 compatibility seams the Pilot suites patch.
 
 ## 2. The GUI shell
 
-- Package `agentclip.gui`; entry `agentclip --gui` (same binary; TUI stays the
+- Package `agentclip.shell.gui`; entry `agentclip --gui` (same binary; TUI stays the
   default until the GUI reaches parity — flipping the default is a later decision).
 - **No Node toolchain.** The frontend is hand-written JS + CSS shipped as
   package data; no build step, no npm. If we ever outgrow this, that's a new decision
   here first.
 - pywebview is the optional extra **`gui`** (`uv sync --extra gui`, `pip install
-  agentclip[gui]`), the same shape as `cv` and `mcp`: `gui/shell.py` imports
+  agentclip[gui]`), the same shape as `cv` and `mcp`: `shell/gui/shell.py` imports
   `webview` inside its functions and `cli.main` imports the shell only on `--gui`,
   so a TUI launch never pays for it and an install without the extra still runs —
   it exits 2 naming the extra. The extra is in the `dev` group too, so the suite
-  can exercise the real toolkit. `tests/test_layering.py` gives `agentclip.gui` its
+  can exercise the real toolkit. `tests/test_layering.py` gives `agentclip.shell.gui` its
   own RULES entry (the TUI's reach minus Textual, plus `webview`), adds it to
   `CLIP_SCREEN_IMPORTERS`, keeps it OUT of the textual exemption, and names two
   boundary tests: `test_gui_never_imports_textual`,
@@ -213,8 +218,8 @@ compatibility seams the Pilot suites patch.
   handed, `Engine` is what the factory `cli.py` builds returns. A shell that
   could not name them would have to re-declare vocabulary its own controller
   already speaks — which is the drift the ports exist to prevent — and
-  `agentclip.app` already depends on that layer, so the direction is unchanged.
-- The assets are located with `importlib.resources` (`files("agentclip.gui") /
+  `agentclip.shell.app` already depends on that layer, so the direction is unchanged.
+- The assets are located with `importlib.resources` (`files("agentclip.shell.gui") /
   "assets"`, materialized by `as_file` for the lifetime of the window loop), never
   `__file__` — so a wheel, a source checkout and the PyInstaller extraction all
   resolve the same way.
@@ -228,7 +233,7 @@ compatibility seams the Pilot suites patch.
 - Bridge: Python→JS via pywebview `evaluate_js` fed from a thread-safe queue (the
   GUI's implementation of the view-port thread contract); JS→Python via pywebview's
   `js_api` object whose methods call the same controller methods the TUI calls.
-  **Shipped in slice 2 (`agentclip/gui/bridge.py`), with the pywebview facts the
+  **Shipped in slice 2 (`agentclip/shell/gui/bridge.py`), with the pywebview facts the
   plan had assumed rather than checked.** `Window.evaluate_js` *is* safe to call
   from any thread — the WebView2 backend marshals the script onto the WinForms
   UI thread with `Control.Invoke` — but it then **blocks the caller** on a
@@ -248,7 +253,7 @@ compatibility seams the Pilot suites patch.
   (`webview/util.py:js_bridge_call`), so every one of them is a one-line marshal
   onto the GUI's loop and the page never touches controller state.
 
-### The GUI's concurrency model (slice 2, `agentclip/gui/runner.py`)
+### The GUI's concurrency model (slice 2, `agentclip/shell/gui/runner.py`)
 
 `SessionController` is asyncio to the bone and the TUI hands it Textual's loop.
 pywebview has none to hand: `webview.start()` runs a native message pump on the
@@ -314,9 +319,9 @@ a toast where a user could otherwise be left staring at nothing:
 implements is now the real one; what is left of the parity backlog is one whole
 SURFACE (the SSH dialog), not methods implemented smaller than their contract.
 
-~~One duplication is tracked with them: `gui/view.py:_distinct_rects` and
+~~One duplication is tracked with them: `shell/gui/view.py:_distinct_rects` and
 `find_all`.~~ **Done, in its own commit.** The fold is
-`automation/flow.py:distinct_rects`, the union around it is `flow.element_rects`
+`driver/automation/flow.py:distinct_rects`, the union around it is `flow.element_rects`
 (the search passed in as `ScreenOps.all_matches`, the way `lowest_match_scored`
 already took `ScreenOps.lowest_match`), and the whole sequence — refusals,
 calibration lookup, capture, union, fold — is
@@ -326,10 +331,10 @@ to put an appearance on an imaginary screen, so the sequences keep asking
 through `self._host` rather than calling the controller's own method.
 - Images (elements panel, service-editor thumbnails): PNG data URIs per crop.
   The crop-not-whole-frame policy and the BGRX rule carry over; the
-  sixel/half-block machinery does not. The encoder is `screen/png.py` (stdlib
+  sixel/half-block machinery does not. The encoder is `driver/screen/png.py` (stdlib
   zlib, already in the layer, and it already writes the capture's undefined
   fourth byte as opaque alpha), so the GUI needs neither Pillow nor anything out
-  of `tui/graphics.py`.
+  of `shell/tui/graphics.py`.
 - The `/identify` and region-picker overlays keep the existing tkinter child-process
   mechanism unchanged — the GUI is in-process Python and shells out the same way.
 - Startup: the window mounts immediately; everything slow (SSH connect, MCP starts)
@@ -543,7 +548,7 @@ drawn window, and until this increment the GUI could not draw one.
 - **PNG data URIs replace the entire sixel/half-block machinery** (brief §7).
   What carries over is the crop policy (the matched rectangle only, cut on the
   poller thread that captured the frame, via the `crop_elements` seam) and the
-  **BGRX-not-BGRA** rule. The GUI needs no Pillow for either: `screen/png.py`
+  **BGRX-not-BGRA** rule. The GUI needs no Pillow for either: `driver/screen/png.py`
   already encodes a capture as RGBA with the undefined fourth byte written as
   OPAQUE alpha, which is exactly the rule — read as alpha, that byte is zero and
   every crop encodes invisible. No mode readout line exists here, deliberately
@@ -556,7 +561,7 @@ drawn window, and until this increment the GUI could not draw one.
   hidden, so opening the column paints the CURRENT tick rather than the next one,
   and a crop whose bytes are unchanged is not re-encoded.
 - **The picker and `/identify` reuse the child-process overlays unchanged**
-  (`screen/picker.py`: `--pick-region`, and `--show-identify` fed JSON on stdin).
+  (`driver/screen/picker.py`: `--pick-region`, and `--show-identify` fed JSON on stdin).
   Both brackets are the TUI's: the detectors are suspended for the whole visit
   (a fullscreen window over the browser they watch is the sustained delta that
   arms the finish trigger on staleness alone), only one such child may be up at
@@ -574,11 +579,11 @@ drawn window, and until this increment the GUI could not draw one.
 
 One **core change** was needed and it is the smallest one available:
 `crop(image, x, y, w, h)` — the cutter, a pure function over a captured buffer —
-moved from `tui/pixels.py` to `screen/capture.py`, which owns `RegionImage`.
-`tui.pixels` re-exports it, so every existing caller and test is untouched;
-`screen` gained no new dependency (the move is stdlib-only, and no Pillow came
-with it), so `tests/test_layering.py` needed no allowance. `region_to_pil` and
-the rest of `tui/graphics.py` did NOT move: they are the sixel path's, and this
+moved from `shell/tui/pixels.py` to `driver/screen/capture.py`, which owns
+`RegionImage`. `shell.tui.pixels` re-exports it, so every existing caller and test
+is untouched; `driver/screen` gained no new dependency (the move is stdlib-only,
+and no Pillow came with it), so `tests/test_layering.py` needed no allowance. `region_to_pil` and
+the rest of `shell/tui/graphics.py` did NOT move: they are the sixel path's, and this
 shell has no use for them.
 
 Two things landed alongside because the picker made them reachable: the
@@ -593,9 +598,9 @@ leaves to the child process on purpose.
 
 **Parity increment 5** — the SERVICE EDITOR (F2), against
 `docs/design/ui-briefs/service-editor.md`. The first surface whose MODEL was
-extracted rather than re-implemented against widgets: `gui/service_editor.py`
+extracted rather than re-implemented against widgets: `shell/gui/service_editor.py`
 holds the working copy, the validation, the commit models and the capture
-orchestration with no window, no page and no toolkit in it, and `gui/view.py`
+orchestration with no window, no page and no toolkit in it, and `shell/gui/view.py`
 plus `app.js` hold only the two things a model cannot do (schedule the capture
 coroutine, and draw). It is why the editor's ~600 no-window tests exist at all —
 the TUI's equivalent needs a Pilot and a 120×45 terminal for the same
@@ -617,7 +622,7 @@ assertions.
   because a key is immutable once created. The toggles/radios/slider write
   through with no validation gate at all — none of them can express an illegal
   value.
-- The seven APPEARANCE rows are real PNG data URIs (`screen/png.py`, the same
+- The seven APPEARANCE rows are real PNG data URIs (`driver/screen/png.py`, the same
   BGRX-as-opaque-alpha rule the elements column needs), encoded only when the
   profile folder is re-read — a selection, a capture, a clear, a forget — never
   per keystroke. Captures run the same `pick_region` child process increment 4
@@ -674,7 +679,7 @@ against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
   string. The table is **this shell's**, recorded divergences included
   (Shift+Enter is the newline, F1/F4 open page screens, `t` never leaves the
   page). The COMMAND rows come the other way: `{type: "commands"}` carries
-  `agentclip.app.commands.COMMANDS` verbatim, so the popup and the help sheet
+  `agentclip.shell.app.commands.COMMANDS` verbatim, so the popup and the help sheet
   read the same registry `/help` and the controller's dispatch do. The filtering
   rules are page-side — a round trip per keystroke would be latency for string
   work — the data never is.
@@ -748,7 +753,7 @@ change on BOTH sides of the shell boundary — because the thing it is a UI for
 was written into `cli.remote_launch`'s body.
 
 - **The eight-step sequence moved down, whole, into
-  `agentclip/hosts/connect.py`** (`connect_remote`), with exactly two things
+  `agentclip/executor/hosts/connect.py`** (`connect_remote`), with exactly two things
   injectable: who answers a question (`ConnectPrompts`) and who is told what is
   happening (`on_step`). Everything else — the order, which steps are fatal,
   every message, the close-on-failure — belongs to the sequence, because a
@@ -760,12 +765,12 @@ was written into `cli.remote_launch`'s body.
   brief §3.4's five, with the target RESOLUTION given its own row rather than
   hidden in the first tick (it is the step that fails most often, on a missing
   `--remote-root`, and it fails before anything is dialled).
-- **`hosts/connect.py` is the one module in that package that may import
+- **`executor/hosts/connect.py` is the one module in that package that may import
   `config`**, and it has its own `RULES` entry saying so. Steps 1 and 6 ARE
   config loads — the local config names the target, the remote one is read back
   through the host — so a module that could not name that layer would have to
   hand both halves back to its caller, which is exactly the shape that let the
-  GUI and the CLI drift. Nothing in `hosts/__init__.py` imports it, so the
+  GUI and the CLI drift. Nothing in `executor/hosts/__init__.py` imports it, so the
   direction never closes into a cycle and the seam still costs no paramiko.
 - **One core change, and it is small: `SessionController.rebind(config,
   engine_factory, project_root)`.** The three things a session is assembled from
@@ -785,7 +790,7 @@ was written into `cli.remote_launch`'s body.
   once Textual owns the terminal.
 - `{type: "connect"}` carries the whole surface in one event, `open: false`
   being the closed state — the service editor's shape, and its model lives in
-  `gui/remote.py` with no window in it for the same reason. All six checklist
+  `shell/gui/remote.py` with no window in it for the same reason. All six checklist
   rows cross on every push whatever has happened, because a stage after a
   failure must stay **pending** rather than skipped-with-a-checkmark. The three
   questions a dial can ask ride the ORDINARY `modal` family
@@ -856,8 +861,8 @@ spec names what a lazy import hides. Four findings, because only one of them was
 the thing this section predicted:
 
 - **The page assets were the real gap, and they were the only one.** They are
-  collected to `agentclip/gui/assets` — the PACKAGE-relative path, not the
-  bundle root — because `gui/shell.py` resolves them with
+  collected to `agentclip/shell/gui/assets` — the PACKAGE-relative path, not the
+  bundle root — because `shell/gui/shell.py` resolves them with
   `importlib.resources` (§2), and PyInstaller's `FrozenImporter` answers that by
   looking under `sys._MEIPASS` at exactly that layout. Verified against a real
   onefile build rather than assumed: the spec before this change produced an exe

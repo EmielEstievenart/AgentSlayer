@@ -1,7 +1,8 @@
 """UI-agnostic application layer: the session orchestrator and its view port.
 
-Imports engine/protocol/store/config only - never Textual, ``clip``, or ``tui``
-(enforced by tests/test_layering.py), so any UI can drive a session by
+Imports engine/engine.store/protocol/config only - never Textual, the Driver's
+``clip``, or ``shell.tui`` (enforced by tests/test_layering.py), so any UI can
+drive a session by
 implementing :class:`ChatView` and feeding the controller events.
 """
 

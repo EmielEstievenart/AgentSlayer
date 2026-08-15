@@ -65,7 +65,7 @@ exported it on that box, and this PC's variable of the same name is a
 different secret. An unreadable `printenv` is a warning and an empty
 mapping - i.e. the unset behaviour the file already allows for.
 
-The loader lives in `agentclip/mcp/config.py`, follows
+The loader lives in `agentclip/executor/mcp/config.py`, follows
 `_load_permission_rules`'s triage exactly (silent when the file is absent,
 one warning when it exists but cannot be understood, never fatal), and is
 called from `load_config` next to the permission loader, gated by a new
@@ -83,7 +83,7 @@ the seam and the reader keeps its one job (tests/test_layering.py).
 The client runtime uses the official `mcp` SDK (>=2,<3), which drags in
 httpx/anyio/pydantic - real weight for a PyInstaller one-file build. It
 follows the `cv` extra's precedent to the letter: an optional
-`agentclip[mcp]` extra, imported lazily inside `agentclip/mcp/client.py`,
+`agentclip[mcp]` extra, imported lazily inside `agentclip/executor/mcp/client.py`,
 and an install without it stays fully functional - configured servers get
 status `missing_sdk` and a warning naming the fix (`uv pip install
 'agentclip[mcp]'`). The dev dependency group carries the SDK so the test
@@ -92,16 +92,16 @@ considered and rejected: stdio framing plus Streamable HTTP plus SSE
 fallback plus capability negotiation is exactly the kind of surface that
 looks small and is not.
 
-`agentclip/mcp/types.py` and `agentclip/mcp/config.py` stay stdlib-only so
-`config.py` may import them unconditionally; only `client.py` touches the
-SDK. The package is a leaf below config in the layering rules
+`agentclip/executor/mcp/types.py` and `agentclip/executor/mcp/config.py` stay
+stdlib-only so `config.py` may import them unconditionally; only `client.py`
+touches the SDK. The package is a leaf below config in the layering rules
 (test_layering.py), which is why the ToolSpecs of section 4 live in
-`agentclip/tools/mcp_tools.py` - the tools layer imports mcp, never the
+`agentclip/executor/tools/mcp_tools.py` - the tools layer imports mcp, never the
 reverse.
 
 ## 3. Runtime: one manager, one loop thread, per process
 
-`McpManager` (`agentclip/mcp/client.py`) is built once per process in
+`McpManager` (`agentclip/executor/mcp/client.py`) is built once per process in
 `cli.py:main()` - the same lifetime as skill discovery - and handed both to
 `AgentClipApp` (for status display) and into `make_engine_factory`'s closure
 (for the tools). It owns a single background thread running an asyncio loop;
@@ -224,9 +224,9 @@ preset (`render_spec` is pure) and size the addition from the real number.
   panel is the sub-agent's. The panels are mounted for the app's whole life,
   so the channel exists pre-session too; nothing has to be parked for the
   next session start.
-- `/mcp` (app/commands.py registry, so help/popup/dispatch stay pinned): the
+- `/mcp` (shell/app/commands.py registry, so help/popup/dispatch stay pinned): the
   full listing - state, tool count, detail - as one transcript note, no
-  session gate. The controller stays clear of `agentclip.mcp` (layering): it
+  session gate. The controller stays clear of `agentclip.executor.mcp` (layering): it
   takes a supplier of duck-typed status rows, and the TUI hands it
   `McpManager.statuses` bound.
 

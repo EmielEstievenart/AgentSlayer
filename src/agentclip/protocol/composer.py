@@ -28,7 +28,7 @@ rest of the system agree with itself for free:
   pre-fence draft that no chat ever saw;
 - re-copy (the double-tap-c path) re-sends the same string, so a redelivery is
   fenced by construction rather than by remembering to wrap it again;
-- streamed delivery (`clip.chunking.split_for_stream`) splits the ALREADY
+- streamed delivery (`driver.clip.chunking.split_for_stream`) splits the ALREADY
   fenced string, so the fence wraps the one chat message rather than each
   burst inside it;
 - self-write suppression is unaffected: `parser.normalized_hash` strips fence

@@ -1,6 +1,6 @@
 """The service editor's MODEL, with no window, no page and no toolkit in it.
 
-The GUI's answer to ``tui/screens/service_editor.py`` (1302 lines of Textual
+The GUI's answer to ``shell/tui/screens/service_editor.py`` (1302 lines of Textual
 widgets wrapped around ~300 lines of decisions). Everything in that screen that
 is a DECISION - the working copy, what validates, what applies live and what
 waits for a discrete press, which of the three footer buttons is showing, what a
@@ -98,7 +98,7 @@ STABLE_MIN = 0.5
 STABLE_MAX = 60.0
 
 # == the words ================================================================
-# ``tui/screens/service_editor.py``'s display strings, spelled again here for
+# ``shell/tui/screens/service_editor.py``'s display strings, spelled again here for
 # the reason every literal in ``gui/view.py`` is: the two shells may not import
 # each other (tests/test_layering.py). Where the TUI's text names a Textual
 # affordance it is re-worded for this shell and said so at the constant.
@@ -188,7 +188,7 @@ def opencv_missing_note(*, frozen: bool | None = None) -> str:
 def png_data_uri(image: RegionImage) -> str:
     """One captured region as a ``data:`` URI an ``<img>`` can be pointed at.
 
-    ``screen.png.encode_png`` is the whole conversion, and it is the reason this
+    ``driver.screen.png.encode_png`` is the whole conversion, and it is the reason this
     shell needs no Pillow: it reads a capture as BGRX and writes the undefined
     fourth byte as OPAQUE alpha rather than as transparency - read as alpha that
     byte is zero and every crop encodes as an invisible rectangle. ``""`` for

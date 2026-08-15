@@ -221,7 +221,7 @@ def crop(image: RegionImage, x: int, y: int, width: int, height: int) -> RegionI
     matched, so a UI can show the user the thing the detector recognised instead
     of a coordinate. It lives here, beside the type it cuts, because it is a
     pure function over a captured buffer with nothing terminal (and nothing
-    graphical) about it - it was ``tui.pixels.crop`` while the TUI was the only
+    graphical) about it - it was ``shell.tui.pixels.crop`` while the TUI was the only
     shell, and the two shells may not import each other.
 
     Clamped rather than checked, and empty rather than raised, for the same

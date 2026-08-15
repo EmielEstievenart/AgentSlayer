@@ -37,7 +37,7 @@ SRC = os.path.join(ROOT, "src")
 # Select, TextArea, Button, Input, Footer, ...).
 textual_datas, textual_binaries, textual_hidden = collect_all("textual")
 
-# tui/widgets/action_panel.py calls Syntax.guess_lexer(), a fully dynamic
+# shell/tui/widgets/action_panel.py calls Syntax.guess_lexer(), a fully dynamic
 # pygments lookup. Without these the plain ``diff`` highlight keeps working
 # while any extension-recognised file preview blows up - a half-broken build.
 pygments_hidden = (
@@ -47,7 +47,7 @@ pygments_hidden = (
 )
 
 # The ELEMENTS column reaches textual-image only through lazy, guarded imports
-# (tui/graphics.py: probe_terminal and sixel_image_class both import inside a
+# (shell/tui/graphics.py: probe_terminal and sixel_image_class both import inside a
 # try, so the whole app can run without the package). PyInstaller's static
 # analysis therefore sees nothing, and a missed collection would not error -
 # the probe would just answer "no sixel" and the frozen exe would silently draw
@@ -72,7 +72,7 @@ textual_image_hidden = [
 # names, so without this the frozen `--gui` opens a window on nothing.
 #
 # The destination keeps the PACKAGE-RELATIVE path, which is the whole point:
-# gui/shell.py resolves the directory with ``importlib.resources``
+# shell/gui/shell.py resolves the directory with ``importlib.resources``
 # (``files("agentclip.shell.gui") / "assets"``), never ``__file__``, and
 # PyInstaller's FrozenImporter answers that by looking under sys._MEIPASS at
 # exactly this layout. Copy them to the bundle root instead and the exe would
@@ -101,7 +101,7 @@ hiddenimports = (
     # tk-less Linux still runs the rest of the app; name it explicitly so the
     # frozen build can never silently lose the picker.
     + ["tkinter"]
-    # The OpenCV matcher backend (screen/matchers.py, tui.md S3.4g). Same lazy,
+    # The OpenCV matcher backend (driver/screen/matchers.py, tui.md S3.4g). Same lazy,
     # try/except-guarded shape as copykitten and for the same reason - a
     # from-source install without the `cv` extra has to keep working - and the
     # same consequence if it is missed: no error, just a service configured for
@@ -163,7 +163,7 @@ excludes = [
     "pytest",
     "_pytest",
     "mypy",
-    # NB: tkinter is NOT excluded - the --pick-region overlay (screen/overlay.py)
+    # NB: tkinter is NOT excluded - the --pick-region overlay (driver/screen/overlay.py)
     # needs it, and PyInstaller's tkinter hook bundles Tcl/Tk once it's reachable.
 ]
 

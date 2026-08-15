@@ -1,6 +1,6 @@
 """AgentClipApp: app shell, embedded CSS (PyInstaller-friendly), global keys.
 
-The session flow itself lives on MainScreen (tui/screens/main.py). The app owns
+The session flow itself lives on MainScreen (shell/tui/screens/main.py). The app owns
 the screen stack, the F1/F2 global keys, and the quit-mid-turn confirmation.
 """
 

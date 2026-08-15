@@ -43,7 +43,7 @@ the union of what both ecosystems scan:
 
 Discovery never raises: a missing root, a folder without a `SKILL.md`, or an
 unreadable file is skipped. The roots are listed in
-`tools/skills.py:skill_search_roots`.
+`executor/tools/skills.py:skill_search_roots`.
 
 ## Progressive disclosure
 
@@ -98,6 +98,6 @@ and nested maps are not interpreted.
 
 `cli.py` calls `discover_skills(project_root)` once and passes the result to
 `default_registry(skills)`, which inserts the `skill` tool (built by
-`tools/skills.py:make_skill_spec`) after `run_command` and before the meta
-tools. Everything lives in the `agentclip.tools` layer so the import direction
+`executor/tools/skills.py:make_skill_spec`) after `run_command` and before the meta
+tools. Everything lives in the `agentclip.executor.tools` layer so the import direction
 in `architecture.md` is preserved.

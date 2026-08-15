@@ -3,8 +3,8 @@
 Audience: engineers building a second frontend (pywebview/HTML/JS) that must
 reach behavioral parity with the Textual TUI, and maintainers keeping both UIs
 in sync. This brief describes BEHAVIOR only, framework-neutrally. The shared
-core is `SessionController` (`src/agentclip/app/controller.py`) driving the
-`ChatView` protocol (`src/agentclip/app/view.py`); a new frontend implements
+core is `SessionController` (`src/agentclip/shell/app/controller.py`) driving the
+`ChatView` protocol (`src/agentclip/shell/app/view.py`); a new frontend implements
 `ChatView` and nothing else needs to change.
 
 Surface covered: the transcript panel, the chat composer, the slash-command
@@ -36,31 +36,31 @@ one, not a leap of faith.
 
 ## 2. Anatomy
 
-- **TranscriptPanel** (`src/agentclip/tui/widgets/transcript.py`) — a
+- **TranscriptPanel** (`src/agentclip/shell/tui/widgets/transcript.py`) — a
   vertically-scrolling list, one mounted element per session event: user
   messages, assistant prose, tool calls (with a collapsible raw-block body),
   notes, errors, and outbound-copy notices. One exists per window/session tab;
   this brief describes one panel's behavior, not the tab bar that selects
   between them.
-- **ChatComposer** (`src/agentclip/tui/widgets/composer.py`) — the single
+- **ChatComposer** (`src/agentclip/shell/tui/widgets/composer.py`) — the single
   persistent text box docked below the transcript. Serves four different jobs
   depending on session phase (task entry, ask_user answer, follow-up, slash
   command) without ever changing widget — see §3.
-- **CommandPopup** (`src/agentclip/tui/widgets/command_popup.py`) — a small
+- **CommandPopup** (`src/agentclip/shell/tui/widgets/command_popup.py`) — a small
   filtered list of slash commands that appears directly above the composer
   while a `/command` is mid-type, and narrows per keystroke.
-- **ActionPanel** (`src/agentclip/tui/widgets/action_panel.py`) — a bottom
+- **ActionPanel** (`src/agentclip/shell/tui/widgets/action_panel.py`) — a bottom
   drawer, hidden when idle, that opens when a tool call needs human approval.
   Holds a title line, a queue strip, a scrollable diff/command preview body,
   Approve/Approve+auto-edits/Reject buttons, and a hidden reject-reason
   `Input`. Also the planned home of the chunked-send wizard (§3, not yet
   shipped in code).
-- **RunPanel** (`src/agentclip/tui/widgets/run_panel.py`) — hidden when idle,
+- **RunPanel** (`src/agentclip/shell/tui/widgets/run_panel.py`) — hidden when idle,
   shown for the duration of a turn's execution. Contains the `RunningBar`
   header (spinner + label + cancel hint), a rows view (one line per planned
   call, glyph-coded), and a collapsible output tail for the currently running
   `run_command` call.
-- **RunningBar** (`src/agentclip/tui/widgets/running_bar.py`) — the animated
+- **RunningBar** (`src/agentclip/shell/tui/widgets/running_bar.py`) — the animated
   one-line "working" indicator that is the run panel's header; owns only the
   spinner animation, the label and the `(ctrl+x to cancel)` hint.
 
@@ -69,7 +69,7 @@ one, not a leap of faith.
 ### Composer modes
 
 Exactly one text widget serves four modes, switched by
-`MainScreen._update_composer()` (`src/agentclip/tui/screens/main.py:4862`),
+`MainScreen._update_composer()` (`src/agentclip/shell/tui/screens/main.py:4862`),
 which is driven by the `SessionView` the controller pushes after every state
 change. Precedence order (first match wins), each with its border-title copy
 and whether Enter's text is parsed for slash commands or delivered verbatim:
@@ -189,7 +189,7 @@ Transitions are driven entirely by the `SessionView` snapshot pushed via
 ## 4. Inputs from core
 
 The controller drives the surface exclusively through the `ChatView` Protocol
-(`src/agentclip/app/view.py`). Methods relevant to this surface:
+(`src/agentclip/shell/app/view.py`). Methods relevant to this surface:
 
 **Transcript writes** (`view.py:101-109`) — always target the session view
 the controller last `focus_session_view`'d, never "whichever tab is on
@@ -234,14 +234,14 @@ screen" (delegation is single-flight):
 - `reset_composer()` — clears the composer text (non-undoable `load_text`).
 
 **Thread contract — the turn executing, call by call** (`view.py:119-132`,
-also documented in `tui/messages.py:1-59`): `call_started`, `call_finished`,
+also documented in `shell/tui/messages.py:1-59`): `call_started`, `call_finished`,
 `call_output` are called from the **engine's worker thread**, mid-`execute()`
 — the only part of the port with this contract. An implementation must be
 non-blocking and thread-safe, and must tolerate a `call_id` it has never
 heard of (a call the controller did not plan for) and one already resolved
 (a parked turn resuming after an `ask_user` mid-plan). The Textual adapter
 satisfies this by `post_message`-ing three Textual messages
-(`CallStarted`/`CallFinished`/`CallOutput`, `tui/messages.py:84-115`) from the
+(`CallStarted`/`CallFinished`/`CallOutput`, `shell/tui/messages.py:84-115`) from the
 port methods and doing all actual widget work in the UI-thread handlers
 (`main.py:1873-1905`). A GUI frontend needs the equivalent bridge (e.g. a
 thread-safe queue drained on the UI event loop) — nothing may touch UI state
@@ -295,7 +295,7 @@ so the footer dims it when inapplicable (tui.md §10).
 
 Slash commands (typed in the composer, dispatched by
 `SessionController._handle_command`, `controller.py:608-629`, registry in
-`src/agentclip/app/commands.py`): `/help` (`/commands`, `/?`), `/new`,
+`src/agentclip/shell/app/commands.py`): `/help` (`/commands`, `/?`), `/new`,
 `/abort`, `/identify`, `/log`, `/mcp`, `/armed [on|off]`, `/mode
 [plan|ask|unattended]`, `/yolo [on|off]`. Only `/yolo`, `/mode`, `/armed`
 directly touch this surface's state (approval policy / permission mode

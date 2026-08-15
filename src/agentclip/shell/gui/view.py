@@ -104,7 +104,7 @@ from agentclip.shell.gui.remote import (
 )
 from agentclip.shell.gui.service_editor import ServiceEditor, kind_of, png_data_uri
 
-# The finish-detector poll cadence, the TUI's own (tui/screens/main.py). Spelled
+# The finish-detector poll cadence, the TUI's own (shell/tui/screens/main.py). Spelled
 # here rather than imported: the two shells may not import each other, and this
 # is a number the detector composition needs, not a shared decision.
 _BUSY_POLL_S = 0.5
@@ -218,7 +218,7 @@ PROFILE_HINT = " · F2 for captures + detection"
 
 # == settings (F4) ============================================================
 # The TUI's SettingsScreen is a theme picker and nothing else - one "Appearance"
-# tab over four Textual themes (``tui/screens/settings.py``), and it does NOT
+# tab over four Textual themes (``shell/tui/screens/settings.py``), and it does NOT
 # touch ``[notify] bell/toast``, which is file-only in both shells. So this
 # shell's F4 mirrors exactly that: an appearance picker, no more.
 #

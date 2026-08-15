@@ -106,7 +106,7 @@ DEFAULT_DENY_TOKENS = (";", "&&", "||", "|", "`", "$(", ">", "<", "\n")
 
 # Theme names selectable in Settings > Appearance (F3). Two are Textual
 # built-ins; "claude-warm"/"claude-dark" are registered by AgentClipApp on
-# mount (tui/app.py) - config.py stays a stdlib-only leaf, so it validates
+# mount (shell/tui/app.py) - config.py stays a stdlib-only leaf, so it validates
 # against this literal set rather than importing textual just to ask it.
 VALID_THEMES = frozenset({"textual-light", "textual-dark", "claude-warm", "claude-dark"})
 DEFAULT_THEME = "textual-dark"
@@ -127,7 +127,7 @@ DEFAULT_GUI_THEME = "dark"
 DEFAULT_STABLE_SECONDS = 2.0
 
 # Which finish detectors a service is allowed to run, in the canonical order the
-# poller builds (and posts) them in - the same order tui/screens/main.py relies
+# poller builds (and posts) them in - the same order shell/tui/screens/main.py relies
 # on to know which message closes a tick:
 #   "busy"  - the reasoning/stop icon disappearing (needs a BUSY capture)
 #   "idle"  - the send icon reappearing (needs an IDLE capture)

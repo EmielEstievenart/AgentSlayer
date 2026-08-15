@@ -128,7 +128,7 @@ forever.
 
 The chat input box is not a stored location at all any more: the two layouts a
 service can show (a fresh chat centres its box, an ongoing one docks it at the
-bottom) are *appearances* captured once per service (``screen.profile``) and
+bottom) are *appearances* captured once per service (``driver.screen.profile``) and
 searched for INSIDE the drawn chat region on the spot (``_find_all``). Moving
 or resizing the browser therefore costs nothing.
 The browser's new-chat button works the same way: captured once per service,

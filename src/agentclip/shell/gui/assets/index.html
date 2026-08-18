@@ -114,6 +114,17 @@
             </div>
           </section>
 
+          <!-- The model's own question, pinned above the box that answers it.
+               The gate's structural twin, and for the same reason: a question is
+               a stop, and a transcript note scrolls away while a stop must not.
+               The TUI has no equivalent - there the note plus the composer's
+               ANSWER NEEDED mode are the whole surface (see gui.md). -->
+          <section class="ask" id="ask-banner" hidden>
+            <div class="ask-title">ANSWER NEEDED</div>
+            <div class="ask-question" id="ask-question"></div>
+            <div class="ask-hint">Enter sends your answer · Esc leaves the box, Esc again cancels the question</div>
+          </section>
+
           <footer class="composer">
             <!-- The slash-command popup. Absolutely positioned over the
                  transcript rather than in the flow, so narrowing the list does

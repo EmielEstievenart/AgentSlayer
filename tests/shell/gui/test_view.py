@@ -84,6 +84,7 @@ class ControllerSpy:
         self.decisions: list[tuple[Decision, str | None]] = []
         self.messages: list[str] = []
         self.cancels = 0
+        self.cancelled_questions = 0
         self.permission_mode = "ask"
         self.yolo = False  # the status bar's fallback when there is no snapshot
 
@@ -95,6 +96,9 @@ class ControllerSpy:
 
     def cancel_execution(self) -> None:
         self.cancels += 1
+
+    def cancel_pending_question(self) -> None:
+        self.cancelled_questions += 1
 
 
 # == the ports are satisfied, all of them =====================================
@@ -232,6 +236,54 @@ def test_the_sub_agent_run_keeps_the_box_open_for_abort(harness: Harness) -> Non
     event = harness.flush().last("state")
     assert event["composer_mode"] == "abort"
     assert "/abort" in event["composer_placeholder"]
+
+
+async def test_the_state_event_carries_the_open_questions_text(harness: Harness) -> None:
+    """The banner's whole supply line. The question reaches this side as the
+    controller's "? ..." transcript note (the TUI's only surface for it), is
+    stashed, and rides the next state push - so the GUI can pin it above the
+    composer without a ChatView method the TUI would have to grow too."""
+    view = harness.view
+    await view.add_note("? which file did you mean, src/x.py or src/y.py")
+    view.render_state(session_view(awaiting_answer=True))
+
+    event = harness.flush().last("state")
+    assert event["awaiting_answer"] is True
+    assert event["question"] == "which file did you mean, src/x.py or src/y.py"
+    # ...and it is still a transcript note as well, exactly as it was.
+    assert harness.recorder.of_type("transcript")[-1]["kind"] == "note"
+
+
+async def test_the_question_clears_the_moment_the_park_ends(harness: Harness) -> None:
+    """Whatever ended it - an answer, an Esc cancel, a /new - the flag going
+    false is the signal, so a stale question can never hang over the composer of
+    a conversation that has moved on."""
+    view = harness.view
+    await view.add_note("? which file did you mean")
+    view.render_state(session_view(awaiting_answer=True))
+    view.render_state(session_view(awaiting_answer=False))
+
+    event = harness.flush().last("state")
+    assert event["awaiting_answer"] is False
+    assert event["question"] == ""
+
+
+async def test_an_ordinary_note_is_not_mistaken_for_a_question(harness: Harness) -> None:
+    view = harness.view
+    await view.add_note("✓ task done")
+    view.render_state(session_view(awaiting_answer=True))
+    assert harness.flush().last("state")["question"] == ""
+
+
+def test_cancelling_the_question_is_the_controllers_decision(harness: Harness) -> None:
+    """Esc's last stage marshals and nothing more: the view does not touch the
+    answer future, because what a cancel MEANS (answer "[cancelled by user]",
+    never poison the park) is the controller's."""
+    spy = ControllerSpy()
+    harness.view._controller = spy  # type: ignore[assignment]
+    harness.view.cancel_question()
+    assert spy.cancelled_questions == 1
+    assert spy.messages == []  # not a send, and never routed as one
 
 
 def test_the_state_event_carries_what_the_status_chrome_needs(harness: Harness) -> None:

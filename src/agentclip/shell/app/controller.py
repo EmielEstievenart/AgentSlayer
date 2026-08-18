@@ -138,6 +138,15 @@ _FAILED_NOTE = (
 
 _ABORT_NOTE = "the user aborted the sub-agent run"
 
+# What a CANCELLED ask_user is answered with. Cancelling is an ordinary answer,
+# never a poisoned park: the engine's only way out of AWAITING_USER is
+# ``answer_user`` (engine.py, phase-guarded), so an exception raised into the
+# answer future would leave a live engine parked on a question nobody will ever
+# answer again. This string travels the normal path instead - the model reads it
+# as the tool's result, the phase advances, and ``_ask``'s finally puts the
+# composer back the way any other answer does.
+_CANCELLED_ANSWER = "[cancelled by user]"
+
 # Noise reason -> toast. "{chat}" is filled with the session's chat name.
 _NOISE_TEXT = {
     "own-outbound": "ignored AgentClip's own outbound text - copy the model's reply instead",
@@ -1150,6 +1159,33 @@ class SessionController:
         self._view.notify(
             "cancelling - the killed call and the skipped ones are sent to the model",
             severity="warning",
+        )
+
+    def cancel_pending_question(self) -> None:
+        """Answer a pending ``ask_user`` with "cancelled" and let the turn run on.
+
+        The way OUT of a question the user does not want to answer, and it is a
+        RESOLUTION, not an abort: the future is completed with
+        ``_CANCELLED_ANSWER``, which flows through ``_handle_step``'s ordinary
+        AskUser branch - echoed into the transcript like any other answer, handed
+        to ``engine.answer_user``, and unparking the engine from AWAITING_USER,
+        which nothing else can do. Poisoning the park instead (what ``/new``
+        does) is only safe when a full session reset follows it; here there is
+        none, and the engine would be stranded.
+
+        A no-op when no question is on the floor, and when a send already
+        resolved it a heartbeat earlier."""
+        if not self._awaiting_answer:
+            return
+        future = self._answer_future
+        if future is None or future.done():
+            return
+        # Same two lines an ordinary send makes (``submit_message``), in the same
+        # order: the box is emptied before the flow can repaint it.
+        self._view.reset_composer()
+        future.set_result(_CANCELLED_ANSWER)
+        self._view.notify(
+            "question cancelled - the model is told you did not answer", severity="warning"
         )
 
     # The three key actions that spawn a flow. ``_turn_aborting`` guards each

@@ -56,6 +56,12 @@
   var gateOpen = false;
   var gateAlwaysOffered = false;
   var rejectOpen = false;
+  // Whether an `ask_user` is on the floor right now, mirrored off the `state`
+  // push for the same reason `live` below mirrors the rest of it: the last Esc
+  // stage has to answer "is there a question to cancel" BETWEEN events. The
+  // banner's visibility is the same fact, but reading it off the DOM would make
+  // a hidden attribute load-bearing.
+  var awaitingAnswer = false;
   // What the last `state`, `status` and `run` pushes said, remembered because
   // the key hint footer has to answer "would this key fire right now" BETWEEN
   // events - which is the question MainScreen.check_action answers on the other
@@ -1082,6 +1088,15 @@
         "what frees the single-key shortcuts below - press t to type again."
     ],
     [
+      "When the model asks you a question",
+      "An ANSWER NEEDED banner sits above the chat box with the question in it, " +
+        "and it stays there until you deal with it. Whatever you type is the " +
+        "answer VERBATIM - a leading slash is text, not a command. If you do not " +
+        "want to answer, Esc cancels the question: once to let go of the box, " +
+        "once more to cancel. That is not an abort - the model is told you " +
+        "declined and the turn carries on."
+    ],
+    [
       "Chat commands (type in the chat box, leading slash)",
       'Typing "/" pops the list up above the box and each further character ' +
         "narrows it. Nothing is highlighted until you press a letter or an " +
@@ -1893,6 +1908,14 @@
     // suppressed rather than offering to complete something Enter will send
     // verbatim anyway (modals-keys-esc.md 6.1).
     composerMode = event.composer_mode || "idle";
+    // The question, pinned above the composer for as long as it is open. The
+    // transcript still gets its "? ..." note - this is the STOP, and a stop that
+    // can scroll out of sight is not one. Python decides both the text and when
+    // it is over (the `awaiting_answer` flag it rides with), so nothing here has
+    // to guess when a question ended.
+    awaitingAnswer = Boolean(event.awaiting_answer);
+    el.askQuestion.textContent = event.question || "";
+    el.askBanner.hidden = !(awaitingAnswer && event.question);
     el.composer.disabled = !event.composer_enabled;
     el.composer.placeholder = event.composer_placeholder || "";
     el.send.disabled = !event.composer_enabled;
@@ -2573,7 +2596,16 @@
                                      (a confirm denies, the summary closes,
                                      a text prompt cancels, help and settings
                                      close, the service editor asks Python)
-       6. nothing of the above    -> no-op
+       6. an ask_user is open     -> below, last: cancels the question, which
+                                     ANSWERS it "[cancelled by user]" rather
+                                     than tearing the turn down. This shell's
+                                     own stage - the TUI has no way out of a
+                                     question but to answer it - and it is
+                                     deliberately last, so an empty composer
+                                     spends one Esc on stage 3 first and the
+                                     press that cancels is never the press
+                                     that was meant to leave the box
+       7. nothing of the above    -> no-op
 
      Stage 5 is CHECKED first here and that is not a reordering: a GUI modal
      traps focus behind its scrim, so stages 1-3 cannot be live at the same
@@ -2643,8 +2675,21 @@
     // pending gate without rejecting anything.
     if (ev.key === "Escape" && plain) {
       ev.preventDefault();
-      if (rejectOpen) closeReject();
-      // ESC STAGE 6 otherwise: nothing to cancel, nothing happens.
+      if (rejectOpen) {
+        closeReject();
+        return;
+      }
+      // ESC STAGE 6: an ask_user is on the floor and nothing nearer claimed the
+      // key - the composer is empty AND already blurred (stages 2 and 3 spend a
+      // press each before this one is reachable, so unsent answer text can never
+      // be lost to it). Python answers the model "[cancelled by user]": the turn
+      // runs on, which is the only thing that can unpark an engine waiting on a
+      // question.
+      if (awaitingAnswer) {
+        api("cancel_question");
+        return;
+      }
+      // ESC STAGE 7 otherwise: nothing to cancel, nothing happens.
       return;
     }
     // Everything else is the key table's, which is also what the help sheet
@@ -2779,6 +2824,8 @@
       gateHint: id("gate-hint"),
       gateRejectRow: id("gate-reject-row"),
       gateNote: id("gate-note"),
+      askBanner: id("ask-banner"),
+      askQuestion: id("ask-question"),
       toasts: id("toasts"),
       scrim: id("scrim"),
       modal: id("modal"),

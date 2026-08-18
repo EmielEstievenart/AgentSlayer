@@ -713,6 +713,13 @@ class GuiView:
         self._session_title = ""
         self._gate_kind: str | None = None
         self._gate_always: str | None = None
+        # The question an open ``ask_user`` is asking, kept so the state push can
+        # carry it to the banner above the composer. Scraped off the transcript
+        # note the controller writes rather than taken from a new port method:
+        # the TUI needs no such surface (its note plus the composer's answer mode
+        # ARE the banner), and a ChatView method only one shell implements would
+        # be a port that lies about what a chat view is (gui.md §2).
+        self._pending_question: str | None = None
         # The status bar's "paused" reading, and nothing else: it MIRRORS what
         # the automation ended up doing with the watcher rather than deciding
         # it (``MainScreen.watch_paused`` / ``_mirror_watcher``).
@@ -984,6 +991,15 @@ class GuiView:
         """ctrl+x's equivalent. The controller no-ops when nothing is running."""
         self._controller.cancel_execution()
 
+    def cancel_question(self) -> None:
+        """Esc's last stage: refuse the question the banner is showing.
+
+        The decision is the controller's whole (it answers the model
+        "[cancelled by user]" rather than tearing the turn down), so this is the
+        marshal and nothing more. A no-op on the far side when no question is
+        open, which is what lets the page press it without knowing."""
+        self._controller.cancel_pending_question()
+
     def answer_prompt(self, prompt_id: str, value: Any) -> None:
         """Resolve one blocking prompt. Unknown ids are ignored - a modal the
         user answered twice must not raise into the page's promise."""
@@ -1016,6 +1032,13 @@ class GuiView:
 
     async def add_note(self, text: str) -> None:
         self._record(text)
+        # "? " is the controller's mark for the model's question, written just
+        # before it parks on the answer (``_handle_step``). The note still goes
+        # to the transcript exactly as it does in the TUI; this stash is what the
+        # state push that follows a heartbeat later turns into the banner, so a
+        # question cannot scroll away unread.
+        if text.startswith("? "):
+            self._pending_question = text[2:]
         self._send_transcript(kind="note", text=text)
 
     async def add_error(self, text: str) -> None:
@@ -3327,12 +3350,20 @@ class GuiView:
         view = self._last_view
         snap = view.snapshot if view is not None else None
         mode, placeholder, enabled = self._composer_mode(view)
+        # The banner lives and dies with the flag, not with the note: whatever
+        # ended the park (an answer, an Esc cancel, a /new) cleared
+        # ``awaiting_answer``, and the stashed question goes with it rather than
+        # hanging over the composer of a conversation that has moved on.
+        awaiting = bool(view and view.awaiting_answer)
+        if not awaiting:
+            self._pending_question = None
         self._bridge.send(
             "state",
             session_active=bool(view and view.session_active),
             busy=bool(view and view.busy),
             pending_approval=bool(view and view.pending_approval),
-            awaiting_answer=bool(view and view.awaiting_answer),
+            awaiting_answer=awaiting,
+            question=self._pending_question or "",
             awaiting_new_session=self._awaiting_new_session,
             has_outbound=bool(view and view.has_outbound),
             role=view.session_role if view is not None else "master",

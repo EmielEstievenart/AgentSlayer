@@ -256,6 +256,21 @@ def test_the_popup_is_suppressed_while_an_ask_user_answer_is_open() -> None:
     assert 'if (composerMode === "answer" || el.composer.disabled) {' in APP_JS
 
 
+def test_the_question_gets_a_panel_of_its_own_above_the_composer() -> None:
+    """A question is a STOP, and the transcript note the TUI leans on scrolls
+    away. The banner is the gate's structural twin - pinned above the box,
+    styled by its own rules rather than the gate's id-scoped ones."""
+    html = (ASSETS / "index.html").read_text(encoding="utf-8")
+    css = (ASSETS / "app.css").read_text(encoding="utf-8")
+    assert '<section class="ask" id="ask-banner" hidden>' in html
+    assert 'id="ask-question"' in html
+    assert html.index('id="ask-banner"') > html.index('id="gate"')
+    assert html.index('id="ask-banner"') < html.index('<footer class="composer">')
+    assert "ANSWER NEEDED" in html and "Esc again cancels the question" in html
+    for rule in (".ask {", ".ask-title {", ".ask-question {", ".ask-hint {"):
+        assert rule in css, rule
+
+
 def test_the_popup_cannot_take_focus() -> None:
     """The TUI's CommandPopup is one non-focusable Static and the caret never
     leaves the composer. Same here: no button, no tabindex, no listener on it."""
@@ -392,12 +407,31 @@ def test_the_composer_owns_stages_one_to_three_in_that_order() -> None:
     assert 'document.execCommand("delete")' in fn
 
 
-def test_the_document_handler_owns_stages_four_five_and_six() -> None:
+def test_the_document_handler_owns_stages_four_to_seven() -> None:
     fn = APP_JS[APP_JS.index("function onDocumentKey(ev)") :]
     fn = fn[: fn.index("\n  }\n")]
-    assert [int(n) for n in re.findall(r"ESC STAGE (\d)", fn)] == [5, 5, 4, 6]
+    assert [int(n) for n in re.findall(r"ESC STAGE (\d)", fn)] == [5, 5, 4, 6, 7]
     # Stage 5 first, and it returns: a modal owns the keyboard while it is up.
     assert fn.index("ESC STAGE 5") < fn.index("ESC STAGE 4")
+    # ...and the question is LAST before the no-op: a pending gate's reject box
+    # is nearer, and stages 2/3 have already spent a press each, so cancelling
+    # can never be the press that was meant to empty or leave the composer.
+    assert fn.index("ESC STAGE 4") < fn.index("ESC STAGE 6")
+
+
+def test_the_last_stage_cancels_a_pending_question_and_only_then() -> None:
+    """The banner's way out. Guarded on the mirrored flag rather than on the
+    banner's `hidden` attribute, and it ASKS PYTHON - the decision (answer the
+    model "cancelled" rather than abort the turn) is the controller's."""
+    fn = APP_JS[APP_JS.index("function onDocumentKey(ev)") :]
+    fn = fn[: fn.index("\n  }\n")]
+    stage = fn[fn.index("ESC STAGE 6") :]
+    assert "if (awaitingAnswer) {" in stage
+    assert 'api("cancel_question");' in stage
+    # The flag is the state push's, so the page never guesses when a question
+    # ended - and the banner is painted from the same fact.
+    assert "awaitingAnswer = Boolean(event.awaiting_answer);" in APP_JS
+    assert "el.askBanner.hidden = !(awaitingAnswer && event.question);" in APP_JS
 
 
 @pytest.mark.parametrize(
@@ -423,7 +457,7 @@ def test_the_service_editor_is_the_layer_below_the_scrim() -> None:
     fn = APP_JS[APP_JS.index("function onDocumentKey(ev)") :]
     fn = fn[: fn.index("\n  }\n")]
     assert fn.index("if (modalUp())") < fn.index("if (editorOpen)")
-    assert fn.index("if (editorOpen)") < fn.index("if (rejectOpen) closeReject();")
+    assert fn.index("if (editorOpen)") < fn.index("if (rejectOpen) {")
 
 
 def test_a_nearer_handler_stops_the_chain() -> None:

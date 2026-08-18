@@ -187,6 +187,9 @@ class Calls:
     def cancel_execution(self) -> None:
         self._note(("cancel_execution",))
 
+    def cancel_pending_question(self) -> None:
+        self._note(("cancel_pending_question",))
+
     def answer_prompt(self, prompt_id: str, value: object) -> None:
         self._note(("answer_prompt", prompt_id, value))
 
@@ -237,6 +240,7 @@ def test_every_js_api_method_reaches_the_call_the_tui_makes() -> None:
     api.decide("approve", "")
     api.decide("reject", "not like that")
     api.cancel()
+    api.cancel_question()
     api.prompt("p1", True)
     assert calls.trace == [
         ("page_ready",),
@@ -244,6 +248,9 @@ def test_every_js_api_method_reaches_the_call_the_tui_makes() -> None:
         ("submit_decision", "approve", ""),
         ("submit_decision", "reject", "not like that"),
         ("cancel_execution",),
+        # Esc's last stage. A DIFFERENT door from `cancel` (ctrl+x): one stops
+        # the tool calls running, the other answers a question "cancelled".
+        ("cancel_pending_question",),
         ("answer_prompt", "p1", True),
     ]
 

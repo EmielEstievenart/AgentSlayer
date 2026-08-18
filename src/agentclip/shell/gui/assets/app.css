@@ -790,6 +790,46 @@ body {
   flex: 1;
 }
 
+/* -- the ask_user banner --------------------------------------------------- */
+/* The gate's twin in weight and in placement - pinned above the composer, its
+   own rules rather than the `#gate` ones so neither panel can be restyled by
+   accident through the other. Coloured --accent where the gate is --warn: both
+   are stops, but only one of them is about to change your files. */
+
+.ask {
+  border-top: 2px solid var(--accent);
+  background: var(--bg-raised);
+  padding: 10px 18px 12px;
+}
+
+.ask-title {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-solid);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+}
+
+.ask-question {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  /* The model writes these, so they may be long and may carry newlines: wrapped,
+     and never a scrollbar of their own - the question is what the panel is. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ask-hint {
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 /* -- composer ------------------------------------------------------------- */
 
 .composer {

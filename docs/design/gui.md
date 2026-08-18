@@ -754,7 +754,8 @@ against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
   work — the data never is.
 - **The Esc chain is the brief's, in the brief's order**, split across the two
   dispatchers that own it: stages 1-3 (popup / clear-with-undo / blur) on the
-  composer, stages 4-6 (reject note / modal-local / no-op) on the document. Stage
+  composer, stages 4-7 (reject note / modal-local / cancel a pending `ask_user` /
+  no-op) on the document. Stage
   5 is *checked* first in the document handler and that is not a reordering — a
   GUI modal traps focus behind its scrim, so stages 1-3 cannot be live beside
   one, and Textual's screen stack gives the TUI the same guarantee. **No stage is
@@ -762,6 +763,24 @@ against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
   named functions rather than inline closures precisely so the order is
   readable and assertable. `ev.defaultPrevented` is what stops a composer Esc
   from also firing stage 4 on the way up.
+- **Stage 6 is this shell's own** (`modals-keys-esc.md` §3.3): the TUI has no way
+  out of an `ask_user` but to answer it, and a GUI where the only exit is typing
+  something the model will read as an answer is a trap. It is last before the
+  no-op on purpose — the composer is auto-focused while a question is open, so
+  stage 3 spends the first press letting go of the box and the press that cancels
+  is never the press that meant to. It **resolves** the answer future with
+  `"[cancelled by user]"` rather than poisoning it the way `/new` does: poison is
+  safe only when a full session reset follows, and the engine's one exit from
+  `AWAITING_USER` is `answer_user`.
+- **The `ask_user` question gets a panel of its own** (`#ask-banner`), pinned
+  above the composer, the approval gate's structural twin: a question is a stop,
+  and a transcript note scrolls away while a stop must not. **A GUI/TUI
+  asymmetry, recorded**: the TUI stays as it is (the `"? …"` note plus the
+  composer's `■ ANSWER NEEDED` mode). Deliberately no new `ChatView` method for
+  it — a port method only one shell implements is a port that lies about what a
+  chat view is — so `GuiView.add_note` reads the question off the controller's
+  `"? "` note and the existing `state` push carries it, keyed off
+  `awaiting_answer` so the banner cannot outlive the park.
 - **`↑`/`↓` in the composer walk this run's sends** — landed after this
   increment, filed here because it is one more claimant on the composer's key
   chain and reads as nothing else. The priority order is the TUI's exactly

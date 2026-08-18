@@ -188,6 +188,22 @@ class LocalHost:
             command,
             shell=True,
             cwd=str(cwd),
+            # A tool's command NEVER inherits this process's stdin. Two reasons,
+            # and the second one is a hang:
+            #  * a command that reads input would otherwise eat the app's own -
+            #    the user's keystrokes in the TUI, the link's frames in the
+            #    engine-over-a-wire process (docs/design/remote-executor.md).
+            #    With DEVNULL it reads EOF and gets on with it.
+            #  * on Windows, an inherited pipe stdin DEADLOCKS the child while
+            #    this process has a blocking read pending on that same handle:
+            #    handles are synchronous, so the child's startup query of its own
+            #    stdin (GetFileType, which every CPython start does) queues
+            #    behind our unfinished ReadFile and never returns. That is
+            #    exactly the shape of the link server - a reader thread parked on
+            #    stdin for the next frame while a worker runs a command - and it
+            #    is what tests/shell/app/test_remote_link.py's streaming test
+            #    hangs on without this line.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             **popen_kwargs,

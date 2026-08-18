@@ -7,10 +7,11 @@
 > the design session for the first increment happens, this document graduates
 > into a binding design doc and `remote-ssh.md` gets amended where superseded.
 >
-> **Exception: §2.2, §2.9 and §2.10 are built, and binding** — increment 1 (the
-> link seam) and increment 2's first slices (the engine-side package, the wire
-> codec, the server loop) shipped, so those parts describe code rather than
-> intent. Everything else here is still plan.
+> **Exception: §2.2, §2.9, §2.10 and §2.11 are built, and binding** — increment
+> 1 (the link seam) and increment 2 (the engine-side package, the wire codec, the
+> server loop, `RemoteLink` and the localhost e2e suite) shipped in full, so
+> those parts describe code rather than intent. Everything else here is still
+> plan.
 
 ## 1. Goal
 
@@ -122,9 +123,14 @@ so the assembly moved down before any wire was written:
   since this package is precisely what runs on the target.
 
 The wire codec landed next, in the same package: `engine/link/wire.py`, the
-shared vocabulary both ends import (§2.9), and then the server loop that speaks
-it beside a bare engine (§2.10). Still to come in increment 2: `RemoteLink`, the
-Shell-side half that speaks the same vocabulary from the other end.
+shared vocabulary both ends import (§2.9), then the server loop that speaks it
+beside a bare engine (§2.10), and finally the Shell-side half that speaks it from
+the other end: `shell/app/remote_link.py` (§2.11). The accepted risk this section
+opens with — "the wire path is only exercised by remote/integration tests" — is
+paid off by `tests/shell/app/test_remote_link.py`, which drives a real
+`python -m agentclip.engine.link` subprocess on localhost through `RemoteLink`
+alone, and ends with the same scripted flow run through BOTH links: equal
+bootstrap payload, equal `StepResult`.
 
 ### 2.3 Disconnect semantics: lossy, honest, simple
 
@@ -328,6 +334,72 @@ hosted session is byte-identical to a pre-MCP one. Increment 4 brings the
 target-side McpManager, and it lands in `__main__.py`'s assembly like every other
 argument.
 
+### 2.11 The client (as built)
+
+`src/agentclip/shell/app/remote_link.py` is the Shell's end: `RemoteLinkClient`,
+which owns one connection, and `RemoteLink`, which is a `Link` the controller
+cannot tell apart from `LocalLink` — same `asyncio.Lock` serializing the same 13
+calls, same `asyncio.to_thread` hop, same three facts read synchronously off the
+object. Only the body of the hop differs: a frame written and an answer read
+instead of an engine method.
+
+**Transport-agnostic, and spawn-free.** The client is constructed over a pair of
+**text streams** and creates nothing. Increment 2's tests hand it a localhost
+subprocess's pipes; increment 3 hands it an SSH exec channel's streams and
+nothing in the module changes. That is why there is no `Popen` in `src` — a
+subprocess is one way to get a reader and a writer, and choosing it is a
+launcher's decision, not the protocol's. (Deployment and the production transport
+are increment 3 in full: this increment ships the client, not a way to run it
+remotely.)
+
+**One reader, inside the call.** There is no background reader thread.
+`roundtrip` writes its call frame and then reads frames itself until that call's
+answer arrives. This is sound because of the contract the whole seam already
+rests on — **one call in flight per connection**: the controller serializes per
+link and only one link is live, so whoever is inside `roundtrip` is the only one
+entitled to read, and the server's per-session busy rule refuses a second call
+anyway. A reader thread would have bought nothing and cost a queue, a shutdown
+protocol and a second place for a frame to go missing.
+
+**Events reach the link they belong to.** `progress`/`output` frames met on the
+way to an answer are dispatched **by session id** through the client's registry,
+so a parked link's events still reach ITS hooks while somebody else's call is
+doing the reading. The engine's hook contract is reimplemented rather than
+inherited: hooks fire from the worker thread, must not block, and one that raises
+is dropped for good — a progress watcher may never fail a turn, and a wire is no
+reason to change that.
+
+**Cancel under the send lock.** One `threading.Lock` guards every write+flush and
+is deliberately NOT held across the read that follows, so `request_cancel` — sync
+and out-of-band, called from the event loop — gets its frame out while the
+roundtrip it interrupts is blocked in a read. It never raises: a dead link fails
+the call it was interrupting on its own, and reporting the same death twice out
+of a method the UI calls on a keypress buys nothing.
+
+**Death is an exception, never a hang.** EOF on the reader (the server exited,
+the channel dropped, the process was killed) raises `EngineLinkError`
+immediately, as do a malformed line, an unknown frame type, and an answer
+carrying an id that is not the outstanding call's — with one call in flight there
+is no other call it could belong to, so the two ends disagree and going on would
+be guessing. The two kinds this side raises on its own account (`link_closed`,
+`protocol`) name what happened to the LINK; the wire's four name what the far
+side answered. `BudgetExceeded` and `EngineStateError` are rebuilt as themselves
+(§2.9), because the controller catches exactly those two by type.
+
+A module-level `_conforms(link: RemoteLink) -> Link` pins conformance where mypy
+can see it: the tests are not type-checked, and a Protocol nothing declares is a
+Protocol nothing enforces.
+
+**One thing the wire changed below the seam.** `LocalHost.spawn` now passes
+`stdin=subprocess.DEVNULL`. A tool's command must never inherit the app's own
+input — the user's keystrokes in the TUI, the link's frames in the server
+process — and on Windows the inheritance is worse than untidy: handles are
+synchronous, so a child's startup query of its own stdin (`GetFileType`, which
+every CPython start does) queues behind the parent's unfinished blocking
+`ReadFile` and never returns. That is exactly the shape of the server — a reader
+thread parked on stdin for the next frame while a worker runs a command — and it
+deadlocked every `python -c …` the e2e suite ran until this landed.
+
 ## 3. Architecture sketch
 
 ```
@@ -365,12 +437,14 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
    turning them into wire messages is increment 2's job, where streaming is
    designed as a first-class message anyway; making them events with no wire
    under them would have been churn, not design. See §2.2 "As built".
-2. **Wire protocol + localhost subprocess.** JSON-lines over stdio; run the
-   engine half as a local subprocess behind `RemoteLink` in tests only.
-   Streaming (output deltas) and cancel as first-class messages. — *in
-   progress*: the engine-side package (§2.2), the codec (§2.9) and the server
-   loop (§2.10) are built; `RemoteLink` and the subprocess-behind-a-link tests
-   are what is left.
+2. **Wire protocol + localhost subprocess.** — **done.** JSON-lines over stdio;
+   the engine half as a local subprocess behind `RemoteLink` in tests only, with
+   streaming (output deltas) and cancel as first-class messages. As built: the
+   engine-side package (§2.2), the codec (§2.9), the server loop (§2.10) and the
+   client (§2.11). The subprocess spawn lives in the tests and nowhere else —
+   `RemoteLinkClient` takes two text streams — so the production transport and
+   the deployment that produces it are increment 3's whole job, with no client
+   changes owed.
 3. **SSH transport + deployment.** SFTP push + `uv run` bootstrap, `RemoteLink`
    over the SSH exec channel, reusing `connect_remote` auth/reconnect.
 4. **MCP + store on target, parity pass.** Target-side McpManager, stores,

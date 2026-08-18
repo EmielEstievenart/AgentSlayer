@@ -7,7 +7,8 @@ Shell uses to drive a session - so that a later increment can put a wire
 underneath it without the controller learning a new vocabulary:
 
 * :class:`LocalLink` - today's mode, the engine in this process (section 2.2);
-* ``RemoteLink`` - later, the same calls as messages over an SSH exec channel;
+* :class:`~agentclip.shell.app.remote_link.RemoteLink` - the same calls as frames
+  on a wire, over any pair of text streams (section 2.11);
 * ``FakeLink`` - a test double for shell tests that want no engine at all.
 
 Only the Shell's own surface is here. Everything below the engine (tool

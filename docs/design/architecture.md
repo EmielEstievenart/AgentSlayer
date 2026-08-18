@@ -161,8 +161,11 @@ src/agentclip/
 └── shell/                 # THE SHELL: the two UIs and the controller they share
     ├── app/               # UI-agnostic orchestration: drives the engine, never imports tui/clip/screen
     │   ├── controller.py  # SessionController: flows, gate/ask futures, delegation (nested sessions)
-    │   ├── link.py        # Link Protocol + LocalLink: the Shell↔Engine seam; RemoteLink later
+    │   ├── link.py        # Link Protocol + LocalLink: the Shell↔Engine seam
     │   │                  #   (docs/design/remote-executor.md §2.2)
+    │   ├── remote_link.py # the same seam over the wire: RemoteLinkClient (one connection, over any
+    │   │                  #   pair of text streams) + RemoteLink (a Link whose engine is elsewhere)
+    │   │                  #   (remote-executor.md §2.11)
     │   ├── commands.py    # the chat slash-command registry: dispatch, /help and the popup read one tuple
     │   ├── view.py        # ChatView Protocol (the one UI seam) + SessionView snapshot + RunCall rows
     │   └── types.py       # SessionSpec, SessionRef, SessionStats (EngineRequest is engine-side:

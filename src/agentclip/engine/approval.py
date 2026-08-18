@@ -1,7 +1,7 @@
 """ApprovalPolicy: the gate every tool call passes before it runs.
 
 Two modes, chosen by whether a permission ruleset was loaded (config.py reads
-OpenCode's opencode.json; see permissions.py):
+AgentClip's permissions.json, which has OpenCode's shape; see permissions.py):
 
 RULESET MODE (rules present). The rules decide, last match wins:
 

@@ -242,7 +242,7 @@ class AgentClipApp(App[None]):
         /* The whole registry plus its border - a bare `/` offers everything, and
            a cap below that would hide the last command rather than shorten the
            list. Grows with app.commands.COMMANDS (a test pins the two). */
-        max-height: 12;
+        max-height: 13;
         background: $surface;
         color: $text;
         border: round $accent;

@@ -230,7 +230,7 @@ and ``note`` is the sentence that beat produced, which is the SAME string the
 terminal path prints (``hosts/connect.py``, ``StepEvent``). ``policy`` is the
 one thing this dialog says that no other surface does: which machine's ruleset
 is about to govern the session, stated because the alternative is a user whose
-host-PC ``opencode.json`` silently stopped applying.
+host-PC ``permissions.json`` silently stopped applying.
 
 The three questions a dial can ask ride the ORDINARY ``modal`` family, with
 their own ``modal`` values (``connect_password`` / ``connect_hostkey`` /

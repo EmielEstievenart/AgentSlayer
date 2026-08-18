@@ -51,7 +51,7 @@ local.
 
 6. **Policy local, project remote.** — **SUPERSEDED, see "Revision: the target owns
    its policy" below.** Kept for the record only; the code no longer reads this way.
-   - Permissions (`opencode.json` ruleset + deny-token backstop): **always local** —
+   - Permissions (the JSON ruleset + deny-token backstop): **always local** —
      the user's policy must not weaken because of remote config.
    - Skills (SKILL.md discovery): **remote** in a remote session — via Host reads.
    - Project `.agentclip.toml`: **remote** — read via Host after connect, before engine
@@ -203,28 +203,30 @@ reason: that is where it physically happens.
 
 ### What moves
 
-**The permission ruleset (`opencode.json` → `permission`).** Read from the target
-via the Host seam: the remote user's `~/.config/opencode/opencode.json` (remote home
-from `host.home_dir()`, as skills already resolve it) and, newly, the remote
-project's `opencode.json`. The host PC's `opencode.json` is **not consulted at all**
-in a remote session — not as a fallback, not as an overlay. Two rulesets in play
-would mean every future permission question has to be answered twice.
+**The permission ruleset (`permissions.json` → `permission`).** Read from the target
+via the Host seam: the remote user's `~/.config/agentclip/permissions.json` (remote
+home from `host.home_dir()`, as skills already resolve it — platformdirs answers for
+THIS machine, so the remote path is composed rather than asked for) and, newly, the
+remote project's `.agentclip/permissions.json`. The host PC's `permissions.json` is
+**not consulted at all** in a remote session — not as a fallback, not as an overlay.
+Two rulesets in play would mean every future permission question has to be answered
+twice.
 
 This is a real code change, not a flag: `_load_permission_rules` takes no `host`
 parameter today, and that absence *is* the current enforcement.
 
-`[permission] opencode_config`, when set, now names a path **on the target**. A
+`[permission] permissions_config`, when set, now names a path **on the target**. A
 host-side `config.toml` may still set it, but the string is resolved remotely — the
 setting says "which file holds the ruleset", and the ruleset is over there.
 
-**A target with no `opencode.json`** behaves exactly like a local machine with none:
+**A target with no `permissions.json`** behaves exactly like a local machine with none:
 empty ruleset, legacy allowlist mode. No new concept, and no fallback to the host
 PC's file — the whole point is that host file no longer participates.
 
 **MCP configuration.** Both layers read from the target via the Host seam, which
 also un-skips the project layer that `config.py:925` drops today. `{file:...}`
 placeholders resolve against the remote config file's directory, over SFTP, so a
-token sitting beside `opencode.json` on the box is found where its author put it.
+token sitting beside `permissions.json` on the box is found where its author put it.
 `{env:VAR}` resolves from the **target's** login-shell environment — fetched once at
 connect (`bash -lc printenv`) and cached for the session — for the same reason: the
 person who wrote `{env:API_TOKEN}` into a file on that box exported it on that box.
@@ -296,7 +298,7 @@ hold.
   sequence - which `cli.remote_launch` and the GUI's connect dialog both drive,
   so the order is stated once (docs/design/ui-briefs/ssh-connect.md).
 - The permission-source string shown in the TUI must name the machine, not just the
-  path — `dev-box:~/.config/opencode/opencode.json` — or two identical-looking
+  path — `dev-box:~/.config/agentclip/permissions.json` — or two identical-looking
   paths become indistinguishable in a screenshot.
 - `[approval]` needs its layers separated: it is read from the merged config dict
   today, so honouring only the host layer means keeping that table out of the merge

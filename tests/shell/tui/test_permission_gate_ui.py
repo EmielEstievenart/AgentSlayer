@@ -1,4 +1,4 @@
-"""Pilot tests for the gate under a permission ruleset (an opencode.json).
+"""Pilot tests for the gate under a permission ruleset (a permissions.json).
 
 Two things change on screen once rules govern a session, and only these two: the
 middle button is offered for COMMANDS as well as edits, and it names the exact
@@ -6,7 +6,7 @@ pattern pressing it would remember. The rest of the drawer - title, preview,
 y/n - is the same widget the legacy tests already cover.
 
 The ruleset is a temp file the test writes; nothing here reads the developer's
-real ~/.config/opencode/opencode.json (the root conftest blocks that path).
+real ~/.config/agentclip/permissions.json (the root conftest blocks that path).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.messages import ClipboardCaptured
 
 # Everything asks: the gate is the whole subject here.
-OPENCODE_JSON = '{"permission": {"*": "ask", "bash": {"*": "ask"}}}'
+RULESET_JSON = '{"permission": {"*": "ask", "bash": {"*": "ask"}}}'
 
 REPLY_ECHO_ONE = """Let me check.
 
@@ -64,10 +64,10 @@ async def _wait_for(
 def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard, Path]:
     project = tmp_path / "project"
     project.mkdir(parents=True)
-    rules = project / "opencode.json"
-    rules.write_text(OPENCODE_JSON, encoding="utf-8")
+    rules = project / "permissions.json"
+    rules.write_text(RULESET_JSON, encoding="utf-8")
     (project / ".agentclip.toml").write_text(
-        f'[permission]\nopencode_config = "{rules.as_posix()}"\n', encoding="utf-8"
+        f'[permission]\npermissions_config = "{rules.as_posix()}"\n', encoding="utf-8"
     )
     config = load_config(project, global_config_path=project / "no-such-global.toml")
     assert config.permission_rules, "the session must start in ruleset mode"

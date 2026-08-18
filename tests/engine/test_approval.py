@@ -4,7 +4,7 @@ LEGACY (no permission ruleset loaded): the glob allowlist (matched pattern
 returned), the deny-token override, verdicts per approval kind, and
 APPROVE_ALL_EDITS stickiness through the Engine.
 
-RULESET (an opencode.json is loaded): allow/ask/deny per permission key, the
+RULESET (a permissions.json is loaded): allow/ask/deny per permission key, the
 deny-token backstop standing in for OpenCode's shell parser, yolo-vs-deny,
 remembered "always allow" rules and their cascade, and what the Engine does with
 a call a rule denies.
@@ -295,7 +295,7 @@ def test_legacy_yolo_answers_an_mcp_call_too() -> None:
 
 # == ruleset mode: OpenCode's allow/ask/deny rules ==============================
 
-# A miniature of the real opencode.json (tests never read the developer's own).
+# A miniature of a real permissions.json (tests never read the developer's own).
 RULESET_JSON = """{
   "permission": {
     "*": "ask",
@@ -337,11 +337,11 @@ def get_spec(registry: ToolRegistry, name: str) -> ToolSpec:
 
 
 def write_ruleset(project: Path, json_text: str = RULESET_JSON) -> Path:
-    """Point the project's config at a temp opencode.json and return its path."""
-    path = project / "opencode.json"
+    """Point the project's config at a temp permissions.json and return its path."""
+    path = project / "permissions.json"
     path.write_text(json_text, encoding="utf-8")
     (project / ".agentclip.toml").write_text(
-        f'[permission]\nopencode_config = "{path.as_posix()}"\n', encoding="utf-8"
+        f'[permission]\npermissions_config = "{path.as_posix()}"\n', encoding="utf-8"
     )
     return path
 
@@ -604,7 +604,7 @@ def test_approve_all_edits_becomes_an_edit_rule_under_a_ruleset(project, make_en
 
 # -- the acceptance example ------------------------------------------------------
 
-# A copy of a real-world opencode.json (the shape this feature was built
+# A copy of a real-world ruleset (the shape this feature was built
 # against), inline so the suite never depends on a file outside it.
 REAL_WORLD_JSON = """{
   "$schema": "https://opencode.ai/config.json",

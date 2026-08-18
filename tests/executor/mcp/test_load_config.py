@@ -17,15 +17,16 @@ from pathlib import Path
 import pytest
 
 import agentclip.config
-from agentclip.config import load_config
+from agentclip.config import load_config, project_permissions_path
 from agentclip.executor.hosts import FakeHost
 from agentclip.executor.mcp.types import McpLocalServer, McpRemoteServer
 
-# The remote user's home, and where OpenCode keeps its config under it - which
-# in a remote session is resolved from `home`, never from this PC's ~.
+# The remote user's home, and where AgentClip keeps its ruleset under it -
+# which in a remote session is composed from `home`, never from this PC's ~.
 REMOTE_HOME = Path("/home/dev")
-REMOTE_OPENCODE = "/home/dev/.config/opencode/opencode.json"
+REMOTE_RULES = "/home/dev/.config/agentclip/permissions.json"
 REMOTE_ROOT = "/srv/app"
+REMOTE_PROJECT_RULES = f"{REMOTE_ROOT}/.agentclip/permissions.json"
 
 
 @pytest.fixture
@@ -40,11 +41,12 @@ def global_path(tmp_path: Path) -> Path:
     return tmp_path / "config.toml"
 
 
-def _write_opencode(path: Path, mcp: dict) -> None:
+def _write_rules(path: Path, mcp: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"mcp": mcp}), encoding="utf-8")
 
 
-def _opencode_json(mcp: dict) -> str:
+def _rules_json(mcp: dict) -> str:
     return json.dumps({"mcp": mcp})
 
 
@@ -65,21 +67,22 @@ def _remote(global_path: Path, host: FakeHost, **kwargs: object):
 
 def test_mcp_defaults_and_no_real_file_is_read(project: Path, global_path: Path, tmp_path: Path) -> None:
     """With no [mcp] table and no override, the servers come from
-    default_opencode_config_path() - which the suite-wide _no_real_opencode_config
-    fixture points at a nonexistent tmp file. This test is the proof that the
-    fixture isolates the MCP reader exactly as it isolates the permission reader
-    (docs/design/mcp.md section 7): the developer's real opencode.json is never
-    opened, because load_config resolves the path through that one function."""
+    default_permissions_config_path() - which the suite-wide
+    _no_real_permissions_config fixture points at a nonexistent tmp file. This
+    test is the proof that the fixture isolates the MCP reader exactly as it
+    isolates the permission reader (docs/design/mcp.md section 7): the
+    developer's real permissions.json is never opened, because load_config
+    resolves the path through that one function."""
     # The attribute lookup must go through the module (the fixture patches
-    # agentclip.config.default_opencode_config_path, not a from-import binding).
-    default = agentclip.config.default_opencode_config_path()
+    # agentclip.config.default_permissions_config_path, not a from-import binding).
+    default = agentclip.config.default_permissions_config_path()
     assert default.is_relative_to(tmp_path)  # the fixture's tmp path, not ~/.config
     assert not default.exists()
 
     config = load_config(project, global_config_path=global_path)
 
     assert config.mcp.enabled is True
-    assert config.mcp.opencode_config == ""
+    assert config.mcp.permissions_config == ""
     assert config.mcp_servers.servers == ()
     assert config.mcp_servers.source == ""
     assert config.warnings == ()  # absent file is silent, like the permission reader
@@ -88,12 +91,12 @@ def test_mcp_defaults_and_no_real_file_is_read(project: Path, global_path: Path,
 def test_default_path_function_is_shared_not_copied(
     project: Path, global_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Repointing default_opencode_config_path (the same seam the permission
+    """Repointing default_permissions_config_path (the same seam the permission
     reader uses) repoints the MCP reader too - i.e. the loader reuses that one
     function rather than carrying a private copy of the default path."""
-    ocjson = tmp_path / "shared-default.json"
-    _write_opencode(ocjson, {"echo": {"type": "local", "command": ["echo", "hi"]}})
-    monkeypatch.setattr("agentclip.config.default_opencode_config_path", lambda: ocjson)
+    rules = tmp_path / "shared-default.json"
+    _write_rules(rules, {"echo": {"type": "local", "command": ["echo", "hi"]}})
+    monkeypatch.setattr("agentclip.config.default_permissions_config_path", lambda: rules)
 
     config = load_config(project, global_config_path=global_path)
 
@@ -101,24 +104,24 @@ def test_default_path_function_is_shared_not_copied(
     server = config.mcp_servers.servers[0]
     assert isinstance(server, McpLocalServer)
     assert server.command == ("echo", "hi")
-    assert config.mcp_servers.source == str(ocjson)
+    assert config.mcp_servers.source == str(rules)
 
 
-def test_opencode_config_override_wins_over_default(
+def test_permissions_config_override_wins_over_default(
     project: Path, global_path: Path, tmp_path: Path
 ) -> None:
     ocjson = tmp_path / "elsewhere.json"
-    _write_opencode(
+    _write_rules(
         ocjson,
         {"github": {"type": "local", "command": ["npx", "gh-mcp"], "timeout": 5000}},
     )
     # TOML literal string (single quotes): a Windows path's backslashes must not
     # be read as escapes.
-    global_path.write_text(f"[mcp]\nopencode_config = '{ocjson}'\n", encoding="utf-8")
+    global_path.write_text(f"[mcp]\npermissions_config = '{ocjson}'\n", encoding="utf-8")
 
     config = load_config(project, global_config_path=global_path)
 
-    assert config.mcp.opencode_config == str(ocjson)
+    assert config.mcp.permissions_config == str(ocjson)
     assert [s.name for s in config.mcp_servers.servers] == ["github"]
     server = config.mcp_servers.servers[0]
     assert isinstance(server, McpLocalServer)
@@ -132,7 +135,7 @@ def test_disabled_means_no_file_is_opened(project: Path, global_path: Path, tmp_
     ocjson = tmp_path / "broken.json"
     ocjson.write_text("{this is not json", encoding="utf-8")
     global_path.write_text(
-        f"[mcp]\nenabled = false\nopencode_config = '{ocjson}'\n", encoding="utf-8"
+        f"[mcp]\nenabled = false\npermissions_config = '{ocjson}'\n", encoding="utf-8"
     )
 
     config = load_config(project, global_config_path=global_path)
@@ -146,13 +149,14 @@ def test_disabled_means_no_file_is_opened(project: Path, global_path: Path, tmp_
 # -- the project layer, in both kinds of session -------------------------------
 
 
-def test_local_session_reads_project_opencode_json(project: Path, global_path: Path) -> None:
-    _write_opencode(project / "opencode.json", {"fs": {"type": "local", "command": ["fs-mcp"]}})
+def test_local_session_reads_the_projects_own_ruleset(project: Path, global_path: Path) -> None:
+    local = project_permissions_path(project)
+    _write_rules(local, {"fs": {"type": "local", "command": ["fs-mcp"]}})
 
     config = load_config(project, global_config_path=global_path)
 
     assert [s.name for s in config.mcp_servers.servers] == ["fs"]
-    assert config.mcp_servers.source == str(project / "opencode.json")
+    assert config.mcp_servers.source == str(local)
 
 
 def test_project_layer_merges_per_field_over_global(
@@ -160,13 +164,13 @@ def test_project_layer_merges_per_field_over_global(
 ) -> None:
     """Global declares the server; the project layer retunes ONE field and the
     rest survives - OpenCode's deep merge, project over global."""
-    ocjson = tmp_path / "global-opencode.json"
-    _write_opencode(
+    ocjson = tmp_path / "global-permissions.json"
+    _write_rules(
         ocjson,
         {"api": {"type": "remote", "url": "https://api.example/mcp", "headers": {"a": "1"}}},
     )
-    _write_opencode(project / "opencode.json", {"api": {"timeout": 1234}})
-    global_path.write_text(f"[mcp]\nopencode_config = '{ocjson}'\n", encoding="utf-8")
+    _write_rules(project_permissions_path(project), {"api": {"timeout": 1234}})
+    global_path.write_text(f"[mcp]\npermissions_config = '{ocjson}'\n", encoding="utf-8")
 
     config = load_config(project, global_config_path=global_path)
 
@@ -176,7 +180,7 @@ def test_project_layer_merges_per_field_over_global(
     assert server.url == "https://api.example/mcp"  # global field survives
     assert server.headers == (("a", "1"),)
     assert server.timeout_ms == 1234  # the project's one overridden field
-    assert config.mcp_servers.source == f"{ocjson}, {project / 'opencode.json'}"
+    assert config.mcp_servers.source == f"{ocjson}, {project_permissions_path(project)}"
 
 
 # -- a remote session: both layers, off the target -----------------------------
@@ -190,15 +194,13 @@ def test_both_layers_are_read_off_the_target(global_path: Path, tmp_path: Path) 
     token beside the file that names it - so the file over there is the one
     that answers, and a file at the same path on this PC must not be.
     """
-    (tmp_path / "opencode.json").write_text(
-        _opencode_json({"api": {"type": "remote", "url": "https://this-pc.example"}}),
+    (tmp_path / "permissions.json").write_text(
+        _rules_json({"api": {"type": "remote", "url": "https://this-pc.example"}}),
         encoding="utf-8",
     )
     host = FakeHost(REMOTE_ROOT)
-    host.add_file(REMOTE_OPENCODE, _opencode_json({"api": {"type": "remote", "url": "https://box"}}))
-    host.add_file(
-        f"{REMOTE_ROOT}/opencode.json", _opencode_json({"api": {"headers": {"a": "1"}}})
-    )
+    host.add_file(REMOTE_RULES, _rules_json({"api": {"type": "remote", "url": "https://box"}}))
+    host.add_file(REMOTE_PROJECT_RULES, _rules_json({"api": {"headers": {"a": "1"}}}))
 
     config = _remote(global_path, host)
 
@@ -209,27 +211,27 @@ def test_both_layers_are_read_off_the_target(global_path: Path, tmp_path: Path) 
     # str(Path), not the posix spelling: McpServers.source is not shown anywhere
     # yet, so it is still the plain path join every local test asserts.
     assert config.mcp_servers.source == (
-        f"{Path(REMOTE_OPENCODE)}, {Path(REMOTE_ROOT) / 'opencode.json'}"
+        f"{Path(REMOTE_RULES)}, {Path(REMOTE_PROJECT_RULES)}"
     )
 
 
 def test_the_remote_global_layer_comes_from_the_remote_home(global_path: Path) -> None:
-    """With no [mcp] opencode_config, ~ is the TARGET user's home - the same
+    """With no [mcp] permissions_config, ~ is the TARGET user's home - the same
     resolution the permission ruleset in that very file gets."""
     host = FakeHost(REMOTE_ROOT)
-    host.add_file(REMOTE_OPENCODE, _opencode_json({"fs": {"type": "local", "command": ["fs"]}}))
+    host.add_file(REMOTE_RULES, _rules_json({"fs": {"type": "local", "command": ["fs"]}}))
 
     config = _remote(global_path, host)
 
     assert [s.name for s in config.mcp_servers.servers] == ["fs"]
-    assert config.mcp_servers.source == str(Path(REMOTE_OPENCODE))
+    assert config.mcp_servers.source == str(Path(REMOTE_RULES))
 
 
-def test_a_tilde_in_mcp_opencode_config_expands_on_the_target(global_path: Path) -> None:
-    global_path.write_text('[mcp]\nopencode_config = "~/servers.json"\n', encoding="utf-8")
+def test_a_tilde_in_mcp_permissions_config_expands_on_the_target(global_path: Path) -> None:
+    global_path.write_text('[mcp]\npermissions_config = "~/servers.json"\n', encoding="utf-8")
     host = FakeHost(REMOTE_ROOT)
     host.add_file(
-        "/home/dev/servers.json", _opencode_json({"fs": {"type": "local", "command": ["fs"]}})
+        "/home/dev/servers.json", _rules_json({"fs": {"type": "local", "command": ["fs"]}})
     )
 
     config = _remote(global_path, host)
@@ -244,8 +246,8 @@ def test_a_stdio_entry_on_the_target_is_read_not_dropped(global_path: Path) -> N
     word, which is the failure this replaced."""
     host = FakeHost(REMOTE_ROOT)
     host.add_file(
-        f"{REMOTE_ROOT}/opencode.json",
-        _opencode_json({"fs": {"type": "local", "command": ["fs-mcp"]}}),
+        REMOTE_PROJECT_RULES,
+        _rules_json({"fs": {"type": "local", "command": ["fs-mcp"]}}),
     )
 
     config = _remote(global_path, host)
@@ -261,14 +263,14 @@ def test_a_file_placeholder_is_read_through_the_host(global_path: Path, tmp_path
     that file is over there."""
     (tmp_path / "token").write_text("this-pcs-secret", encoding="utf-8")
     host = FakeHost(REMOTE_ROOT)
-    host.add_file(REMOTE_OPENCODE, _opencode_json({
+    host.add_file(REMOTE_RULES, _rules_json({
         "api": {
             "type": "remote",
             "url": "https://box",
             "headers": {"Authorization": "Bearer {file:token}"},
         }
     }))
-    host.add_file("/home/dev/.config/opencode/token", "the-boxs-secret\n")
+    host.add_file("/home/dev/.config/agentclip/token", "the-boxs-secret\n")
 
     config = _remote(global_path, host)
 
@@ -279,7 +281,7 @@ def test_a_file_placeholder_is_read_through_the_host(global_path: Path, tmp_path
 
 def test_a_file_placeholder_with_a_tilde_expands_on_the_target(global_path: Path) -> None:
     host = FakeHost(REMOTE_ROOT)
-    host.add_file(REMOTE_OPENCODE, _opencode_json({
+    host.add_file(REMOTE_RULES, _rules_json({
         "api": {"type": "remote", "url": "https://box", "headers": {"k": "{file:~/token}"}}
     }))
     host.add_file("/home/dev/token", "from-the-remote-home")
@@ -298,7 +300,7 @@ def test_env_placeholders_come_from_the_supplied_environment(
     PC's variable of the same name is a different machine's secret."""
     monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "this-pcs-secret")
     host = FakeHost(REMOTE_ROOT)
-    host.add_file(REMOTE_OPENCODE, _opencode_json({
+    host.add_file(REMOTE_RULES, _rules_json({
         "api": {
             "type": "remote",
             "url": "https://box",
@@ -320,7 +322,7 @@ def test_without_a_remote_environment_env_placeholders_are_empty(
     exactly what an unset variable does - and never this PC's value."""
     monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "this-pcs-secret")
     host = FakeHost(REMOTE_ROOT)
-    host.add_file(REMOTE_OPENCODE, _opencode_json({
+    host.add_file(REMOTE_RULES, _rules_json({
         "api": {"type": "remote", "url": "https://box/{env:AGENTCLIP_TEST_TOKEN}"}
     }))
 
@@ -331,7 +333,7 @@ def test_without_a_remote_environment_env_placeholders_are_empty(
     assert server.url == "https://box/"
 
 
-def test_a_target_with_no_opencode_json_is_silent(global_path: Path) -> None:
+def test_a_target_with_no_ruleset_is_silent(global_path: Path) -> None:
     config = _remote(global_path, FakeHost(REMOTE_ROOT))
     assert config.mcp_servers.servers == ()
     assert config.mcp_servers.source == ""

@@ -1,4 +1,4 @@
-"""Reader for the ``mcp`` block of ``opencode.json`` (docs/design/mcp.md 1).
+"""Reader for the ``mcp`` block of ``permissions.json`` (docs/design/mcp.md 1).
 
 The point of this module is compatibility: a server the user already declared
 for OpenCode must mean the same thing here, down to the merge order, the
@@ -385,7 +385,7 @@ def _expand(value: str, ctx: str, base_dir: Path, warnings: list[str], target: M
             # Relative paths anchor to the CONFIG FILE's directory, as OpenCode
             # resolves them - never to this process's cwd, which is wherever
             # AgentClip was launched from and would send "{file:./token.txt}"
-            # hunting through the user's project instead of ~/.config/opencode.
+            # hunting through the user's project instead of ~/.config/agentclip.
             secret = target.expanduser(arg)
             if not secret.is_absolute():
                 secret = base_dir / secret

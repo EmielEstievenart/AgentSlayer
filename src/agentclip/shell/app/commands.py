@@ -106,6 +106,11 @@ COMMANDS: tuple[ChatCommand, ...] = (
         summary="set the appearance (bare /theme lists the themes)",
     ),
     ChatCommand(
+        name="config",
+        arg="[global|local]",
+        summary="open the permissions/MCP file: bare /config says where both live",
+    ),
+    ChatCommand(
         name="yolo",
         arg="[on|off]",
         summary="toggle auto-approve-everything",

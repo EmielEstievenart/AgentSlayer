@@ -30,11 +30,12 @@ from agentclip.config import (
     TOLERANCE_MIN,
     ServicePreset,
     default_global_config_path,
-    default_opencode_config_path,
+    default_permissions_config_path,
     default_profile_dir,
     default_services,
     load_config,
     normalize_finish_signals,
+    project_permissions_path,
     save_active_services,
     save_services,
     save_theme,
@@ -1262,11 +1263,12 @@ def test_default_profile_dir_sits_beside_the_global_config() -> None:
     assert profiles.parent == default_global_config_path().parent
 
 
-# -- the OpenCode permission ruleset ------------------------------------------
+# -- the permission ruleset (permissions.json) --------------------------------
 
-# The shape of a real opencode.json: a top-level "permission" block with a
-# nested bash table, plus the agent/plugin keys AgentClip deliberately ignores.
-OPENCODE_JSON = """{
+# The shape of a permissions.json: a top-level "permission" block with a nested
+# bash table, plus the extra keys AgentClip deliberately ignores (the file has
+# opencode.json's shape, so one copied across still reads).
+PERMISSIONS_JSON = """{
   "$schema": "https://opencode.ai/config.json",
   "permission": {
     "*": "ask",
@@ -1285,22 +1287,30 @@ OPENCODE_JSON = """{
 
 def _point_at(project: Path, path: Path, *, enabled: bool | None = None) -> None:
     """Write the project TOML that aims [permission] at ``path``."""
-    lines = ["[permission]", f'opencode_config = "{path.as_posix()}"']
+    lines = ["[permission]", f'permissions_config = "{path.as_posix()}"']
     if enabled is not None:
         lines.append(f"enabled = {str(enabled).lower()}")
     (project / ".agentclip.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def test_opencode_rules_load_with_the_defaults_prepended(
+def _project_rules(project: Path, text: str) -> Path:
+    """Write the project layer, ``<root>/.agentclip/permissions.json``."""
+    path = project_permissions_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_permission_rules_load_with_the_defaults_prepended(
     project: Path, global_path: Path, tmp_path: Path
 ) -> None:
-    oc = tmp_path / "opencode.json"
-    oc.write_text(OPENCODE_JSON, encoding="utf-8")
-    _point_at(project, oc)
+    rules = tmp_path / "permissions.json"
+    rules.write_text(PERMISSIONS_JSON, encoding="utf-8")
+    _point_at(project, rules)
 
     cfg = load_config(project, global_config_path=global_path)
     assert not cfg.warnings
-    assert cfg.permission_source == str(oc)
+    assert cfg.permission_source == str(rules)
     # Built-in defaults first, the user's rules after: later wins, so their
     # "*": "ask" catch-all overrides the shipped "*": "allow".
     assert cfg.permission_rules[:2] == default_rules()[:2]
@@ -1317,41 +1327,51 @@ def test_opencode_rules_load_with_the_defaults_prepended(
     assert evaluate("list", ".", cfg.permission_rules).action == "ask"
 
 
-def test_the_projects_own_opencode_json_layers_over_the_global_one(
+def test_the_projects_own_ruleset_layers_over_the_global_one(
     project: Path, global_path: Path, tmp_path: Path
 ) -> None:
-    """OpenCode's own precedence, which AgentClip did not honour before: the
-    project's opencode.json is read after the global one, and rules are ordered
-    with the last match winning, so the project tightens or loosens what the
-    machine-wide file said."""
-    oc = tmp_path / "opencode.json"
-    oc.write_text('{"permission": {"bash": "allow", "read": "allow"}}', encoding="utf-8")
-    _point_at(project, oc)
-    (project / "opencode.json").write_text(
-        '{"permission": {"bash": "deny"}}', encoding="utf-8"
-    )
+    """OpenCode's precedence, which AgentClip honours in its own file: the
+    project's .agentclip/permissions.json is read after the global one, and rules
+    are ordered with the last match winning, so the project tightens or loosens
+    what the machine-wide file said."""
+    rules = tmp_path / "permissions.json"
+    rules.write_text('{"permission": {"bash": "allow", "read": "allow"}}', encoding="utf-8")
+    _point_at(project, rules)
+    local = _project_rules(project, '{"permission": {"bash": "deny"}}')
 
     cfg = load_config(project, global_config_path=global_path)
     assert evaluate("bash", "ls", cfg.permission_rules).action == "deny"
     assert evaluate("read", "a.txt", cfg.permission_rules).action == "allow"
-    assert cfg.permission_source == f"{oc}, {project / 'opencode.json'}"
+    assert cfg.permission_source == f"{rules}, {local}"
 
 
-def test_a_project_opencode_json_alone_is_enough_to_leave_legacy_mode(
+def test_a_project_ruleset_alone_is_enough_to_leave_legacy_mode(
     project: Path, global_path: Path
 ) -> None:
     """No global file at all (the everyday machine): the project's own ruleset
     still counts, since both layers are the same one user's answer."""
+    local = _project_rules(project, '{"permission": {"bash": "deny"}}')
+    cfg = load_config(project, global_config_path=global_path)
+    assert evaluate("bash", "ls", cfg.permission_rules).action == "deny"
+    assert cfg.permission_source == str(local)
+
+
+def test_an_opencode_json_is_not_read_at_all(project: Path, global_path: Path) -> None:
+    """The clean break: AgentClip reads ITS file and no other tool's. A project
+    with an opencode.json beside it and no permissions.json is legacy mode."""
     (project / "opencode.json").write_text(
         '{"permission": {"bash": "deny"}}', encoding="utf-8"
     )
     cfg = load_config(project, global_config_path=global_path)
-    assert evaluate("bash", "ls", cfg.permission_rules).action == "deny"
-    assert cfg.permission_source == str(project / "opencode.json")
+    assert cfg.permission_rules == ()
+    assert cfg.permission_source == ""
+    assert not cfg.warnings
 
 
-def test_missing_opencode_file_is_not_a_problem(project: Path, global_path: Path, tmp_path: Path) -> None:
-    """Most machines have no opencode.json; that is legacy mode, not an error."""
+def test_missing_permissions_file_is_not_a_problem(
+    project: Path, global_path: Path, tmp_path: Path
+) -> None:
+    """Most machines have no permissions.json; that is legacy mode, not an error."""
     _point_at(project, tmp_path / "nope.json")
     cfg = load_config(project, global_config_path=global_path)
     assert cfg.permission_rules == ()
@@ -1359,12 +1379,12 @@ def test_missing_opencode_file_is_not_a_problem(project: Path, global_path: Path
     assert not cfg.warnings
 
 
-def test_malformed_opencode_json_warns_and_stays_in_legacy_mode(
+def test_malformed_permissions_json_warns_and_stays_in_legacy_mode(
     project: Path, global_path: Path, tmp_path: Path
 ) -> None:
-    oc = tmp_path / "opencode.json"
-    oc.write_text('{"permission": {"bash": ', encoding="utf-8")
-    _point_at(project, oc)
+    rules = tmp_path / "permissions.json"
+    rules.write_text('{"permission": {"bash": ', encoding="utf-8")
+    _point_at(project, rules)
 
     cfg = load_config(project, global_config_path=global_path)
     assert cfg.permission_rules == ()
@@ -1374,9 +1394,9 @@ def test_malformed_opencode_json_warns_and_stays_in_legacy_mode(
 def test_unknown_action_warns_but_keeps_the_other_rules(
     project: Path, global_path: Path, tmp_path: Path
 ) -> None:
-    oc = tmp_path / "opencode.json"
-    oc.write_text('{"permission": {"read": "allow", "bash": "perhaps"}}', encoding="utf-8")
-    _point_at(project, oc)
+    rules = tmp_path / "permissions.json"
+    rules.write_text('{"permission": {"read": "allow", "bash": "perhaps"}}', encoding="utf-8")
+    _point_at(project, rules)
 
     cfg = load_config(project, global_config_path=global_path)
     assert any("perhaps" in w for w in cfg.warnings)
@@ -1384,9 +1404,9 @@ def test_unknown_action_warns_but_keeps_the_other_rules(
 
 
 def test_permission_can_be_switched_off(project: Path, global_path: Path, tmp_path: Path) -> None:
-    oc = tmp_path / "opencode.json"
-    oc.write_text(OPENCODE_JSON, encoding="utf-8")
-    _point_at(project, oc, enabled=False)
+    rules = tmp_path / "permissions.json"
+    rules.write_text(PERMISSIONS_JSON, encoding="utf-8")
+    _point_at(project, rules, enabled=False)
 
     cfg = load_config(project, global_config_path=global_path)
     assert cfg.permission.enabled is False
@@ -1396,22 +1416,27 @@ def test_permission_can_be_switched_off(project: Path, global_path: Path, tmp_pa
 def test_a_file_without_a_permission_block_yields_no_rules(
     project: Path, global_path: Path, tmp_path: Path
 ) -> None:
-    oc = tmp_path / "opencode.json"
-    oc.write_text('{"model": "anthropic/claude", "plugin": []}', encoding="utf-8")
-    _point_at(project, oc)
+    rules = tmp_path / "permissions.json"
+    rules.write_text('{"model": "anthropic/claude", "plugin": []}', encoding="utf-8")
+    _point_at(project, rules)
 
     cfg = load_config(project, global_config_path=global_path)
     assert cfg.permission_rules == ()
     assert not cfg.warnings
 
 
-def test_default_opencode_path_is_opencodes_own() -> None:
-    """The point of the feature: the SAME file OpenCode reads, on every platform
-    (OpenCode uses ~/.config/opencode, Windows included)."""
-    path = default_opencode_config_path()
-    assert path.name == "opencode.json"
-    assert path.parent.name == "opencode"
-    assert path.parent.parent.name == ".config"
+def test_default_permissions_path_is_platformdirs() -> None:
+    """AgentClip's own file, beside its own config.toml - not another tool's."""
+    path = default_permissions_config_path()
+    assert path.name == "permissions.json"
+    assert path.parent == default_global_config_path().parent
+
+
+def test_the_project_permissions_path_sits_under_dot_agentclip(tmp_path: Path) -> None:
+    """One AgentClip directory per repo, not one file per feature."""
+    path = project_permissions_path(tmp_path)
+    assert path.parent == tmp_path / ".agentclip"
+    assert path.name == "permissions.json"
 
 
 # -- extra_instructions (the user's own host-specific line, protocol.md 2) -----

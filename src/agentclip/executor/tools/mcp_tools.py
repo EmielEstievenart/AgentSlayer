@@ -1,6 +1,6 @@
 """The two MCP tools: `mcp_schema` reads the cache, `mcp` calls a server.
 
-MCP servers come from the user's `opencode.json` (docs/design/mcp.md section 1)
+MCP servers come from the user's `permissions.json` (docs/design/mcp.md section 1)
 and reach the model as ordinary CLIP tools, so nothing in the engine, the
 protocol, or ToolContext knows MCP exists. The split into two tools is the
 same progressive-disclosure move skills make, for the same reason - the paste
@@ -98,7 +98,7 @@ def _clip(text: str, limit: int) -> str:
     Also neuters CLIP sentinels: listing lines ride the deliberately UNFENCED
     bootstrap, and a server whose tool description contains `===CLIP:...` text
     would put sentinel-shaped prose inside the model's operating brief. Servers
-    come from the user's own opencode.json, so this is hygiene at a trust
+    come from the user's own permissions.json, so this is hygiene at a trust
     boundary rather than a hole being closed - but hygiene is cheap.
     """
     flat = " ".join(text.split()).replace("===CLIP:", "==CLIP:")

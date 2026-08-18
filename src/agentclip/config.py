@@ -14,17 +14,17 @@ The global file is always LOCAL. Everything that describes the PROJECT is read
 from the machine the project is on, through the Host (hence the ``host`` and
 ``home`` parameters on :func:`load_config`): its ``.agentclip.toml``, and the
 permission ruleset, which is that machine's
-``~/.config/opencode/opencode.json`` and then its ``<project>/opencode.json``,
-in that order so the project layer outranks the global one. The target owns the
-rules because every file a rule can save is over there
-(docs/design/remote-ssh.md, "the target owns its policy").
+``~/.config/agentclip/permissions.json`` and then its
+``<project>/.agentclip/permissions.json``, in that order so the project layer
+outranks the global one. The target owns the rules because every file a rule can
+save is over there (docs/design/remote-ssh.md, "the target owns its policy").
 
 ``[approval]`` goes the other way: it is the gate, and the gate belongs to the
 machine with the human answering it, so in a remote session it comes from this
 PC's config.toml alone and the remote layer's table is ignored with a warning.
 
-The mcp block of the same opencode.json travels with the permission block: both
-layers are read off that machine, and so are the ``{file:...}`` secrets and
+The mcp block of the same permissions.json travels with the permission block:
+both layers are read off that machine, and so are the ``{file:...}`` secrets and
 ``{env:...}`` variables they name (hence ``environ``, the target's login-shell
 environment). What does NOT move is the spawning - a `local` MCP server is a
 command, and this PC is the only machine that runs one, so McpManager refuses
@@ -383,10 +383,14 @@ class ApprovalConfig:
 class PermissionConfig:
     """Where the OpenCode-style permission ruleset comes from, and whether it is
     consulted at all. Off (or a missing file) leaves the legacy allowlist gate
-    in charge - see engine/approval.py."""
+    in charge - see engine/approval.py.
+
+    The MODEL is OpenCode's (permissions.py ports it rule for rule); the FILE is
+    AgentClip's own ``permissions.json``, which is why the override key names no
+    other tool."""
 
     enabled: bool = True
-    opencode_config: str = ""  # blank = default_opencode_config_path()
+    permissions_config: str = ""  # blank = default_permissions_config_path()
 
 
 @dataclass(frozen=True, slots=True)
@@ -489,14 +493,14 @@ class Config:
     backup: BackupConfig = field(default_factory=BackupConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
-    # The effective ruleset (built-in defaults first, the user's opencode.json
+    # The effective ruleset (built-in defaults first, the user's permissions.json
     # appended). EMPTY means "no ruleset": the legacy allowlist gate stays in
-    # charge, which is what every install without an opencode.json gets.
+    # charge, which is what every install without a permissions.json gets.
     permission_rules: tuple[PermissionRule, ...] = ()
     permission_source: str = ""  # the file the rules came from, "" when none did
-    # The [mcp] table (is the subsystem on, and where opencode.json lives) and
+    # The [mcp] table (is the subsystem on, and where permissions.json lives) and
     # what the loader read out of that file's `mcp` block. Empty servers is the
-    # everyday case - no opencode.json, or [mcp] enabled=false - and means the
+    # everyday case - no permissions.json, or [mcp] enabled=false - and means the
     # runtime builds no manager and the bootstrap gains no MCP docs
     # (docs/design/mcp.md sections 1 and 5).
     mcp: McpConfig = field(default_factory=McpConfig)
@@ -522,14 +526,27 @@ def default_global_config_path() -> Path:
     return Path(platformdirs.user_config_dir("agentclip")) / "config.toml"
 
 
-def default_opencode_config_path() -> Path:
-    """OpenCode's own config file. AgentClip reads the SAME file rather than
-    inventing a parallel permission format: a user who has already told OpenCode
-    which commands they trust has already told AgentClip.
+def default_permissions_config_path() -> Path:
+    """AgentClip's own permission + MCP file, beside its ``config.toml``.
 
-    Not under platformdirs: OpenCode uses ``~/.config/opencode`` on every
-    platform, Windows included, so that is where the file is."""
-    return Path.home() / ".config" / "opencode" / "opencode.json"
+    JSON rather than TOML, and shaped exactly like ``opencode.json`` (a
+    top-level ``permission`` block and a top-level ``mcp`` block), because the
+    permission MODEL is OpenCode's, ported rule for rule (permissions.py) - a
+    ruleset written for one reads correctly in the other, so a user moving over
+    copies their file across and is done. What it is NOT is opencode.json: this
+    is AgentClip's file, in AgentClip's config home, and nothing falls back to
+    another tool's (``/config`` writes the template)."""
+    return Path(platformdirs.user_config_dir("agentclip")) / "permissions.json"
+
+
+def project_permissions_path(project_root: Path) -> Path:
+    """The project layer of the same file: ``<root>/.agentclip/permissions.json``.
+
+    Under ``.agentclip/`` rather than loose in the root: a repo gains one
+    AgentClip directory, not one file per feature, and it is the directory a
+    session's own state already lands in. In a remote session ``project_root``
+    is already the path on the target, so this is that machine's file."""
+    return project_root / ".agentclip" / "permissions.json"
 
 
 def default_remote_state_dir(target: str, root: str) -> Path:
@@ -722,22 +739,28 @@ def _expand_home(raw: str, home: Path | None) -> Path:
     return path
 
 
-def _opencode_config_path(home: Path | None) -> Path:
-    """OpenCode's own config file on the machine the project is on.
+def _permissions_config_path(home: Path | None) -> Path:
+    """The global ``permissions.json`` on the machine the project is on.
 
     ``home`` is the remote user's home directory in a remote session, and None
-    locally - which keeps :func:`default_opencode_config_path` a zero-argument
+    locally - which keeps :func:`default_permissions_config_path` a zero-argument
     function, the shape the test suite patches to keep the developer's real
     ruleset out of the run (tests/conftest.py).
+
+    The remote branch spells the path out rather than asking platformdirs:
+    platformdirs answers for THIS machine, and the target's flavour of config
+    home is not this one's. ``~/.config/agentclip`` is what an AgentClip
+    installed over there uses (executor/tools/skills.py solves the same problem
+    the same way).
     """
     if home is None:
-        return default_opencode_config_path()
-    return home / ".config" / "opencode" / "opencode.json"
+        return default_permissions_config_path()
+    return home / ".config" / "agentclip" / "permissions.json"
 
 
 def _permission_block(path: Path, warnings: list[str], host: Host | None) -> object | None:
-    """The top-level ``permission`` block of one opencode.json, or None when the
-    file has nothing to say about permissions.
+    """The top-level ``permission`` block of one permissions.json, or None when
+    the file has nothing to say about permissions.
 
     Only that one key is read. OpenCode's ``agent``/``plugin`` blocks describe
     OpenCode agents, which AgentClip has no equivalent of - guessing a mapping
@@ -765,7 +788,7 @@ def _permission_block(path: Path, warnings: list[str], host: Host | None) -> obj
 
 def _describe_path(path: Path, host: Host | None) -> str:
     """How a config file is named to the user. In a remote session that has to
-    include the machine: two boxes' ``~/.config/opencode/opencode.json`` are
+    include the machine: two boxes' ``~/.config/agentclip/permissions.json`` are
     indistinguishable in a screenshot otherwise. Spelled POSIX-style over
     there, because that is the flavour of the paths the target deals in - the
     Path arithmetic above ran on whatever this PC's separator is."""
@@ -780,13 +803,13 @@ def _load_permission_rules(
     home: Path | None = None,
 ) -> tuple[tuple[PermissionRule, ...], str]:
     """Read the effective permission ruleset off the machine the project is on:
-    built-in defaults, then that machine's global opencode.json, then the
+    built-in defaults, then that machine's global permissions.json, then the
     project's own. Rules are ordered and the last match wins, so the project
     layer outranks the global one - OpenCode's own precedence, and the same two
     layers :func:`load_mcp_servers` reads.
 
     An empty result is not "no opinion", it is the signal for legacy allowlist
-    mode (engine/approval.py), so a target with no opencode.json anywhere gets
+    mode (engine/approval.py), so a target with no permissions.json anywhere gets
     exactly what a local machine with none gets: ``((), "")`` - the defaults
     alone are never returned, because on their own they would silently replace
     the allowlist gate with a ruleset nobody wrote.
@@ -794,14 +817,14 @@ def _load_permission_rules(
     if not settings.enabled:
         return (), ""
     paths = [
-        _expand_home(settings.opencode_config, home)
-        if settings.opencode_config
-        else _opencode_config_path(home)
+        _expand_home(settings.permissions_config, home)
+        if settings.permissions_config
+        else _permissions_config_path(home)
     ]
-    # Skipped when [permission] opencode_config already names it: reading one
+    # Skipped when [permission] permissions_config already names it: reading one
     # file as both layers would double every rule it holds and name it twice.
-    if project_root / "opencode.json" != paths[0]:
-        paths.append(project_root / "opencode.json")
+    if project_permissions_path(project_root) != paths[0]:
+        paths.append(project_permissions_path(project_root))
 
     rules: list[PermissionRule] = []
     sources: list[str] = []
@@ -1060,21 +1083,23 @@ def load_config(
 
     permission = PermissionConfig(
         enabled=_take_bool(permission_t, "enabled", True, "permission", warnings),
-        opencode_config=_take_str(permission_t, "opencode_config", "", "permission", warnings),
+        permissions_config=_take_str(
+            permission_t, "permissions_config", "", "permission", warnings
+        ),
     )
     permission_rules, permission_source = _load_permission_rules(
         permission, project_root, warnings, host, home
     )
 
-    # MCP servers ride the same opencode.json, parsed by agentclip.executor.mcp.config
+    # MCP servers ride the same permissions.json, parsed by agentclip.executor.mcp.config
     # (stdlib-only, so this import is unconditional). The paths are resolved
     # HERE and handed down - the loader owns parsing, not file discovery - which
-    # is also what lets the test suite's default_opencode_config_path patch
+    # is also what lets the test suite's default_permissions_config_path patch
     # isolate the MCP reader for free (docs/design/mcp.md section 7).
     mcp_t = merged.get("mcp", {})
     mcp = McpConfig(
         enabled=_take_bool(mcp_t, "enabled", True, "mcp", warnings),
-        opencode_config=_take_str(mcp_t, "opencode_config", "", "mcp", warnings),
+        permissions_config=_take_str(mcp_t, "permissions_config", "", "mcp", warnings),
     )
     if mcp.enabled:
         # Ascending precedence: global first, then the project file, whose
@@ -1087,15 +1112,20 @@ def load_config(
         # nothing reading it will spawn it - McpManager refuses stdio servers
         # outright in a remote session, and refusing them by name beats
         # dropping them silently, which is what skipping this layer did.
+        #
+        # No dedup guard here, unlike the permission reader above: [mcp]
+        # permissions_config naming the project file has it read twice, and the
+        # deep merge makes that a no-op (an entry merged over itself is itself),
+        # so the asymmetry costs nothing and the two readers stay as they were.
         mcp_paths = [
-            _expand_home(mcp.opencode_config, home)
-            if mcp.opencode_config
-            else _opencode_config_path(home)
+            _expand_home(mcp.permissions_config, home)
+            if mcp.permissions_config
+            else _permissions_config_path(home)
         ]
-        mcp_paths.append(project_root / "opencode.json")
+        mcp_paths.append(project_permissions_path(project_root))
         mcp_servers = load_mcp_servers(mcp_paths, warnings, _mcp_target(host, home, environ))
     else:
-        # Disabled means DISABLED: no file is opened, so a broken opencode.json
+        # Disabled means DISABLED: no file is opened, so a broken permissions.json
         # cannot even warn its way into a session the user switched MCP off for.
         mcp_servers = McpServers()
 

@@ -1,4 +1,4 @@
-"""Unit tests for the opencode.json ``mcp`` reader (agentclip.executor.mcp.config).
+"""Unit tests for the permissions.json ``mcp`` reader (agentclip.executor.mcp.config).
 
 Loader-level only: files in, :class:`McpServers` out, warnings collected. The
 wiring into ``load_config`` (the ``[mcp]`` table, which paths get read in a
@@ -28,7 +28,7 @@ def write(path: Path, data: object) -> Path:
 
 def test_local_entry_reads_every_field(tmp_path: Path) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "fs": {
@@ -60,7 +60,7 @@ def test_local_entry_reads_every_field(tmp_path: Path) -> None:
 
 
 def test_local_defaults_when_optional_keys_are_absent(tmp_path: Path) -> None:
-    path = write(tmp_path / "opencode.json", {"mcp": {"fs": {"type": "local", "command": ["fs"]}}})
+    path = write(tmp_path / "permissions.json", {"mcp": {"fs": {"type": "local", "command": ["fs"]}}})
     warnings: list[str] = []
 
     (server,) = load_mcp_servers([path], warnings).servers
@@ -75,7 +75,7 @@ def test_local_defaults_when_optional_keys_are_absent(tmp_path: Path) -> None:
 
 def test_unknown_keys_inside_an_entry_are_ignored_silently(tmp_path: Path) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {"mcp": {"fs": {"type": "local", "command": ["fs"], "future_key": {"x": 1}}}},
     )
     warnings: list[str] = []
@@ -89,7 +89,7 @@ def test_unknown_keys_inside_an_entry_are_ignored_silently(tmp_path: Path) -> No
 @pytest.mark.parametrize("timeout", [0, -1, "5000", True, 1.5])
 def test_invalid_timeout_warns_and_defaults(tmp_path: Path, timeout: object) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {"mcp": {"fs": {"type": "local", "command": ["fs"], "timeout": timeout}}},
     )
     warnings: list[str] = []
@@ -103,7 +103,7 @@ def test_invalid_timeout_warns_and_defaults(tmp_path: Path, timeout: object) -> 
 
 def test_invalid_scalars_warn_and_fall_back_without_losing_the_server(tmp_path: Path) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "fs": {
@@ -129,7 +129,7 @@ def test_invalid_scalars_warn_and_fall_back_without_losing_the_server(tmp_path: 
 
 def test_non_string_environment_value_drops_only_that_pair(tmp_path: Path) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "fs": {
@@ -153,7 +153,7 @@ def test_non_string_environment_value_drops_only_that_pair(tmp_path: Path) -> No
 
 def test_remote_entry_reads_every_field(tmp_path: Path) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "gh": {
@@ -180,7 +180,7 @@ def test_remote_entry_reads_every_field(tmp_path: Path) -> None:
 
 def test_oauth_absent_means_true(tmp_path: Path) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {"mcp": {"gh": {"type": "remote", "url": "https://x"}}},
     )
     (server,) = load_mcp_servers([path], []).servers
@@ -198,7 +198,7 @@ def test_oauth_absent_means_true(tmp_path: Path) -> None:
 )
 def test_oauth_only_a_literal_false_disables(tmp_path: Path, value: object, expected: bool) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {"mcp": {"gh": {"type": "remote", "url": "https://x", "oauth": value}}},
     )
     warnings: list[str] = []
@@ -215,7 +215,7 @@ def test_oauth_only_a_literal_false_disables(tmp_path: Path, value: object, expe
 
 def test_local_without_a_usable_command_is_skipped_with_a_warning(tmp_path: Path) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "no_cmd": {"type": "local"},
@@ -241,7 +241,7 @@ def test_remote_without_a_usable_url_is_skipped_with_a_warning(
     entry: dict = {"type": "remote"}
     if url is not None:
         entry["url"] = url
-    path = write(tmp_path / "opencode.json", {"mcp": {"gh": entry}})
+    path = write(tmp_path / "permissions.json", {"mcp": {"gh": entry}})
     warnings: list[str] = []
 
     servers = load_mcp_servers([path], warnings)
@@ -251,7 +251,7 @@ def test_remote_without_a_usable_url_is_skipped_with_a_warning(
 
 
 def test_typeless_entry_that_is_not_a_bare_disable_warns(tmp_path: Path) -> None:
-    path = write(tmp_path / "opencode.json", {"mcp": {"mystery": {"command": ["x"]}}})
+    path = write(tmp_path / "permissions.json", {"mcp": {"mystery": {"command": ["x"]}}})
     warnings: list[str] = []
 
     servers = load_mcp_servers([path], warnings)
@@ -261,7 +261,7 @@ def test_typeless_entry_that_is_not_a_bare_disable_warns(tmp_path: Path) -> None
 
 
 def test_unknown_type_warns_and_is_skipped(tmp_path: Path) -> None:
-    path = write(tmp_path / "opencode.json", {"mcp": {"weird": {"type": "sse", "url": "https://x"}}})
+    path = write(tmp_path / "permissions.json", {"mcp": {"weird": {"type": "sse", "url": "https://x"}}})
     warnings: list[str] = []
 
     servers = load_mcp_servers([path], warnings)
@@ -273,7 +273,7 @@ def test_unknown_type_warns_and_is_skipped(tmp_path: Path) -> None:
 
 def test_entry_that_is_not_a_table_warns_and_is_skipped(tmp_path: Path) -> None:
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {"mcp": {"bad": "npx server", "fs": {"type": "local", "command": ["fs"]}}},
     )
     warnings: list[str] = []
@@ -392,7 +392,7 @@ def test_bare_disable_in_a_later_layer_switches_an_earlier_server_off(tmp_path: 
 
 
 def test_bare_disable_with_nothing_to_disable_is_skipped_silently(tmp_path: Path) -> None:
-    path = write(tmp_path / "opencode.json", {"mcp": {"ghost": {"enabled": False}}})
+    path = write(tmp_path / "permissions.json", {"mcp": {"ghost": {"enabled": False}}})
     warnings: list[str] = []
 
     servers = load_mcp_servers([path], warnings)
@@ -423,7 +423,7 @@ def test_env_placeholder_uses_the_environment(
 ) -> None:
     monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "s3cret")
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "gh": {
@@ -449,7 +449,7 @@ def test_unset_env_placeholder_substitutes_empty_without_warning(
 ) -> None:
     monkeypatch.delenv("AGENTCLIP_TEST_TOKEN", raising=False)
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "gh": {
@@ -476,7 +476,7 @@ def test_substitution_reaches_command_elements_and_environment_values(
     monkeypatch.setenv("AGENTCLIP_TEST_HOME", "/opt/tools")
     monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "s3cret")
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "fs": {
@@ -502,7 +502,7 @@ def test_substitution_never_touches_names_or_table_keys(
 ) -> None:
     monkeypatch.setenv("AGENTCLIP_TEST_NAME", "renamed")
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "{env:AGENTCLIP_TEST_NAME}": {
@@ -525,7 +525,7 @@ def test_file_placeholder_reads_and_strips_the_file(tmp_path: Path) -> None:
     secret = tmp_path / "token.txt"
     secret.write_text("s3cret\n", encoding="utf-8")
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "gh": {
@@ -549,7 +549,7 @@ def test_file_placeholder_reads_and_strips_the_file(tmp_path: Path) -> None:
 def test_missing_file_placeholder_substitutes_empty_with_a_warning(tmp_path: Path) -> None:
     missing = tmp_path / "nope.txt"
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "gh": {
@@ -574,7 +574,7 @@ def test_repeated_placeholders_all_expand(tmp_path: Path, monkeypatch: pytest.Mo
     monkeypatch.setenv("AGENTCLIP_TEST_A", "1")
     monkeypatch.setenv("AGENTCLIP_TEST_B", "2")
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "gh": {
@@ -615,7 +615,7 @@ def test_no_paths_at_all_is_silent(tmp_path: Path) -> None:
 
 
 def test_invalid_json_warns_once_and_loads_nothing(tmp_path: Path) -> None:
-    path = tmp_path / "opencode.json"
+    path = tmp_path / "permissions.json"
     path.write_text('{"mcp": {', encoding="utf-8")
     warnings: list[str] = []
 
@@ -628,7 +628,7 @@ def test_invalid_json_warns_once_and_loads_nothing(tmp_path: Path) -> None:
 
 
 def test_file_without_an_mcp_key_is_silent(tmp_path: Path) -> None:
-    path = write(tmp_path / "opencode.json", {"permission": {"bash": "ask"}})
+    path = write(tmp_path / "permissions.json", {"permission": {"bash": "ask"}})
     warnings: list[str] = []
 
     servers = load_mcp_servers([path], warnings)
@@ -639,7 +639,7 @@ def test_file_without_an_mcp_key_is_silent(tmp_path: Path) -> None:
 
 
 def test_json_that_is_not_an_object_is_silent(tmp_path: Path) -> None:
-    path = write(tmp_path / "opencode.json", ["mcp"])
+    path = write(tmp_path / "permissions.json", ["mcp"])
     warnings: list[str] = []
 
     assert load_mcp_servers([path], warnings).servers == ()
@@ -647,7 +647,7 @@ def test_json_that_is_not_an_object_is_silent(tmp_path: Path) -> None:
 
 
 def test_mcp_that_is_not_a_table_warns(tmp_path: Path) -> None:
-    path = write(tmp_path / "opencode.json", {"mcp": ["fs"]})
+    path = write(tmp_path / "permissions.json", {"mcp": ["fs"]})
     warnings: list[str] = []
 
     servers = load_mcp_servers([path], warnings)
@@ -674,7 +674,7 @@ def test_one_bad_file_does_not_stop_the_other(tmp_path: Path) -> None:
 
 
 def test_source_names_the_single_contributing_file(tmp_path: Path) -> None:
-    path = write(tmp_path / "opencode.json", {"mcp": {"fs": {"type": "local", "command": ["fs"]}}})
+    path = write(tmp_path / "permissions.json", {"mcp": {"fs": {"type": "local", "command": ["fs"]}}})
 
     assert load_mcp_servers([path], []).source == str(path)
 
@@ -719,14 +719,14 @@ def test_the_default_target_is_this_pc(tmp_path: Path, monkeypatch: pytest.Monke
 def test_files_are_read_through_the_targets_reader(tmp_path: Path) -> None:
     """The path never reaches the filesystem: a config only the other machine
     has must be readable, and a same-named local file must not stand in."""
-    write(tmp_path / "opencode.json", {"mcp": {"local": {"type": "remote", "url": "https://no"}}})
+    write(tmp_path / "permissions.json", {"mcp": {"local": {"type": "remote", "url": "https://no"}}})
     elsewhere = {
-        tmp_path / "opencode.json": b'{"mcp": {"api": {"type": "remote", "url": "https://box"}}}'
+        tmp_path / "permissions.json": b'{"mcp": {"api": {"type": "remote", "url": "https://box"}}}'
     }
     warnings: list[str] = []
 
     servers = load_mcp_servers(
-        [tmp_path / "opencode.json"],
+        [tmp_path / "permissions.json"],
         warnings,
         McpTarget(read_bytes=lambda path: elsewhere[path]),
     )
@@ -739,14 +739,14 @@ def test_a_file_placeholder_uses_the_targets_reader_and_home(tmp_path: Path) -> 
     """`{file:~/token}` is a path on that machine: its ~ is that machine's home
     and its bytes come back through the same reader as the config itself."""
     files = {
-        Path("/etc/opencode.json"): b'{"mcp": {"gh": {"type": "remote", "url": "https://x",'
+        Path("/etc/permissions.json"): b'{"mcp": {"gh": {"type": "remote", "url": "https://x",'
         b' "headers": {"Authorization": "Bearer {file:~/token}"}}}}',
         Path("/home/dev/token"): b"from-the-box\n",
     }
     warnings: list[str] = []
 
     (server,) = load_mcp_servers(
-        [Path("/etc/opencode.json")],
+        [Path("/etc/permissions.json")],
         warnings,
         McpTarget(
             read_bytes=lambda path: files[path],
@@ -764,7 +764,7 @@ def test_env_placeholders_read_the_targets_environment(
 ) -> None:
     monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "this-pcs-secret")
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {
             "mcp": {
                 "gh": {
@@ -788,7 +788,7 @@ def test_a_file_that_is_not_utf8_warns_instead_of_raising(tmp_path: Path) -> Non
     """The reader promises never to raise, and a secret file full of bytes is
     as unusable as a missing one."""
     path = write(
-        tmp_path / "opencode.json",
+        tmp_path / "permissions.json",
         {"mcp": {"gh": {"type": "remote", "url": "https://x", "headers": {"k": "{file:blob}"}}}},
     )
     (tmp_path / "blob").write_bytes(b"\xff\xfe\x00garbage")

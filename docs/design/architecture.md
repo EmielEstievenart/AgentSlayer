@@ -484,9 +484,9 @@ The TUI wraps the engine: clipboard watcher thread → `post_message(ClipboardCa
 
 **Allowlist matching: glob (`fnmatch.fnmatchcase`) against the full command string.** Rejected regex: users will write allowlists by hand; glob is auditable at a glance and can't catastrophically backtrack. Safety backstop: if a command contains any *deny token* (`;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`, newline), it **always requires approval** even when a glob matches — this prevents `pytest tests; rm -rf ~` from riding the `pytest *` pattern.
 
-### Permission rules: reading OpenCode's `opencode.json`
+### Permission rules: AgentClip's `permissions.json`
 
-AgentClip reads the **same** permission file OpenCode does — `~/.config/opencode/opencode.json` on every platform, Windows included (`[permission] opencode_config` overrides the path, `[permission] enabled = false` switches it off). Only the top-level `"permission"` key is read: OpenCode's `agent`/`plugin` blocks name OpenCode agents, which have no AgentClip equivalent, and guessing a mapping would grant or refuse things the user never decided. The model can't reach the file either way — it lives outside the workspace.
+Rules live in AgentClip's own JSON file, in two layers, later winning: `platformdirs.user_config_dir("agentclip")/permissions.json` (beside `config.toml`; `~/.config/agentclip/permissions.json` on Linux) then `<project>/.agentclip/permissions.json` — `[permission] permissions_config` overrides the global path, `[permission] enabled = false` switches the whole thing off. The **shape** is `opencode.json`'s, deliberately (the rule model below is OpenCode's, ported), so a ruleset written for that tool reads correctly here when copied across — but nothing falls back to another tool's file: no `opencode.json` is opened, anywhere. `/config [global|local]` creates the file (template `{"permission": {}, "mcp": {}}`) and puts its path on the clipboard; it is read **once at launch**, so an edit needs a restart. Only the top-level `"permission"` key is read: OpenCode's `agent`/`plugin` blocks name OpenCode agents, which have no AgentClip equivalent, and guessing a mapping would grant or refuse things the user never decided. The model can't reach the file either way — it lives outside the workspace.
 
 A rule is `(permission key, resource pattern, action)` with `action ∈ {allow, ask, deny}`. `executor/permissions.py` (a stdlib leaf, shared by `config.py` and `engine/approval.py`) ports OpenCode's semantics verbatim:
 
@@ -566,8 +566,8 @@ command_allowlist = [
 command_deny_tokens = [";", "&&", "||", "|", "`", "$(", ">", "<"]
 
 [permission]
-enabled = true                 # read OpenCode's rules (see above); false = legacy allowlist only
-opencode_config = ""           # "" = ~/.config/opencode/opencode.json
+enabled = true                 # read the ruleset (see above); false = legacy allowlist only
+permissions_config = ""        # "" = <user_config_dir>/agentclip/permissions.json
 
 [limits]
 max_file_read_chars = 20000    # read_file hard cap per call (LLM asks for ranges beyond this)
@@ -912,7 +912,7 @@ tests/                               # mirrors src/agentclip: one directory per 
 │   │   │                            #   step each failure lands on, close-on-failure, the two
 │   │   │                            #   non-fatal steps, the picker's two target sources
 │   │   └── test_ssh_real.py         # @real_ssh: AGENTCLIP_SSH_TESTS=1 + AGENTCLIP_SSH_TARGET only
-│   ├── mcp/                         # the opencode.json reader and the client runtime (mcp.md)
+│   ├── mcp/                         # the permissions.json mcp reader and the client runtime (mcp.md)
 │   └── tools/
 │       ├── test_sandbox.py          # ../escape, absolute POSIX + C:\ + UNC, drive letter, NUL,
 │       │                            #   symlink-out-of-root (skipif Windows without symlink privilege),

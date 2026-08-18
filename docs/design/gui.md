@@ -912,7 +912,7 @@ was written into `cli.remote_launch`'s body.
   window opens on this PC and the dialog auto-opens pre-filled and runs the
   identical sequence with a checklist. A launch with a connect pending builds
   **no MCP runtime** — those servers would be this PC's, read from this PC's
-  `opencode.json`, for a session about to belong to another machine. The TUI's
+  `permissions.json`, for a session about to belong to another machine. The TUI's
   launch-time flow is untouched, which is the §0 carve-out: it cannot prompt
   once Textual owns the terminal.
 - `{type: "connect"}` carries the whole surface in one event, `open: false`

@@ -46,7 +46,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, TypeVar
 
-from agentclip.config import Config, ServicePreset
+from agentclip.config import (
+    Config,
+    ServicePreset,
+    default_permissions_config_path,
+    project_permissions_path,
+)
 from agentclip.engine.approval import PERMISSION_MODES, normalize_mode
 from agentclip.engine.engine import (
     AskUser,
@@ -195,6 +200,17 @@ _MODE_ALERT_TEXT: dict[str, str] = {
     "plan": "mode: PLAN - edits and commands are denied",
     "unattended": "mode: UNATTENDED - nothing will ask you",
 }
+
+# What `/config` writes into a permissions.json that does not exist yet: the two
+# blocks the loader reads and nothing else, so an editor opens a valid document
+# whose shape is already the answer to "where do I put a rule?".
+_CONFIG_TEMPLATE = '{\n  "permission": {},\n  "mcp": {}\n}\n'
+
+# Said every time /config names a file, because the read is a LAUNCH read
+# (cli.py builds one Config per process): an edit made now changes nothing until
+# the next start, and a user who believed otherwise would think their rule was
+# ignored.
+_CONFIG_RESTART_NOTE = "read once at launch - restart AgentClip after editing it"
 
 
 def _fmt_k(chars: int) -> str:
@@ -646,6 +662,7 @@ class SessionController:
             "mcp": lambda _arg: self._cmd_mcp(),
             "armed": self._cmd_armed,
             "theme": self._cmd_theme,
+            "config": self._cmd_config,
         }
 
     def _handle_command(self, raw: str) -> None:
@@ -1022,7 +1039,8 @@ class SessionController:
         statuses = source() if source is not None else ()
         if not statuses:
             self._view.notify(
-                "MCP is not configured - add servers to the mcp block of opencode.json",
+                "MCP is not configured - add servers to the mcp block of "
+                "permissions.json (/config says where it lives)",
                 severity="information",
             )
             return
@@ -1127,6 +1145,108 @@ class SessionController:
             return
         self._view.apply_theme(wanted)  # applies AND persists; idempotent
         self._view.notify(f"theme: {wanted}")
+
+    def _cmd_config(self, arg: str) -> None:
+        """`/config [global|local]`: where the permission + MCP ruleset lives.
+
+        No session gate, `/theme`'s reasoning: a ruleset is a property of a
+        machine and a project, not of a conversation - and the moment a user
+        wants it is usually the moment a gate just asked them something they
+        would rather have answered once, in a file, before starting.
+
+        Bare `/config` REPORTS both layers (`/mode`'s rule: a command naming two
+        things must not make the user guess which one they are in), and an
+        argument that is neither ACTS on nothing at all - `/armed`'s rule that a
+        typo is never read as an instruction, which matters more here because
+        the acting branch WRITES a file.
+
+        The two writes are the same write: make sure the file exists (with an
+        empty template, so an editor opens something valid rather than a blank
+        page) and put its path on the clipboard, which is as close to "open it"
+        as a layer that owns no file manager can get.
+        """
+        wanted = arg.strip().lower()
+        if not wanted:
+            self._view.spawn(self._view.add_note(self._config_report()))
+            return
+        if wanted not in ("global", "local"):
+            self._view.notify(
+                "usage: /config [global|local] - bare /config says where both files are",
+                severity="warning",
+            )
+            return
+        if wanted == "local" and self._config.remote.is_remote():
+            # The project is on the target, and this shell can only write files
+            # on THIS PC: creating a same-named file locally would put a ruleset
+            # nobody will read next to a project that is not here. Said, not
+            # guessed at (docs/design/remote-ssh.md, "the target owns its policy").
+            self._view.notify(
+                "/config local is not supported in a remote session yet - the project's "
+                f"ruleset lives on {self._config.remote.target}; edit it over there",
+                severity="warning",
+            )
+            return
+        path = (
+            default_permissions_config_path()
+            if wanted == "global"
+            else project_permissions_path(self._project_root)
+        )
+        self._view.spawn(self._apply_config(wanted, path))
+
+    def _config_report(self) -> str:
+        """Both layers and whether each one exists yet - bare `/config`'s answer."""
+        lines = [f"permission + MCP ruleset (JSON; {_CONFIG_RESTART_NOTE}):"]
+        for label, path in (
+            ("global", default_permissions_config_path()),
+            ("project", project_permissions_path(self._project_root)),
+        ):
+            if label == "project" and self._config.remote.is_remote():
+                lines.append(f"  {label}:  {path.as_posix()}  (on {self._config.remote.target})")
+                continue
+            state = "exists" if path.is_file() else "not created yet"
+            lines.append(f"  {label}:  {path}  ({state})")
+        lines.append("  /config global or /config local creates it and copies the path")
+        if self._config.remote.is_remote():
+            # Neither local file governs a remote session - the target owns its
+            # policy - and a listing that did not say so would read as if this
+            # PC's ruleset were still in force (docs/design/remote-ssh.md).
+            lines.append(
+                f"  this session's rules come from {self._config.remote.target}, "
+                "not from the files above"
+            )
+        return "\n".join(lines)
+
+    async def _apply_config(self, label: str, path: Path) -> None:
+        """Create the ruleset file if it is missing, then park its path.
+
+        The clipboard half goes through ``park_outbound`` and only that: it is
+        the one write registered with the self-write set before it lands, so the
+        watcher does not read the path back in as a pasted reply (driver/clip).
+        """
+        try:
+            created = await asyncio.to_thread(self._ensure_config_file, path)
+        except OSError as exc:
+            self._view.notify(f"could not create {path}: {exc}", severity="error")
+            return
+        await self._view.park_outbound(str(path))
+        verb = "created" if created else "found"
+        await self._view.add_note(f"⎘ {verb} {path} - path copied. {_CONFIG_RESTART_NOTE}")
+        # Both layers are called permissions.json, so the toast names the LAYER:
+        # "found permissions.json" would not say which of the two it meant.
+        self._view.notify(f"{verb} the {label} ruleset - path copied to the clipboard", timeout=8)
+
+    @staticmethod
+    def _ensure_config_file(path: Path) -> bool:
+        """Write the empty template unless the file is already there; did it write?
+
+        Never touches an existing file - the user's rules are the whole point of
+        it - and the template is the two blocks the loader reads, so an editor
+        opens a valid document with the shape already visible."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            return False
+        path.write_text(_CONFIG_TEMPLATE, encoding="utf-8")
+        return True
 
     def submit_decision(self, decision: Decision, note: str | None) -> None:
         """Resolve the approval gate (from a key action or panel button)."""

@@ -640,7 +640,7 @@ def main(argv: list[str] | None = None) -> int:
     # existed.
     #
     # A launch with a connect PENDING builds none of it: those servers would be
-    # this PC's, read from this PC's opencode.json, for a session that is about
+    # this PC's, read from this PC's permissions.json, for a session that is about
     # to belong to another machine - and "the host PC's file is not consulted at
     # all in a remote session" is the rule, not a preference
     # (docs/design/remote-ssh.md, "the target owns its policy"). The runtime the

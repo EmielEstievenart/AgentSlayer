@@ -4,9 +4,10 @@ A stdlib-only leaf (imported by config.py and engine/approval.py, importing
 neither) so the same rules can be LOADED where config lives and APPLIED where
 the approval verdict is made.
 
-The model is deliberately OpenCode's, not a new one: AgentClip reads the very
-file OpenCode reads (``~/.config/opencode/opencode.json``), so a rule a user
-already trusts must mean here exactly what it means there.
+The model is deliberately OpenCode's, not a new one: AgentClip's own file
+(``~/.config/agentclip/permissions.json``) has opencode.json's shape, so a rule
+a user already trusts must mean here exactly what it means there - copied
+across, it reads the same.
 
     rule = (permission key, resource pattern, action)
 

@@ -136,18 +136,26 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
 
 
 @pytest.fixture(autouse=True)
-def _no_real_opencode_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """No test reads the developer's real ``~/.config/opencode/opencode.json``.
+def _no_real_permissions_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test reads the developer's real ``~/.config/agentclip/permissions.json``.
 
     A permission ruleset REPLACES the legacy allowlist gate (engine/approval.py),
-    so a machine that happens to have OpenCode installed would run this suite
-    under that user's private rules - green here, red on the next machine, and
-    the failure would look like an approval bug rather than a leak. Tests that
-    want a ruleset point ``[permission] opencode_config`` at a file they wrote.
+    so a machine whose owner has written one would run this suite under those
+    private rules - green here, red on the next machine, and the failure would
+    look like an approval bug rather than a leak. Sharper than it used to be:
+    ``/config global`` CREATES that file, so any developer who has tried the
+    command once has one. Tests that want a ruleset point
+    ``[permission] permissions_config`` at a file they wrote.
     """
-    missing = tmp_path / "no-such-opencode.json"
+    missing = tmp_path / "no-such-permissions.json"
     monkeypatch.setattr(
-        "agentclip.config.default_opencode_config_path", lambda: missing
+        "agentclip.config.default_permissions_config_path", lambda: missing
+    )
+    # The controller imported the function by name, so it holds a SECOND binding
+    # - and its `/config global` would create the real file rather than read it.
+    # Patched here, beside the reason, rather than in one command's tests.
+    monkeypatch.setattr(
+        "agentclip.shell.app.controller.default_permissions_config_path", lambda: missing
     )
 
 

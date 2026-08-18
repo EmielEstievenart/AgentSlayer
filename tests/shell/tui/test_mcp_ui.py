@@ -107,7 +107,7 @@ def _row_text(main: MainScreen, index: int) -> str:
 
 
 async def test_no_manager_means_no_mcp_chrome_at_all(tmp_path: Path) -> None:
-    """The default install has no opencode.json mcp block, so it must get
+    """The default install has no permissions.json mcp block, so it must get
     exactly the screen it always had: no MCP heading in the sidebar, no rows,
     and the statusbar segment hidden rather than reading 'mcp 0/0'."""
     app = _make_app(tmp_path)

@@ -150,7 +150,7 @@ def test_a_saved_target_supplies_the_root(args, host: FakeSshHost, tmp_path: Pat
 def test_the_environment_is_the_targets_and_reaches_the_mcp_config(
     args, host: FakeSshHost, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`{env:...}` in the target's opencode.json means the TARGET's variable.
+    """`{env:...}` in the target's permissions.json means the TARGET's variable.
 
     The operator's own environment holds a different secret under the same
     name, and reading it here would send it to the wrong server.
@@ -158,7 +158,7 @@ def test_the_environment_is_the_targets_and_reaches_the_mcp_config(
     monkeypatch.setenv("AGENTCLIP_LAUNCH_TOKEN", "this-pcs-secret")
     host.blocking["printenv"] = (0, "AGENTCLIP_LAUNCH_TOKEN=the-boxs-secret\n")
     host.add_file(
-        f"{REMOTE_ROOT}/opencode.json",
+        f"{REMOTE_ROOT}/.agentclip/permissions.json",
         '{"mcp": {"api": {"type": "remote", "url": "https://x",'
         ' "headers": {"Authorization": "Bearer {env:AGENTCLIP_LAUNCH_TOKEN}"}}}}',
     )
@@ -211,7 +211,7 @@ def test_a_remote_session_never_falls_back_to_this_pcs_environment(
     monkeypatch.setenv("AGENTCLIP_LAUNCH_TOKEN", "this-pcs-secret")
     host.blocking["printenv"] = (1, "")
     host.add_file(
-        f"{REMOTE_ROOT}/opencode.json",
+        f"{REMOTE_ROOT}/.agentclip/permissions.json",
         '{"mcp": {"api": {"type": "remote", "url": "https://x/{env:AGENTCLIP_LAUNCH_TOKEN}"}}}',
     )
 

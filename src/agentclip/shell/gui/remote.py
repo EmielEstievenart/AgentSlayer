@@ -52,7 +52,7 @@ MISSING_TARGET = "name a machine: a saved target, a ~/.ssh/config alias, or [use
 MISSING_ROOT = "this target has no saved root - give the project directory on the remote machine"
 
 # What the banner says when the target has no ruleset of its own. The absence is
-# stated rather than defaulted: a user with a carefully tuned opencode.json on
+# stated rather than defaulted: a user with a carefully tuned permissions.json on
 # THIS PC sees none of it apply the moment they connect, and silence about that
 # is the footgun (docs/design/remote-ssh.md, "the target owns its policy").
 NO_RULESET = "No permission ruleset found on {target}; falling back to the allowlist gate"

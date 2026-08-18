@@ -13,10 +13,12 @@ from agentclip.config import RemoteTarget, load_config
 from agentclip.executor.hosts import FakeHost
 from agentclip.executor.permissions import PermissionRule, evaluate
 
-# The remote user's home, and the ruleset OpenCode keeps under it on every
-# platform - which in a remote session is resolved from `home`, not this PC's.
+# The remote user's home, and the ruleset AgentClip keeps under it - which in a
+# remote session is composed from `home`, not asked of platformdirs (which
+# answers for THIS machine only).
 REMOTE_HOME = Path("/home/dev")
-REMOTE_OPENCODE = "/home/dev/.config/opencode/opencode.json"
+REMOTE_RULES = "/home/dev/.config/agentclip/permissions.json"
+REMOTE_PROJECT_RULES = "/srv/app/.agentclip/permissions.json"
 
 SAVED = """\
 [remote.pi]
@@ -177,33 +179,36 @@ def test_permissions_are_read_through_the_host(
     risk is the one that says what may happen to them ("the target owns its
     policy"). A local file at the very same path must not be what answers.
     """
-    opencode = tmp_path / "opencode.json"
-    opencode.write_text('{"permission": {"bash": "deny"}}', encoding="utf-8")
+    rules = tmp_path / "permissions.json"
+    rules.write_text('{"permission": {"bash": "deny"}}', encoding="utf-8")
     global_path.write_text(
-        f'[permission]\nopencode_config = "{opencode.as_posix()}"\n', encoding="utf-8"
+        f'[permission]\npermissions_config = "{rules.as_posix()}"\n', encoding="utf-8"
     )
     host = FakeHost("/srv/app")
-    host.add_file(opencode.as_posix(), '{"permission": {"bash": "allow"}}')
+    host.add_file(rules.as_posix(), '{"permission": {"bash": "allow"}}')
 
     cfg = load_config(Path("/srv/app"), global_config_path=global_path, host=host)
-    assert cfg.permission_source == f"fake:{opencode.as_posix()}"
+    assert cfg.permission_source == f"fake:{rules.as_posix()}"
     assert cfg.permission_rules[-1].action == "allow"  # the REMOTE file's answer
 
 
 def test_the_remote_global_ruleset_comes_from_the_remote_home(global_path: Path) -> None:
-    """With no [permission] opencode_config, ~ is the TARGET user's home."""
+    """With no [permission] permissions_config, the path is composed from the
+    TARGET user's home: ~/.config/agentclip/permissions.json over there."""
     host = FakeHost("/srv/app")
-    host.add_file(REMOTE_OPENCODE, '{"permission": {"bash": "deny"}}')
+    host.add_file(REMOTE_RULES, '{"permission": {"bash": "deny"}}')
 
     cfg = _remote(global_path, host)
     assert cfg.permission_rules[-1] == PermissionRule("bash", "*", "deny")
-    assert cfg.permission_source == f"fake:{REMOTE_OPENCODE}"
+    assert cfg.permission_source == f"fake:{REMOTE_RULES}"
 
 
-def test_a_tilde_in_opencode_config_expands_on_the_target(global_path: Path) -> None:
+def test_a_tilde_in_permissions_config_expands_on_the_target(global_path: Path) -> None:
     """The setting names which file holds the ruleset, and the ruleset is over
     there - so its ~ is the remote home, not the operator's."""
-    global_path.write_text('[permission]\nopencode_config = "~/rules.json"\n', encoding="utf-8")
+    global_path.write_text(
+        '[permission]\npermissions_config = "~/rules.json"\n', encoding="utf-8"
+    )
     host = FakeHost("/srv/app")
     host.add_file("/home/dev/rules.json", '{"permission": {"bash": "deny"}}')
 
@@ -211,21 +216,21 @@ def test_a_tilde_in_opencode_config_expands_on_the_target(global_path: Path) -> 
     assert cfg.permission_source == "fake:/home/dev/rules.json"
 
 
-def test_the_projects_opencode_json_outranks_the_remote_global_one(
+def test_the_projects_ruleset_outranks_the_remote_global_one(
     global_path: Path,
 ) -> None:
     host = FakeHost("/srv/app")
-    host.add_file(REMOTE_OPENCODE, '{"permission": {"bash": "deny"}}')
-    host.add_file("/srv/app/opencode.json", '{"permission": {"bash": "allow"}}')
+    host.add_file(REMOTE_RULES, '{"permission": {"bash": "deny"}}')
+    host.add_file(REMOTE_PROJECT_RULES, '{"permission": {"bash": "allow"}}')
 
     cfg = _remote(global_path, host)
     # Ordered rules, last match wins: both layers are present, the project's
     # answers.
     assert evaluate("bash", "ls", cfg.permission_rules).action == "allow"
-    assert cfg.permission_source == f"fake:{REMOTE_OPENCODE}, fake:/srv/app/opencode.json"
+    assert cfg.permission_source == f"fake:{REMOTE_RULES}, fake:{REMOTE_PROJECT_RULES}"
 
 
-def test_a_target_with_no_opencode_json_stays_in_legacy_mode(global_path: Path) -> None:
+def test_a_target_with_no_ruleset_stays_in_legacy_mode(global_path: Path) -> None:
     """Exactly what a local machine with no ruleset gets: the defaults are NOT
     returned on their own, because empty is the signal for the allowlist gate."""
     cfg = _remote(global_path, FakeHost("/srv/app"))

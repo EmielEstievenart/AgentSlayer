@@ -291,11 +291,11 @@ process exit:
 
 ### 3.9 Surfacing "target owns its policy"
 
-remote-ssh.md line ~205-207 ("A target with no `opencode.json` behaves
+remote-ssh.md line ~205-207 ("A target with no `permissions.json` behaves
 exactly like a local machine with none... no fallback to the host PC's
 file") plus the broader "the target owns the rules, the host owns the gate"
 section is a real footgun if invisible: a user who has a carefully tuned
-`~/.config/opencode/opencode.json` on their host PC will see **none of it**
+`~/.config/agentclip/permissions.json` on their host PC will see **none of it**
 apply the moment they connect remotely, silently, unless told.
 
 Proposed surfacing, all sourced from what `load_config`/`Config.warnings`
@@ -305,13 +305,13 @@ happy-path notice, only for wiring it to the dialog:
 - A persistent, dismissible-per-session banner in the connect success screen
   (shown once, right after stage 6 completes, before the dialog closes):
   "Permissions and MCP servers for this session come from
-  `<target>:~/.config/opencode/opencode.json`" (or the resolved
-  `opencode_config` path) — using the target-qualified naming the remote-ssh.md
+  `<target>:~/.config/agentclip/permissions.json`" (or the resolved
+  `permissions_config` path) — using the target-qualified naming the remote-ssh.md
   "Consequences to handle" section already mandates for the TUI ("the
   permission-source string shown... must name the machine, not just the
   path", line ~291-292). The GUI reuses that same string, wherever it ends up
   being computed, rather than inventing a second rendering of the same fact.
-- If the target has **no** `opencode.json` (legacy allowlist mode), the same
+- If the target has **no** `permissions.json` (legacy allowlist mode), the same
   banner instead reads "No permission ruleset found on `<target>`; falling
   back to the allowlist gate" — makes the absence a stated fact, not a silent
   default.

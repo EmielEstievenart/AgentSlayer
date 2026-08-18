@@ -14,7 +14,7 @@ gated execution, reaching the machine through the Host seam):
       └──► protocol (leaf)
     config (leaf) ◄── imported by everyone
      ├──► executor/permissions (leaf: the rule model, also used by engine/approval)
-     ├──► executor/mcp (leaf: opencode.json's mcp block - types/reader for config,
+     ├──► executor/mcp (leaf: permissions.json's mcp block - types/reader for config,
      │                  the client runtime for tools; docs/design/mcp.md)
      └──► executor/hosts (to read the project's .agentclip.toml off its machine)
     executor/hosts (leaf: the OS seam - config, executor/tools, engine/store and

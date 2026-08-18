@@ -112,13 +112,14 @@ class McpToolInfo:
 
 @dataclass(frozen=True, slots=True)
 class McpConfig:
-    """The `[mcp]` table of AgentClip's own config (NOT opencode.json):
-    mirrors PermissionConfig - `enabled` kills the subsystem outright,
-    `opencode_config` overrides the file path, blank meaning the same
-    default_opencode_config_path() the permission reader uses."""
+    """The `[mcp]` table of AgentClip's config.toml (NOT permissions.json, which
+    is the file this names): mirrors PermissionConfig - `enabled` kills the
+    subsystem outright, `permissions_config` overrides the file path, blank
+    meaning the same default_permissions_config_path() the permission reader
+    uses. One file holds both blocks, so one key names it twice."""
 
     enabled: bool = True
-    opencode_config: str = ""
+    permissions_config: str = ""
 
 
 @dataclass(frozen=True, slots=True)

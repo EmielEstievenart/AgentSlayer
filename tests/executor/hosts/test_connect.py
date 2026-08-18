@@ -306,7 +306,7 @@ def test_a_remote_session_never_falls_back_to_this_pcs_environment(
     monkeypatch.setenv("AGENTCLIP_CONNECT_TOKEN", "this-pcs-secret")
     host.blocking["printenv"] = (1, "")
     host.add_file(
-        f"{REMOTE_ROOT}/opencode.json",
+        f"{REMOTE_ROOT}/.agentclip/permissions.json",
         '{"mcp": {"api": {"type": "remote", "url": "https://x/{env:AGENTCLIP_CONNECT_TOKEN}"}}}',
     )
     result, _ = run(local, host)

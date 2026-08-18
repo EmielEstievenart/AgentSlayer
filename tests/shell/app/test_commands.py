@@ -9,10 +9,12 @@ agrees with the dispatcher about what counts as a command in progress.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from pathlib import Path
 
-from agentclip.config import Config
+import agentclip.config
+from agentclip.config import Config, project_permissions_path
 from agentclip.shell.app.commands import (
     COMMANDS,
     ChatCommand,
@@ -49,6 +51,7 @@ def test_the_registry_is_the_documented_commands() -> None:
         "armed",
         "mode",
         "theme",
+        "config",
         "yolo",
     ]
     assert lookup("yolo") is not None and lookup("yolo").arg == "[on|off]"  # type: ignore[union-attr]
@@ -99,7 +102,9 @@ def test_unknown_command_hint_lists_every_command() -> None:
     for command in COMMANDS:
         assert command.slash in hint
     # An English list, not a dump.
-    assert hint == "/help, /new, /abort, /identify, /log, /mcp, /armed, /mode, /theme, or /yolo"
+    assert hint == (
+        "/help, /new, /abort, /identify, /log, /mcp, /armed, /mode, /theme, /config, or /yolo"
+    )
 
 
 def test_identify_dispatches_to_the_view_with_no_session_of_any_kind(
@@ -137,7 +142,7 @@ def test_mcp_without_a_source_says_mcp_is_not_configured(
     controller: SessionController, view: FakeChatView
 ) -> None:
     """The fixture controller is built without ``mcp_statuses`` - the app shape
-    when opencode.json has no mcp block - so the command answers with a toast,
+    when permissions.json has no mcp block - so the command answers with a toast,
     not a transcript listing, and needs no session to do it."""
     controller.submit_message("/mcp")
     assert view.events == []
@@ -649,6 +654,133 @@ async def test_the_theme_names_are_the_views_not_the_controllers(
     assert any("unknown theme: textual-dark" in message for message in view.toasts())
 
 
+# -- /config ---------------------------------------------------------------------
+# The permission + MCP ruleset is a FILE, read once at launch, and the app has no
+# editor - so the command's whole job is to make sure the file exists and to hand
+# the user its path. It needs no session for `/theme`'s reason (a ruleset is a
+# property of a machine and a project, not of a conversation), and the path
+# leaves through ``park_outbound`` because that is the one clipboard write the
+# watcher is told about before it lands.
+
+
+async def test_bare_config_reports_both_layers_without_creating_anything(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """`/mode`'s rule: a command naming two things must say where both are
+    before it is asked to act on either."""
+    controller.submit_message("/config")
+    await settle(view)
+
+    note = next(text for text in view.notes() if "permission + MCP ruleset" in text)
+    assert str(agentclip.config.default_permissions_config_path()) in note
+    assert str(project_permissions_path(project)) in note
+    assert "not created yet" in note
+    assert "restart AgentClip" in note
+    assert not project_permissions_path(project).exists()  # a report writes nothing
+    assert view.parked == []
+
+
+async def test_config_local_creates_the_project_file_and_parks_its_path(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """The template is the two blocks the loader reads, so the editor the user
+    opens next shows the shape of the answer rather than a blank page."""
+    controller.submit_message("/config local")
+    await settle(view)
+
+    path = project_permissions_path(project)
+    assert json.loads(path.read_text(encoding="utf-8")) == {"permission": {}, "mcp": {}}
+    assert path.read_text(encoding="utf-8").endswith("\n")
+    assert view.parked == [str(path)]
+    assert view.copied == []  # parked, never delivered: nothing is pasted anywhere
+    assert any("created" in message for message in view.toasts())
+
+
+async def test_config_global_creates_the_file_beside_the_config_toml(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """The suite-wide fixture points the default path at a tmp file that does not
+    exist, which is exactly the state a fresh install is in."""
+    # Read through the module: the suite-wide fixture patches the ATTRIBUTE, and
+    # a from-import here would hold the developer's real path instead.
+    path = agentclip.config.default_permissions_config_path()
+    assert not path.exists()
+
+    controller.submit_message("/config global")
+    await settle(view)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"permission": {}, "mcp": {}}
+    assert view.parked == [str(path)]
+
+
+async def test_config_never_overwrites_a_ruleset_that_exists(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """The user's rules are the whole point of the file: a second /config hands
+    back the path it already had and leaves every byte alone."""
+    path = project_permissions_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"permission": {"bash": "deny"}}', encoding="utf-8")
+
+    controller.submit_message("/config local")
+    await settle(view)
+
+    assert path.read_text(encoding="utf-8") == '{"permission": {"bash": "deny"}}'
+    assert view.parked == [str(path)]
+    assert any("found" in message for message in view.toasts())
+
+
+async def test_a_typo_writes_nothing_and_says_what_would_have_worked(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """`/armed`'s rule that a typo is never read as an instruction, and it bites
+    harder here because the acting branch writes a file."""
+    controller.submit_message("/config globl")
+    await settle(view)
+
+    assert not project_permissions_path(project).exists()
+    assert view.parked == []
+    assert any("usage: /config [global|local]" in message for message in view.toasts())
+
+
+async def test_config_local_refuses_in_a_remote_session(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """The project is on the target and this shell writes files on THIS PC, so
+    creating a same-named file here would put a ruleset nobody reads beside a
+    project that is not here. Said, not guessed at."""
+    remote = replace(app_config, remote=replace(app_config.remote, target="dev@box"))
+    controller = SessionController(remote, make_factory(project), project, view=view)
+    view.controller = controller
+
+    controller.submit_message("/config local")
+    await settle(view)
+
+    assert not project_permissions_path(project).exists()
+    assert view.parked == []
+    assert any("not supported in a remote session" in m for m in view.toasts())
+    assert any("dev@box" in m for m in view.toasts())
+
+    # ...and the report says which machine's rules are actually in force, since
+    # neither local file governs a remote session ("the target owns its policy").
+    controller.submit_message("/config")
+    await settle(view)
+    note = next(text for text in view.notes() if "permission + MCP ruleset" in text)
+    assert "this session's rules come from dev@box" in note
+
+
+async def test_config_works_with_no_session_of_any_kind(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """`/theme`'s gate, or rather its absence: the file governs the session the
+    user is about to start, which is precisely when they reach for it."""
+    controller.submit_message("/config")
+    await settle(view)
+
+    assert controller._engine is None
+    assert not any("start a session" in message for message in view.toasts())
+
+
 def test_match_prefix_narrows_as_the_user_types() -> None:
     assert match_prefix("/") == COMMANDS  # a bare slash offers everything
     assert [c.name for c in match_prefix("/y")] == ["yolo"]
@@ -656,6 +788,7 @@ def test_match_prefix_narrows_as_the_user_types() -> None:
     assert [c.name for c in match_prefix("/mo")] == ["mode"]
     assert [c.name for c in match_prefix("/mc")] == ["mcp"]
     assert [c.name for c in match_prefix("/i")] == ["identify"]
+    assert [c.name for c in match_prefix("/c")] == ["config"]
     assert [c.name for c in match_prefix("/n")] == ["new"]
     assert [c.name for c in match_prefix("/t")] == ["theme"]
     assert [c.name for c in match_prefix("/yolo")] == ["yolo"]

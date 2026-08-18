@@ -183,7 +183,7 @@ def profile_summary(profile: ServiceProfile) -> str:
 # McpManager.statuses() (docs/design/mcp.md section 6). The block is composed
 # ONLY when the app was built with an MCP manager - most installs configure no
 # servers, and an empty "MCP" heading would be a standing question with no
-# answer - so the number of lines is fixed for the process (opencode.json is
+# answer - so the number of lines is fixed for the process (permissions.json is
 # read once, the manager's record list never grows) and the lines are
 # addressed by config-order INDEX rather than by server name: names are the
 # user's and can collide once sanitized, ids must not.

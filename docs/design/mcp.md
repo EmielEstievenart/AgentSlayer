@@ -3,16 +3,17 @@
 Status: binding. Phase 1 scope; §9 lists what is deliberately out.
 
 AgentClip gains MCP (Model Context Protocol) support by reading the **same
-config OpenCode reads** - the `mcp` block of `opencode.json` - and exposing
-each server's tools to the model through the clipboard protocol. The design
-repeats the two moves that already worked once: permissions (read OpenCode's
-file so a rule the user already trusts means the same thing here) and skills
-(list cheaply in the bootstrap, load detail on demand, because the paste
-budget is the scarcest resource in the system).
+config shape OpenCode reads** - an `mcp` block, in AgentClip's own
+`permissions.json` (the file the permission ruleset already lives in) - and
+exposing each server's tools to the model through the clipboard protocol. The
+design repeats the two moves that already worked once: permissions (the same
+file, the same shape, so a block the user already wrote means the same thing
+here) and skills (list cheaply in the bootstrap, load detail on demand,
+because the paste budget is the scarcest resource in the system).
 
-## 1. Config: the same file, the same shape
+## 1. Config: one file, OpenCode's shape
 
-The `mcp` key of `opencode.json` maps server name -> server table:
+The `mcp` key of `permissions.json` maps server name -> server table:
 
 - `{"type": "local", "command": [...], "cwd"?, "environment"?, "enabled"?,
   "timeout"?}` - a stdio server AgentClip spawns.
@@ -31,8 +32,8 @@ compatibility.
 Files read, both from the machine the PROJECT is on - this PC locally, the
 target through the Host in a remote session:
 
-    ~/.config/opencode/opencode.json          always (~ = that machine's home)
-    <project root>/opencode.json              always
+    ~/.config/agentclip/permissions.json      always (~ = that machine's home)
+    <project root>/.agentclip/permissions.json  always
 
 Same-name entries merge per-field, project over global, mirroring OpenCode's
 deep merge. Both layers travel with the permission block of the very same
@@ -43,8 +44,8 @@ spawning - a `local` server is a **command**, and this PC is the only machine
 AgentClip spawns on, so a remote session reports those as failed with the
 reason and never runs them (§3). Reading them is what makes reporting them
 possible; skipping the layer, as an earlier draft did, made a configured
-server vanish without a word. `opencode.jsonc` is out of scope for phase 1
-(JSON with comments needs a real stripper; a wrong one corrupts strings).
+server vanish without a word. JSON-with-comments is out of scope for phase 1
+(it needs a real stripper; a wrong one corrupts strings).
 
 `{env:VAR}` and `{file:path}` placeholders are substituted on every string
 leaf after parsing. OpenCode substitutes over the raw text before parsing;
@@ -69,9 +70,11 @@ The loader lives in `agentclip/executor/mcp/config.py`, follows
 `_load_permission_rules`'s triage exactly (silent when the file is absent,
 one warning when it exists but cannot be understood, never fatal), and is
 called from `load_config` next to the permission loader, gated by a new
-`[mcp]` table: `enabled` (default true) and `opencode_config` (blank = the
-same `default_opencode_config_path()` the permission reader uses - one
-function, not a copy). Parsed servers land on `Config.mcp_servers`.
+`[mcp]` table: `enabled` (default true) and `permissions_config` (blank = the
+same `default_permissions_config_path()` the permission reader uses - one
+function, not a copy). Parsed servers land on `Config.mcp_servers`. The
+reader itself is filename-agnostic: it opens the paths it is handed, which is
+why the clean break away from `opencode.json` touched no line of it.
 
 The reader stays a stdlib-only leaf that knows nothing of the Host: which
 machine it is reading arrives as `McpTarget` - a byte reader, an environment
@@ -173,7 +176,7 @@ Permission wiring:
   design's founding rule is that a rule the user already trusts means here
   exactly what it means there. Yolo may answer the ask; an explicit user
   `deny` still wins, as everywhere.
-- Legacy mode (no opencode.json ruleset): `mcp` always gates. The command
+- Legacy mode (no permissions.json ruleset): `mcp` always gates. The command
   allowlist matches shell prefixes and must not be consulted for MCP ids.
 - "Always allow" remembered from the gate maps to
   `PermissionRule("mcp", <tool id>, "allow")` via a new `always_pattern`
@@ -240,8 +243,8 @@ repaints both surfaces from a fresh `statuses()` on Textual's loop.
 ## 7. Testing
 
 - Config: tests beside tests/test_config.py conventions; the existing
-  `_no_real_opencode_config` fixture already isolates the path because the
-  reader shares `default_opencode_config_path()`.
+  `_no_real_permissions_config` fixture already isolates the path because the
+  reader shares `default_permissions_config_path()`.
 - Client: in-process servers via the SDK's `MCPServer` + memory transport
   (`Client(server_instance)`) - real protocol, no subprocesses, ungated.
   One stdio test may spawn a `sys.executable` child running a tiny script
@@ -266,8 +269,8 @@ timeout named in ms.
   cover API-key servers; reusing OpenCode's `mcp-auth.json` tokens is the
   planned phase 2, full OAuth only if that proves insufficient.
 - MCP resources and prompts (OpenCode's synthetic `list_mcp_resources`
-  family), `tools/list_changed` live refresh, `opencode.jsonc`, and nested
-  `.opencode/opencode.json` discovery. (Remote-project config files were on
+  family), `tools/list_changed` live refresh, JSON-with-comments, and nested
+  per-directory config discovery. (Remote-project config files were on
   this list; they are now §1, and the stdio servers such a file declares are
   reported rather than spawned - running them on the target over an exec
   channel is the wave after this one.)

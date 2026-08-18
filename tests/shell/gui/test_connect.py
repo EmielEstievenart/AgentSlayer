@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 
 from agentclip.cli import make_engine_factory
-from agentclip.config import Config, RemoteTarget, load_config
+from agentclip.config import Config, RemoteTarget, load_config, project_permissions_path
 from agentclip.driver.clip.base import select_provider
 from agentclip.executor.hosts.connect import (
     CONNECT_STEPS,
@@ -559,7 +559,7 @@ async def test_a_connect_points_the_session_at_the_remote_root(
 async def test_the_policy_banner_names_the_machine_and_what_stayed_here(
     harness: RemoteHarness, dial: Any
 ) -> None:
-    """Brief §3.9: a user with a carefully tuned opencode.json on THIS PC sees
+    """Brief §3.9: a user with a carefully tuned permissions.json on THIS PC sees
     none of it apply the moment they connect - silence about that is the
     footgun, so the banner states both halves."""
     harness.view.open_connect()
@@ -777,7 +777,9 @@ def test_the_banner_lists_a_refused_stdio_server_by_name(
 ) -> None:
     """Brief §3.9's last bullet: today a refused stdio server only reaches the
     MCP pane, and a connect summary is where a user would look for it."""
-    (project / "opencode.json").write_text(
+    rules = project_permissions_path(project)
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text(
         '{"mcp": {"tools": {"type": "local", "command": ["node", "x.js"]}}}', encoding="utf-8"
     )
     config = load_config(project, global_config_path=tmp_path / "none.toml")

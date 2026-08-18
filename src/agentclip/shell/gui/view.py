@@ -3343,7 +3343,7 @@ class GuiView:
             budget=snap.budget_chars if snap else 0,
             out_chars=snap.last_outbound_chars if snap else 0,
             permission_mode=snap.mode if snap else self._controller.permission_mode,
-            yolo=bool(snap and snap.yolo),
+            yolo=snap.yolo if snap else self._controller.yolo,
             composer_mode=mode,
             composer_placeholder=placeholder,
             composer_enabled=enabled,
@@ -3404,7 +3404,9 @@ class GuiView:
         # shift+tab would be changing.
         mode = snap.mode if snap else self._controller.permission_mode
         mode_class = {"plan": "st-plan", "unattended": "st-unattended"}.get(mode, "st-dim")
-        if snap and snap.yolo:
+        # The edits slot follows the same rule, so a `/yolo` armed at the start
+        # prompt is visible before the session it will govern exists.
+        if snap.yolo if snap else self._controller.yolo:
             edits, edits_class = "⚡ YOLO", "st-yolo"
         elif snap and snap.auto_accept_edits:
             edits, edits_class = "EDITS:auto", ""

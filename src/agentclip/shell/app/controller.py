@@ -662,16 +662,41 @@ class SessionController:
             return
         handler(arg)
 
+    @property
+    def yolo(self) -> bool:
+        """Whether approvals are off, as the controller last saw it. ``permission_mode``'s
+        shape, and read for its reason: before a session exists this is what the
+        next one will start in, which is what the status bar's edits segment
+        paints when there is no snapshot to read it off."""
+        return self._yolo
+
     def _cmd_yolo(self, arg: str) -> None:
         """Toggle (or set on/off) YOLO auto-approve-everything. Only reachable while
         armed/idle (an ask_user answer wins over commands), so the toggle itself runs
-        off-loop via _engine_call - set_yolo writes one session audit line."""
-        if not self._session_active or self._engine is None:
-            self._view.notify("start a session before using /yolo", severity="warning")
-            return
+        off-loop via _engine_call - set_yolo writes one session audit line.
+
+        Ungated for ``set_permission_mode``'s reason: "approve everything I am
+        about to ask for" is a decision made about the task one is ABOUT to
+        describe, and a switch that could only be thrown after the bootstrap had
+        gone out would be missing at the one moment it is easiest to mean. With
+        no engine there is nothing to audit into and no conversation to announce
+        the change to, so only the mirror moves - ``_session_flow`` hands it to
+        the engine it builds, before the first payload. YOLO still DIES with the
+        session (``_reset_session`` puts the configured default back) and still
+        does not inherit into a sub-agent; only "before the first one" changes.
+        """
         target = _parse_onoff(arg, current=self._yolo)
         if target is None:
             self._view.notify("usage: /yolo [on|off] - bare /yolo toggles", severity="warning")
+            return
+        if self._engine is None:
+            self._yolo = target
+            self._push_state()  # repaint: the badge falls back to the mirror
+            state = "ON" if target else "OFF"
+            self._view.notify(
+                f"YOLO will be {state} when the next session starts",
+                severity="warning" if target else "information",
+            )
             return
         self._view.spawn(self._apply_yolo(target))
 
@@ -1348,6 +1373,13 @@ class SessionController:
             # which is how it knows this is a starting mode and not a change to
             # announce to a conversation that has not begun.
             await self._engine_call(engine.set_permission_mode, self._mode)
+            # Same story for a `/yolo` thrown at the start prompt, but only when
+            # it DIVERGES from what the fresh engine already believes: the engine
+            # builds its policy from the same config default the mirror started
+            # at, so an untouched mirror has nothing to say and set_yolo would
+            # only write an audit line about a change nobody made.
+            if self._yolo != self._config.approval.yolo:
+                await self._engine_call(engine.set_yolo, self._yolo)
             try:
                 out = await self._engine_call(engine.start_task, spec.task)
             except BudgetExceeded as exc:

@@ -435,6 +435,113 @@ async def test_the_mode_survives_a_new_session(
     assert controller._snap is not None and controller._snap.mode == "plan"
 
 
+# -- /yolo -----------------------------------------------------------------------
+# YOLO stays one session's policy - audited into that session's log, back to the
+# configured default when it ends - but "approve everything I am about to ask for"
+# is a decision made about the task one is ABOUT to describe. So the command is
+# reachable at the start prompt, where only the mirror moves; the engine the next
+# session builds is armed with it before its first payload.
+
+
+async def test_yolo_can_be_armed_before_any_session_exists(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """No engine to tell and no conversation to announce it to, so the engine half
+    is skipped entirely: the mirror moves, the status bar is repainted (its edits
+    segment falls back to ``yolo`` when there is no snapshot), and the toast says
+    the state is armed rather than in force."""
+    pushes = len(view.states)
+
+    controller.submit_message("/yolo on")
+    await settle(view)
+
+    assert controller.yolo is True
+    assert controller._engine is None
+    assert view.events == []  # nothing to audit into, nothing to announce
+    assert len(view.states) > pushes
+    assert view.states[-1].snapshot is None
+    assert any("YOLO will be ON when the next session starts" in m for m in view.toasts())
+
+
+async def test_yolo_before_a_session_toggles_against_the_mirror(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """Bare `/yolo` still means "the other one" with no engine to read it off."""
+    controller.submit_message("/yolo")
+    await settle(view)
+    assert controller.yolo is True
+
+    controller.submit_message("/yolo")
+    await settle(view)
+    assert controller.yolo is False
+    assert any("YOLO will be OFF when the next session starts" in m for m in view.toasts())
+
+
+async def test_an_unparseable_yolo_before_a_session_changes_nothing_and_says_so(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """A typo must never be read as either half of the approval switch - the same
+    rule as `/armed`, and it applies before the session as much as during it."""
+    controller.submit_message("/yolo maybe")
+    await settle(view)
+
+    assert controller.yolo is False
+    assert any("usage: /yolo [on|off]" in message for message in view.toasts())
+
+
+async def test_a_yolo_armed_before_the_session_governs_its_first_turn(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """The point of the whole pre-session half: the engine is armed with the
+    dialled-in state BEFORE the bootstrap goes out, so the very first edit of the
+    very first turn auto-approves rather than opening a gate."""
+    controller.submit_message("/yolo on")
+    await settle(view)
+
+    await start_session(controller, view)
+    assert controller._snap is not None and controller._snap.yolo is True
+
+    controller.submit_clipboard(
+        edit_reply("src/utils.py", "return 1", "return 2", chat=MASTER_CHAT)
+    )
+    await settle(view)
+
+    assert view.gates == []  # YOLO approves; it does not ask
+    assert (project / "src" / "utils.py").read_text(encoding="utf-8") == "def f():\n    return 2\n"
+
+
+async def test_an_untouched_yolo_mirror_tells_the_new_engine_nothing(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """The engine builds its policy from the same configured default the mirror
+    started at, so a session begun without a pre-arm must write no yolo audit line
+    - an event about a change nobody made is a lie in the log."""
+    await start_session(controller, view)
+
+    assert controller._snap is not None and controller._snap.yolo is False
+    log = next(project.glob(".agentclip/sessions/*/transcript.jsonl"))
+    assert '"t": "yolo"' not in log.read_text(encoding="utf-8")
+
+
+async def test_yolo_still_dies_with_the_session(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """Unlike the permission mode (the user's dial, carried over), YOLO is a
+    property of one conversation: /new puts the configured default back, and the
+    next session's engine is left alone because the mirror agrees with it again."""
+    await start_session(controller, view)
+    controller.submit_message("/yolo on")
+    await settle(view)
+    view.specs.append(SessionSpec(task="A second task.", service="claude"))
+
+    assert controller.request_new_session() is True
+    await wait_for(lambda: view.cleared > 0, "the session was reset")
+    await settle(view)
+
+    assert controller.yolo is False
+    assert controller._snap is not None and controller._snap.yolo is False
+
+
 # -- /theme ---------------------------------------------------------------------
 # The one command whose vocabulary the controller does not know: a theme name
 # means something in a shell, not in the app layer (Textual themes in the TUI,

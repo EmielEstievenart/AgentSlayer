@@ -368,17 +368,17 @@ async def test_identify_runs_at_the_task_prompt_instead_of_becoming_the_task(
 async def test_a_command_that_needs_a_session_refuses_at_the_task_prompt(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Dispatch, not exemption: each command's own gate answers. `/yolo` wants a
-    session, says so, and the prompt keeps waiting - what it must NOT do is
-    become the task."""
+    """Dispatch, not exemption: each command's own gate answers. `/abort` wants a
+    run to end, says there is none, and the prompt keeps waiting - what it must
+    NOT do is become the task."""
     app = _make_app(tmp_path, profile_root)
     notes = _toasts(monkeypatch)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _at_the_task_prompt(app, pilot)
 
-        await send_composer(app, pilot, "/yolo")
-        await _wait_for(pilot, lambda: _said(notes, "start a session before"), "the refusal")
+        await send_composer(app, pilot, "/abort")
+        await _wait_for(pilot, lambda: _said(notes, "no sub-agent run to abort"), "the refusal")
         assert main.awaiting_new_session
         assert not main.session_active
 

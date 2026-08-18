@@ -85,6 +85,7 @@ class ControllerSpy:
         self.messages: list[str] = []
         self.cancels = 0
         self.permission_mode = "ask"
+        self.yolo = False  # the status bar's fallback when there is no snapshot
 
     def submit_decision(self, decision: Decision, note: str | None) -> None:
         self.decisions.append((decision, note))

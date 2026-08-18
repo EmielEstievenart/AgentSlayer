@@ -264,6 +264,14 @@ def test_the_edits_segment_without_yolo(
     assert segments(harness)["edits"]["text"] == text
 
 
+def test_the_edits_slot_shows_a_yolo_armed_before_any_session(harness: Harness) -> None:
+    """The mode segment's rule, applied to the other switch a user can throw at
+    the start prompt: with no snapshot to read, the controller's mirror is what
+    the next session will start in, so the badge has to say so."""
+    harness.view._controller.submit_message("/yolo on")
+    assert segments(harness)["edits"]["text"] == "⚡ YOLO"
+
+
 def test_a_disarmed_yolo_session_shows_both_badges(harness: Harness) -> None:
     """The pair a user must be able to see - which is exactly why ``armed`` is
     its own slot rather than folded into ``edits``."""

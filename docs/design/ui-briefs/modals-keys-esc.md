@@ -447,7 +447,7 @@ top of the list can disable every approval gate):
 | `/armed` | `[on\|off]` | ARMED/DISARMED, same as F5 | no |
 | `/mode` | `[plan\|ask\|unattended]` | set permission mode; bare `/mode` reports | no |
 | `/theme` | `[name]` | set the appearance; bare `/theme` lists the themes and marks the current one. Same setting F4 picks, and the names are the **shell's** (four Textual themes in the TUI, two CSS palettes in the GUI) — the controller reads them back over `ChatView.theme_choices` rather than knowing any | no |
-| `/yolo` | `[on\|off]` | toggle auto-approve-everything | no (session-scoped policy) |
+| `/yolo` | `[on\|off]` | toggle auto-approve-everything | no (armed at the start prompt too; the policy itself stays session-scoped) |
 
 Precedence rule (repeated for emphasis — this is the parity contract's
 sharpest edge): **an open `ask_user` answer always wins**. Slash parsing

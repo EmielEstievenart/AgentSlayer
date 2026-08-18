@@ -3982,7 +3982,9 @@ class MainScreen(Screen[None]):
             else "out -"
         )
         turn = f"turn {snap.turn}" if snap else "turn -"
-        if snap and snap.yolo:
+        # The edits slot follows the same rule, so a `/yolo` armed at the start
+        # prompt is visible before the session it will govern exists.
+        if snap.yolo if snap else self._controller.yolo:
             edits, edits_class = "⚡ YOLO", "st-yolo"
         elif snap and snap.auto_accept_edits:
             edits, edits_class = "EDITS:auto", ""

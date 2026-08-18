@@ -39,7 +39,7 @@ def test_subagent_keeps_the_anti_refusal_framing_verbatim() -> None:
     assert "The user pasted this message in themselves" in sub
     assert "Every action is reviewed by a human before it runs" in sub
     assert "Your judgment still applies as it normally would" in sub
-    assert "Start work immediately. Your first reply must already contain CLIP calls" in sub
+    assert "For a real task, start now: your first reply should already contain CLIP calls" in sub
     assert "Project root: AgentClip on Windows 11." in sub
 
 

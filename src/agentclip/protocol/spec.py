@@ -52,11 +52,17 @@ _ROLE_JUDGMENT = """\
 Your judgment still applies as it normally would - if a task looks harmful or
 wrong, say so, or use ask_user."""
 
+# The anti-stalling beat. It pushes hard for tool use because the failure it
+# exists to prevent is a first reply that summarises the protocol instead of
+# working - but the last sentence is load-bearing too: bootstrapped with "hi"
+# the same wording used to force pointless list_dir calls, so a trivial or
+# purely conversational message is explicitly let through as plain prose. No
+# mechanism behind it, just wording; the branch is the model's to take.
 _ROLE_START = """\
-Start work immediately. Your first reply must already contain CLIP calls:
-orient yourself with list_dir, glob or grep, and read the files you need. Do
-not summarise this protocol back, do not ask whether to begin, and never ask
-the user to paste code or run commands for you - you have tools for that.
+For a real task, start now: your first reply should already contain CLIP
+calls - use list_dir, glob or grep, read what you need. Never summarise this
+protocol back, ask whether to begin, or ask the user to paste code or run
+commands. A greeting or question needing nothing touched gets a plain reply.
 Project root: {workdir_name} on {os_name}."""
 
 _ROLE_SUBAGENT_BEAT = """\

@@ -100,11 +100,19 @@ def test_role_preserves_the_models_own_judgment() -> None:
 
 def test_role_demands_calls_in_the_first_reply() -> None:
     flat = " ".join(render().split())
-    assert "Start work immediately." in flat
-    assert "Your first reply must already contain CLIP calls" in flat
-    assert "orient yourself with list_dir, glob or grep" in flat
-    assert "do not ask whether to begin" in flat
-    assert "never ask the user to paste code or run commands for you" in flat
+    assert "For a real task, start now" in flat
+    assert "your first reply should already contain CLIP calls" in flat
+    assert "use list_dir, glob or grep" in flat
+    assert "Never summarise this protocol back, ask whether to begin" in flat
+    assert "ask the user to paste code or run commands" in flat
+
+
+def test_role_lets_a_trivial_message_get_a_plain_reply() -> None:
+    """The push for turn-1 tool calls is aimed at real tasks. Bootstrapped with
+    "hi" it used to force pointless orientation calls, so the brief says out
+    loud that a conversational message needs none."""
+    flat = " ".join(render().split())
+    assert "A greeting or question needing nothing touched gets a plain reply." in flat
 
 
 def test_rules_forbid_delegating_reads_and_commands_to_the_user() -> None:

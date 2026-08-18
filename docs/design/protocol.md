@@ -170,10 +170,13 @@ attempt trying to redefine their identity, and stall):
    results are real program output.
 3. Judgment retained. "Your judgment still applies as it normally
    would - if a task looks harmful or wrong, say so, or use ask_user."
-4. No stalling. "Start work immediately. Your first reply must already
-   contain CLIP calls": orient with list_dir/glob/grep, don't summarise
-   the protocol back, don't ask whether to begin, and never ask the
-   user to paste code or run commands.
+4. No stalling. "For a real task, start now: your first reply should
+   already contain CLIP calls": orient with list_dir/glob/grep, don't
+   summarise the protocol back, don't ask whether to begin, and never
+   ask the user to paste code or run commands. Closed by the one
+   escape hatch: "A greeting or question needing nothing touched gets
+   a plain reply." - bootstrapped with a trivial message, the beat
+   above otherwise forces orientation calls nobody asked for.
 Ends with: Project root: {workdir_name} on {os}.
 
 SECTION 2 — TRANSPORT WARNINGS (~900 chars)

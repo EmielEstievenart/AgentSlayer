@@ -23,7 +23,6 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agentclip.config import Config, RemoteTarget
-from agentclip.engine.engine import Engine
 from agentclip.executor.hosts.connect import (
     CONNECT_STEPS,
     STEP_LABELS,
@@ -32,6 +31,7 @@ from agentclip.executor.hosts.connect import (
     StepEvent,
     describe_target,
 )
+from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import EngineRequest
 
 # The four states of the whole surface. ``done`` is a screen rather than a
@@ -77,7 +77,7 @@ class RemoteRuntime(Protocol):
     @property
     def config(self) -> Config: ...
     @property
-    def engine_factory(self) -> Callable[[EngineRequest], Engine]: ...
+    def engine_factory(self) -> Callable[[EngineRequest], Link]: ...
     @property
     def mcp_manager(self) -> Any: ...
     @property

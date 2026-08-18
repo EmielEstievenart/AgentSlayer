@@ -151,15 +151,15 @@ async def test_the_session_context_round_trips(
     controller._yolo = True
     controller._mode = "unattended"
     saved = controller._snapshot_ctx()
-    master_engine = controller._engine
+    master_link = controller._link
     master_stats = controller._stats
 
-    sub_engine = controller._engine_factory("claude")
+    sub_link = controller._engine_factory("claude")
     controller._adopt_ctx(
-        SessionRef(id="sub-1", role="subagent", title="t", chat_name=sub_engine.chat_name),
-        sub_engine,
+        SessionRef(id="sub-1", role="subagent", title="t", chat_name=sub_link.chat_name),
+        sub_link,
     )
-    assert controller._engine is sub_engine
+    assert controller._link is sub_link
     assert controller._stats is not master_stats
     assert controller._stats.replies == 0
     assert controller._turn_glyphs == {}
@@ -176,7 +176,7 @@ async def test_the_session_context_round_trips(
     controller._mode = "plan"
     controller._restore_ctx(saved)
 
-    assert controller._engine is master_engine
+    assert controller._link is master_link
     assert controller._stats is master_stats
     assert controller._stats.replies == 7
     assert controller._turn_glyphs == {1: ["✓", "read_file"]}
@@ -193,10 +193,10 @@ async def test_state_pushes_carry_whose_session_they_describe(
     assert view.states[-1].session_id == "master"
     assert view.states[-1].session_role == "master"
 
-    sub_engine = controller._engine_factory("claude")
+    sub_link = controller._engine_factory("claude")
     controller._adopt_ctx(
         SessionRef(id="sub-1", role="subagent", title="read the docs", chat_name="jade-otter"),
-        sub_engine,
+        sub_link,
     )
 
     pushed = view.states[-1]

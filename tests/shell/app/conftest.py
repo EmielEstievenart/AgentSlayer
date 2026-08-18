@@ -37,9 +37,10 @@ import pytest
 
 from agentclip.cli import make_engine_factory
 from agentclip.config import Config, load_config
-from agentclip.engine.engine import Decision, Engine, PendingAction
+from agentclip.engine.engine import Decision, PendingAction
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app.controller import SessionController
+from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import EngineRequest, SessionRef, SessionSpec
 from agentclip.shell.app.view import RunCall, SessionView, Severity
 
@@ -369,7 +370,7 @@ class FakeChatView:
 # -- wiring -------------------------------------------------------------------
 
 
-def make_factory(root: Path) -> Callable[[EngineRequest | str], Engine]:
+def make_factory(root: Path) -> Callable[[EngineRequest | str], Link]:
     """The real engine factory, with the chat names pinned per role.
 
     Real, because the delegation wiring the controller does - role, catalog
@@ -381,7 +382,7 @@ def make_factory(root: Path) -> Callable[[EngineRequest | str], Engine]:
     )
     subs = iter(SUB_CHATS)
 
-    def build(request: EngineRequest | str) -> Engine:
+    def build(request: EngineRequest | str) -> Link:
         req = EngineRequest(service=request) if isinstance(request, str) else request
         if req.chat_name is None:
             name = MASTER_CHAT if req.role == "master" else next(subs)

@@ -40,6 +40,7 @@ from agentclip.executor.tools.skills import Skill, discover_skills
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.names import generate_chat_name
 from agentclip.protocol.spec import render_spec
+from agentclip.shell.app.link import Link, LocalLink
 from agentclip.shell.app.types import EngineRequest
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.graphics import probe_terminal
@@ -99,8 +100,16 @@ def make_engine_factory(
     data_root: Path | None = None,
     home: Path | None = None,
     mcp_manager: McpManager | None = None,
-) -> Callable[[EngineRequest | str], Engine]:
+) -> Callable[[EngineRequest | str], Link]:
     """Build one fresh Engine (and session directory) per started session.
+
+    What comes back is a :class:`~agentclip.shell.app.link.Link` over that
+    engine, never the engine itself: the Shell drives a session through the seam
+    that a remote engine will one day live behind
+    (docs/design/remote-executor.md section 2.2), and a factory that handed out
+    bare engines would be the one place local and remote sessions were assembled
+    differently. The name stays ``make_engine_factory`` because an engine is
+    still exactly what it builds - the link is how the caller reaches it.
 
     ``get_config`` is called fresh on every session start (not once) so that a
     service edited/added/removed via the service editor takes effect for the
@@ -152,7 +161,7 @@ def make_engine_factory(
     session_os = os_name or platform.system() or "unknown OS"
     skills = discover_skills(project_root, home=home, host=session_host)
 
-    def build(request: EngineRequest | str) -> Engine:
+    def build(request: EngineRequest | str) -> Link:
         req = EngineRequest(service=request) if isinstance(request, str) else request
         session_chat_name = req.chat_name or chat_name or generate_chat_name()
         cfg = get_config()
@@ -184,17 +193,24 @@ def make_engine_factory(
             session_chat_name,
             role=req.role,
         )
-        return Engine(
-            cfg,
-            registry,
-            workspace,
-            session,
-            backups,
-            composer,
-            session_chat_name,
-            role=req.role,
-            host=session_host,
-            build_warnings=build_warnings,
+        # Wrapped in the seam every Shell drives an engine through
+        # (docs/design/remote-executor.md section 2.2): local mode is a LocalLink
+        # over an in-process Engine, and the remote mode this prepares for will
+        # hand back a RemoteLink over the same interface without the Shell
+        # noticing which side of the wire its session is on.
+        return LocalLink(
+            Engine(
+                cfg,
+                registry,
+                workspace,
+                session,
+                backups,
+                composer,
+                session_chat_name,
+                role=req.role,
+                host=session_host,
+                build_warnings=build_warnings,
+            )
         )
 
     return build
@@ -461,7 +477,7 @@ class GuiRuntime:
 
     project_root: Path
     config: Config
-    engine_factory: Callable[[EngineRequest], Engine]
+    engine_factory: Callable[[EngineRequest], Link]
     mcp_manager: McpManager | None
     host: Host
     target: str

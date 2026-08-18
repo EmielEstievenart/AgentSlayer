@@ -1,9 +1,16 @@
-"""cli.make_engine_factory: what an EngineRequest turns into."""
+"""cli.make_engine_factory: what an EngineRequest turns into.
+
+The factory hands back a ``LocalLink`` (docs/design/remote-executor.md section
+2.2), but what these tests are ABOUT is the engine inside it - the registry it
+was sized with, the bootstrap it composes, the session log it opens - so every
+factory here is unwrapped once, at the seam, by :func:`_engines`. The link
+itself is tested in tests/shell/app/test_link.py.
+"""
 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -11,11 +18,26 @@ import pytest
 
 from agentclip.cli import _MCP_SECTION6_SCAFFOLD, _MCP_TASK_FALLBACK, make_engine_factory
 from agentclip.config import Config, load_config
+from agentclip.engine.engine import Engine
 from agentclip.executor.mcp.client import McpManager
 from agentclip.executor.mcp.types import McpLocalServer
 from agentclip.executor.tools.registry import default_registry
 from agentclip.protocol.spec import render_spec
+from agentclip.shell.app.link import Link, LocalLink
 from agentclip.shell.app.types import EngineRequest
+
+
+def _engines(
+    factory: Callable[[EngineRequest | str], Link],
+) -> Callable[[EngineRequest | str], Engine]:
+    """The factory's engines, straight: these tests assert on what was BUILT."""
+
+    def build(request: EngineRequest | str) -> Engine:
+        link = factory(request)
+        assert isinstance(link, LocalLink)
+        return link.engine
+
+    return build
 
 
 @pytest.fixture
@@ -26,7 +48,7 @@ def build(tmp_path: Path):
     def get_config() -> Config:
         return load_config(root, global_config_path=root / "no-such-global.toml")
 
-    return make_engine_factory(get_config, root)
+    return _engines(make_engine_factory(get_config, root))
 
 
 def test_a_plain_service_key_still_works(build) -> None:
@@ -153,15 +175,17 @@ def _mcp_free_spec_len(root: Path) -> int:
 
 
 def _mcp_factory(root: Path, manager: McpManager | None):
-    return make_engine_factory(
-        lambda: load_config(root, global_config_path=root / "no-such-global.toml"),
-        root,
-        chat_name=PINNED_CHAT,
-        os_name="TestOS",
-        # The tmp project doubles as HOME so the developer's real skill folders
-        # cannot leak into the catalog these budgets are derived from.
-        home=root,
-        mcp_manager=manager,
+    return _engines(
+        make_engine_factory(
+            lambda: load_config(root, global_config_path=root / "no-such-global.toml"),
+            root,
+            chat_name=PINNED_CHAT,
+            os_name="TestOS",
+            # The tmp project doubles as HOME so the developer's real skill folders
+            # cannot leak into the catalog these budgets are derived from.
+            home=root,
+            mcp_manager=manager,
+        )
     )
 
 
@@ -278,8 +302,8 @@ def test_all_disabled_servers_add_no_catalog_text(tmp_path: Path) -> None:
 def test_the_session_log_records_role_and_parent(tmp_path: Path) -> None:
     root = tmp_path / "project"
     root.mkdir()
-    build = make_engine_factory(
-        lambda: load_config(root, global_config_path=root / "nope.toml"), root
+    build = _engines(
+        make_engine_factory(lambda: load_config(root, global_config_path=root / "nope.toml"), root)
     )
     engine = build(
         EngineRequest(

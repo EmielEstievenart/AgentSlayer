@@ -2,18 +2,21 @@
 
 This is the engine's host - the state machine that drives a whole AgentClip
 session, lifted out of the Textual ``MainScreen`` so the UI can be swapped. It
-owns the Engine, the async flow state machine, the approval gate / ask_user
-futures, session stats, the per-turn glyph strip, the per-turn run-panel rows,
-and the depth-1 mid-turn reply queue. It talks to the UI ONLY through the
+owns the link to the Engine, the async flow state machine, the approval gate /
+ask_user futures, session stats, the per-turn glyph strip, the per-turn
+run-panel rows, and the depth-1 mid-turn reply queue. It talks to the UI ONLY through the
 :class:`~agentclip.shell.app.view.ChatView` port and therefore imports no
 Textual and no ``clip`` (clipboard I/O is a view concern - see
 ``ChatView.copy_outbound`` / ``read_clipboard``).
 
 Threading model (unchanged from the old MainScreen, now expressed through the port):
 
-- Every Engine call is funneled through :meth:`_engine_call`, which serializes
-  via an ``asyncio.Lock`` and offloads to a thread (``asyncio.to_thread``) so a
-  minutes-long ``execute()`` never blocks the event loop.
+- Every Engine call goes through the :class:`~agentclip.shell.app.link.Link`
+  seam (docs/design/remote-executor.md section 2.2), which serializes them - one
+  in flight - and keeps them off the event loop, so a minutes-long ``execute()``
+  never blocks it. ``LocalLink`` does that with an ``asyncio.Lock`` and
+  ``asyncio.to_thread``; the controller holds a ``Link`` and never an ``Engine``,
+  which is what lets a later increment put a wire under the same calls.
 - Flow coroutines run as background workers via ``view.spawn``; only one runs at a
   time (the ``busy`` flag). A reply arriving mid-turn is queued depth-1, newest wins.
 - The approval gate is an ``asyncio.Future`` resolved by ``submit_decision``;
@@ -40,7 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Coroutine, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -61,7 +64,6 @@ from agentclip.engine.engine import (
     Decision,
     Delegate,
     Done,
-    Engine,
     EngineStateError,
     NewTurn,
     Noise,
@@ -77,6 +79,7 @@ from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.parser import peek_chat_name
 from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus, ToolCall
 from agentclip.shell.app.commands import command_list, help_text, lookup
+from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import EngineRequest, SessionRef, SessionStats
 from agentclip.shell.app.view import ChatView, RunCall, SessionView, Severity
 
@@ -356,7 +359,7 @@ class _TurnAborted(Exception):
 class _SessionContext:
     """Everything ``SessionController`` holds *per session*, saved whole.
 
-    Nearly every method on the controller reads ``self._engine`` /
+    Nearly every method on the controller reads ``self._link`` /
     ``self._stats`` / ``self._snap``; a delegation swaps all of it for the
     sub-agent's and swaps it back afterwards, so those methods work on the
     sub-agent unchanged. Save-and-restore beats threading a session parameter
@@ -365,7 +368,7 @@ class _SessionContext:
     """
 
     ref: SessionRef
-    engine: Engine
+    link: Link
     chat_name: str | None
     preset: ServicePreset | None
     snap: StatusSnapshot | None
@@ -390,7 +393,7 @@ class SessionController:
     def __init__(
         self,
         config: Config,
-        engine_factory: Callable[[EngineRequest], Engine],
+        engine_factory: Callable[[EngineRequest], Link],
         project_root: Path,
         *,
         view: ChatView,
@@ -406,11 +409,10 @@ class SessionController:
         # McpStatusLine); the TUI passes McpManager.statuses, bound.
         self._mcp_statuses = mcp_statuses
 
-        self._engine: Engine | None = None
+        self._link: Link | None = None
         self._chat_name: str | None = None  # this session's agreed chat name
         self._preset: ServicePreset | None = None
         self._snap: StatusSnapshot | None = None
-        self._engine_lock = asyncio.Lock()
         self._gate_future: asyncio.Future[tuple[Decision, str | None]] | None = None
         self._answer_future: asyncio.Future[str] | None = None
         self._queued_capture: str | None = None
@@ -481,7 +483,7 @@ class SessionController:
     def rebind(
         self,
         config: Config,
-        engine_factory: Callable[[EngineRequest], Engine],
+        engine_factory: Callable[[EngineRequest], Link],
         project_root: Path,
     ) -> bool:
         """Point the NEXT session at a different machine. Returns whether it took.
@@ -542,7 +544,7 @@ class SessionController:
         sub-agent's reply must carry CLIP blocks to mean anything to the run
         that is waiting on it.
         """
-        if not self._session_active or self._engine is None:
+        if not self._session_active or self._link is None:
             return
         if self._turn_aborting:
             # A /new is tearing this session down right now, so this reply
@@ -699,7 +701,7 @@ class SessionController:
     def _cmd_yolo(self, arg: str) -> None:
         """Toggle (or set on/off) YOLO auto-approve-everything. Only reachable while
         armed/idle (an ask_user answer wins over commands), so the toggle itself runs
-        off-loop via _engine_call - set_yolo writes one session audit line.
+        off-loop through the link - set_yolo writes one session audit line.
 
         Ungated for ``set_permission_mode``'s reason: "approve everything I am
         about to ask for" is a decision made about the task one is ABOUT to
@@ -715,7 +717,7 @@ class SessionController:
         if target is None:
             self._view.notify("usage: /yolo [on|off] - bare /yolo toggles", severity="warning")
             return
-        if self._engine is None:
+        if self._link is None:
             self._yolo = target
             self._push_state()  # repaint: the badge falls back to the mirror
             state = "ON" if target else "OFF"
@@ -731,11 +733,11 @@ class SessionController:
         # handling. set_yolo flips the policy flag THEN writes an audit line; if
         # that write fails we resync the mirror from the engine's real state
         # (re-read by _refresh_status) so a later bare /yolo toggles the right way.
-        engine = self._engine
-        if engine is None:
+        link = self._link
+        if link is None:
             return
         try:
-            await self._engine_call(engine.set_yolo, target)  # flips policy + audits, off-loop
+            await link.set_yolo(target)  # flips policy + audits, off-loop
         except Exception as exc:  # keep the mirror honest, then surface it
             await self._refresh_status()
             if self._snap is not None:
@@ -818,15 +820,15 @@ class SessionController:
         # below still runs, and the mirror it leaves behind is what _session_flow
         # arms the next engine with, before that engine's first payload.
         #
-        # During a DELEGATION ``self._engine`` is the sub-agent's, so a shift+tab
+        # During a DELEGATION ``self._link`` is the sub-agent's, so a shift+tab
         # pressed while one runs reaches the conversation actually running - the
         # one the user is watching - and takes effect on its next verdict. The
         # master picks the change up when the slot comes back
         # (``_rearm_master_mode``).
-        engine = self._engine
-        if engine is not None:
+        link = self._link
+        if link is not None:
             try:
-                await self._engine_call(engine.set_permission_mode, target)
+                await link.set_permission_mode(target)
             except Exception as exc:
                 await self._refresh_status()
                 if self._snap is not None:
@@ -856,7 +858,7 @@ class SessionController:
         cannot do (no session, nothing to re-inject) and names which, so the two
         refusals read as different sentences rather than one silent no-op.
         """
-        if self._engine is None:
+        if self._link is None:
             self._view.notify(
                 "no session - the instructions ride the bootstrap when one starts",
                 severity="warning",
@@ -865,11 +867,11 @@ class SessionController:
         self._view.spawn(self._apply_reinstruct())
 
     async def _apply_reinstruct(self) -> None:
-        engine = self._engine
-        if engine is None:
+        link = self._link
+        if link is None:
             return
         try:
-            result = await self._engine_call(engine.arm_extra_instructions)
+            result = await link.arm_extra_instructions()
         except Exception as exc:
             await self._view.add_error(f"could not arm the instructions: {exc}")
             self._view.alert("re-instruct failed - see transcript", severity="error")
@@ -996,7 +998,7 @@ class SessionController:
         * at an approval gate -> the gate is rejected, which aborts the sub-
           agent's turn; the abort then lands at the next reply park;
         * executing tool calls -> ``request_cancel`` on the SUB-AGENT's engine
-          (``self._engine`` is the sub's for the length of the run) so the
+          (``self._link`` is the sub's for the length of the run) so the
           worker thread unblocks; that turn ends normally, and the latched flag
           ends the run when it comes back for a reply.
 
@@ -1017,9 +1019,9 @@ class SessionController:
         if gate is not None and not gate.done():
             gate.set_result((Decision.REJECT, _ABORT_NOTE))
             return
-        engine = self._engine
-        if self._executing and engine is not None:
-            engine.request_cancel()
+        link = self._link
+        if self._executing and link is not None:
+            link.request_cancel()
 
     def _cmd_help(self) -> None:
         self._view.spawn(self._view.add_note(help_text()))
@@ -1263,19 +1265,19 @@ class SessionController:
     def cancel_execution(self) -> None:
         """Cancel the tool calls running right now (a too-slow command, usually).
 
-        Deliberately does NOT go through ``_engine_call``: the engine lock is
-        held by the very ``execute()`` we are interrupting, and
-        ``request_cancel`` is thread-safe by design (it sets an Event) precisely
-        so it can be called from here, on the event loop, mid-execute.
+        Deliberately NOT one of the link's serialized calls: the lock is held
+        by the very ``execute()`` we are interrupting, which is why the seam
+        keeps ``request_cancel`` sync and out-of-band (the engine behind it just
+        sets an Event) so it can be called from here, on the event loop.
 
         The turn is not aborted: the engine finishes it normally and the results
         - the interrupted call plus the skipped ones - flow through the usual
         Send path, so the model is told what happened without the user doing
         anything else. A no-op when nothing is executing."""
-        engine = self._engine
-        if engine is None or not self._executing:
+        link = self._link
+        if link is None or not self._executing:
             return
-        engine.request_cancel()
+        link.request_cancel()
         self._view.notify(
             "cancelling - the killed call and the skipped ones are sent to the model",
             severity="warning",
@@ -1406,7 +1408,7 @@ class SessionController:
             self._flow_idle.set()
         await self._refresh_status()
         queued, self._queued_capture = self._queued_capture, None
-        if queued is not None and self._session_active and self._engine is not None:
+        if queued is not None and self._session_active and self._link is not None:
             self._spawn_flow(self._ingest_flow(queued))
 
     async def _abort_turn(self) -> None:
@@ -1451,12 +1453,12 @@ class SessionController:
         gate = self._gate_future
         if gate is not None and not gate.done():
             gate.set_exception(_TurnAborted())
-        engine = self._engine
-        if self._executing and engine is not None:
-            # Thread-safe by design (it sets an Event), which is what lets it be
+        link = self._link
+        if self._executing and link is not None:
+            # Out-of-band by design (it sets an Event), which is what lets it be
             # called from the event loop while the worker thread is inside
             # execute(). That turn ends normally; the checkpoint after it raises.
-            engine.request_cancel()
+            link.request_cancel()
         await self._flow_idle.wait()
 
     def _check_turn_abort(self) -> None:
@@ -1470,18 +1472,15 @@ class SessionController:
         if self._turn_aborting:
             raise _TurnAborted()
 
-    async def _engine_call(self, fn: Callable[..., _T], /, *args: object, **kwargs: object) -> _T:
-        """Serialize every engine call and run it off the event loop."""
-        async with self._engine_lock:
-            return await asyncio.to_thread(fn, *args, **kwargs)
-
     async def _run_engine_step(
-        self, fn: Callable[..., _T], /, *args: object, **kwargs: object
+        self, fn: Callable[..., Awaitable[_T]], /, *args: object, **kwargs: object
     ) -> _T:
         """Run execute()/answer_user() with the 'working' spinner showing meanwhile.
 
-        The window this brackets is exactly the window in which cancelling means
-        something (``_executing``): the engine is chewing through tool calls on
+        Bookkeeping only: the serializing and the off-loop hop live in the Link
+        (see :mod:`agentclip.shell.app.link`), so all this adds is the spinner and
+        the ``_executing`` window - which is exactly the window in which
+        cancelling means something: the engine is chewing through tool calls on
         the worker thread and the user is watching the spinner."""
         # Race-free: there is no await between this check and ``_executing``
         # going true, so an abort either raises here or finds the flag set and
@@ -1492,7 +1491,7 @@ class SessionController:
         self._view.start_working(label, self._run_rows())
         self._executing = True
         try:
-            return await self._engine_call(fn, *args, **kwargs)
+            return await fn(*args, **kwargs)
         finally:
             self._executing = False
             self._view.stop_working()
@@ -1510,7 +1509,7 @@ class SessionController:
             # calibration. Calibrating it later notifies the user to /new - we
             # cannot retro-fit a tool into a conversation the model already read.
             delegation = self._view.delegation_available()
-            engine = await asyncio.to_thread(
+            link = await asyncio.to_thread(
                 self._engine_factory,
                 EngineRequest(
                     service=spec.service,
@@ -1520,7 +1519,7 @@ class SessionController:
                     task_chars=len(spec.task),
                 ),
             )
-            self._watch_engine(engine)
+            self._watch_link(link)
             # The permission mode the user dialled in BEFORE this session existed
             # (shift+tab or /mode at the start prompt, or the one carried over
             # from the session before it) is the mode this one starts in. Applied
@@ -1528,16 +1527,16 @@ class SessionController:
             # first turn already obeys it - and while the engine is still IDLE,
             # which is how it knows this is a starting mode and not a change to
             # announce to a conversation that has not begun.
-            await self._engine_call(engine.set_permission_mode, self._mode)
+            await link.set_permission_mode(self._mode)
             # Same story for a `/yolo` thrown at the start prompt, but only when
             # it DIVERGES from what the fresh engine already believes: the engine
             # builds its policy from the same config default the mirror started
             # at, so an untouched mirror has nothing to say and set_yolo would
             # only write an audit line about a change nobody made.
             if self._yolo != self._config.approval.yolo:
-                await self._engine_call(engine.set_yolo, self._yolo)
+                await link.set_yolo(self._yolo)
             try:
-                out = await self._engine_call(engine.start_task, spec.task)
+                out = await link.start_task(spec.task)
             except BudgetExceeded as exc:
                 self._view.notify(
                     f"the bootstrap needs {exc.needed_chars:,} chars but {spec.service!r} "
@@ -1548,15 +1547,15 @@ class SessionController:
                 )
                 continue
             break
-        self._engine = engine
-        # Immutable for the session, so it is read straight off the engine (no
-        # _engine_call round trip needed) and mirrored for the noise toasts.
-        self._chat_name = engine.chat_name
+        self._link = link
+        # Immutable for the session, so the link answers for them with no round
+        # trip of its own (see Link) and they are mirrored for the noise toasts.
+        self._chat_name = link.chat_name
         self._active = SessionRef(
             id="master",
             role="master",
             title=_short_title(spec.task),
-            chat_name=engine.chat_name,
+            chat_name=link.chat_name,
         )
         self._preset = self._config.services.get(spec.service, self._config.preset())
         # Frozen here for the same reason the master's preset is: the sub-agent
@@ -1571,11 +1570,11 @@ class SessionController:
         # (e.g. "paste budget too small for MCP tools" - docs/design/mcp.md
         # section 5). The factory that decided it has no view, so the facts ride
         # the engine to here, the first moment a transcript exists to hold them.
-        for warning in engine.build_warnings:
+        for warning in link.build_warnings:
             await self._view.add_note(f"! {warning}")
             self._view.notify(warning, severity="warning", timeout=8)
         await self._view.add_note(
-            f"chat name: {engine.chat_name} - the model echoes chat={engine.chat_name} on "
+            f"chat name: {link.chat_name} - the model echoes chat={link.chat_name} on "
             "every reply; pastes without it are ignored"
         )
         if delegation:
@@ -1597,10 +1596,10 @@ class SessionController:
     # -- ingest -> review -> execute -----------------------------------------
 
     async def _ingest_flow(self, text: str, *, forced: bool = False) -> None:
-        engine = self._engine
-        if engine is None:
+        link = self._link
+        if link is None:
             return
-        result = await self._engine_call(engine.ingest, text)
+        result = await link.ingest(text)
         if isinstance(result, Noise):
             if forced and result.reason == "not-protocol":
                 await self._view.add_prose(text[:4000])
@@ -1662,8 +1661,8 @@ class SessionController:
         ``_handle_step``). No behaviour of its own: the master path is still
         body-then-handle, in that order.
         """
-        engine = self._engine
-        assert engine is not None
+        link = self._link
+        assert link is not None
         for prose in reply.prose:
             if prose.strip():
                 await self._view.add_prose(prose)
@@ -1689,13 +1688,13 @@ class SessionController:
         done = 0
         while True:
             self._check_turn_abort()
-            pending = await self._engine_call(engine.pending)
+            pending = await link.pending()
             if not pending:
                 break
             action = pending[0]
             self._set_glyph(action.call.id, "▶")
             decision, note = await self._gate(action, f"{done + 1}/{done + len(pending)}")
-            await self._engine_call(engine.decide, action.call.id, decision, note)
+            await link.decide(action.call.id, decision, note)
             done += 1
             target = action.call.params.get("path") or action.call.params.get("command", "")
             if decision is Decision.REJECT:
@@ -1719,7 +1718,7 @@ class SessionController:
                 await self._view.add_note(f"✓ {label} {action.call.tool} {target}".rstrip())
         self._view.hide_gate()
         await self._refresh_status()  # EXECUTING (status segment driven by busy)
-        return await self._run_engine_step(engine.execute)
+        return await self._run_engine_step(link.execute)
 
     def _set_glyph(self, call_id: int, glyph: str) -> None:
         if call_id in self._turn_glyphs:
@@ -1747,8 +1746,8 @@ class SessionController:
 
     # -- watching the engine execute (WORKER-THREAD callbacks) ----------------
     #
-    # Both are called by the engine from the thread ``_engine_call`` offloaded
-    # it to, so they may not await, may not touch the flow state machine, and
+    # Both are called by the engine from the thread the link offloaded the call
+    # to, so they may not await, may not touch the flow state machine, and
     # may not assume the event loop is anywhere near them. All they do is stamp
     # the row map - a dict write per call, which the GIL makes atomic and which
     # nothing on the loop side reads mid-execute - and hand the fact straight to
@@ -1770,10 +1769,13 @@ class SessionController:
     def _on_call_output(self, call_id: int, chunk: str) -> None:
         self._view.call_output(call_id, chunk)
 
-    def _watch_engine(self, engine: Engine) -> None:
-        """Point a freshly built engine's two live-progress hooks at this view."""
-        engine.set_progress_hook(self._on_call_progress)
-        engine.set_output_hook(self._on_call_output)
+    def _watch_link(self, link: Link) -> None:
+        """Point a freshly built session's two live-progress hooks at this view.
+
+        Sync registration, and the hooks keep the engine's own contract behind
+        the seam: they fire on the worker thread, mid-execute (see Link)."""
+        link.set_progress_hook(self._on_call_progress)
+        link.set_output_hook(self._on_call_output)
 
     async def _gate(self, action: PendingAction, position: str) -> tuple[Decision, str | None]:
         self._check_turn_abort()  # never put a panel up for a turn already gone
@@ -1795,14 +1797,14 @@ class SessionController:
             # is hidden once at the end of _run_turn (and by _wrap_flow on teardown).
 
     async def _handle_step(self, step: StepResult) -> None:
-        engine = self._engine
-        assert engine is not None
+        link = self._link
+        assert link is not None
         # Nothing this method does is safe for a turn the user has abandoned -
         # least of all the Send branch, which would copy the old conversation's
         # next payload onto the clipboard for a chat that no longer exists.
         self._check_turn_abort()
         # Both parking steps resume the SAME turn, so they loop together: a
-        # reply may ask a question, then delegate, then ask again. `engine` stays
+        # reply may ask a question, then delegate, then ask again. `link` stays
         # valid across a delegation because _run_subagent restores this session's
         # context before it returns.
         while isinstance(step, (AskUser, Delegate)):
@@ -1811,14 +1813,14 @@ class SessionController:
                 await self._view.add_note(f"? {step.question}")
                 answer = await self._ask(step.question)
                 await self._view.add_user(answer)
-                step = await self._run_engine_step(engine.answer_user, answer)
+                step = await self._run_engine_step(link.answer_user, answer)
                 continue
             text, status, code = await self._run_subagent(step)
             await self._view.add_note(
                 f"← sub-agent result ({len(text):,} chars, {status}) - handed back to the model"
             )
             step = await self._run_engine_step(
-                engine.deliver_delegate_result, text, status=status, code=code
+                link.deliver_delegate_result, text, status=status, code=code
             )
         if isinstance(step, Send):
             await self._copy_outbound(step.outbound)
@@ -1972,7 +1974,7 @@ class SessionController:
         """Hand the master's engine any mode change it slept through.
 
         Only one engine is reachable at a time (``_apply_mode`` writes to
-        whatever ``self._engine`` currently is), so a shift+tab pressed during a
+        whatever ``self._link`` currently is), so a shift+tab pressed during a
         delegation lands on the SUB-AGENT's policy - which is right, that is the
         conversation running - and leaves the master's saying what it said when
         the run began. The mirror is the authority, so the master is the stale
@@ -1987,11 +1989,11 @@ class SessionController:
         exception would replace the delegation's own outcome (or a _TurnAborted
         on its way out) with a bookkeeping failure.
         """
-        engine = self._engine
-        if engine is None or master.engine_mode == self._mode:
+        link = self._link
+        if link is None or master.engine_mode == self._mode:
             return
         try:
-            await self._engine_call(engine.set_permission_mode, self._mode)
+            await link.set_permission_mode(self._mode)
         except Exception as exc:
             await self._view.add_error(
                 f"could not re-arm the permission mode after the sub-agent run: {exc}"
@@ -2015,7 +2017,7 @@ class SessionController:
         # and the factory needs its real length to size the MCP catalog -
         # model-written delegations routinely dwarf a typed master task.
         task_text = _compose_sub_task(req)
-        engine = await asyncio.to_thread(
+        link = await asyncio.to_thread(
             self._engine_factory,
             EngineRequest(
                 # The SUB-AGENT window's own service, not the master's: the two
@@ -2033,23 +2035,23 @@ class SessionController:
                 task_chars=len(task_text),
             ),
         )
-        self._watch_engine(engine)  # a sub-agent's calls are watched like the master's
-        ref = replace(ref, chat_name=engine.chat_name)
+        self._watch_link(link)  # a sub-agent's calls are watched like the master's
+        ref = replace(ref, chat_name=link.chat_name)
         await self._view.open_session_view(ref)
         self._sub = ref
-        self._adopt_ctx(ref, engine)
+        self._adopt_ctx(ref, link)
         # The dial governs every engine in the app run, sub-agents included:
         # armed here, while this engine is still IDLE and before its bootstrap,
         # so the sub-agent's very first verdict already obeys plan/unattended and
         # nothing is announced to a conversation that has not started.
-        await self._engine_call(engine.set_permission_mode, self._mode)
+        await link.set_permission_mode(self._mode)
         await self._view.add_note(
-            f"sub-agent chat: {engine.chat_name} - a fresh chat with its own context; "
+            f"sub-agent chat: {link.chat_name} - a fresh chat with its own context; "
             "it sees nothing of the conversation that delegated to it"
         )
         await self._view.add_user(task_text)
         try:
-            out = await self._engine_call(engine.start_task, task_text)
+            out = await link.start_task(task_text)
         except BudgetExceeded as exc:
             await self._view.add_error(f"the sub-agent bootstrap does not fit one paste: {exc}")
             return (_budget_body(exc), "error", "too_large")
@@ -2064,7 +2066,7 @@ class SessionController:
         # against its own service, so "paste budget too small for MCP tools" can
         # be true of the sub-run alone - and the note lands in the sub-agent's
         # tab, the only transcript anyone will read this run in.
-        for warning in engine.build_warnings:
+        for warning in link.build_warnings:
             await self._view.add_note(f"! {warning}")
             self._view.notify(warning, severity="warning", timeout=8)
         await self._view.add_note(
@@ -2072,9 +2074,9 @@ class SessionController:
             "sub-agent chat"
         )
         await self._refresh_status()
-        return (await self._sub_loop(engine), "ok", None)
+        return (await self._sub_loop(link), "ok", None)
 
-    async def _sub_loop(self, engine: Engine) -> str:
+    async def _sub_loop(self, link: Link) -> str:
         """The ordinary session loop, with an awaited reply instead of a flow.
 
         Same body as the master's (``_run_turn_body`` is literally shared, so
@@ -2085,7 +2087,7 @@ class SessionController:
         """
         while True:
             text = await self._await_reply()
-            result = await self._engine_call(engine.ingest, text)
+            result = await link.ingest(text)
             if isinstance(result, Noise):
                 self._view.notify(f"sub-agent: {self._noise_text(result.reason)}")
                 continue
@@ -2127,12 +2129,12 @@ class SessionController:
                     await self._view.add_note(f"? {step.question}")
                     answer = await self._ask(step.question)
                     await self._view.add_user(answer)
-                    step = await self._run_engine_step(engine.answer_user, answer)
+                    step = await self._run_engine_step(link.answer_user, answer)
                     continue
                 # Unreachable: `delegate` is not in a sub-agent's registry, so
                 # the call pre-resolves as unknown_tool long before here.
                 step = await self._run_engine_step(
-                    engine.deliver_delegate_result,
+                    link.deliver_delegate_result,
                     _NESTED_DELEGATION_BODY,
                     status="error",
                     code="unknown_tool",
@@ -2185,12 +2187,12 @@ class SessionController:
     # -- session context save / restore ---------------------------------------
 
     def _snapshot_ctx(self) -> _SessionContext:
-        engine = self._engine
+        link = self._link
         active = self._active
-        assert engine is not None and active is not None
+        assert link is not None and active is not None
         return _SessionContext(
             ref=active,
-            engine=engine,
+            link=link,
             chat_name=self._chat_name,
             preset=self._preset,
             snap=self._snap,
@@ -2203,8 +2205,8 @@ class SessionController:
             engine_mode=self._mode,
         )
 
-    def _adopt_ctx(self, ref: SessionRef, engine: Engine) -> None:
-        """Make ``ref``/``engine`` the session every other method operates on.
+    def _adopt_ctx(self, ref: SessionRef, link: Link) -> None:
+        """Make ``ref``/``link`` the session every other method operates on.
 
         The stats, glyph strip and outbound state start empty - they describe a
         conversation, and this is a different one. YOLO deliberately does NOT
@@ -2222,8 +2224,8 @@ class SessionController:
         payload, exactly as ``_session_flow`` does for the master.
         """
         self._active = ref
-        self._engine = engine
-        self._chat_name = engine.chat_name
+        self._link = link
+        self._chat_name = link.chat_name
         self._snap = None
         self._stats = SessionStats(service=self._stats.service)
         self._turn_glyphs = {}
@@ -2235,7 +2237,7 @@ class SessionController:
 
     def _restore_ctx(self, ctx: _SessionContext) -> None:
         self._active = ctx.ref
-        self._engine = ctx.engine
+        self._link = ctx.link
         self._chat_name = ctx.chat_name
         self._preset = ctx.preset
         self._snap = ctx.snap
@@ -2285,7 +2287,7 @@ class SessionController:
 
     async def _reset_session(self) -> None:
         self._session_active = False
-        self._engine = None
+        self._link = None
         self._chat_name = None
         # A sub-run has already been torn down before this runs - a mid-turn
         # /new aborts it first (``_abort_turn``), every other road here is idle -
@@ -2325,8 +2327,8 @@ class SessionController:
     # -- undo / follow-up / manual ingest ------------------------------------
 
     async def _undo_flow(self) -> None:
-        engine = self._engine
-        if engine is None:
+        link = self._link
+        if link is None:
             return
         confirmed = await self._view.confirm(
             "Undo the most recent turn?",
@@ -2337,7 +2339,7 @@ class SessionController:
         if not confirmed:
             return
         try:
-            report, notice = await self._engine_call(engine.undo_last_turn, compose_notice=True)
+            report, notice = await link.undo_last_turn(compose_notice=True)
         except EngineStateError as exc:
             self._view.notify(str(exc), severity="warning")
             return
@@ -2360,10 +2362,10 @@ class SessionController:
             )
 
     async def _follow_up_flow(self, text: str) -> None:
-        engine = self._engine
-        if engine is None:
+        link = self._link
+        if link is None:
             return
-        out = await self._engine_call(engine.follow_up, text)
+        out = await link.follow_up(text)
         await self._view.add_user(text)
         await self._copy_outbound(out)
         await self._refresh_status()
@@ -2453,9 +2455,9 @@ class SessionController:
     # -- status push ----------------------------------------------------------
 
     async def _refresh_status(self) -> None:
-        engine = self._engine
-        if engine is not None:
-            self._snap = await self._engine_call(engine.status)
+        link = self._link
+        if link is not None:
+            self._snap = await link.status()
         self._push_state()
 
     def _push_state(self) -> None:

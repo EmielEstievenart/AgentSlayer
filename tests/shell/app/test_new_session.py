@@ -237,16 +237,16 @@ async def test_new_while_executing_cancels_the_engine_and_copies_nothing(
     call, so cancelling earlier is a race the engine loses by design.
     """
     await start_session(controller, view)
-    engine = controller._engine
-    assert engine is not None
+    link = controller._link
+    assert link is not None
     cancels: list[None] = []
-    real_cancel = engine.request_cancel
+    real_cancel = link.request_cancel
 
     def spy() -> None:
         cancels.append(None)
         real_cancel()
 
-    engine.request_cancel = spy  # type: ignore[method-assign]
+    link.request_cancel = spy  # type: ignore[method-assign]
     marker = controller._project_root / MARKER
     controller.submit_clipboard(slow_command_reply(20, chat=MASTER_CHAT))
     await wait_for(marker.exists, "the command to be running", timeout=30)

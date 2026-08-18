@@ -255,11 +255,12 @@ from agentclip.driver.screen.template import (
     find_all_in_region,
     find_lowest_with_best_miss,
 )
-from agentclip.engine.engine import Decision, Engine, PendingAction, StatusSnapshot
+from agentclip.engine.engine import Decision, PendingAction, StatusSnapshot
 from agentclip.executor.mcp.types import McpServerStatus
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
+from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import EngineRequest, SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.tui.messages import (
@@ -678,7 +679,7 @@ class MainScreen(Screen[None]):
         self,
         config: Config,
         provider: ClipboardProvider,
-        engine_factory: Callable[[EngineRequest], Engine],
+        engine_factory: Callable[[EngineRequest], Link],
         project_root: Path,
         profile_root: Path,
         *,

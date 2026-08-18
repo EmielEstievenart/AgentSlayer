@@ -54,7 +54,7 @@ from typing import Any
 
 from agentclip.config import Config
 from agentclip.driver.clip.base import ClipboardProvider
-from agentclip.engine.engine import Engine
+from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import EngineRequest
 from agentclip.shell.gui.bridge import Bridge, EmitFn, JsApi
 from agentclip.shell.gui.remote import RemoteConnect
@@ -75,7 +75,7 @@ class GuiRunner:
         *,
         config: Config,
         provider: ClipboardProvider,
-        engine_factory: Callable[[EngineRequest], Engine],
+        engine_factory: Callable[[EngineRequest], Link],
         project_root: Path,
         profile_root: Path | None = None,
         global_config_path: Path | None = None,

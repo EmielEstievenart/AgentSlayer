@@ -23,8 +23,8 @@ from agentclip.config import (
     save_theme,
 )
 from agentclip.driver.clip.base import ClipboardProvider
-from agentclip.engine.engine import Engine
 from agentclip.executor.mcp.client import McpManager
+from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import EngineRequest
 from agentclip.shell.tui.screens.confirm import ConfirmScreen
 from agentclip.shell.tui.screens.help import HelpScreen
@@ -690,7 +690,7 @@ class AgentClipApp(App[None]):
         *,
         config: Config,
         provider: ClipboardProvider,
-        engine_factory: Callable[[EngineRequest], Engine],
+        engine_factory: Callable[[EngineRequest], Link],
         project_root: Path,
         global_config_path: Path | None = None,
         profile_root: Path | None = None,

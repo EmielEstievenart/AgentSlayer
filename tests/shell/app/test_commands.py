@@ -236,7 +236,7 @@ def test_the_engine_never_hears_about_the_armed_switch(
     no session - it never even reaches for one."""
     controller.submit_message("/armed off")
     assert view.armed_targets == [False]
-    assert controller._engine is None
+    assert controller._link is None
     assert view.events == []  # no transcript note, no audit trail
 
 
@@ -352,7 +352,7 @@ async def test_the_mode_can_be_set_before_any_session_exists(
     await settle(view)
 
     assert controller.permission_mode == "plan"
-    assert controller._engine is None
+    assert controller._link is None
     assert any("exploration only" in note for note in view.notes())
     assert len(view.states) > pushes  # repainted, so the segment can follow
     assert view.states[-1].snapshot is None  # ...with no session behind it
@@ -461,7 +461,7 @@ async def test_yolo_can_be_armed_before_any_session_exists(
     await settle(view)
 
     assert controller.yolo is True
-    assert controller._engine is None
+    assert controller._link is None
     assert view.events == []  # nothing to audit into, nothing to announce
     assert len(view.states) > pushes
     assert view.states[-1].snapshot is None
@@ -777,7 +777,7 @@ async def test_config_works_with_no_session_of_any_kind(
     controller.submit_message("/config")
     await settle(view)
 
-    assert controller._engine is None
+    assert controller._link is None
     assert not any("start a session" in message for message in view.toasts())
 
 

@@ -18,8 +18,8 @@ import pytest
 from agentclip import __version__, cli
 from agentclip.config import load_config
 from agentclip.driver.clip.base import select_provider
-from agentclip.engine.engine import Engine
 from agentclip.executor.hosts.local import LocalHost
+from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import EngineRequest
 from agentclip.shell.gui.shell import (
     ASSET_DIR,
@@ -39,7 +39,7 @@ def asset_text(name: str) -> str:
     return files(ASSET_PACKAGE).joinpath(ASSET_DIR, name).read_text(encoding="utf-8")
 
 
-def _no_engine(request: EngineRequest) -> Engine:
+def _no_engine(request: EngineRequest) -> Link:
     """An engine factory for the paths that never reach a session start."""
     raise AssertionError("no engine should be built on this path")
 

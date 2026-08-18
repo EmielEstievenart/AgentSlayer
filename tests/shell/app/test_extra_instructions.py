@@ -97,7 +97,7 @@ async def test_without_a_session_it_says_so_and_touches_nothing(
     await settle(view)
 
     assert any("no session" in toast for toast in view.toasts())
-    assert controller._engine is None
+    assert controller._link is None
 
 
 async def test_a_service_with_no_instructions_is_pointed_at_the_editor(

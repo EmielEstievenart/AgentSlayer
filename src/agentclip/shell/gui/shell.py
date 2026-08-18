@@ -26,7 +26,7 @@ from typing import Any, Protocol
 from agentclip import __version__
 from agentclip.config import Config
 from agentclip.driver.clip.base import ClipboardProvider
-from agentclip.engine.engine import Engine
+from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import EngineRequest
 from agentclip.shell.gui.remote import RemoteConnect
 from agentclip.shell.gui.runner import GuiRunner
@@ -141,7 +141,7 @@ def run_gui(
     launch: LaunchLike,
     *,
     provider: ClipboardProvider,
-    engine_factory: Callable[[EngineRequest], Engine],
+    engine_factory: Callable[[EngineRequest], Link],
     mcp_manager: McpStatusSource | None = None,
     on_config_change: Callable[[Config], None] | None = None,
     host: Any = None,

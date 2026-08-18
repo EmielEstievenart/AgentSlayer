@@ -6,6 +6,10 @@
 > resolved (or consciously deferred again) before implementation starts. Once
 > the design session for the first increment happens, this document graduates
 > into a binding design doc and `remote-ssh.md` gets amended where superseded.
+>
+> **Exception: §2.2 is built, and its "As built" subsection is binding** —
+> increment 1 (the link seam) shipped, so that part describes code rather than
+> intent. Everything else here is still plan.
 
 ## 1. Goal
 
@@ -55,6 +59,42 @@ speaks the wire protocol over SSH, `FakeLink` for tests. Local startup and
 debuggability are unchanged. Accepted risk: the wire path is only exercised by
 remote/integration tests — mitigate with a wire-protocol test suite that runs
 `RemoteLink` against a subprocess on localhost.
+
+**As built (increment 1).** The interface lives at
+`src/agentclip/shell/app/link.py`, and the Protocol is split by *thread
+contract* rather than by topic, because that split is what a wire has to
+reproduce:
+
+- **Immutable per-session facts** — `chat_name`, `role`, `build_warnings` — stay
+  plain sync attributes, snapshotted once at construction. The controller reads
+  them from the event loop with nothing to await (transcript notes quote them
+  the moment a session arms), so a `RemoteLink` carries them home in the
+  handshake instead of paying a round trip per read.
+- **State-changing calls are async and serialized**, one in flight:
+  `start_task`, `follow_up`, `ingest`, `pending`, `decide`, `execute`,
+  `answer_user`, `deliver_delegate_result`, `undo_last_turn`, `status`,
+  `set_yolo`, `set_permission_mode`, `arm_extra_instructions`.
+- **`request_cancel` is sync and out-of-band**, deliberately never gated by the
+  serializing lock: the call it interrupts is the one holding it. Locally that
+  is still `Engine.request_cancel` setting a `threading.Event`; on the wire it
+  has to be a message the transport can send while a request is outstanding.
+- **The two hook setters are sync registration**, wired once right after
+  construction and before the first async call. The hooks keep today's contract,
+  which is the engine's: fired from the worker thread mid-`execute()`, must not
+  block, and one that raises is silently dropped for the rest of the session.
+
+`LocalLink` owns the `asyncio.Lock` + `asyncio.to_thread` hop that used to be
+`SessionController._engine_call` — they are the *local answer* to a question the
+seam asks of every implementation ("one at a time, and do not block the loop"),
+not a fact about the controller, which now holds a `Link` and never an `Engine`.
+Exceptions cross unwrapped (`BudgetExceeded`, `EngineStateError`), because the
+controller catches those by type.
+
+`cli.make_engine_factory` returns a `Link` (a `LocalLink` over a freshly built
+`Engine`); the name was kept because an engine is still exactly what it builds.
+One controller-level lock became one lock per link, which is equivalent because
+the controller only ever calls the link in the live session slot — verified call
+site by call site when this landed.
 
 ### 2.3 Disconnect semantics: lossy, honest, simple
 
@@ -153,10 +193,16 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
 
 ## 4. Increments (proposed, not yet committed to)
 
-1. **Carve the link seam locally.** Introduce the Shell↔Engine link interface
-   and route today's in-process calls through `LocalLink`. Pure refactor, no
-   wire yet. The controller's engine-hook contracts (worker-thread callbacks
-   for progress/output, futures for gates) become link-mediated events.
+1. **Carve the link seam locally.** — **done.** Introduce the Shell↔Engine link
+   interface and route today's in-process calls through `LocalLink`. Pure
+   refactor, no wire yet. As built: `shell/app/link.py` holds the Protocol and
+   `LocalLink`; the factory returns a `Link`; `SessionController` holds
+   `self._link` and its `_engine_call` is gone (the lock and the thread hop moved
+   into the link). The progress/output hooks stayed *sync registration* with the
+   engine's worker-thread contract rather than becoming link-mediated events —
+   turning them into wire messages is increment 2's job, where streaming is
+   designed as a first-class message anyway; making them events with no wire
+   under them would have been churn, not design. See §2.2 "As built".
 2. **Wire protocol + localhost subprocess.** JSON-lines over stdio; run the
    engine half as a local subprocess behind `RemoteLink` in tests only.
    Streaming (output deltas) and cancel as first-class messages.

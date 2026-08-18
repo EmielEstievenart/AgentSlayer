@@ -23,9 +23,9 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from agentclip.engine.engine import Engine
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.shell.app.controller import SessionController
+from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import EngineRequest, SessionRef
 
 from .conftest import (
@@ -73,7 +73,7 @@ def _record_engine_requests(controller: SessionController) -> list[EngineRequest
     seen: list[EngineRequest] = []
     inner = controller._engine_factory
 
-    def record(request: EngineRequest) -> Engine:
+    def record(request: EngineRequest) -> Link:
         seen.append(request)
         return inner(request)
 
@@ -210,14 +210,14 @@ async def test_the_master_context_is_restored(
     controller: SessionController, view: FakeChatView
 ) -> None:
     await _delegating_session(controller, view)
-    master_engine = controller._engine
+    master_link = controller._link
     master_stats = controller._stats
 
     controller.submit_clipboard(delegate_reply("Read the docs."))
     await _feed_sub(controller, task_done_reply("read", result="notes", chat=SUB))
     await settle(view)
 
-    assert controller._engine is master_engine
+    assert controller._link is master_link
     assert controller._stats is master_stats
     assert controller._chat_name == MASTER_CHAT
     assert controller._active == SessionRef(
@@ -420,7 +420,7 @@ async def test_an_exception_mid_run_restores_the_master_and_reports(
     """5.11: the finally is the whole safety net - it must fire for a failure
     nobody predicted, and the master's turn must still complete."""
     await _delegating_session(controller, view)
-    master_engine = controller._engine
+    master_link = controller._link
 
     async def boom(session: SessionRef) -> None:
         raise RuntimeError("the tab would not mount")
@@ -433,7 +433,7 @@ async def test_an_exception_mid_run_restores_the_master_and_reports(
     payload = view.copied[-1]
     assert "the sub-agent run failed" in payload
     assert "the tab would not mount" in payload
-    assert controller._engine is master_engine
+    assert controller._link is master_link
     assert controller._sub is None
     assert view.chats_ended  # the live chat went back to the master's window
     assert view.focused[-1] == "master"
@@ -447,14 +447,16 @@ async def test_a_sub_task_too_large_for_one_paste_is_an_error_result(
     real = controller._engine_factory
 
     def build(request: object) -> object:
-        engine = real(request)  # type: ignore[arg-type]
-        if engine.role == "subagent":
+        link = real(request)  # type: ignore[arg-type]
+        if link.role == "subagent":
 
             def refuse(task: str) -> None:
                 raise BudgetExceeded(needed_chars=99_000, budget_chars=12_000)
 
-            engine.start_task = refuse  # type: ignore[method-assign]
-        return engine
+            # Patched on the ENGINE, under the link: the link's own start_task is
+            # a coroutine that hands the call to whatever the engine's is.
+            link.engine.start_task = refuse  # type: ignore[method-assign]
+        return link
 
     controller._engine_factory = build  # type: ignore[assignment]
 

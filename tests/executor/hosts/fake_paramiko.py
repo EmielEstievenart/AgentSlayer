@@ -179,7 +179,17 @@ class FakeSftp:
 
 
 class FakeChannel:
-    """One exec channel: scripted output and exit status, or a broken link."""
+    """One exec channel: scripted output and exit status, or a broken link.
+
+    Two shapes, because ssh.py opens two kinds of channel. A per-call exec
+    channel answers its whole output at once (``FakeCommandScript.output``) and
+    is done. A LINK channel (``SshHost.open_link_channel``) is long-lived and
+    duplex, so it is scripted as ``chunks``/``stderr_chunks``: each ``recv``
+    hands back the next staged chunk and ``b""`` once they run out, which is
+    exactly the boundary-splitting the reader has to survive. Whatever is
+    written to it accumulates in ``sent``, since on a link channel the bytes
+    going UP are half of what there is to assert about.
+    """
 
     def __init__(self, script: FakeCommandScript, client: FakeSSHClient) -> None:
         self._script = script
@@ -187,7 +197,10 @@ class FakeChannel:
         self.command = ""
         self.combined = False
         self.closed = False
+        self.sent = bytearray()
         self._sent = False
+        self._chunk = 0
+        self._stderr_chunk = 0
 
     def set_combine_stderr(self, value: bool) -> None:
         self.combined = value
@@ -205,11 +218,22 @@ class FakeChannel:
 
     def recv(self, n: int) -> bytes:
         self._raise_if_broken()
+        if self._script.chunks:  # a staged, long-lived stream
+            return self._next(self._script.chunks, "_chunk")
         self._sent = True
         return self._script.output.encode()
 
     def recv_stderr(self, n: int) -> bytes:
-        return b""
+        self._raise_if_broken()
+        return self._next(self._script.stderr_chunks, "_stderr_chunk")
+
+    def send(self, data: bytes) -> int:
+        self._raise_if_broken()
+        self.sent.extend(data)
+        return len(data)
+
+    def sendall(self, data: bytes) -> None:
+        self.send(data)
 
     def exit_status_ready(self) -> bool:
         self._raise_if_broken()
@@ -220,6 +244,14 @@ class FakeChannel:
 
     def close(self) -> None:
         self.closed = True
+
+    def _next(self, staged: list[bytes], cursor: str) -> bytes:
+        """The next staged chunk, or ``b""`` (EOF) once they are exhausted."""
+        index = getattr(self, cursor)
+        if index >= len(staged):
+            return b""
+        setattr(self, cursor, index + 1)
+        return staged[index]
 
     def _raise_if_broken(self) -> None:
         if self._client.broken or self._script.breaks:
@@ -233,6 +265,10 @@ class FakeCommandScript:
     output: str = ""
     hangs: bool = False
     breaks: bool = False  # the link dies while the command is in flight
+    # A link channel's two streams, one recv() per element. Empty means "this is
+    # an ordinary exec channel"; see FakeChannel.
+    chunks: list[bytes] = field(default_factory=list)
+    stderr_chunks: list[bytes] = field(default_factory=list)
 
 
 class FakeTransport:

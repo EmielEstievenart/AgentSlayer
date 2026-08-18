@@ -37,11 +37,20 @@ session leader and its PID is the process group of everything the command
 spawns; :meth:`SshExec.kill` reads that PID over SFTP and sends
 ``kill -9 -- -<pgid>`` down a separate channel - the remote twin of LocalExec's
 killpg.
+
+**The link channel** (:meth:`SshHost.open_link_channel`) is the other kind of
+channel this module opens, and deliberately the opposite shape: one long-lived
+duplex stream carrying the Shell<->Engine wire protocol
+(docs/design/remote-executor.md §2.12), rather than one command with an exit
+code. It is NOT wrapped, NOT setsid'd and NOT registered with the per-call
+bookkeeping above - see the method's docstring for why each of those is a
+feature.
 """
 
 from __future__ import annotations
 
 import base64
+import codecs
 import errno
 import hashlib
 import shlex
@@ -68,6 +77,14 @@ _CONNECT_TIMEOUT_S = 20
 _PASSWORD_ATTEMPTS = 3
 _POLL_S = 0.02
 _RECV_CHUNK = 65536
+
+# How much of the link channel's stderr is kept. The remote engine's stderr is
+# its LOG, never protocol data (docs/design/remote-executor.md §2.9), and its
+# whole job here is to explain a handshake that never arrived - a job the LAST
+# few kilobytes do as well as all of them, and without letting a chatty target
+# grow this buffer for the life of a session.
+_LINK_STDERR_TAIL = 8192
+_LINK_CLOSE_JOIN_S = 2.0
 
 # Prompt callbacks the caller supplies. Both are answered BEFORE the TUI starts
 # on the first connect (cli.py wires them to the terminal); a re-dial calls them
@@ -255,6 +272,145 @@ class SshExec:
     def _close(self) -> None:
         with suppress(Exception):  # closing a dead channel must never raise
             self._chan.close()
+
+
+class _ChannelReader:
+    """Lines of UTF-8 text off a channel's stdout, blocking until there is one.
+
+    Deliberately hand-rolled rather than ``channel.makefile()``: paramiko's
+    ``BufferedFile`` is not a clean text stream (its ``readline`` has its own
+    newline rules and its own idea of when a read is short), and the wire's whole
+    framing rests on "one ``\\n``-terminated line is one frame". So the same
+    ``recv`` loop :class:`SshExec` uses moves bytes, an INCREMENTAL decoder turns
+    them into text - a multibyte character split across two TCP-sized chunks must
+    not become two replacement characters - and only ``"\\n"`` ends a line.
+
+    EOF answers ``""``, which is what :class:`RemoteLinkClient` reads as "the
+    link closed". A transport that died mid-session raises inside ``recv``; that
+    is the same event seen from lower down, so it is reported the same way rather
+    than as an exception type the protocol client would have to learn.
+    """
+
+    __slots__ = ("_chan", "_decoder", "_buffer", "_eof")
+
+    def __init__(self, chan: paramiko.Channel) -> None:
+        self._chan = chan
+        self._decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        self._buffer = ""
+        self._eof = False
+
+    def readline(self, limit: int = -1) -> str:
+        """One frame, or ``""`` at EOF. Blocks until one of the two happens."""
+        while True:
+            newline = self._buffer.find("\n")
+            if newline >= 0:
+                line = self._buffer[: newline + 1]
+                self._buffer = self._buffer[newline + 1 :]
+                return line
+            if self._eof:
+                # A final line with no terminator: hand it over once, then "".
+                rest, self._buffer = self._buffer, ""
+                return rest
+            try:
+                data = self._chan.recv(_RECV_CHUNK)
+            except (OSError, EOFError, paramiko.SSHException):
+                data = b""  # the link died: EOF, from up here
+            if data:
+                self._buffer += self._decoder.decode(data)
+                continue
+            self._eof = True
+            self._buffer += self._decoder.decode(b"", final=True)
+
+
+class _ChannelWriter:
+    """Text onto a channel's stdin, flushed by the act of writing it.
+
+    ``sendall`` blocks until every byte is on the transport, so ``flush`` has
+    nothing left to do - but it exists because the protocol client writes
+    ``write`` then ``flush`` and must not have to know which transport it got.
+    A dead channel surfaces as :class:`OSError`, which is what that client
+    already catches as "the link closed mid-write".
+    """
+
+    __slots__ = ("_chan",)
+
+    def __init__(self, chan: paramiko.Channel) -> None:
+        self._chan = chan
+
+    def write(self, s: str, /) -> int:
+        try:
+            self._chan.sendall(s.encode("utf-8"))
+        except (OSError, EOFError, paramiko.SSHException) as exc:
+            raise OSError(errno.EIO, f"the link channel is gone: {exc}") from exc
+        return len(s)
+
+    def flush(self) -> None:
+        """A no-op: :meth:`write` already blocked until the bytes were sent."""
+
+
+class LinkChannel:
+    """One long-lived duplex channel: the transport a remote engine speaks over.
+
+    What :class:`~agentclip.shell.app.remote_link.RemoteLinkClient` needs is a
+    reader and a writer, and this is where an SSH session becomes them
+    (docs/design/remote-executor.md §2.12). Nothing above the seam touches a
+    paramiko type: :attr:`reader` and :attr:`writer` are the two text-stream
+    shapes the client was written against, and the three methods beside them are
+    about the CHANNEL rather than the protocol on it.
+
+    **stderr is drained on a thread, always.** Two reasons, and either alone
+    would be enough. An unread stderr fills the channel's window and then wedges
+    the remote process the moment it writes one more byte - a deadlock whose
+    symptom is a link that simply stops answering. And when the handshake never
+    arrives, what the launch printed to stderr IS the diagnosis ("command not
+    found", a traceback, a permission error), so :meth:`stderr_tail` is what
+    turns "the link closed" into a sentence naming what went wrong.
+    """
+
+    def __init__(self, chan: paramiko.Channel) -> None:
+        self._chan = chan
+        self.reader = _ChannelReader(chan)
+        self.writer = _ChannelWriter(chan)
+        self._tail = bytearray()
+        self._tail_lock = threading.Lock()
+        self._drain = threading.Thread(
+            target=self._drain_stderr, name="agentclip-link-stderr", daemon=True
+        )
+        self._drain.start()
+
+    def stderr_tail(self) -> str:
+        """The last few KB the remote process wrote to stderr, decoded loosely."""
+        with self._tail_lock:
+            return bytes(self._tail).decode("utf-8", errors="replace")
+
+    def exit_status(self) -> int | None:
+        """The channel's exit status, or None while the process is still running."""
+        try:
+            if not self._chan.exit_status_ready():
+                return None
+            return self._chan.recv_exit_status()
+        except (OSError, EOFError, paramiko.SSHException):
+            return None
+
+    def close(self) -> None:
+        """Close the channel - which is how the remote engine is stopped."""
+        with suppress(Exception):  # closing a dead channel must never raise
+            self._chan.close()
+        self._drain.join(timeout=_LINK_CLOSE_JOIN_S)
+
+    def _drain_stderr(self) -> None:
+        while True:
+            try:
+                data = self._chan.recv_stderr(_RECV_CHUNK)
+            except (OSError, EOFError, paramiko.SSHException):
+                return
+            if not data:
+                return  # EOF on stderr: the process is done writing logs
+            with self._tail_lock:
+                self._tail.extend(data)
+                excess = len(self._tail) - _LINK_STDERR_TAIL
+                if excess > 0:
+                    del self._tail[:excess]
 
 
 class SshHost:
@@ -553,6 +709,48 @@ class SshHost:
             self.mark_dead(exc)
             raise OSError(errno.EIO, f"connection lost to {self.target}: {exc}") from exc
         return SshExec(self, chan, pidfile)
+
+    # -- the link channel ----------------------------------------------------
+
+    def open_link_channel(self, command: str) -> LinkChannel:
+        """Run ``command`` on a channel of its own and hand back its streams.
+
+        The transport a remote engine is spoken to over
+        (docs/design/remote-executor.md §2.6, §2.12): ``agentclip-engine`` is
+        launched by name on the target and the wire protocol runs over this
+        channel's stdio for the life of the session. ``_ensure`` dials or
+        re-dials first, so this is also the point a dead link is noticed.
+
+        Three deliberate differences from :meth:`spawn`, all of them semantics
+        rather than tidiness:
+
+        * **No** :func:`wrap_command`, and in particular no ``setsid``. The
+          engine process MUST die with this channel and with the connection -
+          that IS §2.3's disconnect model ("the remote process dies with the SSH
+          connection; no detached daemon in v1"), and a session leader would
+          survive exactly the event the design says ends it, leaving an engine
+          behind on the target with a session store open under it.
+        * **stderr is kept separate** (``set_combine_stderr(False)``): stdout is
+          the protocol and nothing else may appear on it, while stderr is the
+          remote log and the only evidence a failed launch leaves.
+        * **No per-call bookkeeping** - no pidfile, no :class:`SshExec`, no kill
+          path. There is no "outcome unknown" to report here because there is no
+          command result to report: a transport that dies surfaces as EOF on the
+          reader, and the client turns that into one failed call rather than a
+          verdict about a tool.
+        """
+        client = self._ensure()
+        try:
+            transport = client.get_transport()
+            if transport is None:
+                raise paramiko.SSHException("the transport is gone")
+            chan = transport.open_session(timeout=_CONNECT_TIMEOUT_S)
+            chan.set_combine_stderr(False)
+            chan.exec_command(command)
+        except (paramiko.SSHException, OSError, EOFError) as exc:
+            self.mark_dead(exc)
+            raise OSError(errno.EIO, f"connection lost to {self.target}: {exc}") from exc
+        return LinkChannel(chan)
 
     # -- Host: files ---------------------------------------------------------
 

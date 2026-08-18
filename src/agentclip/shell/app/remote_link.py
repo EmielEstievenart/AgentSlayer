@@ -9,13 +9,15 @@ back off another one.
 
 Transport-agnostic on purpose
 -----------------------------
-:class:`RemoteLinkClient` is constructed over a pair of TEXT STREAMS and spawns
+:class:`RemoteLinkClient` is constructed over a pair of LINE STREAMS and spawns
 nothing. In increment 2 the tests hand it a localhost subprocess's pipes
 (``python -m agentclip.engine.link``); in increment 3 the same object gets an SSH
-exec channel's streams and nothing in this module changes. That is why there is
+exec channel's streams (``executor.hosts.ssh.LinkChannel``). That is why there is
 no ``Popen`` here and no ``paramiko``: what a link needs is a reader and a
 writer, and deciding WHERE they come from is the launcher's business, not the
-protocol's.
+protocol's - which is also why the two parameters are the
+:class:`LineReader`/:class:`LineWriter` Protocols below rather than ``TextIO``:
+one of the two transports is a file object and the other deliberately is not.
 
 One reader, inside the call
 ---------------------------
@@ -57,7 +59,7 @@ import contextlib
 import threading
 from collections.abc import Callable
 from dataclasses import asdict
-from typing import Any, Literal, TextIO
+from typing import Any, Literal, Protocol
 
 from agentclip import __version__
 from agentclip.engine.approval import PermissionMode
@@ -102,6 +104,31 @@ LINK_VERSION = "version_mismatch"
 UPDATE_HINT = "update the target's install (e.g. `uv tool install --upgrade agentclip`)"
 
 
+class LineReader(Protocol):
+    """The half of a transport this client reads frames off.
+
+    Two Protocols rather than ``TextIO`` because a transport is not always a
+    file: increment 2's tests hand over a subprocess's pipes (which ARE
+    ``TextIO``), and increment 3 hands over an SSH exec channel wrapped in a
+    small duplex adapter (which is not, and must not be - see
+    ``executor.hosts.ssh.LinkChannel``). Structural typing is exactly the tool
+    for "whatever can do these two things", and stating the two things is
+    cheaper than requiring every transport to impersonate a file object.
+    """
+
+    def readline(self) -> str:
+        """The next ``\\n``-terminated frame, or ``""`` at EOF. Blocks."""
+        ...
+
+
+class LineWriter(Protocol):
+    """The half this client writes frames onto. See :class:`LineReader`."""
+
+    def write(self, s: str, /) -> int: ...
+
+    def flush(self) -> None: ...
+
+
 def version_refusal(peer: wire.Versions) -> str:
     """The sentence a user reads when the target speaks another wire version.
 
@@ -137,7 +164,7 @@ class RemoteLinkClient:
       before/between links, and count as roundtrips for the rule above.
     """
 
-    def __init__(self, reader: TextIO, writer: TextIO) -> None:
+    def __init__(self, reader: LineReader, writer: LineWriter) -> None:
         self._reader = reader
         self._writer = writer
         # Guards every write+flush, and nothing else. Deliberately NOT held

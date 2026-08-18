@@ -6,6 +6,7 @@ import argparse
 import getpass
 import platform
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from agentclip.config import Config, default_remote_state_dir, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.screen.matchers import MATCHERS, select_matcher
 from agentclip.engine.link.factory import EngineRequest, make_engine_builder
+from agentclip.engine.link.wire import EngineLinkError
 from agentclip.engine.store.session import prune_sessions
 from agentclip.executor.hosts.base import Host
 from agentclip.executor.hosts.connect import (
@@ -32,12 +34,14 @@ from agentclip.executor.hosts.connect import (
 )
 from agentclip.executor.hosts.local import LocalHost
 from agentclip.executor.mcp.client import McpManager
+from agentclip.shell.app.engine_launch import classify_launch_failure, engine_command
 from agentclip.shell.app.link import Link, LocalLink
+from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLinkClient
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.graphics import probe_terminal
 
 if TYPE_CHECKING:  # paramiko rides in with SshHost, so the real import stays lazy
-    from agentclip.executor.hosts.ssh import SshHost
+    from agentclip.executor.hosts.ssh import LinkChannel, SshHost
 
 
 def make_engine_factory(
@@ -85,6 +89,104 @@ def make_engine_factory(
         return LocalLink(builder(request))
 
     return build
+
+
+# How long a failed launch is given to report an exit status before the failure
+# is described. The engine died, so the channel's EOF and its exit status arrive
+# from two different places on the transport and not in a fixed order - and
+# "exit 127" is the difference between naming the fault and quoting stderr at
+# somebody. A second, spent only on a launch that already failed.
+_LAUNCH_VERDICT_S = 1.0
+_LAUNCH_POLL_S = 0.02
+
+
+@dataclass(frozen=True, slots=True)
+class RemoteEngine:
+    """A live link to an engine on a target: the client, and what it rides on.
+
+    Handed back beside the factory because the two have different lifetimes to
+    the sessions built from them. Every session of one remote run is hosted by
+    ONE server process on ONE channel (docs/design/remote-executor.md §2.10), so
+    the thing to close at the end is this, not any individual link - and closing
+    the channel is precisely how the remote engine is stopped, since it dies with
+    the channel by design (§2.3).
+    """
+
+    client: RemoteLinkClient
+    channel: LinkChannel
+    target: str
+
+    def close(self) -> None:
+        self.channel.close()
+
+
+def make_remote_link_factory(
+    connected: ConnectedRemote, *, service: str | None = None
+) -> tuple[Callable[[EngineRequest | str], Link], RemoteEngine]:
+    """The remote mode's session factory: an engine on the target, behind a RemoteLink.
+
+    The twin of :func:`make_engine_factory`, and the point where the two halves
+    of increment 3 meet: a dialled target (``executor.hosts.connect``) on one
+    side, the wire client (``shell.app.remote_link``) on the other, and between
+    them one ``agentclip-engine`` launched by name over an exec channel
+    (docs/design/remote-executor.md §2.6, §2.12). It lives in ``cli`` for the
+    same reason the ``LocalLink`` wrap does - this is the one module allowed to
+    know both halves; ``shell.app`` may not import the host seam, and the host
+    seam may not import a protocol.
+
+    No ``--service`` unless the caller asks for one: the engine reads the
+    TARGET's config over there, and a service key is the one part of it a local
+    flag legitimately overrides (§2.5).
+
+    **Not wired into ``main``'s ``--ssh`` branch, and not into the GUI's connect
+    flow.** This increment ships the transport, not the switch: the default
+    remote mode stays the per-call ``SshHost`` path until increment 4's parity
+    pass (MCP on the target, policy verification) says the remote engine can do
+    everything the per-call path does. §2.8's deletion of that path is increment
+    5. Flipping the default before then would trade a mode that works for one
+    that has not been shown to.
+    """
+    host = connected.host
+    channel = host.open_link_channel(engine_command(connected.project_root.as_posix(), service))
+    client = RemoteLinkClient(channel.reader, channel.writer)
+    try:
+        client.hello()
+    except EngineLinkError as exc:
+        if exc.kind == LINK_VERSION:
+            # The far side ANSWERED: ``hello`` already built the sentence naming
+            # both installs (§2.9), and no channel fact can improve on it.
+            channel.close()
+            raise
+        raise _launch_failed(channel, host.target, exc) from exc
+
+    def build(request: EngineRequest | str) -> Link:
+        # A bare service key is the same shorthand the local builder accepts;
+        # the wire only carries the request object.
+        req = EngineRequest(service=request) if isinstance(request, str) else request
+        return client.build_session(req)
+
+    return build, RemoteEngine(client=client, channel=channel, target=host.target)
+
+
+def _launch_failed(channel: LinkChannel, target: str, exc: EngineLinkError) -> EngineLinkError:
+    """Turn "the link closed" into what actually happened on the target.
+
+    A handshake that never arrived is the one failure the protocol cannot
+    explain: from the client's side a missing engine, a broken install and a
+    killed process are all EOF. The channel knows better - it has an exit status
+    and the target's own stderr - so the error is re-raised carrying that instead
+    (§2.12).
+
+    The channel is closed on the way out. A half-built remote session is not a
+    thing, and the failing path is the one that must not leak a channel per
+    retry.
+    """
+    deadline = time.monotonic() + _LAUNCH_VERDICT_S
+    while channel.exit_status() is None and time.monotonic() < deadline:
+        time.sleep(_LAUNCH_POLL_S)
+    message = classify_launch_failure(channel.exit_status(), channel.stderr_tail(), target)
+    channel.close()
+    return EngineLinkError(exc.kind, message)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

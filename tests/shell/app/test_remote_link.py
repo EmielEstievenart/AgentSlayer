@@ -72,8 +72,9 @@ class _Server:
 
     The transport seam in the flesh: :class:`RemoteLinkClient` is handed two text
     streams and never learns they came from a ``Popen``. Increment 3 hands it an
-    SSH exec channel's streams instead, and nothing in ``remote_link.py`` changes
-    - which is the whole reason no spawning lives in ``src``.
+    SSH exec channel's streams instead (``executor.hosts.ssh.LinkChannel``, whose
+    adapters satisfy the same two Protocols a pipe does) - which is the whole
+    reason no spawning lives in ``src``.
 
     stderr is drained on a thread of its own, because it is the remote process's
     LOG (never protocol data) and because an assertion that can quote it is worth

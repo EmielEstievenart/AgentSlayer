@@ -7,17 +7,17 @@
 > the design session for the first increment happens, this document graduates
 > into a binding design doc and `remote-ssh.md` gets amended where superseded.
 >
-> **Exception: §2.2, §2.9, §2.10 and §2.11 are built, and binding** — increment
-> 1 (the link seam) and increment 2 (the engine-side package, the wire codec, the
-> server loop, `RemoteLink` and the localhost e2e suite) shipped in full, so
-> those parts describe code rather than intent. Everything else here is still
-> plan.
+> **Exception: §2.2, §2.6, §2.9, §2.10, §2.11 and §2.12 are built, and
+> binding** — increment 1 (the link seam), increment 2 (the engine-side package,
+> the wire codec, the server loop, `RemoteLink` and the localhost e2e suite) and
+> increment 3 (the console script, the SSH link channel, launch-failure
+> classification and the opt-in remote factory) shipped in full, so those parts
+> describe code rather than intent. Everything else here is still plan.
 >
-> **Increment 3 (SSH transport + deployment) is in progress.** Its packaging
-> half has landed — the engine entry point is now the `agentclip-engine` console
-> script, so §2.6 describes a decided and partly-built deployment model rather
-> than the SFTP-and-uv plan it used to. The transport itself (exec channel,
-> launch, missing-engine detection) is not built.
+> **The default `--ssh` mode is still the per-call `SshHost` path.** Increment 3
+> built the remote-engine transport and left it *additive*: `cli.make_remote_link_factory`
+> is reachable and tested, and nothing calls it yet. The flip waits on increment
+> 4's parity pass (§4), and §2.8's deletion on increment 5.
 
 ## 1. Goal
 
@@ -415,8 +415,11 @@ instead of an engine method.
 
 **Transport-agnostic, and spawn-free.** The client is constructed over a pair of
 **text streams** and creates nothing. Increment 2's tests hand it a localhost
-subprocess's pipes; increment 3 hands it an SSH exec channel's streams and
-nothing in the module changes. That is why there is no `Popen` in `src` — a
+subprocess's pipes; increment 3 hands it an SSH exec channel's streams. That
+prediction held, with one honest amendment: the two parameters are now
+`LineReader`/`LineWriter` **Protocols** rather than `TextIO`, because the SSH
+adapter is deliberately not a file object (§2.12). No behaviour moved — a pipe
+satisfies both Protocols structurally. That is why there is no `Popen` in `src` — a
 subprocess is one way to get a reader and a writer, and choosing it is a
 launcher's decision, not the protocol's. (Deployment and the production transport
 are increment 3 in full: this increment ships the client, not a way to run it
@@ -478,6 +481,114 @@ every CPython start does) queues behind the parent's unfinished blocking
 thread parked on stdin for the next frame while a worker runs a command — and it
 deadlocked every `python -c …` the e2e suite ran until this landed.
 
+### 2.12 The SSH transport (as built)
+
+The client was written over two text streams and told to create nothing (§2.11).
+This is the increment that produces them: `SshHost.open_link_channel(command) ->
+LinkChannel`, in `src/agentclip/executor/hosts/ssh.py`, plus two pure functions
+in `src/agentclip/shell/app/engine_launch.py` and one factory in `cli.py`. The
+three live in three layers on purpose — the seam may not import a protocol, the
+Shell may not import the seam, and `cli` is the module allowed to know both.
+
+**The channel is the opposite shape to a tool call.** `spawn` opens a channel per
+command, wraps it in `wrap_command` (setsid, a pidfile, `bash -lc`), merges
+stderr into stdout and reports an exit code. `open_link_channel` does none of
+that, and each omission is a decision:
+
+- **No `setsid`, no wrapper.** The engine process MUST die with the channel and
+  with the connection — that IS §2.3's disconnect model. A session leader would
+  survive exactly the event the design says ends the session, leaving an engine
+  running on the target with a session store open under it and no way to reach
+  it. So the command is sent bare, as the exec channel's own child.
+- **`set_combine_stderr(False)`.** stdout is the protocol and nothing else may
+  appear on it (§2.9); stderr is the remote process's log.
+- **No pidfile, no `SshExec`, no kill path.** There is no "outcome unknown" to
+  report because there is no command result: a dead transport surfaces as EOF on
+  the reader, and the client turns that into one failed call.
+
+**The two streams.** `LinkChannel.reader`/`.writer` are small adapters, not
+`channel.makefile()` — paramiko's `BufferedFile` has its own newline rules and
+its own idea of a short read, and the whole framing rests on "one `\n`-terminated
+line is one frame". The reader runs the same `recv` loop `SshExec` uses, feeds an
+**incremental** UTF-8 decoder (a multibyte character split across two chunks must
+not become two replacement characters), and splits on `"\n"`, blocking until a
+line or EOF; EOF answers `""`, which is what the client already reads as "the
+link closed". The writer is `sendall(s.encode("utf-8"))` with `flush()` as a
+documented no-op, and a dead channel surfaces as `OSError`, which the client
+already catches as "closed mid-write". Because the two ends now differ in type,
+`RemoteLinkClient` takes `LineReader`/`LineWriter` **Protocols** rather than
+`TextIO`: a subprocess's pipes satisfy them structurally and so does this
+adapter, and stating the two methods is cheaper than making every transport
+impersonate a file.
+
+**stderr is drained continuously, onto a daemon thread, into a bounded ~8KB
+tail.** Two independent reasons, either sufficient. An unread stderr fills the
+channel's window and then wedges the remote process the moment it writes one
+more byte — a deadlock whose only symptom is a link that stops answering. And
+when the handshake never arrives, what the launch printed to stderr *is* the
+diagnosis. `stderr_tail()`, `exit_status()` (None while running) and `close()`
+(close the channel, join the drain thread) are the rest of the surface; nothing
+above the seam touches a paramiko type.
+
+**What we ask the target to run.** `engine_command(project_root, service=None)`
+builds `agentclip-engine --project <root> [--service <key>]` with `shlex.quote`
+— POSIX quoting whatever machine this is, because the target's shell reads it and
+a remote root with a space is ordinary. Deliberately absent are
+`--global-config`, `--home` and `--data-root`: on the target the engine reads the
+TARGET's own config, permissions and platform directories by plain local reads.
+That is §2.5 seen from the launch side, and passing this machine's paths over
+there would be both meaningless and a policy leak. (The localhost e2e suite
+passes all three, because there the two machines are one and the isolation is the
+whole point.)
+
+**A launch that produced no handshake gets a sentence.** From the client's side a
+missing engine, a broken install and a killed process are all EOF, so
+`classify_launch_failure(exit_status, stderr_tail, target)` is handed the two
+values the *channel* knows and returns what the user reads. It takes plain values
+rather than a channel precisely because it lives in `shell.app`, which may not
+import `executor.hosts` — which also makes it testable without a network. Exit
+127, or `command not found`/`not found` in the tail, is the case worth naming
+apart, because it is the one every first connect hits and the one with an action
+attached:
+
+> `agentclip-engine is not installed on dev@box - install it with e.g. `uv tool install agentclip``
+
+Anything else stays honest instead of guessing: the status the channel ended with
+(or "it is still running") and the target's own stderr, verbatim. A **version**
+mismatch never reaches here — the far side answered, and `hello()` already built
+the sentence naming both installs (§2.9, §2.11).
+
+**The factory, and why it is not the default.** `cli.make_remote_link_factory(connected,
+*, service=None)` takes what `connect_remote` hands back, opens the channel,
+wraps its streams in a `RemoteLinkClient`, says hello, and returns
+`(factory, RemoteEngine)` — the factory building one `RemoteLink` per
+`EngineRequest`, the `RemoteEngine` carrying the client and the channel because
+*one* server process on *one* channel hosts every session of a remote run (§2.10)
+and closing that channel is how the engine is stopped. A failed handshake closes
+the channel and re-raises the `EngineLinkError` carrying the classified message;
+the exit status is polled for up to a second first, because EOF and the exit
+status arrive from two different places on the transport and "exit 127" is the
+difference between naming the fault and quoting stderr at somebody.
+
+It is **not** wired into `main()`'s `--ssh` branch or the GUI's connect dialog.
+Increment 3 ships the transport, not the switch. The remote engine still has no
+MCP (`__main__.py` passes `mcp_manager=None`), and nobody has verified that the
+target's policy loading, stores and skills behave as §2.4/§2.5 say they will —
+that is increment 4's parity pass, and flipping the default before it would trade
+a mode that works for one that has not been shown to. §2.8's deletion of the
+per-call path is increment 5.
+
+**Tested by** `tests/executor/hosts/test_link_channel.py` (framing across chunk
+boundaries, a multibyte character split across one, EOF, the bytes actually sent,
+the stderr tail and its bound, exit status before/after, the bare command line,
+and a `FakeSSHClient`-backed host whose engine exits 127 producing the
+not-installed sentence out of `make_remote_link_factory`),
+`tests/shell/app/test_engine_launch.py` (the two pure functions), and — gated
+behind `AGENTCLIP_SSH_TESTS=1`, needing `agentclip` actually installed on the
+target — `tests/executor/hosts/test_link_real.py`. There is deliberately no
+fake-SSH end-to-end `serve()` conversation: the localhost subprocess suite
+already proves the wire, and these prove the transport under it.
+
 ## 3. Architecture sketch
 
 ```
@@ -523,11 +634,15 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
    `RemoteLinkClient` takes two text streams — so the production transport and
    the deployment that produces it are increment 3's whole job, with no client
    changes owed.
-3. **SSH transport + deployment.** — *in progress.* `RemoteLink` over an SSH exec
+3. **SSH transport + deployment.** — **done.** `RemoteLink` over an SSH exec
    channel running the pre-installed `agentclip-engine` (§2.6), reusing
    `connect_remote` auth/reconnect; detecting a target that has no
-   `agentclip-engine` on PATH, and reporting it legibly. The packaging half
-   landed first: the engine entry point is a console script.
+   `agentclip-engine` on PATH, and reporting it legibly. As built: the packaging
+   half first (the engine entry point is a console script), then
+   `SshHost.open_link_channel` + `LinkChannel`, `shell/app/engine_launch.py`'s
+   two pure functions, and `cli.make_remote_link_factory` — see §2.12. The
+   default `--ssh` mode is deliberately **not** flipped: the factory is additive
+   and nothing calls it, because parity (below) has not been shown.
 4. **MCP + store on target, parity pass.** Target-side McpManager, stores,
    policy loading; the `/config`-wave permissions.json paths on the target.
 5. **Delete SshHost per-call mode** once parity is verified; amend
@@ -543,14 +658,17 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
   replacement (session-scoped server-side state + thin per-call payload) is
   undesigned. Includes where `backup_hook`, `cancel_event`, and `on_output`
   land in the new shape.
-- **Install UX on the target**: *detecting* a missing or wire-incompatible
-  `agentclip-engine` is increment-3 transport work and lands there (a launch that
-  fails with "command not found", and the handshake's version refusal). What is
-  open is the UX around it: does the connect flow guide the install/upgrade at
-  all, or only name the command to run — and where does that live
-  (ui-briefs/ssh-connect.md will need a revision either way)? Offline or
-  locked-down targets, where the user cannot install anything, may be the case
-  the standalone binary below is really for.
+- **Install UX on the target**: *detection* is **resolved** — a launch that dies
+  without a handshake is classified from the channel's exit status and stderr
+  tail, and a missing engine produces a sentence naming the target and the
+  install command (§2.12); a wire-incompatible one is the handshake's version
+  refusal (§2.9). What remains open is the UX around it: does the connect flow
+  *guide* the install/upgrade — offer to run it, re-check after — or only name
+  the command to run, and where does that live (ui-briefs/ssh-connect.md will
+  need a revision either way)? Nothing surfaces these messages in a UI yet,
+  because nothing calls the remote factory yet. Offline or locked-down targets,
+  where the user cannot install anything, may be the case the standalone binary
+  below is really for.
 - **A standalone single-file binary for the engine half** — a later packaging
   increment: one artifact copied to the target, no Python required over there,
   per-arch builds to produce. Optionally, the cheaper version of the same wish: a

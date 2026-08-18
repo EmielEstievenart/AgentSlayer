@@ -29,7 +29,9 @@ engine, ending a delegated run - waits for the flow to unwind, and only then
 resets. What those tests pin is that the abort is *clean*: no outbound is copied
 for a turn nobody will read, no gate or answer park is left armed, the master's
 context is restored after a sub-run, and nothing slips into the flow slot in the
-gap. The one refusal left is "no active session to replace".
+gap. ``/new`` itself has no refusal left at all - with no session it opens the
+browser chat and stops there - and "no active session to replace" survives only
+on ``request_new_session``, whose callers need to hear that no session is coming.
 
 Typing ``/new`` at an ask_user park is deliberately NOT a new chat - the
 composer's text is the answer, verbatim (``submit_message``'s standing
@@ -92,6 +94,28 @@ async def test_new_resets_even_when_the_chat_could_not_be_opened(
 
     assert view.new_chats_opened == 1  # it was asked for, and failed on the far side
     assert view.trace.count("open-new-chat-refused") == 1
+
+
+async def test_new_with_no_session_still_opens_a_fresh_browser_chat(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """A clean harness is not a clean chat page.
+
+    ``/new`` used to refuse before the browser was touched whenever AgentClip
+    had no session of its own, which read the harness's state as the browser's:
+    the start screen is exactly where a user reaches for a fresh chat, because
+    the page in front of them is still full of the last run's conversation. So
+    the command states its intent like any other time and the view reports what
+    landed - there is simply no tool half to renew behind it, and nothing on
+    this side to refuse.
+    """
+    controller.submit_message("/new")
+    await settle(view)
+
+    assert view.new_chats_opened == 1
+    assert view.trace.count("open-new-chat") == 1
+    assert view.cleared == 0  # nothing to reset, which is not an error
+    assert not any("no active session to replace" in text for text in view.toasts())
 
 
 async def test_the_summary_screens_new_session_opens_no_browser_chat(

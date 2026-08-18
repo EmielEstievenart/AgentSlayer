@@ -439,7 +439,7 @@ top of the list can disable every approval gate):
 | Command | Arg | Summary | Session-gated? |
 |---|---|---|---|
 | `/help` (aliases `/commands`, `/?`) | — | list the commands | no |
-| `/new` | — | fresh browser chat + fresh session; aborts a turn in flight rather than refusing | yes ("no active session to replace") |
+| `/new` | — | fresh browser chat + fresh session; aborts a turn in flight rather than refusing | no (with no session it opens the chat and stops there) |
 | `/abort` | — | end the sub-agent run in flight | no-op warning if nothing delegated |
 | `/identify` | — | draw labelled boxes on the real screen over what the tool currently sees | no |
 | `/log` | — | show the harness decision log | no |

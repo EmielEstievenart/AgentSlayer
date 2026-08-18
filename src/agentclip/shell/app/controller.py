@@ -859,17 +859,22 @@ class SessionController:
         means "the chat in the browser is stale" (the first has none, the last
         has just been read by the user).
 
-        Not refused mid-turn any more: a turn in flight is ABORTED for it (see
+        Never refused. Not mid-turn - a turn in flight is ABORTED for it (see
         ``request_new_session``), because a user who cannot start a new chat has
-        no way out of a conversation that has gone wrong. The one place typing
-        `/new` still does something else is the ask_user answer park, where the
-        composer's text IS the answer, verbatim - ``submit_message`` never gets
-        as far as command parsing there, and the sidebar's "New browser chat"
-        button is the escape hatch instead.
+        no way out of a conversation that has gone wrong - and not with no
+        session either: AgentClip having nothing to replace says nothing about
+        the chat on screen, which is exactly the state a user reaches for `/new`
+        from before starting work in a page still full of the last run. So the
+        command always states the intent, and the view reports which halves
+        happened; with no session there is simply no tool half to renew, and the
+        view's own toast says so (it calls ``request_new_session`` back only
+        when there is a session to reset).
+
+        The one place typing `/new` still does something else is the ask_user
+        answer park, where the composer's text IS the answer, verbatim -
+        ``submit_message`` never gets as far as command parsing there, and the
+        sidebar's "New browser chat" button is the escape hatch instead.
         """
-        if not self._session_active:
-            self._view.notify("no active session to replace", severity="warning")
-            return  # refused before the browser is touched, exactly like the button
         self._view.open_new_chat_now()
 
     def request_new_session(self) -> bool:

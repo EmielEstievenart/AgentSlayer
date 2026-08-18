@@ -333,7 +333,16 @@ class FakeChatView:
             asyncio.get_running_loop().call_soon(fn)
 
     def _reset_after_new_chat(self) -> None:
-        if self.controller is not None:
+        # Only when there IS a session to renew, exactly like both real views
+        # (MainScreen._reset_after_new_browser_chat and GuiView._new_browser_chat
+        # each read their own ``session_active`` first): with no session the
+        # fresh browser chat is the whole of the command, and asking for the
+        # tool half anyway would toast a refusal at a user who never asked for
+        # one. The state pushed through ``render_state`` is what a real view
+        # knows this from, so the fake reads the same thing.
+        if self.controller is None:
+            return
+        if self.states and self.states[-1].session_active:
             self.controller.request_new_session()
 
     def _resolve_gate(self) -> None:

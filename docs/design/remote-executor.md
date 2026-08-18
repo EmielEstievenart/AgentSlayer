@@ -7,9 +7,10 @@
 > the design session for the first increment happens, this document graduates
 > into a binding design doc and `remote-ssh.md` gets amended where superseded.
 >
-> **Exception: §2.2 is built, and its "As built" subsection is binding** —
-> increment 1 (the link seam) shipped, so that part describes code rather than
-> intent. Everything else here is still plan.
+> **Exception: §2.2 and §2.9 are built, and binding** — increment 1 (the link
+> seam) and increment 2's first slices (the engine-side package, the wire codec)
+> shipped, so those parts describe code rather than intent. Everything else here
+> is still plan.
 
 ## 1. Goal
 
@@ -120,8 +121,10 @@ so the assembly moved down before any wire was written:
   RULES entry pins `agentclip.engine.link` to config/engine/executor/protocol),
   since this package is precisely what runs on the target.
 
-Still to come in increment 2: the wire codec and the server loop, which land in
-this same package and call the same builder.
+The wire codec landed next, in the same package: `engine/link/wire.py`, the
+shared vocabulary both ends import (§2.9). Still to come in increment 2: the
+JSON-lines server loop and `RemoteLink`, which speak that vocabulary and call
+this same builder.
 
 ### 2.3 Disconnect semantics: lossy, honest, simple
 
@@ -193,6 +196,72 @@ files over SFTP to scan locally) is **deleted**. What survives from
 machinery, repurposed to deploy and talk to the remote process. One remote
 story, clean break — same style as the opencode.json → permissions.json split.
 
+### 2.9 Wire protocol v1 (as built)
+
+`src/agentclip/engine/link/wire.py` is the shared vocabulary both halves import
+— the server loop on the target and the `RemoteLink` inside the Shell. It is one
+module on purpose: a schema each end kept for itself would be two schemas, and
+the drift would only ever show up in a remote run.
+
+**Framing.** JSON Lines: one JSON object per line, UTF-8, `"\n"`-terminated,
+compact separators, `ensure_ascii=False`. The only raw newline in an encoded
+line is the terminator (JSON escapes the ones inside strings), so "one frame per
+line" stays true of a 200k-char command output as much as of a handshake. Every
+frame is **flushed as it is written**; nothing is batched. `stderr` is never
+protocol data — it is the remote process's log, and anything printed to stdout
+outside `encode_line` has corrupted the stream.
+
+**Frames.** `hello` / `hello_ack` (both carry `version`; the ack also carries a
+uuid4 `server_id`, which names the PROCESS and exists so §2.3's detach/reattach
+mode can be added without a protocol redesign — v1 only checks it is non-empty);
+`call` (`id`, `method`, `params`, plus `session` for the 13 session-scoped
+methods — `build_session` has none, because it is what mints one); `result`
+(`id`, `value`); `error` (`id`, `kind`, `detail`, optional `data`); `progress`
+and `output` (session-scoped events, no `id`); `cancel`.
+
+**Events before the answer.** All `progress`/`output` frames for a call are
+written and flushed strictly before that call's `result`/`error`. So the answer
+IS the end of the call's event stream: nothing from a turn arrives after the
+turn's answer, and no event needs a sequence number to be ordered against it.
+
+**Cancel is out-of-band and unanswered.** It carries no `id` and gets no reply —
+it is the wire's `Link.request_cancel`, and the call it interrupts is the one
+whose answer is already outstanding. A cancel for an idle session is a no-op,
+exactly like the local one.
+
+**Values.** Dataclasses become JSON objects with every field present (decode
+never fills a missing field in for a peer). The two unions — `IngestResult` and
+`StepResult` — are tagged by the member's class name under `"kind"`. Enums travel
+by `.name` (`Decision`, `Phase`); `Literal` aliases by their value
+(`PermissionMode`, `ResultStatus`, `ArmResult`, and the inline `kind`/`phase`
+literals). `StatusSnapshot.session_dir` is the ONE `Path` on the seam and travels
+as a POSIX string: in a remote session it names a directory on another machine,
+so the Shell must treat it as display data — never something to open or join.
+
+**Errors.** Four kinds. `budget_exceeded` and `engine_state_error` rebuild
+`BudgetExceeded` / `EngineStateError` on the far side, because the Shell catches
+exactly those two by type; `bad_request` (unknown method, unknown session, wrong
+version) and `internal` arrive as `EngineLinkError`, since a Shell that cannot
+act on the difference is better told plainly that the far side broke. The
+optional `data` object carries the structured fields an exception needs to be
+rebuilt faithfully — today only `BudgetExceeded`'s two numbers, which the Shell
+formats itself, so a message-only reconstruction would print a plausible
+sentence with the wrong figures in it.
+
+**Decoding is strict.** An unknown frame type, an unknown union tag, an unknown
+enum name, a wrong version, a missing field, a field of the wrong JSON type, an
+unknown method or an unknown parameter all raise `WireError`. A boundary that
+guesses is a boundary that acts on a message it got wrong.
+
+**Per-method plumbing.** `encode_params`/`decode_params` and
+`encode_result`/`decode_result` are table-driven over the 14 methods, so the
+server and the `RemoteLink` each hold one line per method and everything that
+could drift between them is stated once. `build_session`'s params ARE
+`EngineRequest`'s fields; its result is a `SessionInfo` — the session id plus the
+three immutable facts the `Link` Protocol exposes synchronously (`chat_name`,
+`role`, `build_warnings`), carried home in that one answer exactly as §2.2 said
+a handshake would.
+
 ## 3. Architecture sketch
 
 ```
@@ -242,9 +311,10 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
 
 ## 5. Open points (**OPEN**)
 
-- **Wire protocol details**: framing (JSON-lines assumed), versioning/handshake
-  shape, how streaming output deltas and best-effort cancel are encoded, and
-  the latency budget for the RunPanel's ~5/sec peek cadence over the wire.
+- **RunPanel latency over a real link**: framing, versioning/handshake, streaming
+  deltas and cancel are decided and built (§2.9). What is still open is the
+  budget for the RunPanel's ~5/sec peek cadence over a real SSH connection — a
+  cadence that is free in-process and unmeasured on the wire.
 - **ToolContext redesign**: agreed it can't cross the wire, but its remote
   replacement (session-scoped server-side state + thin per-call payload) is
   undesigned. Includes where `backup_hook`, `cancel_event`, and `on_output`

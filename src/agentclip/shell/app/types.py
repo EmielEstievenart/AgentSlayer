@@ -8,9 +8,13 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Literal
 
-Role = Literal["master", "subagent"]
+# The role vocabulary is the ENGINE's - it decides which catalog a session gets
+# and stamps every audit line - and it travels to the engine on an
+# ``EngineRequest``, which lives with the assembly that reads it
+# (docs/design/remote-executor.md section 2.2). The types below name it because
+# a session ref has to say which kind of run it refers to; they do not own it.
+from agentclip.engine.link.factory import Role
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,34 +37,6 @@ class SessionSpec:
     task: str
     service: str
     subagent_service: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class EngineRequest:
-    """What the controller asks the engine factory to build.
-
-    A request object rather than a bare service key so role, catalog gating and
-    chat naming travel as plain data: the factory lives in `cli` (it needs the
-    tool/store/composer wiring) while the decision to spawn a sub-agent is made
-    in `app`, which must not import screen or tui to make it.
-    """
-
-    service: str
-    role: Role = "master"
-    # Whether the `delegate` tool appears in the catalog at all. Only ever true
-    # for a master, and only when the sub-agent chat window is fully calibrated:
-    # offering a tool the host cannot honour wastes a whole round trip.
-    allow_delegate: bool = False
-    chat_name: str | None = None  # None -> the factory draws a fresh one
-    parent_chat_name: str | None = None  # the delegating chat, for the audit log
-    # len() of the exact task text start_task will be given, when the caller
-    # already holds it - both controller flows do. The factory sizes the MCP
-    # catalog addition against the preset's paste budget (docs/design/mcp.md
-    # section 5), and the bootstrap = spec + THIS task: sizing against a guessed
-    # task allowance is how a four-sentence task on a 12k preset turned into
-    # BudgetExceeded. 0 means "unknown", which falls back to a conservative
-    # allowance in the factory.
-    task_chars: int = 0
 
 
 @dataclass(frozen=True, slots=True)

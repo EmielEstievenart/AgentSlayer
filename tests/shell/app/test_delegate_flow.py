@@ -23,10 +23,11 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.shell.app.controller import SessionController
 from agentclip.shell.app.link import Link
-from agentclip.shell.app.types import EngineRequest, SessionRef
+from agentclip.shell.app.types import SessionRef
 
 from .conftest import (
     MASTER_CHAT,

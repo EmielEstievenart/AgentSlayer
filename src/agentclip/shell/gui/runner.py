@@ -54,8 +54,8 @@ from typing import Any
 
 from agentclip.config import Config
 from agentclip.driver.clip.base import ClipboardProvider
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.shell.app.link import Link
-from agentclip.shell.app.types import EngineRequest
 from agentclip.shell.gui.bridge import Bridge, EmitFn, JsApi
 from agentclip.shell.gui.remote import RemoteConnect
 from agentclip.shell.gui.view import GuiView, McpStatusSource

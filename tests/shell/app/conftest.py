@@ -38,10 +38,11 @@ import pytest
 from agentclip.cli import make_engine_factory
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import Decision, PendingAction
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app.controller import SessionController
 from agentclip.shell.app.link import Link
-from agentclip.shell.app.types import EngineRequest, SessionRef, SessionSpec
+from agentclip.shell.app.types import SessionRef, SessionSpec
 from agentclip.shell.app.view import RunCall, SessionView, Severity
 
 MASTER_CHAT = "amber-falcon"

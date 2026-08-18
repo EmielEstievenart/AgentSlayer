@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agentclip.config import Config, RemoteTarget
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.hosts.connect import (
     CONNECT_STEPS,
     STEP_LABELS,
@@ -32,7 +33,6 @@ from agentclip.executor.hosts.connect import (
     describe_target,
 )
 from agentclip.shell.app.link import Link
-from agentclip.shell.app.types import EngineRequest
 
 # The four states of the whole surface. ``done`` is a screen rather than a
 # closed dialog because that is where the policy banner and the save offer live

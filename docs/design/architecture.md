@@ -79,6 +79,11 @@ src/agentclip/
 │   ├── states.py          # Phase enum + legal-transition table
 │   ├── approval.py        # ApprovalPolicy: permission rules (or the legacy allowlist), session escalation flags
 │   ├── results.py         # ToolResult + middle-truncation to configured size caps
+│   ├── link/              # the ENGINE half of the Shell↔Engine link (remote-executor.md §2.2);
+│   │   │                  #   never imports shell/driver — it is what runs on the target
+│   │   └── factory.py     # EngineRequest + make_engine_builder: one EngineRequest → one Engine
+│   │                      #   (registry sizing, workspace jail, stores, composer). cli's
+│   │                      #   make_engine_factory is this behind a LocalLink
 │   └── store/
 │       ├── session.py     # SessionStore: .agentclip/ layout, transcript JSONL append, outbound dumps
 │       └── backups.py     # BackupStore: per-turn copy-on-first-touch snapshots, undo, retention
@@ -160,7 +165,8 @@ src/agentclip/
     │   │                  #   (docs/design/remote-executor.md §2.2)
     │   ├── commands.py    # the chat slash-command registry: dispatch, /help and the popup read one tuple
     │   ├── view.py        # ChatView Protocol (the one UI seam) + SessionView snapshot + RunCall rows
-    │   └── types.py       # SessionSpec, SessionRef, EngineRequest, SessionStats
+    │   └── types.py       # SessionSpec, SessionRef, SessionStats (EngineRequest is engine-side:
+    │                      #   engine/link/factory.py, so a remote engine can decode one)
     ├── gui/               # the pywebview desktop shell: a native window over hand-written
     │                      #   HTML/CSS/JS in assets/, Python in the same process (gui.md §2)
     └── tui/
@@ -343,15 +349,17 @@ class SessionSpec:
     service: str                        # the master window tab's service
     subagent_service: str = ""          # the sub-agent window tab's; "" → same as the master's
 
+# engine/link/factory.py --------------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class EngineRequest:
-    """What the controller asks cli.make_engine_factory to build."""
+    """What the controller asks the engine factory to build."""
     service: str
     role: Literal["master", "subagent"] = "master"
     allow_delegate: bool = False        # `delegate` in the catalog at all (master + calibrated only)
     chat_name: str | None = None        # None → the factory draws a fresh one
     parent_chat_name: str | None = None # recorded in the session log for the audit trail
 
+# back to shell/app/types.py -----------------------------------------------------
 @dataclass(frozen=True, slots=True)
 class SessionRef:
     id: str                             # "master", "sub-1", "sub-2", ...
@@ -360,9 +368,12 @@ class SessionRef:
     chat_name: str                      # routes pastes to the right session
 
 # A request object rather than a bare service key because role, catalog gating
-# and chat naming have to travel as plain data: the factory lives in `cli` (it
-# needs the tool/store/composer wiring) while the decision to spawn a sub-agent
-# is made in `shell/app`, which must not import the Driver or `shell/tui` to make it.
+# and chat naming have to travel as plain data: the assembly lives in
+# `engine/link/factory.py` (it needs the tool/store/composer wiring, and a remote
+# engine has to be able to build from a request with no shell in the process)
+# while the decision to spawn a sub-agent is made in `shell/app`, which must not
+# import the Driver or `shell/tui` to make it. `cli.make_engine_factory` is that
+# builder behind a LocalLink (docs/design/remote-executor.md §2.2).
 #
 # SessionSpec is the same seam for the OTHER half of "which service?". AgentClip
 # drives two browser windows and the user picks a service per window tab

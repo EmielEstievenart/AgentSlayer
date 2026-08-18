@@ -39,7 +39,7 @@ from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.engine.engine import Engine
-from agentclip.shell.app.types import EngineRequest
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.messages import ClipboardCaptured
 from agentclip.shell.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen

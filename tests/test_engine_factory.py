@@ -16,15 +16,19 @@ from typing import Any
 
 import pytest
 
-from agentclip.cli import _MCP_SECTION6_SCAFFOLD, _MCP_TASK_FALLBACK, make_engine_factory
+from agentclip.cli import make_engine_factory
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import Engine
+from agentclip.engine.link.factory import (
+    _MCP_SECTION6_SCAFFOLD,
+    _MCP_TASK_FALLBACK,
+    EngineRequest,
+)
 from agentclip.executor.mcp.client import McpManager
 from agentclip.executor.mcp.types import McpLocalServer
 from agentclip.executor.tools.registry import default_registry
 from agentclip.protocol.spec import render_spec
 from agentclip.shell.app.link import Link, LocalLink
-from agentclip.shell.app.types import EngineRequest
 
 
 def _engines(

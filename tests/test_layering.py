@@ -119,6 +119,30 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
+    # engine.link: the ENGINE HALF of the Shell<->Engine link
+    # (docs/design/remote-executor.md) - the assembly both the `cli` and the
+    # server process a later increment adds call to turn one EngineRequest into
+    # one Engine. Like engine.store it lives inside the engine package with its
+    # own allowance, so it must come before the ``agentclip.engine`` rule below
+    # (first match wins). It reaches executor.mcp because SIZING the tool catalog
+    # against the session's paste budget is its job and nobody else's - the
+    # config it reads the budget from is a leaf and cannot ask a running server
+    # what it offers. What it must NEVER import is shell or driver: this IS the
+    # code that runs on the target, where there is no clipboard and no window.
+    (
+        "agentclip.engine.link",
+        frozenset(
+            {
+                "agentclip.config",
+                "agentclip.engine",
+                "agentclip.engine.store",
+                "agentclip.executor.hosts",
+                "agentclip.executor.mcp",
+                "agentclip.executor.tools",
+                "agentclip.protocol",
+            }
+        ),
+    ),
     # engine.store: session + backup persistence. It lives INSIDE the engine
     # package but keeps its own narrower allowance, so it must come before the
     # ``agentclip.engine`` rule below (first match wins) - otherwise the store

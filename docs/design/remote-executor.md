@@ -96,6 +96,33 @@ One controller-level lock became one lock per link, which is equivalent because
 the controller only ever calls the link in the live session slot — verified call
 site by call site when this landed.
 
+**As built (increment 2, first slice: the engine half's home).** The other side
+of the seam now exists as a package: `src/agentclip/engine/link/`. Increment 2
+needs a process that builds an `Engine` with no shell in it, and today's
+`cli` cannot be that process — importing it drags Textual in at module level —
+so the assembly moved down before any wire was written:
+
+- `engine/link/factory.py:make_engine_builder` is the shared assembly, verbatim
+  what `cli.make_engine_factory` used to do (skills discovered once, config
+  re-derived per request when the service differs, the MCP catalog sized by
+  measurement, the session audit event) except that it returns the **bare
+  `Engine`**. Both callers will be built on it: the server process on the target,
+  and `cli`.
+- `EngineRequest` (and the `Role` literal) moved **engine-side**, out of
+  `shell/app/types.py`, because it is the message a remote engine is asked to
+  build from: the server has to decode one without importing a shell.
+  `shell/app/types.py` imports `Role` back for `SessionRef` and re-exports
+  nothing else - every importer of `EngineRequest` names the new home.
+- `cli.make_engine_factory` keeps its name and signature and is now three lines:
+  build once, and return a closure that wraps each engine in a `LocalLink`. The
+  wrap stays in `cli` on purpose - **nothing under `agentclip/engine/` may
+  import `agentclip.shell` or `agentclip.driver`** (a `tests/test_layering.py`
+  RULES entry pins `agentclip.engine.link` to config/engine/executor/protocol),
+  since this package is precisely what runs on the target.
+
+Still to come in increment 2: the wire codec and the server loop, which land in
+this same package and call the same builder.
+
 ### 2.3 Disconnect semantics: lossy, honest, simple
 
 - The remote process **dies with the SSH connection** (child of the exec

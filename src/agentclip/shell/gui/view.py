@@ -78,6 +78,7 @@ from agentclip.driver.screen.profile_store import load_profile
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot, can_delegate, missing
 from agentclip.engine.engine import Decision, PendingAction
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.hosts.connect import (
     PASSWORD_ATTEMPTS,
     ConnectedRemote,
@@ -92,7 +93,7 @@ from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
 from agentclip.shell.app.commands import COMMANDS
 from agentclip.shell.app.link import Link
-from agentclip.shell.app.types import EngineRequest, SessionRef
+from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.gui.bridge import Bridge
 from agentclip.shell.gui.remote import (

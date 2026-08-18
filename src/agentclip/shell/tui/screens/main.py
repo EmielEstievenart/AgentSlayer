@@ -256,12 +256,13 @@ from agentclip.driver.screen.template import (
     find_lowest_with_best_miss,
 )
 from agentclip.engine.engine import Decision, PendingAction, StatusSnapshot
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.mcp.types import McpServerStatus
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
 from agentclip.shell.app.link import Link
-from agentclip.shell.app.types import EngineRequest, SessionRef
+from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.tui.messages import (
     AutoCopyRequested,

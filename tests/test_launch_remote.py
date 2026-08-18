@@ -16,9 +16,9 @@ import pytest
 
 from agentclip import cli
 from agentclip.config import Config, load_config
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.hosts import FakeHost
 from agentclip.executor.hosts.ssh import SshError
-from agentclip.shell.app.types import EngineRequest
 
 REMOTE_ROOT = "/home/dev/app"
 

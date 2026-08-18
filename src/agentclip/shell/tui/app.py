@@ -23,9 +23,9 @@ from agentclip.config import (
     save_theme,
 )
 from agentclip.driver.clip.base import ClipboardProvider
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.mcp.client import McpManager
 from agentclip.shell.app.link import Link
-from agentclip.shell.app.types import EngineRequest
 from agentclip.shell.tui.screens.confirm import ConfirmScreen
 from agentclip.shell.tui.screens.help import HelpScreen
 from agentclip.shell.tui.screens.main import MainScreen

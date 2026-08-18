@@ -75,12 +75,13 @@ from agentclip.engine.engine import (
     StatusSnapshot,
     StepResult,
 )
+from agentclip.engine.link.factory import EngineRequest
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.parser import peek_chat_name
 from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus, ToolCall
 from agentclip.shell.app.commands import command_list, help_text, lookup
 from agentclip.shell.app.link import Link
-from agentclip.shell.app.types import EngineRequest, SessionRef, SessionStats
+from agentclip.shell.app.types import SessionRef, SessionStats
 from agentclip.shell.app.view import ChatView, RunCall, SessionView, Severity
 
 _T = TypeVar("_T")

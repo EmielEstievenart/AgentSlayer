@@ -33,6 +33,7 @@ from typing import Any
 
 import pytest
 
+from agentclip import __version__
 from agentclip.config import Config, load_config
 from agentclip.engine.link import wire
 from agentclip.engine.link.factory import make_engine_builder
@@ -111,8 +112,8 @@ class _Link:
         self._to_server.write(text)
         self._to_server.flush()
 
-    def hello(self) -> str:
-        self.send(wire.hello_frame())
+    def hello(self, frame: dict[str, Any] | None = None) -> wire.HelloAck:
+        self.send(frame if frame is not None else wire.hello_frame())
         return wire.read_hello_ack(self.next_frame())
 
     def call(self, method: str, *, session: str | None = None, **params: Any) -> int:
@@ -273,16 +274,33 @@ reason: a turn long enough for the user to change their mind
 
 
 def test_hello_is_answered_with_a_versioned_ack(link: _Link) -> None:
-    server_id = link.hello()
-    assert server_id  # names the PROCESS; v1 only asks that it is non-empty
+    ack = link.hello()
+    assert ack.server_id  # names the PROCESS; v1 only asks that it is non-empty
+    # Both numbers, and the package is this install's own: it is what a refusal
+    # on either side gets to name (docs/design/remote-executor.md section 2.9).
+    assert ack.versions == wire.Versions(wire.WIRE_VERSION, __version__)
 
 
 def test_a_hello_from_another_version_is_refused_and_ends_the_process(link: _Link) -> None:
-    link.send({"type": "hello", "version": wire.WIRE_VERSION + 1})
+    link.send({"type": "hello", "version": wire.WIRE_VERSION + 1, "package": "9.9.9"})
     error = wire.read_error(link.next_frame())
     assert error.kind == "bad_request"
     assert "wire version" in error.detail
+    # Both wire versions and both package versions: the client is about to turn
+    # this detail into the sentence a human reads.
+    assert str(wire.WIRE_VERSION + 1) in error.detail and str(wire.WIRE_VERSION) in error.detail
+    assert "9.9.9" in error.detail and __version__ in error.detail
     assert link.wait_exit() != 0
+
+
+def test_a_hello_from_another_package_on_the_same_wire_is_served(link: _Link) -> None:
+    """Two independently-installed halves are EXPECTED to differ in package
+    version (design section 2.6). It costs a stderr line and nothing else."""
+    ack = link.hello({"type": "hello", "version": wire.WIRE_VERSION, "package": "9.9.9"})
+    assert ack.server_id
+    assert link.ask("build_session", service="claude").chat_name == CHAT
+    log = link.log.getvalue()
+    assert "9.9.9" in log and __version__ in log
 
 
 def test_garbage_before_the_hello_ends_the_process(link: _Link) -> None:

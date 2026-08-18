@@ -18,13 +18,34 @@ stream. Every frame is flushed as it is written; nothing is batched.
 
 Frame vocabulary (v1)
 ---------------------
-``{"type":"hello","version":1}``
+``{"type":"hello","version":1,"package":"0.1.0"}``
     The client's first line. Nothing else may precede it.
-``{"type":"hello_ack","version":1,"server_id":"<uuid4>"}``
+``{"type":"hello_ack","version":1,"package":"0.1.0","server_id":"<uuid4>"}``
     The server's reply. ``server_id`` identifies the PROCESS, not a session: it
     exists so a later detach/reattach daemon mode can be added without a
     protocol redesign (design section 2.3), and v1 clients only check that it is
     a non-empty string.
+
+Two versions, and only one of them is a gate
+--------------------------------------------
+Both handshake frames carry BOTH numbers, and they do different jobs:
+
+* ``version`` is :data:`WIRE_VERSION`, and it is the COMPATIBILITY GATE. A peer
+  that speaks another one is refused before any other frame is read, because
+  every frame after the handshake is decoded as v1 and reading a v2 call frame
+  as v1 is exactly the guess a protocol boundary must not make.
+* ``package`` is ``agentclip.__version__``, and it is DIAGNOSTIC ONLY. Nothing
+  branches on it. It exists so that a refusal can be said in human terms - "the
+  engine on the target is agentclip 0.1.0, this one is 0.4.2" - to a user who
+  installed the two halves separately and can only act on package versions,
+  never on a wire number they have never heard of.
+
+Same wire version + different package versions is LEGAL and expected: the
+engine half is a console script the user pre-installs on the target
+(design section 2.6), so the two halves drift apart in package terms the moment
+one machine is upgraded and the other is not. Only a wire mismatch is fatal, and
+when it happens :class:`WireVersionError` carries both ends' numbers so the
+message the user finally reads names two installs rather than two integers.
 ``{"type":"call","id":<int>,"method":"<str>","params":{...}}``
     A request. ``id`` is client-chosen, strictly increasing, and echoed by
     exactly one ``result`` or ``error``. Session-scoped methods (the 13 `Link`
@@ -91,6 +112,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, get_args
 
+from agentclip import __version__
 from agentclip.engine.approval import PermissionMode
 from agentclip.engine.engine import (
     ArmResult,
@@ -134,6 +156,45 @@ class WireError(Exception):
     call with ``kind="bad_request"``, the client tears the link down, and neither
     ever tries to salvage a partially-understood message.
     """
+
+
+@dataclass(frozen=True, slots=True)
+class Versions:
+    """One end's two numbers, as the handshake states them.
+
+    ``wire`` is the protocol this end speaks (the gate); ``package`` is the
+    ``agentclip`` distribution it was installed from (the diagnostic). See the
+    module docstring for why the second one is never branched on.
+    """
+
+    wire: int
+    package: str
+
+
+#: This process's own pair. Both handshake frames are built from it, and it is
+#: the "ours" half of every :class:`WireVersionError`.
+OURS = Versions(wire=WIRE_VERSION, package=__version__)
+
+
+class WireVersionError(WireError):
+    """A peer that does not speak our wire version - with both installs named.
+
+    A plain :class:`WireError` would say "wire version 2 is not 1" and throw the
+    package versions away, which is precisely the half a HUMAN can act on: the
+    user chose an ``agentclip`` release on each machine, not a wire number. So
+    the mismatch gets its own type, carrying both ends' :class:`Versions`, and
+    the message the Shell finally prints is built from those fields rather than
+    re-parsed out of a sentence.
+    """
+
+    def __init__(self, what: str, peer: Versions, ours: Versions = OURS) -> None:
+        super().__init__(
+            f"{what}: wire version {peer.wire} is not {ours.wire}"
+            f" - the far side is agentclip {peer.package},"
+            f" this side is agentclip {ours.package}"
+        )
+        self.peer = peer
+        self.ours = ours
 
 
 class EngineLinkError(RuntimeError):
@@ -1064,32 +1125,59 @@ def _typed(frame: dict[str, Any], expected: str) -> dict[str, Any]:
     return frame
 
 
-def _version(frame: dict[str, Any], what: str) -> int:
-    version = _int_at(frame, "version", what)
-    if version != WIRE_VERSION:
-        raise WireError(f"{what}: wire version {version} is not {WIRE_VERSION}")
-    return version
+def _read_versions(frame: dict[str, Any], what: str) -> Versions:
+    """Both of the peer's numbers, package FIRST.
+
+    The order matters: the package is parsed before the wire version is
+    compared, so a peer that speaks another version is refused with its install
+    already in hand (:class:`WireVersionError`) instead of with an integer
+    nobody can act on. A frame that omits ``package`` altogether is not a
+    version mismatch but a malformed v1 frame - both handshake frames have
+    carried the field since v1 - so it earns a plain :class:`WireError`.
+    """
+    package = _str_at(frame, "package", what)
+    if not package:
+        raise WireError(f"{what}: empty package version")
+    peer = Versions(wire=_int_at(frame, "version", what), package=package)
+    if peer.wire != WIRE_VERSION:
+        raise WireVersionError(what, peer)
+    return peer
+
+
+@dataclass(frozen=True, slots=True)
+class HelloAck:
+    """The server's reply, once it has been checked: who answered, and as what."""
+
+    server_id: str
+    versions: Versions
 
 
 def hello_frame() -> dict[str, Any]:
-    return {"type": "hello", "version": WIRE_VERSION}
+    return {"type": "hello", "version": OURS.wire, "package": OURS.package}
 
 
-def read_hello(frame: dict[str, Any]) -> int:
-    return _version(_typed(frame, "hello"), "hello")
+def read_hello(frame: dict[str, Any]) -> Versions:
+    """The client's versions, or :class:`WireVersionError` naming both installs."""
+    return _read_versions(_typed(frame, "hello"), "hello")
 
 
 def hello_ack_frame(server_id: str) -> dict[str, Any]:
-    return {"type": "hello_ack", "version": WIRE_VERSION, "server_id": server_id}
+    return {
+        "type": "hello_ack",
+        "version": OURS.wire,
+        "package": OURS.package,
+        "server_id": server_id,
+    }
 
 
-def read_hello_ack(frame: dict[str, Any]) -> str:
+def read_hello_ack(frame: dict[str, Any]) -> HelloAck:
+    """The server's id and versions, or :class:`WireVersionError` naming both."""
     data = _typed(frame, "hello_ack")
-    _version(data, "hello_ack")
+    versions = _read_versions(data, "hello_ack")
     server_id = _str_at(data, "server_id", "hello_ack")
     if not server_id:
         raise WireError("hello_ack: empty server_id")
-    return server_id
+    return HelloAck(server_id=server_id, versions=versions)
 
 
 def call_frame(

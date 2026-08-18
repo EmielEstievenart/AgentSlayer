@@ -36,18 +36,21 @@ import sys
 import threading
 import time
 from collections.abc import Iterator
+from io import StringIO
 from pathlib import Path
 
 import pytest
 
+from agentclip import __version__
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import CallProgress
+from agentclip.engine.link import wire
 from agentclip.engine.link.factory import EngineRequest, make_engine_builder
 from agentclip.engine.link.wire import EngineLinkError
 from agentclip.engine.states import Decision, EngineStateError
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.shell.app.link import LocalLink
-from agentclip.shell.app.remote_link import RemoteLink, RemoteLinkClient
+from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLink, RemoteLinkClient
 
 # Both halves of a parity test have to agree on the chat name, and every canned
 # reply has to name one, so every session here is pinned to this - through
@@ -254,6 +257,81 @@ class _Hooks:
     def deltas(self) -> str:
         with self._lock:
             return "".join(delta for _, delta, _ in self.output)
+
+
+# == the version gate, on scripted streams =====================================
+#
+# The one handshake case a subprocess cannot stage: both halves here are the SAME
+# installed package, so they can never disagree about a version. The deployment
+# model they exist for is the opposite (design section 2.6 - the engine half is a
+# console script the user installs on the target), so what the target said is
+# scripted into a pair of StringIO streams instead, and what the USER would be
+# told is the assertion.
+
+
+def _client_hearing(*frames: dict[str, object]) -> tuple[RemoteLinkClient, StringIO]:
+    sent = StringIO()
+    reader = StringIO("".join(wire.encode_line(frame) for frame in frames))
+    return RemoteLinkClient(reader, sent), sent
+
+
+def test_the_hello_states_this_installs_two_versions() -> None:
+    client, sent = _client_hearing(wire.hello_ack_frame("p1"))
+    client.hello()
+    hello = wire.decode_line(sent.getvalue())
+    assert hello["version"] == wire.WIRE_VERSION
+    assert hello["package"] == __version__
+
+
+def test_a_target_on_another_wire_version_is_refused_by_naming_both_installs() -> None:
+    client, _ = _client_hearing(
+        {
+            "type": "hello_ack",
+            "version": wire.WIRE_VERSION + 1,
+            "package": "9.9.9",
+            "server_id": "p1",
+        }
+    )
+    with pytest.raises(EngineLinkError) as caught:
+        client.hello()
+    message = str(caught.value)
+    assert caught.value.kind == LINK_VERSION
+    # Both wire versions, both package versions, and what to do about it - the
+    # user installed the two halves separately and can only act on the latter.
+    assert f"wire v{wire.WIRE_VERSION + 1}" in message and f"wire v{wire.WIRE_VERSION}" in message
+    assert "9.9.9" in message and __version__ in message
+    assert "update the target's install" in message
+
+
+def test_an_error_frame_instead_of_an_ack_keeps_the_targets_reason() -> None:
+    """What an OLDER target actually does: refuse our hello, say why, and exit.
+
+    The detail it sends already names both wire versions and both packages, so
+    passing it through is the difference between a user who knows which machine
+    to upgrade and one who reads "expected a 'hello_ack' frame, got 'error'".
+    """
+    detail = str(wire.WireVersionError("hello", wire.Versions(wire.WIRE_VERSION, __version__)))
+    client, _ = _client_hearing(wire.error_frame(0, "bad_request", detail))
+    with pytest.raises(EngineLinkError) as caught:
+        client.hello()
+    message = str(caught.value)
+    assert caught.value.kind == LINK_VERSION
+    assert detail in message
+    assert "update the target's install" in message
+
+
+def test_a_target_on_another_package_version_is_fine_and_remembered() -> None:
+    """Same wire, different release: legal, expected, and worth showing later."""
+    client, _ = _client_hearing(
+        {
+            "type": "hello_ack",
+            "version": wire.WIRE_VERSION,
+            "package": "9.9.9",
+            "server_id": "p1",
+        }
+    )
+    assert client.hello() == "p1"
+    assert client.server_package == "9.9.9"
 
 
 # == the handshake and the sessions ============================================

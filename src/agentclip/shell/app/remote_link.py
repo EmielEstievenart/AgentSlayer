@@ -59,6 +59,7 @@ from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any, Literal, TextIO
 
+from agentclip import __version__
 from agentclip.engine.approval import PermissionMode
 from agentclip.engine.engine import (
     ArmResult,
@@ -71,7 +72,13 @@ from agentclip.engine.engine import (
 )
 from agentclip.engine.link import wire
 from agentclip.engine.link.factory import EngineRequest
-from agentclip.engine.link.wire import BUILD_SESSION, EngineLinkError, SessionInfo, WireError
+from agentclip.engine.link.wire import (
+    BUILD_SESSION,
+    EngineLinkError,
+    SessionInfo,
+    WireError,
+    WireVersionError,
+)
 from agentclip.engine.states import Decision
 from agentclip.engine.store.backups import UndoReport
 from agentclip.protocol.types import Outbound, ResultStatus
@@ -84,6 +91,29 @@ from agentclip.shell.app.link import Link
 # then there are no error frames.
 LINK_CLOSED = "link_closed"
 LINK_PROTOCOL = "protocol"
+# The third: the two halves are installed separately (design section 2.6), so a
+# target running another wire version is a CONFIGURATION problem the user can
+# fix, not a bug - and it deserves a message that says which install to touch.
+LINK_VERSION = "version_mismatch"
+
+# What the user is told to do about it. Named here rather than spelled inline so
+# the two paths that raise it (a wrong-version ack, and an error frame in place
+# of one) cannot end up advising two different things.
+UPDATE_HINT = "update the target's install (e.g. `uv tool install --upgrade agentclip`)"
+
+
+def version_refusal(peer: wire.Versions) -> str:
+    """The sentence a user reads when the target speaks another wire version.
+
+    Both installs by name, because that is the only half a human can act on: the
+    wire number is ours to reason about, the ``agentclip`` version is what they
+    chose on each machine and what they will change.
+    """
+    return (
+        f"the engine on the target speaks wire v{peer.wire} (agentclip {peer.package}); "
+        f"this AgentClip speaks wire v{wire.WIRE_VERSION} (agentclip {__version__}) "
+        f"- {UPDATE_HINT}"
+    )
 
 
 class RemoteLinkClient:
@@ -121,25 +151,64 @@ class RemoteLinkClient:
         # no lock of its own.
         self._links: dict[str, RemoteLink] = {}
         self.server_id: str = ""
+        # The target's ``agentclip`` version, learned in the handshake. Nothing
+        # branches on it - it is here so a status line or a link indicator can
+        # show WHICH install is answering, and so a support question about a
+        # remote session has an answer that does not need another round trip.
+        self.server_package: str = ""
 
     # -- the handshake ---------------------------------------------------------
 
     def hello(self) -> str:
-        """Say hello, check the version, remember who answered.
+        """Say hello, check the versions, remember who answered.
 
-        Anything but a v1 ``hello_ack`` - a version we do not speak, a frame out
-        of order, a process that died on startup - is a link that must not be
-        used, so it raises rather than being nursed along. The ``server_id``
-        names the PROCESS (wire.py); v1 keeps it for the detach/reattach mode
-        design section 2.3 leaves room for, and checks only that it is there.
+        Anything but a v1 ``hello_ack`` - a frame out of order, a process that
+        died on startup - is a link that must not be used, so it raises rather
+        than being nursed along. The ``server_id`` names the PROCESS (wire.py);
+        v1 keeps it for the detach/reattach mode design section 2.3 leaves room
+        for, and checks only that it is there.
+
+        The WIRE version is the gate and the only thing refused here. The
+        PACKAGE version is remembered and never compared: the engine half is
+        installed on the target by the user (design section 2.6), so the two
+        halves being different releases of ``agentclip`` is the normal case, not
+        a fault. When the gate does close, both installs are named - see
+        :func:`version_refusal` - because "wire v2 is not v1" is not something a
+        user can do anything with.
         """
         self._write(wire.hello_frame())
         frame = self._read_frame()
+        self._refuse_error_frame(frame)
         try:
-            self.server_id = wire.read_hello_ack(frame)
+            ack = wire.read_hello_ack(frame)
+        except WireVersionError as exc:
+            raise EngineLinkError(LINK_VERSION, version_refusal(exc.peer)) from exc
         except WireError as exc:
             raise EngineLinkError(LINK_PROTOCOL, f"bad handshake: {exc}") from exc
+        self.server_id = ack.server_id
+        self.server_package = ack.versions.package
         return self.server_id
+
+    def _refuse_error_frame(self, frame: dict[str, Any]) -> None:
+        """The other shape a refused handshake takes: an ``error`` instead of an ack.
+
+        A server that does not speak our wire version answers the hello with a
+        ``bad_request`` whose detail already names both wire versions and both
+        packages (``WireVersionError``), and then exits. Passing that detail
+        through - rather than letting ``read_hello_ack`` report "expected a
+        'hello_ack' frame, got 'error'" - is the difference between a user who
+        knows which machine to upgrade and one who does not.
+        """
+        if frame.get("type") != "error":
+            return
+        try:
+            error = wire.read_error(frame)
+        except WireError:  # not a readable error frame; let the ack reader talk
+            return
+        raise EngineLinkError(
+            LINK_VERSION,
+            f"the engine on the target refused the handshake: {error.detail} - {UPDATE_HINT}",
+        )
 
     # -- sessions --------------------------------------------------------------
 

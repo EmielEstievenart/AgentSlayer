@@ -57,6 +57,7 @@ import uuid
 from collections.abc import Callable
 from typing import Any, TextIO
 
+from agentclip import __version__
 from agentclip.engine.engine import CallProgress, Engine
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.engine.link.wire import (
@@ -188,22 +189,38 @@ def serve(
 def _handshake(reader: TextIO, out: _Writer, log: TextIO) -> bool:
     """The first line must be a v1 ``hello``; nothing may precede it.
 
-    A version this process does not speak is refused HERE, before an engine
+    A WIRE version this process does not speak is refused HERE, before an engine
     exists, because every frame after this point is read as v1 - and reading a
     v2 call frame as v1 is exactly the guess a protocol boundary must not make.
+    The refusal names both wire versions AND both package versions
+    (``WireVersionError``), because the two halves are installed separately
+    (design section 2.6) and the human on the other end can only act on the
+    latter.
+
+    A PACKAGE version this process does not share is not refused at all - same
+    wire, different release, which is the expected steady state of two
+    independently-installed halves. It costs one line of stderr, so that a
+    puzzling session has the two numbers in its log.
     """
     line = reader.readline()
     if not line:
         _log(log, "the client closed the link before saying hello")
         return False
     try:
-        read_hello(decode_line(line))
+        peer = read_hello(decode_line(line))
     except WireError as exc:
         # Answerable even when the line was gibberish: the client is owed the
-        # reason it is about to see the process exit.
+        # reason it is about to see the process exit. Best effort - a client
+        # that has already gone away simply never reads it.
         out.send(error_frame(_NO_CALL_ID, "bad_request", str(exc)))
         _log(log, f"bad hello: {exc}")
         return False
+    if peer.package != __version__:
+        _log(
+            log,
+            f"the client is agentclip {peer.package}, this engine is agentclip {__version__}"
+            f" - same wire v{peer.wire}, carrying on",
+        )
     out.send(hello_ack_frame(str(uuid.uuid4())))
     return True
 

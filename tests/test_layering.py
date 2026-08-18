@@ -133,6 +133,12 @@ RULES: list[tuple[str, frozenset[str]]] = [
         "agentclip.engine.link",
         frozenset(
             {
+                # The root package, which is ``__version__`` and nothing else:
+                # the handshake states the PACKAGE version of each half so a
+                # version refusal can name both installs (remote-executor.md
+                # section 2.9). EXACT_ONLY, so this buys the constant and no
+                # subpackage.
+                "agentclip",
                 "agentclip.config",
                 "agentclip.engine",
                 "agentclip.engine.store",

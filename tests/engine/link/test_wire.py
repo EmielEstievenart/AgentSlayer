@@ -17,6 +17,7 @@ from typing import get_args
 
 import pytest
 
+from agentclip import __version__
 from agentclip.engine.engine import (
     AskUser,
     AutoReply,
@@ -353,11 +354,26 @@ def test_undo_result_carries_a_missing_notice() -> None:
 # -- frames --------------------------------------------------------------------
 
 
-def test_handshake_frames() -> None:
-    assert wire.read_hello(wire.hello_frame()) == wire.WIRE_VERSION
+def test_handshake_frames_carry_both_versions() -> None:
+    hello = wire.hello_frame()
+    assert wire.read_hello(hello) == wire.Versions(wire.WIRE_VERSION, __version__)
+    assert hello["package"] == __version__
+
     ack = wire.hello_ack_frame("6f1a-uuid4")
-    assert wire.read_hello_ack(ack) == "6f1a-uuid4"
-    assert ack["version"] == wire.WIRE_VERSION
+    read = wire.read_hello_ack(ack)
+    assert read == wire.HelloAck("6f1a-uuid4", wire.Versions(wire.WIRE_VERSION, __version__))
+    assert (ack["version"], ack["package"]) == (wire.WIRE_VERSION, __version__)
+
+
+def test_a_different_package_on_the_same_wire_is_legal() -> None:
+    """The expected steady state of two independently-installed halves: the
+    package version is a diagnostic, and only the wire version is a gate."""
+    peer = wire.read_hello({"type": "hello", "version": wire.WIRE_VERSION, "package": "9.9.9"})
+    assert peer == wire.Versions(wire.WIRE_VERSION, "9.9.9")
+    ack = wire.read_hello_ack(
+        {"type": "hello_ack", "version": wire.WIRE_VERSION, "package": "9.9.9", "server_id": "p"}
+    )
+    assert ack.versions.package == "9.9.9"
 
 
 def test_call_frame_carries_a_session_for_session_methods_only() -> None:
@@ -488,9 +504,14 @@ def test_unknown_frame_type_is_refused() -> None:
 @pytest.mark.parametrize(
     "frame",
     [
-        {"type": "hello", "version": 2},
-        {"type": "hello", "version": "1"},
-        {"type": "hello"},
+        {"type": "hello", "version": 2, "package": "0.9.0"},
+        {"type": "hello", "version": "1", "package": "0.9.0"},
+        {"type": "hello", "package": "0.9.0"},
+        # The package field is not optional in v1: a hello without one is a
+        # malformed frame, not a version mismatch.
+        {"type": "hello", "version": 1},
+        {"type": "hello", "version": 1, "package": ""},
+        {"type": "hello", "version": 1, "package": 3},
     ],
 )
 def test_a_wrong_version_never_handshakes(frame: dict[str, object]) -> None:
@@ -500,9 +521,31 @@ def test_a_wrong_version_never_handshakes(frame: dict[str, object]) -> None:
 
 def test_a_wrong_version_ack_is_refused() -> None:
     with pytest.raises(wire.WireError):
-        wire.read_hello_ack({"type": "hello_ack", "version": 99, "server_id": "x"})
+        wire.read_hello_ack({"type": "hello_ack", "version": 99, "package": "9.9.9", "server_id": "x"})
     with pytest.raises(wire.WireError):
-        wire.read_hello_ack({"type": "hello_ack", "version": 1, "server_id": ""})
+        wire.read_hello_ack({"type": "hello_ack", "version": 1, "package": "9.9.9", "server_id": ""})
+    with pytest.raises(wire.WireError):
+        wire.read_hello_ack({"type": "hello_ack", "version": 1, "server_id": "x"})
+    with pytest.raises(wire.WireError):
+        wire.read_hello_ack({"type": "hello_ack", "version": 1, "package": "", "server_id": "x"})
+
+
+@pytest.mark.parametrize("what", ["hello", "hello_ack"])
+def test_a_version_mismatch_carries_both_installs(what: str) -> None:
+    """The whole reason the mismatch has a type of its own: a bare WireError
+    would leave the refusal with two integers and no install to name."""
+    frame: dict[str, object] = {"type": what, "version": 2, "package": "9.9.9"}
+    if what == "hello_ack":
+        frame["server_id"] = "p"
+    reader = wire.read_hello if what == "hello" else wire.read_hello_ack
+    with pytest.raises(wire.WireVersionError) as caught:
+        reader(frame)  # type: ignore[operator]
+    exc = caught.value
+    assert exc.peer == wire.Versions(2, "9.9.9")
+    assert exc.ours == wire.OURS == wire.Versions(wire.WIRE_VERSION, __version__)
+    assert "9.9.9" in str(exc) and __version__ in str(exc)
+    assert "wire version" in str(exc)
+    assert isinstance(exc, wire.WireError)  # still fatal for the frame it rode on
 
 
 def test_unknown_union_tags_are_refused() -> None:

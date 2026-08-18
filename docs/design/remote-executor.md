@@ -217,13 +217,42 @@ frame is **flushed as it is written**; nothing is batched. `stderr` is never
 protocol data — it is the remote process's log, and anything printed to stdout
 outside `encode_line` has corrupted the stream.
 
-**Frames.** `hello` / `hello_ack` (both carry `version`; the ack also carries a
-uuid4 `server_id`, which names the PROCESS and exists so §2.3's detach/reattach
-mode can be added without a protocol redesign — v1 only checks it is non-empty);
+**Frames.** `hello` / `hello_ack` (both carry `version` AND `package` — see "Two
+versions" below; the ack also carries a uuid4 `server_id`, which names the
+PROCESS and exists so §2.3's detach/reattach mode can be added without a
+protocol redesign — v1 only checks it is non-empty);
 `call` (`id`, `method`, `params`, plus `session` for the 13 session-scoped
 methods — `build_session` has none, because it is what mints one); `result`
 (`id`, `value`); `error` (`id`, `kind`, `detail`, optional `data`); `progress`
 and `output` (session-scoped events, no `id`); `cancel`.
+
+**Two versions, and only one of them is a gate.** The handshake exchanges both
+`version` (`WIRE_VERSION`, an integer) and `package` (`agentclip.__version__`).
+`version` is the **compatibility gate**: a peer that speaks another one is
+refused before any other frame is read, because everything after the handshake
+is decoded as v1 and reading a v2 `call` frame as v1 is exactly the guess a
+protocol boundary must not make. `package` is a **diagnostic** — nothing
+branches on it, and *same wire version + different package versions is legal and
+expected*. The reason is the deployment model (§2.6, as rewritten by the
+deployment slice): the engine half is a console script (`agentclip-engine`) the
+user pre-installs on the target's PATH, so the two halves are
+independently-versioned installs and drift apart the moment one machine is
+upgraded and the other is not.
+
+The package version earns its place at the one moment the gate closes. A refusal
+that could only say "wire v2 is not v1" would throw away the half a HUMAN can act
+on — nobody chose a wire number; they chose an `agentclip` release on each
+machine. So the mismatch has a type of its own, `WireVersionError(WireError)`,
+carrying both ends' `Versions(wire, package)`, and the Shell turns those fields
+into the sentence the user reads: *"the engine on the target speaks wire v2
+(agentclip 0.1.0); this AgentClip speaks wire v1 (agentclip 0.4.2) — update the
+target's install (e.g. `uv tool install --upgrade agentclip`)"*. The server's
+refusal frame carries the same four numbers in its `detail` and the client passes
+that detail through, so an ack that never arrives because the target refused
+FIRST is just as legible as one that arrived wrong. A package difference on a
+matching wire costs one line of the server's stderr and nothing else. `package`
+is required in v1: a handshake frame without it is a malformed frame, not a
+version mismatch.
 
 **Events before the answer.** All `progress`/`output` frames for a call are
 written and flushed strictly before that call's `result`/`error`. So the answer
@@ -385,6 +414,14 @@ be guessing. The two kinds this side raises on its own account (`link_closed`,
 `protocol`) name what happened to the LINK; the wire's four name what the far
 side answered. `BudgetExceeded` and `EngineStateError` are rebuilt as themselves
 (§2.9), because the controller catches exactly those two by type.
+
+**A third kind: `version_mismatch`.** A target that speaks another wire version
+is not a bug but a configuration the user can fix, so `hello()` raises it with
+the sentence §2.9 specifies — both wire versions, both `agentclip` versions, and
+what to do about it — whether the target answered with a wrong-version
+`hello_ack` or refused first with an `error` frame. The server's `package`
+version is kept on the client (`server_package`) so a later status line can show
+which install is answering without another round trip.
 
 A module-level `_conforms(link: RemoteLink) -> Link` pins conformance where mypy
 can see it: the tests are not type-checked, and a Protocol nothing declares is a

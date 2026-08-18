@@ -7,6 +7,11 @@ here the concern is the Textual wiring: F4 opens the screen, selecting a
 RadioButton applies app.theme immediately, escape/Cancel restores whatever
 was active on open, and Save writes through to disk via the injectable
 global_config_path (same pattern test_service_editor_ui.py uses).
+
+The tail of the file covers the OTHER door onto the same setting - the
+``ChatView`` seam `/theme` drives (``MainScreen.theme_choices`` /
+``current_theme`` / ``apply_theme``) - and the fact that there is no third one:
+Textual's ctrl+p palette is disabled.
 """
 
 from __future__ import annotations
@@ -16,14 +21,16 @@ import tomllib
 from collections.abc import Callable
 from pathlib import Path
 
+import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, RadioSet
 
+import agentclip.shell.tui.app as app_module
 from agentclip.cli import make_engine_factory
-from agentclip.config import load_config
+from agentclip.config import VALID_THEMES, load_config
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.shell.tui.app import AgentClipApp
-from agentclip.shell.tui.screens.settings import SettingsScreen
+from agentclip.shell.tui.screens.settings import THEME_CHOICES, SettingsScreen
 
 
 async def _wait_for(
@@ -203,6 +210,82 @@ async def test_radio_set_pressed_button_matches_selected_theme(tmp_path: Path) -
         pressed = radio_set.pressed_button
         assert pressed is not None
         assert pressed.id == "theme-claude-warm"
+
+
+# == the other door: /theme and no command palette =============================
+# F4's picker and the chat command are two ways to one setting, so they share
+# the list (THEME_CHOICES) and the save path (AgentClipApp.remember_theme).
+# There is no third way in: Textual's palette is switched off, because the page
+# has none and a TUI-only command surface listing a different set of things is
+# how a feature comes to exist in half the app.
+
+
+def test_the_command_palette_is_disabled() -> None:
+    """Commands are typed into the composer with a leading slash, in both
+    shells. A palette would be a second, TUI-only roster."""
+    assert AgentClipApp.ENABLE_COMMAND_PALETTE is False
+
+
+async def test_the_theme_seam_offers_exactly_what_the_picker_offers(
+    tmp_path: Path,
+) -> None:
+    """One list, in the order the settings screen offers them - a `/theme` that
+    could set something F4 will not show would be a second source of truth."""
+    app, _global_path = _make_app(tmp_path)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        assert main.theme_choices() == tuple(name for name, _label in THEME_CHOICES)
+        assert set(main.theme_choices()) == set(VALID_THEMES)
+        assert main.current_theme() == "textual-dark"
+
+
+async def test_the_theme_seam_applies_and_persists_like_save_does(tmp_path: Path) -> None:
+    """`/theme`'s whole mechanism: worn live (the app-wide reactive) and written
+    to the same `[general] theme` key Save writes, so the next launch reads it."""
+    app, global_path = _make_app(tmp_path)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        main.apply_theme("claude-warm")
+        await pilot.pause()
+
+        assert app.theme == "claude-warm"
+        assert main.current_theme() == "claude-warm"
+        assert app.app_config.general.theme == "claude-warm"
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["general"]["theme"] == "claude-warm"
+        reloaded = load_config(app.project_root, global_config_path=global_path)
+        assert reloaded.general.theme == "claude-warm"
+
+
+async def test_an_unsavable_theme_still_gets_worn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The trade ``_persist_services`` makes: remembering a preference is a
+    convenience, never the point of the press - and only the failure to remember
+    is the view's to report, since the command's own toast is the controller's."""
+    app, _global_path = _make_app(tmp_path)
+
+    def boom(theme: str, path: Path | None = None) -> None:
+        raise OSError("read-only")
+
+    monkeypatch.setattr(app_module, "save_theme", boom)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        assert app.remember_theme("claude-dark") is False
+        main.apply_theme("claude-dark")
+        await pilot.pause()
+
+        assert app.theme == "claude-dark"  # worn anyway
+        assert app.app_config.general.theme == "claude-dark"
 
 
 async def test_button_pressed_events_are_stopped(tmp_path: Path) -> None:

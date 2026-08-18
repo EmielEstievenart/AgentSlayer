@@ -121,16 +121,27 @@ Header: "APPEARANCE · what it looks like". One fixed-height row per
 `TemplateKind` (7 rows, declaration order — see §6 for the full list),
 each row containing:
 
-1. **Thumbnail** (`svc-tpl-preview-<kind>`) — a picture of the *first*
-   captured image for that kind, or blank if none. Rendered as a sixel
-   bitmap when the terminal supports it, else as a 12×2 half-block-cell
-   approximation (TUI-only distinction — see §7). In a GUI frontend this is
-   simply an `<img>`.
-2. **Name + status**, stacked:
+1. **Thumbnail** (`svc-tpl-preview-<kind>`) — a picture of *one* captured
+   image for that kind — the one the row is currently **showing** — or blank
+   if none. Rendered as a sixel bitmap when the terminal supports it, else as
+   a 12×2 half-block-cell approximation (TUI-only distinction — see §7). In a
+   GUI frontend this is simply an `<img>`.
+2. **Two arrows**, one either side of the thumbnail, that step the shown
+   variant back and forward through that kind's stack, **wrapping** at both
+   ends. Disabled (not hidden — the column must not reflow when a second
+   capture lands) while the kind holds fewer than two images. Which variant
+   is shown is state of the editor, not of the row's widget: it is
+   reconciled — clamped — against the folder every time the profile is
+   re-read. *TUI: not implemented; the Textual editor shows the first
+   variant only (§7).*
+3. **Name + status**, stacked:
    - kind label (e.g. "Busy indicator")
    - status line `svc-tpl-<kind>`: `"not captured"` / `"<w>×<h> · captured"`
-     / `"<w>×<h> · N images"` (`service_editor.py:363-376`)
-3. **Actions**, stacked:
+     / `"<w>×<h> · N/M"` — the position of the shown variant in the stack,
+     and its dimensions, since variants of one control are routinely
+     different sizes. (TUI: `"<w>×<h> · N images"`, the first image's size,
+     `service_editor.py:363-376`.)
+4. **Actions**, stacked:
    - Button `svc-capture-<kind>-btn` — "Capture"
    - Button `svc-clear-<kind>-btn` — "Clear" (disabled while that kind has
      nothing captured)
@@ -272,7 +283,12 @@ control above comes alive.
 - "Forget appearance": visible only when the selected service currently
   has at least one captured `TemplateKind`.
 - Each kind's "Clear" button: disabled when that kind currently holds no
-  captured images (nothing for it to do).
+  captured images (nothing for it to do). It is enabled by *any* number of
+  images, because it removes the one on show rather than the stack (§5.5).
+- Each kind's two variant arrows: disabled when that kind holds fewer than
+  two images (nothing to cycle between). Disabled rather than hidden, for
+  the same reason as everything else in §3.5 — the appearance column must
+  not reflow while the user is pointing at it.
 
 ---
 
@@ -381,6 +397,11 @@ under a `profile_root` directory:
 - `drop_template(root, key, kind) -> None` — removes one kind's whole
   stack from the manifest, then deletes its files
   (`profile_store.py:285-310`).
+- `drop_variant(root, key, kind, index) -> None` — the same, over one
+  0-based entry of a kind's stack: unlist it, then unlink it. The stack
+  closes up behind it, a kind whose last image goes is unlisted entirely,
+  and an index naming nothing is a no-op rather than an error. This is what
+  the GUI's per-variant "Clear" calls.
 - `delete_profile(root, key) -> None` — removes the entire per-service
   folder (`profile_store.py:313-321`).
 
@@ -474,15 +495,24 @@ value outside its own configured 0-64 range, which is exactly the range
   Writes the PNG to the profile store **immediately** on success — not
   deferred to editor close. Sets an internal `profiles_changed` flag.
   Repaints that kind's thumbnail/status and the whole-profile summary line
-  on completion. On any failure at any step (cancel, pick error, capture
-  error, unsearchable region, save error) nothing is written and a toast
-  explains why; a cancel is reported neutrally ("… unchanged (selection
-  cancelled)").
-- **Clear**: immediately drops that kind's *entire* stack from disk (all
-  variants), **no confirmation dialog** — rationale: one capture press
-  away from being restored, so a confirm would cost more attention than
-  the mistake it guards against. Sets `profiles_changed`. Repaints the
-  same readouts as Capture.
+  on completion, and leaves the row **showing the newly captured variant**
+  (the last of the stack) — a row that went on showing the older picture
+  would read as a capture that did not land. On any failure at any step
+  (cancel, pick error, capture error, unsearchable region, save error)
+  nothing is written and a toast explains why; a cancel is reported
+  neutrally ("… unchanged (selection cancelled)").
+- **Clear**: immediately drops **the variant the row is showing** from disk
+  — one image, not the kind — **no confirmation dialog**; rationale: one
+  capture press away from being restored, so a confirm would cost more
+  attention than the mistake it guards against. Sets `profiles_changed`.
+  Repaints the same readouts as Capture. The shown index does **not** follow
+  the picture it dropped: it stays where it is, so the variant that slides
+  into the slot is the one on show, and clearing the *last* variant clamps
+  back to the new last one. Clearing the only variant returns the row to
+  "not captured". *TUI: drops that kind's entire stack — the Textual editor
+  has no shown-variant notion (§7).*
+- **The two variant arrows**: page-side only. They move which variant the
+  row shows (wrapping) and touch neither disk nor `profiles_changed`.
 
 ### 5.6 "Forget appearance"
 
@@ -609,8 +639,15 @@ built from (`tui.md:295`).
 - **A kind is a stack, not a slot**: every `Capture` press on an
   already-captured kind **adds** a new variant rather than replacing the
   existing one (all variants are OR'd together at match time). Only
-  `Clear` (that kind) or `Forget appearance` (the whole profile) removes
-  anything.
+  `Clear` (the one variant on show) or `Forget appearance` (the whole
+  profile) removes anything. The row is therefore a **window onto a stack**,
+  not a picture of a slot: exactly one variant is on show at a time, the
+  arrows move which, and the status line names the position so the user can
+  say what they are looking at. Which variant is showing is UI state and
+  nothing else — it is never persisted, it is clamped rather than trusted
+  whenever the folder is re-read (it moves under the editor: a clear, a
+  capture, a forget, another service selected), and there is no ordering
+  meaning to the position beyond capture order.
 - **Detection/appearance are ANDed, not just the checklist alone**: a
   ticked `busy` or `idle` finish signal whose corresponding `TemplateKind`
   (`BUSY`/`IDLE`) has never been captured runs **nothing at all** — the
@@ -687,9 +724,10 @@ replaced by native GUI equivalents, not ported:
   carry over, not the input mechanics.
 - **Sixel vs. half-block thumbnail rendering** is a terminal-graphics
   compatibility fallback with no GUI equivalent — a GUI frontend just
-  renders the captured image (or its first stack variant) as a normal
-  `<img>`/bitmap at whatever resolution is convenient; there is no
-  "coarse fallback" tier to reproduce. Specifically NOT to carry over:
+  renders the captured image (whichever stack variant the row is showing,
+  §2.7) as a normal `<img>`/bitmap at whatever resolution is convenient;
+  there is no "coarse fallback" tier to reproduce. Specifically NOT to carry
+  over:
   - the sixel/half-block **renderer choice made once at modal-open time
     and never revisited** (a real GUI doesn't need this rigidity — image
     elements can just be images);

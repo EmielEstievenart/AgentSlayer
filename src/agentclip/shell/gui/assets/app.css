@@ -7,12 +7,14 @@
    the remaining increment (the SSH dialog) would argue with.
    Only system fonts - nothing here may reach the network. */
 
-/* Two palettes, and the whole difference between them is this block: every
+/* The palettes, and the whole difference between them is this region: every
    colour in the file below is a variable, so a theme is a set of values rather
    than a second stylesheet to keep in sync. `dark` is the default and is what
-   :root carries; `light` is a class on <body> that redefines the same names.
-   Which one is worn is config (`[gui] theme`) and arrives as a `settings`
-   event - the page never decides, it only paints (docs/design/gui.md §3). */
+   :root carries; every other theme is a class on <body> that redefines the same
+   names, and nothing outside this region may name a colour at all (a test
+   fails on the first hex that escapes it). Which one is worn is config
+   (`[gui] theme`) and arrives as a `settings` event - the page never decides,
+   it only paints (docs/design/gui.md §3). */
 :root {
   --bg: #14161a;
   --bg-sunken: #101215; /* under the shell: the status bar */
@@ -61,6 +63,61 @@ body.theme-light {
   --shadow: 0 6px 18px rgba(28, 32, 39, 0.18);
 }
 
+/* The two Claude themes, which are the TUI's own (shell/tui/app.py registers
+   them as Textual themes with these exact names) rendered in this shell's
+   variable set. Same command, same name, two mediums: `/theme claude-dark`
+   means one thing whichever shell it is typed in, and the values below are the
+   Textual theme's role-by-role - background/surface/panel/foreground and the
+   five semantic colours - with the four this shell has and Textual does not
+   (--bg-sunken, --line, --warn-deep, --magenta) DERIVED from them rather than
+   invented, so a change to the Textual theme has an obvious answer here.
+
+   Warm is the paper one. Its "raised" is the Textual `surface`, which is a
+   shade DARKER than the page rather than a whiter white - that is what a warm
+   light palette does, and inverting it to #fff would put a cold rectangle in
+   the middle of it. */
+body.theme-claude-warm {
+  --bg: #faf9f5; /* Textual background */
+  --bg-sunken: #e8e4d8; /* Textual panel: the deepest of the three grounds */
+  --bg-raised: #f0eee6; /* Textual surface */
+  --line: #d6d0be; /* panel, pushed until an edge reads as an edge */
+  --text: #3d3929; /* Textual foreground */
+  --text-dim: #6f6a56; /* foreground muted - NOT `secondary`, which is an accent */
+  --accent: #c96442; /* Textual primary */
+  --ok: #3f7d4f;
+  --warn: #b8720f;
+  --warn-deep: #8a5409; /* the flash's off beat, one step down from --warn */
+  --err: #b3261e;
+  --magenta: #8e4b9c; /* SUB-AGENT: plum, so it cannot be read as the terracotta accent */
+  --on-solid: #faf9f5; /* Textual button-color-foreground */
+  --scrim: rgba(61, 57, 41, 0.4); /* the foreground, as the light theme does it */
+  --scrim-deep: rgba(61, 57, 41, 0.45);
+  --shadow: 0 6px 18px rgba(61, 57, 41, 0.18);
+}
+
+/* ...and the dark one, where "raised" and "sunken" mean what they usually do
+   again: surface sits above the page, and the status bar's ground is dug a step
+   below it. The scrims are black here for the same reason :root's are - over a
+   dark page, a tinted scrim is a smear rather than a dimming. */
+body.theme-claude-dark {
+  --bg: #262624; /* Textual background */
+  --bg-sunken: #1c1c1a; /* under the shell: the status bar */
+  --bg-raised: #30302e; /* Textual surface */
+  --line: #4a4844; /* Textual panel, pushed up until it separates */
+  --text: #f0eee6; /* Textual foreground */
+  --text-dim: #a8a49a; /* foreground muted - NOT `secondary`, which is an accent */
+  --accent: #d97757; /* Textual primary */
+  --ok: #7fb069;
+  --warn: #e0a548;
+  --warn-deep: #a8792f; /* the flash's off beat */
+  --err: #e0605a;
+  --magenta: #c68fd6; /* SUB-AGENT: a violet the warm accent cannot be confused with */
+  --on-solid: #262624; /* Textual button-color-foreground */
+  --scrim: rgba(0, 0, 0, 0.55);
+  --scrim-deep: rgba(0, 0, 0, 0.6);
+  --shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -89,6 +146,11 @@ body {
 /* -- header --------------------------------------------------------------- */
 
 .titlebar {
+  /* The paste flash hangs off this element's bottom edge (below), which is the
+     whole reason it is a positioning context: "just under the titlebar" is then
+     a fact the browser works out rather than a pixel number in here that a
+     padding change would silently falsify. */
+  position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -134,8 +196,21 @@ body {
    is looking at their browser, not at this window. It blinks, which the TUI
    does on a 0.4s timer; the cadence is not load-bearing, only "obnoxious enough
    to notice", so this is one CSS animation and no JavaScript. Its quiet sibling
-   (.side-armed) deliberately never animates. */
+   (.side-armed) deliberately never animates.
+
+   An OVERLAY, not a row: it hangs off the titlebar's bottom edge across the
+   full width and covers the top of whatever is below, so raising and dropping
+   it - which happens repeatedly inside one turn - costs ZERO layout. In the
+   flow it shrank .body on every appearance and walked the transcript, the run
+   panel and the composer up and down with it. The shadow is what says "above",
+   so the strip cannot be read as a row of the page that painted wrong. */
 .flash {
+  position: absolute;
+  top: 100%; /* the titlebar's own height, whatever it is */
+  left: 0;
+  right: 0;
+  /* Over the page, under the toasts (20) and every scrim (25/26/30). */
+  z-index: 15;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -143,6 +218,7 @@ body {
   padding: 8px 18px;
   background: var(--warn);
   color: var(--on-solid);
+  box-shadow: var(--shadow);
   font-weight: 700;
   text-align: center;
   white-space: pre-line;
@@ -1243,6 +1319,56 @@ button:not(:disabled) {
   white-space: pre;
 }
 
+/* -- key hints ------------------------------------------------------------
+   The TUI's stock Footer, in this shell's chrome: one compact row of "key
+   what", above the status bar and sharing its ground so the two read as one
+   strip of chrome rather than two bars. Always drawn - a hint bar that came and
+   went would be the flash banner's mistake one end of the window down - so its
+   height is reserved for the whole run and a state change costs no layout at
+   all.
+
+   One row, never two: the row is a cheatsheet read sideways, and a bar that
+   grew a second line when a gate opened would move the composer. What does not
+   fit is clipped, in the table's own order, which puts the app keys and the
+   approval keys first. */
+
+.keyhints {
+  display: flex;
+  flex: none;
+  flex-wrap: nowrap;
+  gap: 14px;
+  padding: 4px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-sunken);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  /* Not focusable, not selectable: a click on it must not be a way to lose the
+     caret out of the chat box (app.js also refuses the mousedown). */
+  user-select: none;
+}
+
+.kh {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.kh-key {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-weight: 700;
+}
+
+/* The middle of the footer's three states: the key does not fire right now but
+   it will - a turn has to finish, a gate has to open, the caret has to leave
+   the chat box. Dimmed rather than dropped, because a row that vanished and
+   came back would teach the user nothing about when it works. The third state
+   is being absent from the strip entirely, which is a decision in app.js. */
+.kh.dim {
+  opacity: 0.4;
+}
+
 /* -- status bar ----------------------------------------------------------- */
 
 .statusbar {
@@ -1479,6 +1605,22 @@ button:not(:disabled) {
   align-items: center;
   padding: 6px 0;
   border-bottom: 1px solid var(--line);
+}
+
+/* The crop box and the two arrows that walk its stack, as one unit: the arrows
+   are drawn (disabled) even for a kind with one image, so a second capture
+   landing cannot reflow the column under the pointer. */
+.svc-variants {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  align-items: center;
+}
+
+.svc-arrow {
+  padding: 3px 5px;
+  font-size: 12px;
+  line-height: 1;
 }
 
 /* The crop box is drawn whether or not it holds a picture, so a capture

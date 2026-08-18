@@ -80,6 +80,17 @@ class FakeChatView:
         # forget, so the fake resolves the toggles the way MainScreen does.
         self.armed_targets: list[bool | None] = []
         self.os_armed = True
+        # /theme. Which names exist is the view's answer in the real app (four
+        # Textual themes in the TUI, two CSS palettes in the GUI), so the fake
+        # owns a settable list and remembers every name applied through it.
+        self.themes: tuple[str, ...] = (
+            "textual-light",
+            "textual-dark",
+            "claude-warm",
+            "claude-dark",
+        )
+        self.theme = "textual-dark"
+        self.themes_applied: list[str] = []
         self.input_started = 0
         self.exited = False
         self.tasks: list[asyncio.Task[Any]] = []
@@ -236,6 +247,18 @@ class FakeChatView:
         # Same shape as show_identify_overlay: one call, no answer, no session.
         self.armed_targets.append(target)
         self.os_armed = (not self.os_armed) if target is None else target
+
+    def theme_choices(self) -> tuple[str, ...]:
+        return self.themes
+
+    def current_theme(self) -> str:
+        return self.theme
+
+    def apply_theme(self, name: str) -> None:
+        # Applies AND persists in a real view, and says nothing either way - the
+        # controller owns /theme's one toast.
+        self.themes_applied.append(name)
+        self.theme = name
 
     async def read_clipboard(self) -> str | None:
         return self.clipboard

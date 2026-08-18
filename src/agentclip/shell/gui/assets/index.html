@@ -24,20 +24,29 @@
         <span class="pill" id="service"></span>
         <span class="spacer"></span>
         <span class="version" id="version"></span>
-      </header>
 
-      <!-- The "your move" banner the automation raises when a payload is
-           waiting on the user's Ctrl+V or Enter. It blinks, deliberately: the
-           user is looking at their browser, not at this window. Full width
-           rather than inside the sidebar (where the TUI puts it) because a
-           300px column in a 1200px window is the quietest place on screen and
-           this banner's whole job is to be seen - and because F3 must not be
-           able to hide the thing asking for a keystroke. Its one button rides
-           with it, shown only under the Ctrl+V variant (retry=true). -->
-      <div class="flash" id="flash" hidden>
-        <span id="flash-text"></span>
-        <button id="retry-insert" type="button" hidden>Retry insert</button>
-      </div>
+        <!-- The "your move" banner the automation raises when a payload is
+             waiting on the user's Ctrl+V or Enter. It blinks, deliberately: the
+             user is looking at their browser, not at this window. Full width
+             rather than inside the sidebar (where the TUI puts it) because a
+             300px column in a 1200px window is the quietest place on screen and
+             this banner's whole job is to be seen - and because F3 must not be
+             able to hide the thing asking for a keystroke. Its one button rides
+             with it, shown only under the Ctrl+V variant (retry=true).
+
+             It lives INSIDE the titlebar so it can hang off its bottom edge as
+             an overlay (app.css: position absolute, top 100%) instead of being
+             a row in the flow: raising and dropping it happens mid-turn, and a
+             strip that shoved the transcript, the run panel and the composer
+             down a notch each time would reflow the page under the user's eyes
+             - which is the one thing a banner asking for a keystroke must not
+             do. Nothing here depends on the titlebar's height being a number
+             anybody wrote down. -->
+        <div class="flash" id="flash" hidden>
+          <span id="flash-text"></span>
+          <button id="retry-insert" type="button" hidden>Retry insert</button>
+        </div>
+      </header>
 
       <div class="body">
         <div class="chat">
@@ -220,6 +229,17 @@
         <pre class="log-lines" id="log-lines"></pre>
       </section>
 
+      <!-- The key hints, the TUI's stock Footer in this shell's chrome: one
+           compact row of "key what", painted from the ONE key table in app.js
+           so a shortcut cannot appear here without existing (and cannot exist
+           without appearing). Its rows carry the footer's three states -
+           normal, dimmed, gone - and the strip itself is always drawn, so its
+           height is reserved and nothing below it ever moves. Nothing in it is
+           focusable and nothing is clickable: it is a cheatsheet, not a
+           toolbar, and stealing the caret out of the composer to read one
+           would be worse than not having it. -->
+      <div class="keyhints" id="keyhints"></div>
+
       <!-- Ten segments, composed in Python and rendered in order. A segment
            that must hide is simply not in the list. -->
       <div class="statusbar" id="statusbar"></div>
@@ -325,9 +345,10 @@
           <div class="svc-col svc-col-appearance">
             <div class="side-title">APPEARANCE · what it looks like</div>
             <!-- One row per TemplateKind, all seven always, whether or not
-                 anything is captured. The thumbnail is the FIRST image of the
-                 kind's stack as a PNG data URI - there is no coarse fallback
-                 tier here and no reason the column may not scroll (brief §7). -->
+                 anything is captured. The thumbnail is ONE image of the kind's
+                 stack as a PNG data URI, with an arrow either side to walk the
+                 rest - there is no coarse fallback tier here and no reason the
+                 column may not scroll (brief §7). -->
             <ol class="svc-kinds" id="svc-kinds"></ol>
             <div class="side-status" id="svc-templates"></div>
             <button id="svc-forget" type="button">Forget appearance</button>

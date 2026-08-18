@@ -195,6 +195,7 @@ from textual.screen import Screen
 from textual.widgets import Button, Collapsible, Footer, Input
 
 from agentclip.config import (
+    DEFAULT_THEME,
     Config,
     ServicePreset,
     save_active_services,
@@ -281,6 +282,7 @@ from agentclip.shell.tui.messages import (
 )
 from agentclip.shell.tui.pixels import crop
 from agentclip.shell.tui.screens.confirm import ConfirmScreen
+from agentclip.shell.tui.screens.settings import THEME_CHOICES
 from agentclip.shell.tui.screens.summary import SummaryScreen
 from agentclip.shell.tui.screens.text_entry import TextEntryScreen
 from agentclip.shell.tui.widgets.action_panel import ActionPanel
@@ -337,6 +339,12 @@ _NEW_CHAT_SETTLE_S = 0.4
 PASTE_SETTLE_DELAY = _delivery.PASTE_SETTLE_DELAY
 _SUBMIT_SETTLE_S = _delivery.SUBMIT_SETTLE_S
 _STREAM_CHUNK_SETTLE_S = _delivery.STREAM_CHUNK_SETTLE_S
+# ...and so are the activation wait in front of that first beat and the beat
+# before a snap back, for exactly the same reason: a suite that waited out a
+# real foreground poll on every delivery is a suite nobody runs.
+_ACTIVATION_ATTEMPTS = _delivery.ACTIVATION_ATTEMPTS
+_ACTIVATION_POLL_S = _delivery.ACTIVATION_POLL_S
+_SNAP_BACK_SETTLE_S = _delivery.SNAP_BACK_SETTLE_S
 # The auto-copy harvest's own tuning numbers moved down with the sequence that
 # reads them (agentclip.driver.automation.flow). They stay reachable under this
 # module's names because the Pilot suites size their assertions off them - how
@@ -487,6 +495,9 @@ class _MainScreenOps(ScreenOps):
     def focus_window(self, handle: int) -> bool:
         return focus_window_verified(handle)
 
+    def foreground_window(self) -> int | None:
+        return foreground_window()
+
     def send_paste(self) -> bool:
         return send_paste()
 
@@ -531,8 +542,17 @@ class _MainScreenOps(ScreenOps):
     def new_chat_settle(self) -> float:
         return _NEW_CHAT_SETTLE_S
 
+    def activation_attempts(self) -> int:
+        return _ACTIVATION_ATTEMPTS
+
+    def activation_poll(self) -> float:
+        return _ACTIVATION_POLL_S
+
     def paste_settle(self) -> float:
         return PASTE_SETTLE_DELAY
+
+    def snap_back_settle(self) -> float:
+        return _SNAP_BACK_SETTLE_S
 
     def submit_settle(self) -> float:
         return _SUBMIT_SETTLE_S
@@ -1300,10 +1320,10 @@ class MainScreen(Screen[None]):
         extraction and is what the Pilot suites read."""
         return self._automation.own_window
 
-    async def _snap_focus_back(self) -> bool:
-        """Bring AgentClip's own window back to the foreground after a click in
-        the browser (the controller's - see ``snap_focus_back``)."""
-        return await self._automation.snap_focus_back()
+    # Snapping focus back is the controller's whole and only
+    # (``snap_back_after_click``, beat included): this screen used to keep a
+    # one-line wrapper around it, and there is no shell decision left inside it
+    # to justify one.
 
     # -- dynamic bindings -----------------------------------------------------
 
@@ -2197,6 +2217,35 @@ class MainScreen(Screen[None]):
                 timeout=8,
             )
 
+    # == ChatView: /theme ======================================================
+    # F4's picker and `/theme` are two doors onto one setting, so they share the
+    # list (``SettingsScreen.THEME_CHOICES``, in the order that screen offers
+    # them) and the save path (``AgentClipApp.remember_theme``). A second list
+    # here would be a `/theme` that could set something F4 cannot show.
+
+    def theme_choices(self) -> tuple[str, ...]:
+        return tuple(name for name, _label in THEME_CHOICES)
+
+    def current_theme(self) -> str:
+        # ``App.theme`` is a reactive with a default, so this only falls back for
+        # a screen mounted outside the real app (unit tests do that).
+        return str(getattr(self.app, "theme", DEFAULT_THEME) or DEFAULT_THEME)
+
+    def apply_theme(self, name: str) -> None:
+        """Wear ``name`` now and remember it, exactly as Save on F4 does.
+
+        The preview and the persistence are deliberately the two halves the
+        settings screen already splits: ``app.theme`` is app-wide and applies on
+        assignment, ``remember_theme`` is the write. The host app is duck-typed
+        for ``_persist_services``'s reason - ``AgentClipApp`` is a
+        TYPE_CHECKING-only import here - so a screen mounted outside the real app
+        still applies the theme and simply has nowhere to save it.
+        """
+        self.app.theme = name
+        remember = getattr(self.app, "remember_theme", None)
+        if remember is not None:
+            remember(name)
+
     # == AutomationView: the ARMED switch =====================================
 
     def paint_armed(self, armed: bool) -> None:
@@ -2434,11 +2483,17 @@ class MainScreen(Screen[None]):
         self._submit_text(message.text)
 
     def action_submit_composer(self) -> None:
+        # Through the widget's own ``submit`` rather than straight to
+        # ``_submit_text``: this key sends WITHOUT focusing the box, and the
+        # composer is what remembers a send for its up/down history. Reading the
+        # text out from under it would leave a message the user just watched
+        # leave unreachable by `up`. The extra hop is the ``Submitted`` message,
+        # which lands back here a moment later.
         try:
             composer = self.composer
         except NoMatches:
             return
-        self._submit_text(composer.text)
+        composer.submit()
 
     def _submit_text(self, text: str) -> None:
         """One door for every composer send.
@@ -3531,11 +3586,10 @@ class MainScreen(Screen[None]):
             self.notify(self._NO_CLICK_REASONS[outcome] + tail, severity="warning")
             return
         self.notify("new browser chat opened")
-        # Same beat as the auto-copy flow: let the click register before focus
-        # moves away, then bring the user back to AgentClip.
-        if self._own_window is not None:
-            await asyncio.sleep(0.15)
-            await self._snap_focus_back()
+        # Same beat as the auto-copy flow's, and the same one call:
+        # ``snap_back_after_click`` lets the click register before focus moves
+        # away, then brings the user back to AgentClip.
+        await self._automation.snap_back_after_click()
         self._reset_after_new_browser_chat(slot)
 
     def _reset_after_new_browser_chat(self, slot: AgentSlot) -> bool:

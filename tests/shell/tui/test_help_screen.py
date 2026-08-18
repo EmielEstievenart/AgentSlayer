@@ -61,6 +61,16 @@ def test_it_names_the_screens_the_app_binds_and_no_stale_ones() -> None:
     assert "browser window" in text.lower()
 
 
+def test_it_describes_what_the_arrows_do_at_the_chat_box() -> None:
+    """Up/Down mean three things in that box depending on what is on screen
+    (§3.3d), and the first/last-line rule is the half a user would otherwise
+    only discover by pressing one in the middle of a pasted traceback."""
+    text = help_text()
+    assert "Up/Down walk back through what you have already sent this run" in text
+    assert "FIRST/LAST line" in text
+    assert "half-way through typing" in text  # the draft comes back
+
+
 def test_it_describes_the_autocomplete_rules_that_decide_what_enter_does() -> None:
     """The popup changes what Enter means, which is the one thing a user cannot
     work out by looking at the box."""

@@ -29,6 +29,7 @@ import pytest
 from agentclip.config import (
     DEFAULT_GUI_THEME,
     VALID_GUI_THEMES,
+    VALID_THEMES,
     load_config,
     save_gui_theme,
 )
@@ -37,6 +38,11 @@ from agentclip.shell.app.commands import COMMANDS
 from agentclip.shell.gui.bridge import JsApi, JsCalls
 from agentclip.shell.gui.runner import GuiRunner
 from agentclip.shell.gui.view import QUIT_BODY, QUIT_TITLE, THEME_CHOICES, GuiView
+
+# The one cross-shell import in this file, and it earns its place: the send
+# history's cap is a number both shells have to agree on, so it is asserted
+# equal rather than described twice (tui.md §3.3d).
+from agentclip.shell.tui.widgets.composer import HISTORY_LIMIT
 from tests.shell.gui.conftest import Harness, settle
 from tests.shell.gui.test_view import ControllerSpy, session_view, snapshot
 
@@ -144,10 +150,11 @@ def test_the_help_sheet_is_rendered_from_the_key_table() -> None:
 def test_the_table_carries_every_binding_the_brief_lists(key: str) -> None:
     """§5.1's table, minus what a page has no equivalent for.
 
-    Absent on purpose: ``ctrl+p`` (Textual's command palette - there is no
-    palette here), ``ctrl+s`` (``ctrl+enter`` is this shell's one send chord,
-    and it IS in the table), and the composer-local and modal-local rows, which
-    belong to their own handlers.
+    Absent on purpose: ``ctrl+p`` (there is no palette here, and the TUI's
+    Textual default is switched off - the composer's slash commands are the one
+    command surface in both shells), ``ctrl+s`` (``ctrl+enter`` is this shell's
+    one send chord, and it IS in the table), and the composer-local and
+    modal-local rows, which belong to their own handlers.
     """
     assert any(f'"{key}"' in entry["keys"] for entry in key_entries())
 
@@ -260,6 +267,109 @@ def test_the_popup_cannot_take_focus() -> None:
     assert "<button" not in paint and "tabindex" not in paint
 
 
+# == the send history the arrows walk ==========================================
+# tui.md §3.3d, and the same rules on this side. Structure, not formatting: what
+# these pin is the ORDER the three claimants on up/down are tried in, and the
+# guards that keep the middle one from ever being skipped.
+
+
+def composer_key_body() -> str:
+    fn = APP_JS[APP_JS.index("function onComposerKey(ev)") :]
+    return fn[: fn.index("\n  }\n")]
+
+
+def test_the_arrows_reach_the_history_only_after_the_popup_has_refused() -> None:
+    """Three claimants on one pair of keys, and the order is the whole design:
+    the open popup, then the textarea's caret, then the history. A history
+    branch above the popup's would make the arrows unable to pick a command."""
+    fn = composer_key_body()
+    assert fn.index("popupOpen()") < fn.index("sentOlder(value)")
+    # ...and still ahead of Enter, so the send branch is untouched by any of it.
+    assert fn.index("sentOlder(value)") < fn.index('ev.key === "Enter" && !ev.shiftKey')
+
+
+def test_the_arrows_recall_only_from_the_first_and_last_line() -> None:
+    """Otherwise a pasted traceback stops being navigable: one press in the
+    middle of it would replace the whole box. `↑` needs no newline before the
+    caret, `↓` none after it - which on a one-line box is always true, so it
+    behaves like every other chat client with no rule to learn."""
+    fn = composer_key_body()
+    assert 'value.slice(0, from).indexOf("\\n") === -1' in fn
+    assert 'value.slice(to).indexOf("\\n") === -1' in fn
+    # A live selection is excluded outright: there the arrows are how a
+    # selection is grown, and there is no caret to be "on the first line".
+    assert "var collapsed = from === to;" in fn
+    assert fn.count("collapsed &&") == 2
+    # Modifier-free only, so ctrl/alt/shift+arrow keep whatever they meant.
+    assert "!ev.ctrlKey && !ev.altKey && !ev.metaKey && !ev.shiftKey" in fn
+
+
+def test_declining_the_key_leaves_it_to_the_caret() -> None:
+    """The ends of the walk are not dead keys. `sentOlder`/`sentNewer` answer
+    null at the oldest entry and outside browse mode, and only a non-null answer
+    is preventDefault()ed - so `↓` in a box nobody walked up from is an
+    ordinary caret key, exactly as it is in the TUI."""
+    fn = composer_key_body()
+    assert "if (recalled !== null) {" in fn
+    assert fn.index("if (recalled !== null) {") < fn.index("ev.preventDefault();\n        recallSent")
+
+
+def test_the_one_send_door_is_what_grows_the_history() -> None:
+    """Enter and the Send button meet in `send()`, so that is the only place the
+    list can grow - and the push has to come BEFORE the clear or there is
+    nothing left to remember."""
+    fn = APP_JS[APP_JS.index("function send()") :]
+    fn = fn[: fn.index("\n  }\n")]
+    assert "sentPush(text);" in fn
+    assert fn.index("sentPush(text);") < fn.index('el.composer.value = "";')
+
+
+def test_editing_the_box_ends_the_walk() -> None:
+    """The page's half of `ChatComposer._text_changed`: the one `input` listener
+    that already re-decides the popup also drops browse mode, so what is in the
+    box after a keystroke is the user's draft and the next `↑` starts again from
+    the newest. A recall must not trip it, or it would undo its own position."""
+    boot = APP_JS[APP_JS.index('el.composer.addEventListener("input"') :]
+    boot = boot[: boot.index("});")]
+    assert "if (!recalling) sentReset();" in boot
+    assert "syncPopup();" in boot
+    recall = APP_JS[APP_JS.index("function recallSent(text)") :]
+    recall = recall[: recall.index("\n  }\n")]
+    assert "recalling = true;" in recall and "recalling = false;" in recall
+    assert "el.composer.selectionStart = el.composer.selectionEnd = text.length;" in recall
+
+
+def test_the_two_shells_walk_the_same_history_by_the_same_rules() -> None:
+    """These arrows are muscle memory; two shells that disagreed about them
+    would be worse than one shell that lacked them. The cap is asserted equal
+    rather than described, because it is the one rule that is a number."""
+    assert "var SENT_MAX = " + str(HISTORY_LIMIT) + ";" in APP_JS
+    fn = APP_JS[APP_JS.index("function sentPush(text)") :]
+    fn = fn[: fn.index("\n  }\n")]
+    assert "if (!text.trim()) return;" in fn  # blanks are not sends
+    assert "sent[sent.length - 1] === text" in fn  # consecutive duplicates collapse
+    assert "sent.slice(-SENT_MAX)" in fn
+    assert "sentReset();" in fn  # a send ends the walk
+    newer = APP_JS[APP_JS.index("function sentNewer()") :]
+    newer = newer[: newer.index("\n  }\n")]
+    assert "var draft = sentDraft;" in newer  # past the newest, the draft comes back
+
+
+def test_the_history_does_not_shadow_the_windows_own() -> None:
+    """`window.history` is a real API and `var history = []` inside this closure
+    would silently take it away from everything in the file."""
+    assert not re.search(r"\bvar history\b", APP_JS)
+
+
+def test_the_help_sheet_says_what_the_arrows_do() -> None:
+    """A binding a user cannot discover is a binding that does not exist, and
+    the composer's own keys are exempt from the KEYS table precisely because the
+    sheet describes them as prose (`test_every_key_the_page_binds...`) - so this
+    is the only thing standing between the feature and being invisible."""
+    assert "Up/Down walk back through what you have already sent this " in APP_JS
+    assert "FIRST/LAST line of " in APP_JS
+
+
 # == the Esc chain =============================================================
 
 
@@ -342,16 +452,35 @@ def test_help_settings_payload_and_the_prompts_share_one_modal() -> None:
 # == settings (F4) =============================================================
 
 
-def test_f4_offers_what_the_tuis_settings_screen_offers_and_no_more() -> None:
+def test_f4_is_an_appearance_picker_and_nothing_more_just_as_the_tuis_is() -> None:
     """§2.2: the TUI's SettingsScreen is a theme picker with a single
     "Appearance" tab. It does not touch [notify] bell/toast - those are
-    file-only in both shells - so neither does this one."""
-    assert [value for value, _ in THEME_CHOICES] == ["dark", "light"]
+    file-only in both shells - so neither does this one.
+
+    What the two screens do NOT have in common is the list itself; that is the
+    test below. All this one pins about the list is that the picker offers every
+    palette ``[gui] theme`` will accept and no name it would reject, because a
+    radio the config layer refuses is a button that does nothing.
+    """
     assert set(value for value, _ in THEME_CHOICES) == set(VALID_GUI_THEMES)
+    assert THEME_CHOICES[0][0] == DEFAULT_GUI_THEME  # what an unset config wears, first
     fn = APP_JS[APP_JS.index("function openSettings()") :]
     fn = fn[: fn.index("\n  }\n")]
     assert "bell" not in fn and "toast" not in fn
     assert 'input.type = "radio"' in fn
+
+
+def test_the_two_shells_share_exactly_the_claude_pair_of_theme_names() -> None:
+    """The overlap is a decision, not a leak. `/theme claude-dark` has to mean
+    the same thing whichever shell it is typed in, so those two names live in
+    both vocabularies and this shell paints them as CSS blocks. Everything else
+    stays put - `dark`/`light` are this shell's and the `textual-*` pair is the
+    TUI's - which is what keeps `[gui] theme` and `[general] theme` from
+    collapsing into one setting with two spellings."""
+    shared = VALID_GUI_THEMES & VALID_THEMES
+    assert shared == {"claude-warm", "claude-dark"}
+    this_shells_own = VALID_GUI_THEMES - VALID_THEMES
+    assert this_shells_own == {"dark", "light"}
 
 
 def test_the_theme_crosses_at_start_and_after_a_reload(harness: Harness) -> None:
@@ -359,7 +488,7 @@ def test_the_theme_crosses_at_start_and_after_a_reload(harness: Harness) -> None
     harness.view.start()
     event = harness.flush().last("settings")
     assert event["theme"] == DEFAULT_GUI_THEME
-    assert [row["value"] for row in event["themes"]] == ["dark", "light"]
+    assert [row["value"] for row in event["themes"]] == [value for value, _ in THEME_CHOICES]
     harness.recorder.clear()
     harness.view.page_ready()
     assert harness.flush().last("settings")["theme"] == DEFAULT_GUI_THEME
@@ -429,19 +558,136 @@ def test_an_unknown_theme_name_from_the_page_is_ignored(harness: Harness) -> Non
     assert harness.view._config.gui.theme == DEFAULT_GUI_THEME
 
 
+# -- the other door: /theme ----------------------------------------------------
+# F4's picker and the chat command are two ways onto one setting, and they share
+# the mechanics rather than the message: the picker says "theme saved" because
+# the click itself said nothing, while `/theme`'s toast is the controller's, so
+# the seam is silent on success and a command says one thing once.
+
+
+def test_the_theme_seam_offers_this_shells_own_palettes(harness: Harness) -> None:
+    """The reason the choices are a port question at all: the two shells' lists
+    are neither the same nor disjoint - they share the Claude pair and nothing
+    else - so only the view can say what a name means here."""
+    assert harness.view.theme_choices() == tuple(value for value, _ in THEME_CHOICES)
+    assert harness.view.current_theme() == DEFAULT_GUI_THEME
+
+
+def test_a_theme_applied_from_a_chat_command_saves_and_repaints(
+    harness: Harness, tmp_path: Path, project: Path
+) -> None:
+    """The page paints only what the ``settings`` event says, so re-pushing it
+    is how a theme changed from Python reaches the body class."""
+    config_path = tmp_path / "global.toml"
+    harness.view._global_config_path = config_path
+
+    harness.view.apply_theme("light")
+
+    assert harness.view.current_theme() == "light"
+    assert harness.flush().last("settings")["theme"] == "light"
+    assert load_config(project, global_config_path=config_path).gui.theme == "light"
+    assert harness.recorder.of_type("toast") == []  # the controller raises the one toast
+
+
+def test_a_claude_palette_makes_the_same_round_trip_as_the_originals(
+    harness: Harness, tmp_path: Path, project: Path
+) -> None:
+    """The name the two shells share, through both of this shell's doors. It is
+    worth its own test because it is the one that could have been half-added -
+    a CSS block with no config name, or a config name with no block - and
+    neither half fails loudly on its own."""
+    config_path = tmp_path / "global.toml"
+    harness.view._global_config_path = config_path
+
+    api_of(harness).theme("claude-dark")  # F4's radio
+    assert harness.flush().last("settings")["theme"] == "claude-dark"
+
+    harness.view.apply_theme("claude-warm")  # /theme, the other door
+    assert harness.view.current_theme() == "claude-warm"
+    assert harness.flush().last("settings")["theme"] == "claude-warm"
+
+    reloaded = load_config(project, global_config_path=config_path)
+    assert reloaded.gui.theme == "claude-warm"
+    assert not reloaded.warnings  # the TUI's name, accepted by the GUI's table
+
+
+def test_the_settings_event_is_what_repaints_the_page() -> None:
+    """The other half of the above, on the page's side: a Python-initiated
+    re-push has to wear the theme, not merely refresh the radio buttons."""
+    fn = APP_JS[APP_JS.index('case "settings":') :]
+    fn = fn[: fn.index("return;")]
+    assert "applyTheme(event.theme)" in fn
+
+
+def _palette(selector: str) -> str:
+    """One palette block's body, from its selector to its closing brace.
+
+    Refusing a second ``{`` is the load-bearing half: a palette that lost its
+    closing brace slices clean through into the NEXT block here, and every
+    "does it define --x" question then answers yes with the neighbour's
+    values - which is exactly how an unclosed ``theme-light`` once sailed past
+    this file while the browser dropped half the palettes on the floor.
+    """
+    css = (ASSETS / "app.css").read_text(encoding="utf-8")
+    block = css[css.index(selector + " {") :]
+    body = block[: block.index("\n}")]
+    assert body.count("{") == 1, selector + " is not closed and ran into the next block"
+    return body
+
+
 def test_the_page_paints_a_real_light_palette() -> None:
     """"Ship dark-only and label it" was the fallback; this is the other branch,
     so the variables have to actually exist rather than the class being inert."""
-    css = (ASSETS / "app.css").read_text(encoding="utf-8")
-    light = css[css.index("body.theme-light {") :]
-    light = light[: light.index("\n}")]
+    light = _palette("body.theme-light")
     for token in ("--bg", "--bg-raised", "--line", "--text", "--text-dim",
                   "--accent", "--ok", "--warn", "--err", "--on-solid"):
         assert token + ":" in light, token
-    # Nothing below the palette may hard-code a colour, or the theme is a lie.
+    # Nothing below the palette region may hard-code a colour, or the theme is a
+    # lie - which is also what makes a new palette one block and no edits.
+    css = (ASSETS / "app.css").read_text(encoding="utf-8")
     body = css[css.index("\n* {") :]
     assert not re.search(r":\s*#[0-9a-fA-F]{3,8}\b", body), "a colour escaped the palette"
-    assert 'classList.toggle("theme-light"' in APP_JS
+
+
+def test_every_palette_answers_the_same_questions_as_the_light_one() -> None:
+    """A theme is a full set of values, not an override of the handful somebody
+    remembered: a block that skips one name inherits :root's dark value for it,
+    which is how a light palette ends up with one black rectangle in it. The
+    light block is the yardstick because it was written first, by hand, against
+    the whole file."""
+    wanted = set(re.findall(r"(--[a-z-]+):", _palette("body.theme-light")))
+    assert len(wanted) >= 16  # the yardstick is a whole palette, not a stub
+    for value, _label in THEME_CHOICES:
+        if value == DEFAULT_GUI_THEME:
+            continue  # the default IS :root; it has no block by design
+        block = _palette("body.theme-" + value)
+        assert set(re.findall(r"(--[a-z-]+):", block)) == wanted, value
+
+
+def test_the_default_palette_is_root_itself_and_wears_no_class() -> None:
+    """Otherwise "no class" and "theme-dark" are two ways to be the same thing,
+    and the CSS has to keep both of them right."""
+    css = (ASSETS / "app.css").read_text(encoding="utf-8")
+    assert "body.theme-" + DEFAULT_GUI_THEME + " {" not in css
+    fn = APP_JS[APP_JS.index("function applyTheme(name)") :]
+    fn = fn[: fn.index("\n  }\n")]
+    assert "theme !== THEME_DEFAULT" in fn
+
+
+def test_applying_a_theme_swaps_one_class_and_leaves_the_others_alone() -> None:
+    """N palettes, not two: the previous `theme-*` class comes off and the new
+    one goes on, validated against the list Python pushed rather than a literal
+    in here - so the page needs no edit when a palette is added. `yolo` is a
+    body class too, and must survive a retheme."""
+    fn = APP_JS[APP_JS.index("function applyTheme(name)") :]
+    fn = fn[: fn.index("\n  }\n")]
+    assert "themeChoices" in fn  # the known set is Python's, with THEME_NAMES as the floor
+    assert "THEME_NAMES" in fn
+    assert 'indexOf("theme-") === 0' in fn  # only the theme classes are stripped
+    assert "classList.remove" in fn and 'classList.add("theme-" + theme)' in fn
+    # ...which is what the prefix test is FOR: the yolo banner is a body class
+    # as well, set from somewhere else entirely, and a retheme must not eat it.
+    assert 'classList.toggle("yolo"' in APP_JS
 
 
 # == the remaining keys ========================================================

@@ -8,7 +8,13 @@ those two events:
   accepted the input, never that the browser has finished taking focus, and a
   Ctrl+V that overtakes the activation is delivered to whatever had focus
   before. So the paste waits a beat, and it waits it on the event loop
-  (``asyncio.sleep``) rather than blocking the UI thread;
+  (``asyncio.sleep``) rather than blocking the UI thread. In front of that beat
+  there is now an activation POLL as well (``_await_browser_activation``,
+  ``main_mod._ACTIVATION_POLL_S``, which the directory's conftest shrinks to
+  nothing) - the decisions it makes belong to the pure-unit suite next door
+  (tests/driver/automation/test_delivery.py); what is pinned HERE is the flat
+  beat, which is the half no window handle can report on and the half whose
+  whole point is that it is a real gap on a real event loop;
 * the RETRY - when the paste never landed anyway, the sidebar offers
   ``#retry-insert-btn`` under its blinking nag, and pressing it re-runs the very
   same sequence against the payload the failed attempt was carrying.

@@ -399,7 +399,7 @@ line against `main.py:726-786` (BINDINGS), `main.py:1302-1365`
 | `F8` | MainScreen, priority, show=False | show/hide harness decision log pane (same call as `/log`) | `action_toggle_harness_log` |
 | `ctrl+x` | MainScreen, priority, dynamic (`executing`) | cancel tool calls running now (turn still reports back) | `action_cancel_execution` → `controller.cancel_execution()` |
 | `ctrl+o` | MainScreen, priority, show=False, hidden outright unless `executing` | show/hide the running command's live output | `action_toggle_run_output` |
-| `ctrl+p` | global, Textual default | command palette (every action mirrored) | Textual native |
+| `ctrl+p` | global (App) | **nothing — the palette is disabled** (`ENABLE_COMMAND_PALETTE = False`); the composer's slash commands are the one command surface, in both shells | Textual native, switched off |
 | `ctrl+q` | global, Textual default | quit; ConfirmScreen if mid-turn | `AgentClipApp.action_quit` |
 | `shift+tab` | MainScreen, priority, show=False, **no `check_action`**, works pre-session and mid-turn | cycle permission mode `ask → plan → unattended → ask` (overrides Textual's own `Screen` binding for this key) | `action_cycle_permission_mode` → `controller.cycle_permission_mode()` |
 | `ctrl+s` / `ctrl+enter` | MainScreen, priority, show=False | send composer without focusing it | `action_submit_composer` |
@@ -446,6 +446,7 @@ top of the list can disable every approval gate):
 | `/mcp` | — | list configured MCP servers | no |
 | `/armed` | `[on\|off]` | ARMED/DISARMED, same as F5 | no |
 | `/mode` | `[plan\|ask\|unattended]` | set permission mode; bare `/mode` reports | no |
+| `/theme` | `[name]` | set the appearance; bare `/theme` lists the themes and marks the current one. Same setting F4 picks, and the names are the **shell's** (four Textual themes in the TUI, two CSS palettes in the GUI) — the controller reads them back over `ChatView.theme_choices` rather than knowing any | no |
 | `/yolo` | `[on\|off]` | toggle auto-approve-everything | no (session-scoped policy) |
 
 Precedence rule (repeated for emphasis — this is the parity contract's
@@ -638,7 +639,16 @@ dimmed keys in `Footer` for discoverability.")
   toolbar/menu needs its own enabled/dimmed/hidden logic, but should
   preserve the **three states**, not collapse dimmed and hidden into one
   "disabled" look — the doc leans on dimmed to mean "coming soon" and
-  hidden to mean "never, in this mode."
+  hidden to mean "never, in this mode." *(Done, in the GUI shell's key
+  hint strip above its status bar: `KEYS[].foot` is the `show=` flag and
+  `KEYS[].avail` returns `"on"`/`"dim"`/`"off"` — `check_action`'s three
+  answers by another name, computed from the `state`/`status`/`run`
+  pushes the page already gets. Where the page cannot see a gate at all
+  — `r`'s "this service has no extra instructions" — the key is shown
+  normal and the refusal stays a toast; `docs/design/gui.md §3` records
+  that as the remaining divergence. A GUI has one state a Textual footer
+  does not: a focused text box swallows the bare letters, so those rows
+  dim while the caret is in a box.)*
 
 - **Theme system.** `SettingsScreen` previews live via
   `self.app.theme = ...`, a Textual `App`-level reactive that

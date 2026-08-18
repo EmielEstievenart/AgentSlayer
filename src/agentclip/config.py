@@ -112,12 +112,15 @@ VALID_THEMES = frozenset({"textual-light", "textual-dark", "claude-warm", "claud
 DEFAULT_THEME = "textual-dark"
 
 # The GUI shell's appearance, in its OWN table. `[general] theme` names a
-# Textual theme and is validated against VALID_THEMES above; the pywebview
-# shell's themes are CSS palettes with no Textual equivalent, so writing one of
-# these names into that key would make every TUI launch warn and reset it. Two
-# shells, two vocabularies, one file - and `[gui]` is where this shell's answers
-# go (docs/design/gui.md section 3).
-VALID_GUI_THEMES = frozenset({"dark", "light"})
+# Textual theme; this one names a CSS palette, and the two tables stay separate
+# because "dark"/"light" written into that key would make every TUI launch warn
+# and reset it. The overlap is deliberate rather than accidental: the claude pair
+# exists in BOTH vocabularies on purpose, so `/theme claude-dark` means the same
+# thing whichever shell it is typed in - the same name, each shell rendering it
+# in its own medium (a Textual theme there, the palette block in
+# assets/app.css here). Two shells, two vocabularies, one file - and `[gui]` is
+# where this shell's answers go (docs/design/gui.md section 3).
+VALID_GUI_THEMES = frozenset({"dark", "light", "claude-warm", "claude-dark"})
 DEFAULT_GUI_THEME = "dark"
 
 

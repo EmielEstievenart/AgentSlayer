@@ -48,6 +48,7 @@ def test_the_registry_is_the_documented_commands() -> None:
         "mcp",
         "armed",
         "mode",
+        "theme",
         "yolo",
     ]
     assert lookup("yolo") is not None and lookup("yolo").arg == "[on|off]"  # type: ignore[union-attr]
@@ -98,7 +99,7 @@ def test_unknown_command_hint_lists_every_command() -> None:
     for command in COMMANDS:
         assert command.slash in hint
     # An English list, not a dump.
-    assert hint == "/help, /new, /abort, /identify, /log, /mcp, /armed, /mode, or /yolo"
+    assert hint == "/help, /new, /abort, /identify, /log, /mcp, /armed, /mode, /theme, or /yolo"
 
 
 def test_identify_dispatches_to_the_view_with_no_session_of_any_kind(
@@ -434,6 +435,113 @@ async def test_the_mode_survives_a_new_session(
     assert controller._snap is not None and controller._snap.mode == "plan"
 
 
+# -- /theme ---------------------------------------------------------------------
+# The one command whose vocabulary the controller does not know: a theme name
+# means something in a shell, not in the app layer (Textual themes in the TUI,
+# CSS palettes in the GUI - overlapping by the Claude pair and by nothing else),
+# so every one of these goes through the port - the choices are read back before
+# anything is applied.
+
+
+async def test_bare_theme_lists_the_choices_and_marks_the_current_one(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """`/help`'s shape rather than `/mode`'s: the names are not guessable and
+    differ per shell, so the answer is a transcript note worth keeping rather
+    than a toast that is gone in eight seconds."""
+    view.theme = "claude-warm"
+
+    controller.submit_message("/theme")
+    await settle(view)
+
+    note = next(text for text in view.notes() if text.startswith("themes:"))
+    for name in view.themes:
+        assert name in note
+    assert "claude-warm (current)" in note
+    assert "/theme <name> to switch" in note
+    assert view.themes_applied == []  # a listing changes nothing
+
+
+async def test_bare_theme_needs_no_session_of_any_kind(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """`/armed`'s rule, minus the urgency: appearance belongs to the machine the
+    user is sitting at, not to a conversation."""
+    controller.submit_message("/theme")
+    await settle(view)
+
+    assert view.toasts() == []  # no refusal, no "start a session first"
+
+
+def test_theme_with_a_valid_name_applies_and_persists_it(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """One port call, which is the whole change - the view wears it AND
+    remembers it, because the two shells save into two different config
+    tables and only they know which."""
+    controller.submit_message("/theme claude-dark")
+
+    assert view.themes_applied == ["claude-dark"]
+    assert view.current_theme() == "claude-dark"
+    assert view.toasts() == ["theme: claude-dark"]  # said once
+
+
+def test_theme_reads_the_name_the_user_typed(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    controller.submit_message("/theme  CLAUDE-WARM ")
+
+    assert view.themes_applied == ["claude-warm"]
+
+
+def test_setting_the_same_theme_again_is_idempotent(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    controller.submit_message("/theme claude-dark")
+    controller.submit_message("/theme claude-dark")
+
+    assert view.themes_applied == ["claude-dark", "claude-dark"]
+    assert view.current_theme() == "claude-dark"
+
+
+def test_an_unknown_theme_changes_nothing_and_says_so(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """`/armed`'s rule that a typo is never read as an instruction - and the
+    refusal names the ones that would have worked, since the user has no other
+    way to find them out."""
+    controller.submit_message("/theme solarized")
+
+    assert view.themes_applied == []
+    assert view.current_theme() == "textual-dark"
+    message, severity = view.notifications[-1]
+    assert "unknown theme: solarized" in message
+    assert severity == "warning"
+    for name in view.themes:
+        assert name in message
+
+
+async def test_the_theme_names_are_the_views_not_the_controllers(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """A list shaped like the GUI's through the same controller. The two shells
+    overlap - ``claude-dark`` is a real name in both - but neither list is the
+    other's, and ``textual-dark`` is the TUI's alone. Nothing in the app layer
+    may hold a theme name it did not read back from the port, which is why the
+    refusal below has to come from the VIEW's list and not from a set of names
+    the controller knows."""
+    view.themes = ("dark", "light", "claude-warm", "claude-dark")
+    view.theme = "dark"
+
+    controller.submit_message("/theme light")
+    assert view.themes_applied == ["light"]
+
+    controller.submit_message("/theme textual-dark")
+    await settle(view)
+    assert view.themes_applied == ["light"]  # refused, and by the view's list
+    assert any("unknown theme: textual-dark" in message for message in view.toasts())
+
+
 def test_match_prefix_narrows_as_the_user_types() -> None:
     assert match_prefix("/") == COMMANDS  # a bare slash offers everything
     assert [c.name for c in match_prefix("/y")] == ["yolo"]
@@ -442,6 +550,7 @@ def test_match_prefix_narrows_as_the_user_types() -> None:
     assert [c.name for c in match_prefix("/mc")] == ["mcp"]
     assert [c.name for c in match_prefix("/i")] == ["identify"]
     assert [c.name for c in match_prefix("/n")] == ["new"]
+    assert [c.name for c in match_prefix("/t")] == ["theme"]
     assert [c.name for c in match_prefix("/yolo")] == ["yolo"]
     assert [c.name for c in match_prefix("/YO")] == ["yolo"]
 

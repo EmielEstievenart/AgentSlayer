@@ -19,6 +19,7 @@ from pathlib import Path
 from agentclip.cli import make_engine_factory
 from agentclip.config import Config
 from agentclip.driver.clip.base import select_provider
+from agentclip.shell.gui.bridge import JsCalls
 from agentclip.shell.gui.runner import GuiRunner
 from tests.shell.gui.conftest import Recorder
 
@@ -212,6 +213,17 @@ def test_the_js_api_reaches_the_view_through_the_loop(
         assert seen == [("submit", "hello"), ("cancel", "")]
     finally:
         runner.stop()
+
+
+def test_the_runner_answers_every_call_the_js_api_forwards() -> None:
+    """``JsApi`` swallows its own exceptions (a raise there is a click that
+    pywebview logs and drops), so a ``JsCalls`` method the runner forgot to
+    implement fails SILENTLY at runtime - the arrows-that-do-nothing bug. The
+    protocol is satisfied structurally, one marshal per method, and this is the
+    seam where a new method can be declared, forwarded and glued to the view
+    without ever being implemented here."""
+    for name in (n for n in dir(JsCalls) if not n.startswith("_")):
+        assert callable(getattr(GuiRunner, name, None)), name
 
 
 def test_every_key_action_marshals_onto_the_loop_too(

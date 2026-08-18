@@ -29,7 +29,10 @@ from __future__ import annotations
 from enum import Enum
 
 from agentclip.driver.automation.delivery import (
+    ACTIVATION_ATTEMPTS,
+    ACTIVATION_POLL_S,
     PASTE_SETTLE_DELAY,
+    SNAP_BACK_SETTLE_S,
     STREAM_CHUNK_SETTLE_S,
     SUBMIT_SETTLE_S,
 )
@@ -38,6 +41,7 @@ from agentclip.driver.screen.capture import RegionImage, capture_region
 from agentclip.driver.screen.focus import (
     click_region,
     focus_window_verified,
+    foreground_window,
     move_cursor,
     scroll_region,
     send_enter,
@@ -110,6 +114,12 @@ class ScreenOps:
         """Bring a window back, verified and retried (``focus_window_verified``)."""
         return focus_window_verified(handle)
 
+    def foreground_window(self) -> int | None:
+        """Whose window holds the foreground right now, or None (unsupported
+        platform, or mid focus switch). The read the delivery's activation wait
+        is built on: not ours any more means the click's activation landed."""
+        return foreground_window()
+
     def send_paste(self) -> bool:
         """A synthetic Ctrl+V into whatever has focus. Un-aimed on purpose - the
         caller has just clicked the chat box and waited out the activation."""
@@ -176,9 +186,24 @@ class ScreenOps:
     # activation would be a file nobody runs. What each one is FOR is documented
     # where its default lives (agentclip.driver.automation.delivery).
 
+    def activation_attempts(self) -> int:
+        """How many times the delivery asks who holds the foreground before it
+        stops waiting for the browser's activation and pastes anyway."""
+        return ACTIVATION_ATTEMPTS
+
+    def activation_poll(self) -> float:
+        """The beat between two of those askings."""
+        return ACTIVATION_POLL_S
+
     def paste_settle(self) -> float:
-        """How long the focus click is given to take effect before the Ctrl+V."""
+        """How long the focused chat box is given to take a caret before the
+        Ctrl+V - the in-page half of the wait, after the activation half."""
         return PASTE_SETTLE_DELAY
+
+    def snap_back_settle(self) -> float:
+        """How long a click in the browser is given to register before the
+        foreground is handed back to our own window."""
+        return SNAP_BACK_SETTLE_S
 
     def submit_settle(self) -> float:
         """How long the pasted box is given to re-measure before the Enter tap."""

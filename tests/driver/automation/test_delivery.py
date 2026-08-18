@@ -52,6 +52,11 @@ PAYLOAD = "===CLIP:BEGIN=== the outbound ===CLIP:END==="
 # Small enough that a readable payload is several chunks, big enough that a short
 # one is exactly one.
 CHUNK = 12
+# The two window handles the activation wait and the snap back are about: ours
+# (what a shell recorded through ``set_own_window``) and whatever the focus click
+# brought forward.
+OUR_WINDOW = 4242
+BROWSER_WINDOW = 1717
 
 
 def _image(width: int, height: int) -> RegionImage:
@@ -80,6 +85,14 @@ class ScriptedOps(ScreenOps):
         # by the time a delivery returns, a stream has moved on.
         self.pasted: list[str] = []
         self.clipboard: FakeClipboard | None = None
+        # Who the OS says holds the foreground, one reading per ask, the last
+        # one repeating for ever - so a script is written as "ours, ours, then
+        # the browser" and a machine that never hands it over is one entry long.
+        # The browser by default: the click landed, which is the ordinary case.
+        self.foreground: list[int | None] = [BROWSER_WINDOW]
+        self.foreground_reads = 0
+        # Every handle the delivery asked to have brought back, in order.
+        self.focused: list[int] = []
 
     def capture(self, region: ScreenRegion) -> RegionImage:
         return _image(region.width, region.height)
@@ -87,6 +100,18 @@ class ScriptedOps(ScreenOps):
     def click(self, region: ScreenRegion, *, settle_s: float | None = None) -> bool:
         self.events.append("click")
         return self.click_lands
+
+    def foreground_window(self) -> int | None:
+        # Deliberately NOT on ``events``: a read is not something done TO the
+        # machine, and every "what actually happened" assertion in this file
+        # would grow a poll's worth of noise.
+        self.foreground_reads += 1
+        return self.foreground.pop(0) if len(self.foreground) > 1 else self.foreground[0]
+
+    def focus_window(self, handle: int) -> bool:
+        self.events.append("focus")
+        self.focused.append(handle)
+        return True
 
     def send_paste(self) -> bool:
         self.events.append("paste")
@@ -98,7 +123,18 @@ class ScriptedOps(ScreenOps):
         self.events.append("enter")
         return self.enter_lands
 
+    def activation_attempts(self) -> int:
+        # Three rather than the real ten: the budget is a CEILING here, and a
+        # test for "it ran out" only has to spend one.
+        return 3
+
+    def activation_poll(self) -> float:
+        return 0.0
+
     def paste_settle(self) -> float:
+        return 0.0
+
+    def snap_back_settle(self) -> float:
         return 0.0
 
     def submit_settle(self) -> float:
@@ -304,6 +340,67 @@ async def test_disarmed_parks_the_payload_and_touches_nothing(
     assert _flash(view) == (PASTE_FLASH_TEXT, True)
 
 
+# -- waiting for the click's activation ------------------------------------------
+
+
+async def test_the_paste_waits_until_the_foreground_is_no_longer_ours(
+    delivery: AutomationController, ops: ScriptedOps
+) -> None:
+    """The click is an activation REQUEST, granted asynchronously, and a Ctrl+V
+    that overtakes it lands in whatever held focus a moment ago. So the delivery
+    asks the OS who has the foreground until the answer stops being us."""
+    delivery.set_own_window(OUR_WINDOW)
+    ops.foreground = [OUR_WINDOW, OUR_WINDOW, BROWSER_WINDOW]
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.foreground_reads == 3  # asked until the answer changed, then stopped
+    assert ops.events == ["click", "paste"]
+    assert delivery.loop_state is LoopState.WAIT_SEND
+
+
+async def test_a_foreground_that_never_moves_pastes_anyway_once_the_budget_runs_out(
+    delivery: AutomationController, ops: ScriptedOps
+) -> None:
+    """The wait is a ceiling, not a precondition: refusing to deliver a payload
+    that would probably have landed is worse than pasting on a stale reading,
+    and the banner plus the retry button already cover a paste that goes
+    nowhere."""
+    delivery.set_own_window(OUR_WINDOW)
+    ops.foreground = [OUR_WINDOW]  # ...and it stays ours for ever
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.foreground_reads == 3  # the whole budget, and not one ask more
+    assert ops.events == ["click", "paste"]
+    assert delivery.loop_state is LoopState.WAIT_SEND
+
+
+async def test_with_no_window_of_our_own_the_wait_is_skipped_rather_than_spent(
+    delivery: AutomationController, ops: ScriptedOps
+) -> None:
+    """Nothing recorded is nothing to compare the foreground to, so there is no
+    question to answer - and a shell that never called ``set_own_window`` must
+    not pay the whole budget on every delivery for it."""
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.foreground_reads == 0
+    assert ops.events == ["click", "paste"]
+
+
+async def test_a_click_that_never_landed_never_waits_for_an_activation(
+    delivery: AutomationController, ops: ScriptedOps
+) -> None:
+    """No click, no activation to wait for - and nothing to paste into either."""
+    delivery.set_own_window(OUR_WINDOW)
+    ops.click_lands = False
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.foreground_reads == 0
+    assert ops.events == ["click"]
+
+
 # -- the opt-in Enter tap --------------------------------------------------------
 
 
@@ -356,6 +453,71 @@ async def test_a_refused_tap_falls_back_to_asking_for_enter(
     assert delivery.loop_state is LoopState.WAIT_SEND
     assert _flash(view) == (ENTER_FLASH_TEXT, False)
     assert any("auto-submit could not type Enter" in e.text for e in delivery.harness_log)
+    # ...and the send is theirs to make in the browser, so the browser keeps
+    # the focus - a tap that did not take is not an auto-sent delivery.
+    assert "focus" not in ops.events
+
+
+# -- who holds the focus when the delivery is over -------------------------------
+
+
+async def test_an_auto_sent_delivery_hands_the_foreground_back(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+) -> None:
+    """Pasted AND sent leaves the user nothing to do in the browser, so the next
+    thing worth watching is this window's rail - and alt-tabbing back to it by
+    hand is not the user's job."""
+    host.preset = _preset(auto_submit=True)
+    delivery.set_own_window(OUR_WINDOW)
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events == ["click", "paste", "enter", "focus"]
+    assert ops.focused == [OUR_WINDOW]
+
+
+async def test_a_streamed_delivery_that_auto_sent_hands_it_back_too(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+) -> None:
+    """The stream's auto-submit is the same tap on the same flag, so it cannot
+    end up with a different answer to "whose window is this now"."""
+    host.preset = _preset(auto_submit=True, delivery=DELIVERY_STREAM)
+    delivery.set_own_window(OUR_WINDOW)
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events[-2:] == ["enter", "focus"]
+    assert ops.focused == [OUR_WINDOW]
+
+
+async def test_a_paste_still_waiting_on_the_users_enter_leaves_the_browser_focused(
+    delivery: AutomationController, ops: ScriptedOps, view: FakeAutomationView
+) -> None:
+    """">>> PRESS ENTER <<<" is an instruction to act over THERE, and stealing
+    the foreground would make the user click back into the browser to obey a
+    banner that has already stopped being true."""
+    delivery.set_own_window(OUR_WINDOW)
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert _flash(view) == (ENTER_FLASH_TEXT, False)
+    assert "focus" not in ops.events
+    assert ops.focused == []
+
+
+async def test_a_paste_that_never_landed_leaves_the_browser_focused(
+    delivery: AutomationController, ops: ScriptedOps, view: FakeAutomationView
+) -> None:
+    """Same rule, harder case: the banner is asking for a Ctrl+V in the chat
+    box, which is the one window this must not take the focus away from."""
+    delivery.set_own_window(OUR_WINDOW)
+    ops.paste_lands = False
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert _flash(view) == (PASTE_FLASH_TEXT, True)
+    assert "focus" not in ops.events
+    assert ops.focused == []
 
 
 # -- burst or stream -------------------------------------------------------------

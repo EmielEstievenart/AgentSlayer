@@ -56,6 +56,20 @@
   var gateOpen = false;
   var gateAlwaysOffered = false;
   var rejectOpen = false;
+  // What the last `state`, `status` and `run` pushes said, remembered because
+  // the key hint footer has to answer "would this key fire right now" BETWEEN
+  // events - which is the question MainScreen.check_action answers on the other
+  // side, out of exactly these facts. Nothing else reads them: the page still
+  // paints only what it is told, and this is that telling, kept.
+  var live = {
+    sessionActive: false,
+    busy: false,
+    phase: "IDLE",
+    hasOutbound: false,
+    armed: true,
+    provider: "",
+    executing: false
+  };
   var modalId = null;
   var modalKind = null;
   // The page's OWN modals, which ride the same element the Python prompts do
@@ -76,9 +90,37 @@
   // open a leading slash is TEXT, and offering to complete it would be a lie
   // about what Enter is going to do (modals-keys-esc.md 6.1).
   var composerMode = "idle";
+  // What has been SENT from the box this run, oldest first, and where the
+  // arrows currently stand in it (`sentAt === null` is "not browsing", which is
+  // a different state from "standing on the newest": only in the first is
+  // ArrowDown the textarea's key again). `sentDraft` is what was half-typed
+  // when the walk began, handed back by walking down past the newest - which is
+  // what makes an accidental ArrowUp cost nothing.
+  //
+  // NOT called `history`: that name is `window.history`, and a var shadowing it
+  // inside this closure is the sort of thing that works right up until
+  // something in here reaches for a real navigation API.
+  var SENT_MAX = 50; // tui/widgets/composer.py's HISTORY_LIMIT, same reasons
+  var sent = [];
+  var sentAt = null;
+  var sentDraft = "";
+  // Set while WE rewrite the box, so the `input` listener does not read a recall
+  // as the user editing and end the walk on the spot. Assigning `.value` fires
+  // no `input` event in any browser, so today this is belt AND braces - it is
+  // here so that stays a fact about the DOM rather than a load-bearing one.
+  var recalling = false;
   // The appearance, and the choices the settings modal offers. Both are Python's
   // ([gui] theme); this side only wears what it is told.
-  var theme = "dark";
+  //
+  // THEME_NAMES is a FLOOR, not the list: the real one arrives with the first
+  // `settings` event (config.VALID_GUI_THEMES, in the order THEME_CHOICES puts
+  // them) and replaces it, so adding a palette is one Python edit plus one CSS
+  // block and nothing here. It exists for the handful of milliseconds before
+  // that event lands, when a `/theme` echo or a saved theme would otherwise be
+  // validated against an empty list and fall back to the default.
+  var THEME_DEFAULT = "dark";
+  var THEME_NAMES = ["dark", "light", "claude-warm", "claude-dark"];
+  var theme = THEME_DEFAULT;
   var themeChoices = [];
   // tui/widgets/transcript.py's MAX_EVENTS, per WINDOW: a transcript is a
   // reading surface, not an archive, and the whole log is one `l` away.
@@ -655,6 +697,7 @@
     el.gateHint.textContent = event.hint || "press y to approve · n to reject";
     closeReject();
     el.gate.hidden = false;
+    paintKeyHints(); // y/n/a come out of their dim
   }
 
   function hideGate() {
@@ -662,6 +705,7 @@
     gateAlwaysOffered = false;
     closeReject();
     el.gate.hidden = true;
+    paintKeyHints();
   }
 
   function openReject() {
@@ -1029,9 +1073,13 @@
       "Chat box (bottom of the window)",
       "Type a message and press Enter to send it. Shift+Enter inserts a newline " +
         "(the TUI uses Ctrl+J; this is the web convention and a deliberate " +
-        "difference). Esc clears the box and keeps the caret there; Esc on an " +
-        "EMPTY box lets go of it, which is what frees the single-key shortcuts " +
-        "below - press t to type again."
+        "difference). Up/Down walk back through what you have already sent this " +
+        "run, newest first, and Down past the newest hands back whatever you " +
+        "were half-way through typing - but only from the FIRST/LAST line of " +
+        "the box, so in a multi-line message they still move the caret, and the " +
+        "command list gets them first while it is up. Esc clears the box and " +
+        "keeps the caret there; Esc on an EMPTY box lets go of it, which is " +
+        "what frees the single-key shortcuts below - press t to type again."
     ],
     [
       "Chat commands (type in the chat box, leading slash)",
@@ -1158,9 +1206,34 @@
     pageModalClose("Close (esc)");
   }
 
+  /* Wear a palette. One class on <body> per theme, and the DEFAULT wears none
+     at all - `:root` is already that palette, so "no class" and "theme-dark"
+     would be two spellings of one thing and the CSS would have to carry both.
+
+     An unknown name falls back rather than throwing: this runs on an event from
+     Python, and a page that refuses to paint because a config file has a typo in
+     it is worse than a page in the default palette. Python rejects the same name
+     one layer up (`GuiView._persist_theme`), so this is the second net. */
   function applyTheme(name) {
-    theme = name === "light" ? "light" : "dark";
-    document.body.classList.toggle("theme-light", theme === "light");
+    var known = themeChoices.length
+      ? themeChoices.map(function (choice) {
+          return choice.value;
+        })
+      : THEME_NAMES;
+    theme = known.indexOf(name) === -1 ? THEME_DEFAULT : name;
+    // Only the theme classes go: `yolo` is a body class too and is nobody's
+    // business here. Collected before removing, because a live DOMTokenList
+    // shifts under an index that is deleting out of it.
+    var stale = [];
+    for (var i = 0; i < document.body.classList.length; i++) {
+      if (document.body.classList[i].indexOf("theme-") === 0) {
+        stale.push(document.body.classList[i]);
+      }
+    }
+    stale.forEach(function (cls) {
+      document.body.classList.remove(cls);
+    });
+    if (theme !== THEME_DEFAULT) document.body.classList.add("theme-" + theme);
   }
 
   /* == sidebar ==============================================================
@@ -1253,6 +1326,9 @@
   }
 
   function paintStatus(event) {
+    // The provider is here and nowhere else, and it is half of `w`'s "never, in
+    // this mode": in manual-clipboard mode nothing polls the clipboard at all.
+    live.provider = event.provider || "";
     el.statusbar.innerHTML = "";
     (event.segments || []).forEach(function (segment) {
       var node = document.createElement("span");
@@ -1264,6 +1340,11 @@
   }
 
   function paintArmed(armed) {
+    // Both doors into the banner (`status` and `armed`) come through here, so
+    // this is the one place the strip has to be told: while disarmed the
+    // watcher key is gone, not faded.
+    live.armed = Boolean(armed);
+    paintKeyHints();
     el.sideArmed.hidden = Boolean(armed);
     // The wording is the TUI's DISARMED_BANNER_TEXT; it says what stopped,
     // because "disarmed" alone leaves the user wondering whether detection died
@@ -1482,12 +1563,37 @@
       item.className = "svc-kind";
       item.id = "svc-kind-" + kind.kind;
 
+      // The thumbnail is ONE of a stack, so it comes with the two arrows that
+      // walk it. Which variant is showing is the model's state, not this
+      // side's: a press asks, and the answer arrives as the next editor event
+      // like every other press in this modal.
+      var stack = document.createElement("div");
+      stack.className = "svc-variants";
+      var prev = document.createElement("button");
+      prev.type = "button";
+      prev.className = "svc-arrow";
+      prev.textContent = "‹";
+      prev.title = "previous variant";
+      prev.addEventListener("click", function () {
+        api("svc_prev", kind.kind);
+      });
       var thumb = document.createElement("div");
       thumb.className = "svc-thumb";
       var img = document.createElement("img");
       img.alt = kind.label;
       img.hidden = true;
       thumb.appendChild(img);
+      var next = document.createElement("button");
+      next.type = "button";
+      next.className = "svc-arrow";
+      next.textContent = "›";
+      next.title = "next variant";
+      next.addEventListener("click", function () {
+        api("svc_next", kind.kind);
+      });
+      stack.appendChild(prev);
+      stack.appendChild(thumb);
+      stack.appendChild(next);
 
       var text = document.createElement("div");
       text.className = "svc-kind-text";
@@ -1516,11 +1622,18 @@
       actions.appendChild(capture);
       actions.appendChild(clear);
 
-      item.appendChild(thumb);
+      item.appendChild(stack);
       item.appendChild(text);
       item.appendChild(actions);
       el.svcKinds.appendChild(item);
-      svcKinds[kind.kind] = { img: img, status: status, capture: capture, clear: clear };
+      svcKinds[kind.kind] = {
+        img: img,
+        status: status,
+        capture: capture,
+        clear: clear,
+        prev: prev,
+        next: next
+      };
     });
     svcBuilt = true;
   }
@@ -1750,6 +1863,12 @@
       // that explains why (brief §3.3).
       node.capture.disabled = off;
       node.clear.disabled = !kind.can_clear;
+      // Disabled below two variants rather than hidden, like Clear: a row that
+      // grew a pair of arrows the moment a second capture landed would reflow
+      // the column under the pointer.
+      var single = Number(kind.count || 0) < 2;
+      node.prev.disabled = single;
+      node.next.disabled = single;
     });
     el.svcTemplates.textContent = event.templates || "";
     el.svcForget.hidden = !event.show_forget;
@@ -1789,6 +1908,14 @@
     // is up for as long as somebody is configuring a service.
     if (event.composer_enabled && !rejectOpen && !editorOpen && !modalUp()) el.composer.focus();
     syncPopup();
+    // ...and the five facts the key hint strip reads. Kept here rather than in
+    // the footer's own code because this event IS the state: one snapshot, one
+    // place it is unpacked.
+    live.sessionActive = Boolean(event.session_active);
+    live.busy = Boolean(event.busy);
+    live.phase = event.phase || "IDLE";
+    live.hasOutbound = Boolean(event.has_outbound);
+    paintKeyHints();
   }
 
   /* == dispatch ============================================================ */
@@ -1848,6 +1975,10 @@
         runOutput = {};
         streamingCall = null;
         tailOpen = false;
+        // ctrl+x cancels calls that are running THIS INSTANT and nothing else,
+        // so the panel's own lifetime is the hint's.
+        live.executing = Boolean(event.running);
+        paintKeyHints();
         if (event.running) {
           (event.calls || []).forEach(function (call) {
             runRows[call.call_id] = call;
@@ -1901,6 +2032,7 @@
       case "composer_reset":
         el.composer.value = "";
         popupHide();
+        sentReset(); // the box emptied under the walk; there is no draft left to give back
         return;
       case "commands":
         // The slash registry. One push per load, feeding both the popup and the
@@ -1989,22 +2121,35 @@
                and types a question mark in the composer.
        when    optional extra condition (the gate keys)
        what    the help sheet's description
-       section which help block it appears under */
+       section which help block it appears under
+       foot    the KEY HINT FOOTER's short label, and its presence is what puts
+               the row in the strip at all - the TUI's `show=` on a Binding,
+               with the Binding's own wording. Absent on every key the TUI's
+               footer hides for the same reason it does (x, F2, F4, F6-F8,
+               ctrl+o, ctrl+q, ctrl+enter, shift+tab): the strip is one row and
+               the loop's one-key answers are what belongs on it.
+       avail   the footer's three-way state - "on" | "dim" | "off" - which is
+               check_action's True / None / False and nothing else. Absent means
+               "on", except that a row with a `when` is dimmed while it is
+               false, so the gate keys need no second gate written out. */
 
   var KEY_SECTIONS = ["App", "Approval", "Session"];
 
   var KEYS = [
     // -- App ---------------------------------------------------------------
     { keys: ["F1", "?"], on: ["F1", "?"], mods: "", hot: true, section: "App",
+      foot: "help",
       what: "this help", run: function () { openHelp(); } },
     { keys: ["F2"], on: ["F2"], mods: "", hot: true, section: "App",
       what: "service profiles: sizes, what each service LOOKS like, which finish signals it may watch",
       run: function () { api("svc_open"); } },
     { keys: ["F3"], on: ["F3"], mods: "", hot: true, section: "App",
+      foot: "sidebar",
       what: "hide/show the sidebar", run: function () { toggleSidebar(); } },
     { keys: ["F4"], on: ["F4"], mods: "", hot: true, section: "App",
       what: "appearance (theme)", run: function () { openSettings(); } },
     { keys: ["F5"], on: ["F5"], mods: "", hot: true, section: "App",
+      foot: "armed",
       what: "ARM / DISARM the tool (also /armed). Disarmed it still watches and shows everything, but never clicks, pastes or reads your clipboard",
       run: function () { api("armed", null); } },
     { keys: ["F6"], on: ["F6"], mods: "", hot: true, section: "App",
@@ -2025,38 +2170,61 @@
       run: function () { api("quit"); } },
 
     // -- Approval ----------------------------------------------------------
+    // Dimmed rather than dropped with no gate up, which is check_action's
+    // `None`: the keys come back the moment a call needs a decision, and a
+    // strip that lost three entries and grew them again would move the rest.
     { keys: ["y"], on: ["y"], mods: "", section: "Approval", when: gateIsOpen,
+      foot: "approve",
       what: "approve the gated call", run: function () { api("decide", "approve", ""); } },
     { keys: ["n"], on: ["n"], mods: "", section: "Approval", when: gateIsOpen,
+      foot: "reject",
       what: "reject it (a reason is optional)", run: function () { openReject(); } },
     { keys: ["a"], on: ["a"], mods: "", section: "Approval", when: alwaysOffered,
+      foot: "auto-edits",
       what: "approve and stop asking - auto-accept edits, or always allow this pattern",
       run: function () { api("decide", "approve_always", ""); } },
 
     // -- Session -----------------------------------------------------------
-    { keys: ["u"], on: ["u"], mods: "", section: "Session",
+    { keys: ["u"], on: ["u"], mods: "", section: "Session", avail: availFloor,
+      foot: "undo",
       what: "undo the last turn (confirm first; a revert notice is copied for the model)",
       run: function () { api("undo"); } },
-    { keys: ["c"], on: ["c"], mods: "", section: "Session",
+    { keys: ["c"], on: ["c"], mods: "", section: "Session", avail: availOutbound,
+      // Two words longer than every other label, and they buy the only thing a
+      // footer can say about a double tap: that there IS one. The TUI's own
+      // wording, for the same reason.
+      foot: "re-copy · cc pastes",
       what: "re-copy the last outbound payload; press c TWICE quickly and it is pasted into the chat as well",
       run: function () { api("recopy"); } },
-    { keys: ["i"], on: ["i"], mods: "", section: "Session",
+    { keys: ["i"], on: ["i"], mods: "", section: "Session", avail: availIngest,
+      foot: "ingest",
       what: "force-ingest the clipboard now", run: function () { api("ingest"); } },
-    { keys: ["r"], on: ["r"], mods: "", section: "Session",
+    // The one row whose HIDDEN state this side cannot see: the TUI drops `r`
+    // outright on a service with nothing to re-inject, and whether this service
+    // carries extra instructions is not on any push the page receives. So it is
+    // shown, and the refusal stays a toast from Python - the divergence gui.md
+    // §3 records, now down to one key instead of three.
+    { keys: ["r"], on: ["r"], mods: "", section: "Session", avail: availSession,
+      foot: "re-instruct",
       what: "re-send this service's extra instructions with the next payload (set them with F2)",
       run: function () { api("reinstruct"); } },
-    { keys: ["w"], on: ["w"], mods: "", section: "Session",
+    { keys: ["w"], on: ["w"], mods: "", section: "Session", avail: availWatch,
+      foot: "watcher",
       what: "pause/resume the clipboard watcher", run: function () { api("watch"); } },
-    { keys: ["t"], on: ["t"], mods: "", section: "Session",
+    { keys: ["t"], on: ["t"], mods: "", section: "Session", avail: availComposer,
+      foot: "type message",
       what: "jump back to the chat box", run: focusComposer },
-    { keys: ["e"], on: ["e"], mods: "", section: "Session",
+    { keys: ["e"], on: ["e"], mods: "", section: "Session", avail: availFloor,
+      foot: "summary",
       what: "end session / show the summary", run: function () { api("end_session"); } },
-    { keys: ["l"], on: ["l"], mods: "", section: "Session",
+    { keys: ["l"], on: ["l"], mods: "", section: "Session", avail: availSession,
+      foot: "export log",
       what: "export the whole chat log to a file (raw blocks and payloads, for debugging)",
       run: function () { api("export_log"); } },
     { keys: ["x"], on: ["x"], mods: "", section: "Session",
       what: "expand/collapse the last collapsed output", run: function () { toggleLastBlock(); } },
     { keys: ["ctrl+x"], on: ["x", "X"], mods: "ctrl", hot: true, section: "Session",
+      avail: availExecuting, foot: "cancel run",
       what: "cancel the tool calls running now. The turn still ends cleanly and the model is told",
       run: function () { api("cancel"); } },
     { keys: ["ctrl+o"], on: ["o", "O"], mods: "ctrl", hot: true, section: "Session",
@@ -2070,6 +2238,67 @@
 
   function alwaysOffered() {
     return gateOpen && gateAlwaysOffered;
+  }
+
+  /* == the footer's three states ============================================
+     MainScreen.check_action, key for key, out of the pushes this page already
+     receives (`state`, `status`, `run`) - which is why none of these reach for
+     anything new over the bridge. The three answers are the brief's
+     (modals-keys-esc.md §6.6 / §7):
+
+       "on"  - it fires now
+       "dim" - it does not, but it WILL: a turn has to finish, a gate has to
+               open, a session has to start. Shown, faded.
+       "off" - it never can, in this mode. Gone from the strip entirely.
+
+     Nothing here DECIDES anything: every one of these keys is gated again on
+     the Python side, where the whole truth is, and refuses out loud when it is
+     pressed anyway. This is a cheatsheet that keeps up. */
+
+  // `u` and `e`: a live session, no turn in flight, and the floor back with the
+  // user - the summary is a report on a settled session, and undo cannot walk
+  // back a turn that is still being written.
+  function availFloor() {
+    var back =
+      live.sessionActive &&
+      !live.busy &&
+      (live.phase === "AWAITING_REPLY" || live.phase === "DONE");
+    return back ? "on" : "dim";
+  }
+
+  function availSession() {
+    return live.sessionActive ? "on" : "dim";
+  }
+
+  function availOutbound() {
+    return live.hasOutbound ? "on" : "dim";
+  }
+
+  // `i` only parses in AWAITING_REPLY: everywhere else there is no reply for
+  // the clipboard to be.
+  function availIngest() {
+    var ok = live.sessionActive && !live.busy && live.phase === "AWAITING_REPLY";
+    return ok ? "on" : "dim";
+  }
+
+  // `w` is the one key with a real "never, in this mode": in manual-clipboard
+  // mode nothing polls, and while disarmed nothing may - so the key is dropped
+  // rather than faded, because it is not coming back until something else
+  // changes (F5, or the provider). The DISARMED badge and banner say why.
+  function availWatch() {
+    if (live.provider === "manual" || !live.armed) return "off";
+    return availSession();
+  }
+
+  // `t`, against the composer's own disabled flag - which is Python's
+  // composed answer to "may the user type right now" (GuiView._composer_mode),
+  // and so a better gate than re-deriving one here.
+  function availComposer() {
+    return el.composer && !el.composer.disabled ? "on" : "dim";
+  }
+
+  function availExecuting() {
+    return live.executing ? "on" : "dim";
   }
 
   // `t`. Page-side, with no controller behind it, exactly like F3's sidebar:
@@ -2111,6 +2340,135 @@
     return false;
   }
 
+  /* == the key hint footer ===================================================
+     The TUI's stock Footer, painted from the SAME table the dispatcher reads
+     and the help sheet renders - so this strip cannot advertise a key that does
+     not exist, and a key added to the table shows up here by existing. Which
+     rows it carries is the table's `foot`, which is the TUI's `show=` on a
+     Binding; what state each one is in is `avail`, which is check_action's
+     three-way answer (above).
+
+     F1's sheet is still where a key is EXPLAINED - a sentence per row does not
+     fit in a strip - and this is where it is remembered. */
+
+  // Built once. The rows never change; only their state does, and rebuilding a
+  // row of spans several times a turn would be a repaint for nothing.
+  var footRows = [];
+
+  function buildKeyHints() {
+    footRows = [];
+    el.keyhints.innerHTML = "";
+    KEYS.forEach(function (entry) {
+      if (!entry.foot) return;
+      var node = document.createElement("span");
+      node.className = "kh";
+      var key = document.createElement("b");
+      key.className = "kh-key";
+      key.textContent = entry.keys[0];
+      node.appendChild(key);
+      node.appendChild(document.createTextNode(" " + entry.foot));
+      el.keyhints.appendChild(node);
+      footRows.push({ entry: entry, node: node });
+    });
+    paintKeyHints();
+  }
+
+  function footState(entry) {
+    if (entry.avail) return entry.avail();
+    // A row with a gate and no `avail` is the gate's own dimming: the approval
+    // keys say "not now" rather than disappearing, which is check_action's
+    // `None` for exactly the same three keys.
+    if (entry.when) return entry.when() ? "on" : "dim";
+    return "on";
+  }
+
+  // A focused text box swallows every bare letter - dispatchKey's one rule, and
+  // the whole reason the single-letter keys are safe to have at all. While it
+  // has the caret those rows are not going to fire whatever their gate says, so
+  // the strip must not promise otherwise. Esc gives the box back (stage 3).
+  function printableBinding(entry) {
+    return (
+      entry.mods === "" && !entry.hot && entry.on.length > 0 && entry.on[0].length === 1
+    );
+  }
+
+  function typingNow() {
+    var node = document.activeElement;
+    var tag = node && node.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+  }
+
+  function paintKeyHints() {
+    if (!footRows.length) return;
+    var typing = typingNow();
+    footRows.forEach(function (row) {
+      var state = footState(row.entry);
+      if (state === "on" && typing && printableBinding(row.entry)) state = "dim";
+      row.node.hidden = state === "off";
+      row.node.className = state === "dim" ? "kh dim" : "kh";
+    });
+  }
+
+  /* == the send history the arrows walk ======================================
+     tui/widgets/composer.py's SendHistory, rule for rule: session-local, capped,
+     blanks skipped, a repeat of the newest collapsed, and the draft handed back
+     past the newest end. Two shells, one behaviour - the arrows are chat-app
+     muscle memory and would be worse than useless if they differed. */
+
+  function sentReset() {
+    sentAt = null;
+    sentDraft = "";
+  }
+
+  function sentPush(text) {
+    sentReset(); // a send ends the walk
+    if (!text.trim()) return;
+    // Sending the same thing twice running is common (a retried command, a
+    // repeated "continue") and would otherwise cost two ArrowUps to get past.
+    if (sent.length && sent[sent.length - 1] === text) return;
+    sent.push(text);
+    if (sent.length > SENT_MAX) sent = sent.slice(-SENT_MAX);
+  }
+
+  // Both of these return null to DECLINE the key, which is how the arrows go
+  // back to being ordinary caret keys at the ends of the walk.
+  function sentOlder(current) {
+    if (sentAt === null) {
+      if (!sent.length) return null;
+      sentDraft = current; // captured only on the way in
+      sentAt = sent.length - 1;
+    } else if (sentAt === 0) {
+      return null; // already the oldest: let the caret have the key back
+    } else {
+      sentAt -= 1;
+    }
+    return sent[sentAt];
+  }
+
+  function sentNewer() {
+    if (sentAt === null) return null; // nobody walked up; this is a caret key
+    if (sentAt === sent.length - 1) {
+      var draft = sentDraft; // read before the reset that clears it
+      sentReset();
+      return draft; // may be "" - an empty box is a perfectly good draft
+    }
+    sentAt += 1;
+    return sent[sentAt];
+  }
+
+  // Put a remembered send in the box with the caret at the end. What this
+  // overwrites is recoverable by walking back DOWN to the draft, which is why
+  // it does not go through execCommand the way Esc's clear does: the key that
+  // replaced the text is also the key that gives it back, and that is a better
+  // promise than an undo the user has to know about.
+  function recallSent(text) {
+    recalling = true;
+    el.composer.value = text;
+    el.composer.selectionStart = el.composer.selectionEnd = text.length;
+    recalling = false;
+    syncPopup();
+  }
+
   // The composer's own dispatcher, and the first three stages of the Esc
   // chain. Enter sends, Shift+Enter is a newline: the TUI uses ctrl+j because
   // Enter is its send key inside a TextArea, and this is the web-native
@@ -2139,6 +2497,32 @@
         // and this does not fall through to the two stages below.
         ev.preventDefault();
         popupHide();
+        return;
+      }
+    }
+    // ...and once the popup above has had its refusal, up/down walk the sends -
+    // but ONLY from the edge of the text. Anywhere else they are the textarea's
+    // own keys, because a pasted traceback has to stay navigable and a key that
+    // sometimes moves the caret and sometimes replaces the whole box would be
+    // unusable. On a one-line box both edges are the same line, so it behaves
+    // like every other chat app with no rule to learn. Same order, same rule and
+    // same cap as ChatComposer._on_key.
+    if ((ev.key === "ArrowUp" || ev.key === "ArrowDown") && !ev.ctrlKey && !ev.altKey && !ev.metaKey && !ev.shiftKey) {
+      var value = el.composer.value;
+      var from = el.composer.selectionStart;
+      var to = el.composer.selectionEnd;
+      // A live selection is excluded outright: shrinking or growing it is what
+      // the arrows do there, and there is no caret to be "on the first line".
+      var collapsed = from === to;
+      var recalled = null;
+      if (ev.key === "ArrowUp" && collapsed && value.slice(0, from).indexOf("\n") === -1) {
+        recalled = sentOlder(value);
+      } else if (ev.key === "ArrowDown" && collapsed && value.slice(to).indexOf("\n") === -1) {
+        recalled = sentNewer();
+      }
+      if (recalled !== null) {
+        ev.preventDefault();
+        recallSent(recalled);
         return;
       }
     }
@@ -2276,6 +2660,11 @@
     if (el.composer.disabled) return;
     var text = el.composer.value;
     if (!text.trim()) return;
+    // The one send door, so this is the one place the arrows' memory can grow:
+    // follow-ups, slash commands and ask_user answers alike, whether the send
+    // came from Enter or from the button. Before the clear, or there would be
+    // nothing left to remember.
+    sentPush(text);
     el.composer.value = "";
     popupHide();
     api("submit", text);
@@ -2375,6 +2764,7 @@
       elRows: id("el-rows"),
       logpane: id("logpane"),
       logLines: id("log-lines"),
+      keyhints: id("keyhints"),
       statusbar: id("statusbar"),
       run: id("run"),
       runLabel: id("run-label"),
@@ -2436,10 +2826,15 @@
     });
 
     el.composer.addEventListener("keydown", onComposerKey);
-    // Every edit re-decides the list: typing, pasting, cutting, undo. One
-    // listener rather than one per cause, which is what `sync_popup` on the
-    // Changed event is on the other side.
-    el.composer.addEventListener("input", syncPopup);
+    // Every edit re-decides the list AND ends any walk through the send
+    // history: what is in the box after a keystroke is the user's, not the
+    // entry they had walked back to, so the next ArrowUp starts again from the
+    // newest. One listener rather than one per cause, which is what
+    // `_text_changed` on the Changed event is on the other side.
+    el.composer.addEventListener("input", function () {
+      if (!recalling) sentReset();
+      syncPopup();
+    });
     el.send.addEventListener("click", send);
 
     // A click anywhere on the run panel is the same request as ctrl+o: the
@@ -2576,6 +2971,24 @@
     el.logLines.addEventListener("wheel", function () {}, { passive: true });
 
     document.addEventListener("keydown", onDocumentKey);
+
+    // The key hint strip: drawn once, before the first event, so the row is
+    // there (and its height reserved) from the empty start screen onwards.
+    buildKeyHints();
+    // Its fourth trigger, after `state`, `status`/`armed`, the gate and the run
+    // panel: the caret itself. A focused text box swallows the bare letters, and
+    // the strip has to say so the moment focus moves either way. On focusout the
+    // box still owns document.activeElement, so that answer is one tick away.
+    document.addEventListener("focusin", paintKeyHints);
+    document.addEventListener("focusout", function () {
+      window.setTimeout(paintKeyHints, 0);
+    });
+    // A cheatsheet may not be a way to LOSE the caret: pressing it does nothing,
+    // so it must not blur the chat box either (the CSS makes it unselectable;
+    // only this can keep the focus where it was).
+    el.keyhints.addEventListener("mousedown", function (ev) {
+      ev.preventDefault();
+    });
 
     booted = true;
     while (pending.length) receive(pending.shift());

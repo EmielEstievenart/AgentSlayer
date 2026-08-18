@@ -101,6 +101,11 @@ COMMANDS: tuple[ChatCommand, ...] = (
         summary="set the permission mode (bare /mode says which one you are in)",
     ),
     ChatCommand(
+        name="theme",
+        arg="[name]",
+        summary="set the appearance (bare /theme lists the themes)",
+    ),
+    ChatCommand(
         name="yolo",
         arg="[on|off]",
         summary="toggle auto-approve-everything",

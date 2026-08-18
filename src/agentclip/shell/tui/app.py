@@ -75,6 +75,13 @@ CLAUDE_DARK_THEME = Theme(
 class AgentClipApp(App[None]):
     TITLE = "AgentClip"
 
+    # Textual's ctrl+p palette is OFF. Commands are typed into the chat composer
+    # with a leading slash (shell/app/commands.py) and are the same list in both
+    # shells - the page has no palette and never had one - so a second, TUI-only
+    # command surface listing a different set of things would be one more place
+    # for a feature to exist in only half the app.
+    ENABLE_COMMAND_PALETTE = False
+
     BINDINGS = [
         Binding("f1", "help", "help"),
         Binding("question_mark", "help", "help", show=False),
@@ -235,7 +242,7 @@ class AgentClipApp(App[None]):
         /* The whole registry plus its border - a bare `/` offers everything, and
            a cap below that would hide the last command rather than shorten the
            list. Grows with app.commands.COMMANDS (a test pins the two). */
-        max-height: 11;
+        max-height: 12;
         background: $surface;
         color: $text;
         border: round $accent;
@@ -836,11 +843,32 @@ class AgentClipApp(App[None]):
         chosen = await self.push_screen_wait(SettingsScreen(self.theme))
         if chosen is None:
             return  # cancelled/escaped - the screen already reverted the live preview
-        save_theme(chosen, self._global_config_path)
+        if self.remember_theme(chosen):
+            self.notify("theme saved", timeout=4)
+
+    def remember_theme(self, theme: str) -> bool:
+        """Keep ``theme`` - in ``app_config`` and on disk - and say whether the
+        write landed.
+
+        F4's save path, shared with `/theme`'s (``MainScreen.apply_theme``), so
+        the picker and the command cannot end up remembering a preference two
+        different ways. Only the PERSISTENCE can fail, and failing it is not
+        failing the press: the theme the user picked is already worn, and
+        ``app_config`` is updated either way - the same trade
+        ``MainScreen._persist_services`` makes, for the same reason. The return
+        value exists so the caller can decide whether "theme saved" is still a
+        true thing to say; the warning about *why* it was not saved is raised
+        here, once.
+        """
         self.app_config = replace(
-            self.app_config, general=replace(self.app_config.general, theme=chosen)
+            self.app_config, general=replace(self.app_config.general, theme=theme)
         )
-        self.notify("theme saved", timeout=4)
+        try:
+            save_theme(theme, self._global_config_path)
+        except OSError as exc:
+            self.notify(f"could not save the theme: {exc}", severity="warning")
+            return False
+        return True
 
     async def action_quit(self) -> None:
         main = self.main_screen

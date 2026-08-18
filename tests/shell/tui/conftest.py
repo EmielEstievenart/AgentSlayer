@@ -49,6 +49,7 @@ from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.profile_store import save_template
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.shell.tui.app import AgentClipApp
+from agentclip.shell.tui.screens import main as main_mod
 from agentclip.shell.tui.screens.main import MainScreen
 
 
@@ -143,6 +144,23 @@ def new_chat_click_lands(monkeypatch: pytest.MonkeyPatch) -> None:
         self._reset_after_new_browser_chat(slot)
 
     monkeypatch.setattr(MainScreen, "_new_browser_chat", _click_landed)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_activation_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shrink the delivery's activation poll to a beatless loop.
+
+    Autouse rather than per suite, because unlike every other beat here this one
+    is paid by tests that are not about it. ``deliver`` waits for the foreground
+    to stop being OUR window before it pastes (§3.4b), the suite-wide OS gate
+    leaves ``GetForegroundWindow`` real on purpose (reads tell a test about the
+    desktop without touching it), and the window an app mounted in a pytest run
+    records as its own IS the foreground one - so every delivery in this
+    directory would sit out the whole 1s budget waiting for a browser that does
+    not exist. The poll still runs and still asks its full ``attempts``; only
+    the sleep between two asks goes.
+    """
+    monkeypatch.setattr(main_mod, "_ACTIVATION_POLL_S", 0.0)
 
 
 @pytest.fixture(autouse=True)

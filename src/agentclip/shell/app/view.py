@@ -213,6 +213,29 @@ class ChatView(Protocol):
     # ``None`` means toggle, and it is the bare `/armed` (and F5).
     def set_os_armed(self, target: bool | None) -> None: ...
 
+    # `/theme`'s three questions, and every one of them is the view's because
+    # a theme has no shell-independent name. The Textual front-end wears four
+    # Textual themes (two built-in, two registered on mount) persisted as
+    # ``[general] theme``; the page wears four CSS palettes persisted as ``[gui]
+    # theme``, and writing either vocabulary into the other table would make the
+    # other shell warn and reset on every launch (config.VALID_GUI_THEMES). The
+    # two lists are not disjoint - `claude-warm`/`claude-dark` are deliberately
+    # spelled the same in both, so one command reads the same in either shell -
+    # but neither is the other's, which is exactly why asking is not optional. So
+    # the controller never holds a theme name it did not first read from here:
+    # it asks what there is, asks which one is on, and hands one of those back.
+    #
+    # ``apply_theme`` is the whole change - wear it AND remember it - and its
+    # argument is guaranteed to be one of ``theme_choices``, so it has nothing to
+    # validate and nothing to refuse. It is also SILENT on success: the
+    # controller raises the one toast, so a view that toasted here too would say
+    # the same thing twice for one command (a failed WRITE is the view's to
+    # report, being the only thing the controller cannot see). Listing order is
+    # the view's as well - it is the order that shell already offers them in.
+    def theme_choices(self) -> tuple[str, ...]: ...
+    def current_theme(self) -> str: ...
+    def apply_theme(self, name: str) -> None: ...
+
     def start_input(self) -> None: ...
     def stop_input(self) -> None: ...
 

@@ -29,12 +29,20 @@ likes and keeps this widget usable (popup-less) without one.
 consumed literally - an answer to the model's ``ask_user`` - a leading slash is
 TEXT, not a command, so no popup may appear.
 
+``up``/``down`` walk what has already been sent (``SendHistory``), which is the
+third thing those two keys mean here and the last one tried: the popup gets them
+first, the multi-line editor gets them whenever the caret still has somewhere to
+go, and only from the top or bottom edge of the document do they recall. That
+ordering is the whole design - a pasted traceback must stay navigable, and a
+one-line box must feel like every other chat app.
+
 The MainScreen owns every bit of routing; this widget only emits ``Submitted``.
 """
 
 from __future__ import annotations
 
 from contextlib import suppress
+from typing import Any
 
 from textual import events, on
 from textual.css.query import NoMatches
@@ -43,6 +51,93 @@ from textual.widgets import TextArea
 
 from agentclip.shell.app.commands import ChatCommand, match_prefix
 from agentclip.shell.tui.widgets.command_popup import CommandPopup
+
+# How many sends the arrows can reach back through. Session-local and in memory
+# only: this is a convenience for retyping the last thing, not a transcript -
+# the transcript is the transcript, and `l` exports it.
+HISTORY_LIMIT = 50
+
+
+class SendHistory:
+    """What has been sent from the box this run, and where the arrows stand in it.
+
+    Pure state with no widget in it, so the rules that are easy to get subtly
+    wrong - what "past the newest" restores, when a duplicate collapses, what
+    the cap throws away - are testable without a running app.
+
+    The model is readline's, and the piece worth naming is the DRAFT: browsing
+    starts by putting whatever the user had half-typed somewhere safe, and
+    walking back down past the newest entry hands it back. That is what makes an
+    accidental ``up`` cost nothing, and it is why recall does not need an undo.
+    """
+
+    def __init__(self, limit: int = HISTORY_LIMIT) -> None:
+        self._entries: list[str] = []  # oldest first
+        self._limit = limit
+        # None means "not browsing", which is a different state from "browsing
+        # the newest": only in the first is `down` the editor's key again.
+        self._index: int | None = None
+        self._draft = ""
+
+    @property
+    def entries(self) -> tuple[str, ...]:
+        return tuple(self._entries)
+
+    @property
+    def browsing(self) -> bool:
+        return self._index is not None
+
+    def push(self, text: str) -> None:
+        """Remember a send, and stop browsing - a send ends the walk."""
+        self.reset()
+        if not text.strip():
+            return
+        # Consecutive duplicates collapse. Sending the same thing twice in a row
+        # is common (a retried `/identify`, a repeated "continue") and it would
+        # otherwise cost two presses of `up` to get past one message.
+        if self._entries and self._entries[-1] == text:
+            return
+        self._entries.append(text)
+        del self._entries[: -self._limit]  # a no-op until the cap is reached
+
+    def older(self, current: str) -> str | None:
+        """The entry before the one on show, or ``None`` when there is none.
+
+        ``None`` is not an error - it is this class declining the key, so the
+        caller lets the editor have it. At the oldest entry that is deliberate:
+        `up` goes back to meaning "move the caret", which is what the user gets
+        in every other box, rather than silently doing nothing.
+        """
+        if self._index is None:
+            if not self._entries:
+                return None
+            self._draft = current  # only ever captured on the way IN
+            self._index = len(self._entries) - 1
+        elif self._index == 0:
+            return None
+        else:
+            self._index -= 1
+        return self._entries[self._index]
+
+    def newer(self) -> str | None:
+        """The entry after the one on show - or, past the newest, the draft.
+
+        ``None`` while not browsing: `down` in a box nobody has walked up from
+        is an ordinary caret key and must stay one.
+        """
+        if self._index is None:
+            return None
+        if self._index == len(self._entries) - 1:
+            draft = self._draft  # read before reset(), which is what clears it
+            self.reset()
+            return draft  # may be "" - an empty box is a perfectly good draft
+        self._index += 1
+        return self._entries[self._index]
+
+    def reset(self) -> None:
+        """Leave browse mode. What is in the box is now the box's own business."""
+        self._index = None
+        self._draft = ""
 
 
 class ChatComposer(TextArea):
@@ -56,6 +151,17 @@ class ChatComposer(TextArea):
             super().__init__()
 
     _verbatim: bool = False  # class-level default; MainScreen sets it per mode
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._history = SendHistory()
+        # How many ``Changed`` messages still in flight are OUR doing. Textual
+        # posts ``Changed`` rather than raising it, so a boolean set around the
+        # ``load_text`` below would already be back to False by the time the
+        # message arrived - and the recall would read as a user edit and undo
+        # its own browse position on the spot. One recall is exactly one
+        # ``load_text`` is exactly one ``Changed``, so counting is honest.
+        self._recall_echoes = 0
 
     # -- slash-command popup ---------------------------------------------------
 
@@ -101,6 +207,14 @@ class ChatComposer(TextArea):
 
     @on(TextArea.Changed)
     def _text_changed(self, event: TextArea.Changed) -> None:
+        # Editing is how the user leaves the send history: whatever is in the box
+        # after a keystroke is theirs, not the entry they had walked back to, and
+        # the next `up` starts again from the newest. Our own recalls are the one
+        # exception, and they are counted rather than flagged (see __init__).
+        if self._recall_echoes:
+            self._recall_echoes -= 1
+        else:
+            self._history.reset()
         self.sync_popup()
 
     def _complete(self, command: ChatCommand) -> None:
@@ -145,13 +259,33 @@ class ChatComposer(TextArea):
                 event.prevent_default()
                 popup.hide()  # the box keeps its text AND its focus
                 return
+        # ...and once the popup has had its refusal, up/down walk the sends -
+        # but ONLY from the edge of the document. Anywhere else they are the
+        # editor's keys, because a pasted traceback has to stay navigable and a
+        # key that sometimes moves the caret and sometimes replaces the whole
+        # box would be unusable. On a one-line box (the overwhelmingly common
+        # case) both edges are the same line, so it behaves like every other
+        # chat app with no rule to learn.
+        recalled: str | None = None
+        if event.key == "up" and self.cursor_at_first_line:
+            recalled = self._history.older(self.text)
+        elif event.key == "down" and self.cursor_at_last_line:
+            recalled = self._history.newer()
+        # ``None`` from either is the history DECLINING the key (the oldest entry
+        # is reached, or nothing has been sent), and a declined key falls through
+        # to the editor rather than being swallowed - an arrow that does nothing
+        # at all is worse than one that moves the caret nowhere useful.
+        if self._recall(recalled):
+            event.stop()
+            event.prevent_default()
+            return
         # Enter sends (TextArea's default would insert "\n"); ctrl+j keeps the
         # literal-newline escape hatch. Everything else falls through to the
         # normal TextArea editing keys.
         if event.key == "enter":
             event.stop()
             event.prevent_default()
-            self.post_message(self.Submitted(self.text))
+            self.submit()
             return
         if event.key == "ctrl+j":
             event.stop()
@@ -179,6 +313,36 @@ class ChatComposer(TextArea):
             return
         await super()._on_key(event)
 
+    # -- sending, and the memory of it -----------------------------------------
+
+    def submit(self) -> None:
+        """Send what is in the box. The composer's one send door.
+
+        A method rather than two lines in the Enter branch because Enter is not
+        the only way in: MainScreen's ``ctrl+s``/``ctrl+enter`` are priority
+        bindings that send *without focusing the box*, and a send that skipped
+        this would be a hole in the history the arrows walk - the user would
+        press `up` and not find the message they had just watched leave.
+        """
+        self._history.push(self.text)
+        self.post_message(self.Submitted(self.text))
+
+    def _recall(self, text: str | None) -> bool:
+        """Put a remembered send in the box, caret at the end. False = declined.
+
+        ``load_text`` throws the undo history away, which is the right trade
+        here and only here: what a recall replaces is recoverable by walking
+        back DOWN to the draft, so the key that overwrites the box is also the
+        key that gives it back - a better guarantee than ctrl+z, and one the
+        user can find without knowing about ctrl+z.
+        """
+        if text is None:
+            return False
+        self._recall_echoes += 1
+        self.load_text(text)
+        self.move_cursor(self.document.end)
+        return True
+
     def reset(self) -> None:
         """Clear the box after a message is sent.
 
@@ -186,4 +350,5 @@ class ChatComposer(TextArea):
         drops the undo history, and a message that has already *left* is not one
         ctrl+z should be able to resurrect into the box behind it.
         """
+        self._history.reset()  # the walk ends where the message does
         self.load_text("")

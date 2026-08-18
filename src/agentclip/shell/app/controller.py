@@ -636,6 +636,7 @@ class SessionController:
             "log": lambda _arg: self._cmd_log(),
             "mcp": lambda _arg: self._cmd_mcp(),
             "armed": self._cmd_armed,
+            "theme": self._cmd_theme,
         }
 
     def _handle_command(self, raw: str) -> None:
@@ -1053,6 +1054,40 @@ class SessionController:
             self._view.notify("usage: /armed [on|off] - bare /armed toggles", severity="warning")
             return
         self._view.set_os_armed(target)
+
+    def _cmd_theme(self, arg: str) -> None:
+        """`/theme [name]`. Bare REPORTS the choices, `/theme <name>` wears one.
+
+        No session gate (`/armed`'s reasoning, minus the urgency): appearance is
+        a property of the machine the user is sitting at, not of a conversation,
+        and there is nothing here a run could notice.
+
+        It is the ONLY command surface for the theme in either shell now that
+        neither has a command palette, so bare `/theme` has to be a listing
+        rather than a cycle: the names are not guessable, and the two shells
+        have different ones. Which names those are is the view's answer, not
+        this module's - the controller never holds a theme name it did not read
+        back from ``theme_choices`` (tui.md section 3.3a), which is also why an
+        unrecognised one changes nothing: `/armed`'s rule that a typo is never
+        read as an instruction.
+        """
+        choices = self._view.theme_choices()
+        current = self._view.current_theme()
+        if not arg:
+            listing = " · ".join(
+                f"{name} (current)" if name == current else name for name in choices
+            )
+            self._view.spawn(self._view.add_note(f"themes:  {listing}  -  /theme <name> to switch"))
+            return
+        wanted = arg.strip().lower()
+        if wanted not in choices:
+            self._view.notify(
+                f"unknown theme: {arg} - try {', '.join(choices)}",
+                severity="warning",
+            )
+            return
+        self._view.apply_theme(wanted)  # applies AND persists; idempotent
+        self._view.notify(f"theme: {wanted}")
 
     def submit_decision(self, decision: Decision, note: str | None) -> None:
         """Resolve the approval gate (from a key action or panel button)."""

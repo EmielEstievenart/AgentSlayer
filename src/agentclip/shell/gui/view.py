@@ -222,9 +222,12 @@ PROFILE_HINT = " · F2 for captures + detection"
 # touch ``[notify] bell/toast``, which is file-only in both shells. So this
 # shell's F4 mirrors exactly that: an appearance picker, no more.
 #
-# The two palettes are CSS, not Textual themes, so they are named in this
-# shell's own vocabulary and persisted in this shell's own config table
-# (``[gui] theme``, ``config.VALID_GUI_THEMES``). Live preview is the TUI's
+# The palettes are CSS, not Textual themes, so they are named in this shell's
+# own vocabulary and persisted in this shell's own config table (``[gui] theme``,
+# ``config.VALID_GUI_THEMES``). Two of the four names are the TUI's too, and that
+# is the point: ``/theme claude-dark`` is one command with one meaning in both
+# shells, rendered here as a palette block rather than a Textual theme. The other
+# two are this shell's alone. Live preview is the TUI's
 # model too: picking one applies it immediately - but here it is also SAVED
 # immediately, because a page-side class flip has no "revert on escape" to be
 # the other half of a staged edit and a setting that survives the window is what
@@ -232,6 +235,8 @@ PROFILE_HINT = " · F2 for captures + detection"
 THEME_CHOICES: tuple[tuple[str, str], ...] = (
     ("dark", "Dark"),
     ("light", "Light"),
+    ("claude-warm", "Claude Warm"),
+    ("claude-dark", "Claude Dark"),
 )
 # ``AgentClipApp._open_settings``'s toast, word for word.
 THEME_SAVED = "theme saved"
@@ -1553,8 +1558,15 @@ class GuiView:
                 f"the new-chat click did not land ({outcome.name.lower()}).{tail}",
                 severity="warning",
             )
+            # No snap back on this branch, deliberately, and for the reason the
+            # TUI gives: the browser is where the user has to finish the job, so
+            # it keeps whatever focus it already has.
             return
         self.notify("new browser chat opened")
+        # The click landed and the fresh chat is empty - nothing left to do over
+        # there, so bring the user back here (the same call the TUI makes, beat
+        # included).
+        await self._automation.snap_back_after_click()
 
     # == the two fullscreen child processes ====================================
     # The region picker and ``/identify`` are the same shape and share one
@@ -1804,10 +1816,11 @@ class GuiView:
 
     # == what the page's keys ask for (js_api, already on the loop) ============
     # Every one of these is a MainScreen ``action_*`` with the Textual removed:
-    # the same controller call, the same refusals, the same order. What they do
-    # NOT carry over is ``check_action``'s three-way footer dimming - the page
-    # has no footer to dim, so a key that cannot fire says why in a toast
-    # instead of being quietly absent (docs/design/gui.md §3).
+    # the same controller call, the same refusals, the same order. They are also
+    # the whole gate: ``check_action``'s three-way dimming is drawn on the page
+    # now (the key hint strip, from the ``state``/``status``/``run`` pushes), but
+    # it is a cheatsheet - the answer to a key actually pressed is here, and a
+    # key that cannot fire says why in a toast (docs/design/gui.md §3).
 
     def cycle_permission_mode(self) -> None:
         """shift+tab: ask -> plan -> unattended -> ask.
@@ -1851,9 +1864,9 @@ class GuiView:
         Gated exactly as ``MainScreen.check_action`` gates it - a live session,
         no turn in flight, and the floor back with the user (AWAITING_REPLY or
         DONE) - because the summary is a report on a settled session and mid-turn
-        numbers would be a lie the moment they were read. The TUI hides the key;
-        this shell has no footer to hide it from, so it says why instead
-        (docs/design/gui.md §3).
+        numbers would be a lie the moment they were read. The TUI dims the key
+        in its footer and this shell dims it in the key hint strip, but the
+        refusal is still said out loud here (docs/design/gui.md §3).
 
         It is NOT the end of the session: ``task_done`` leaves the user in the
         chat able to follow up, and the summary is one keypress away with three
@@ -1955,16 +1968,44 @@ class GuiView:
         the service editor's save already make, for the same reason: remembering
         a preference is a convenience, never the point of the press.
         """
+        if self._persist_theme(theme):
+            self.notify(THEME_SAVED, timeout=4)
+
+    # -- ChatView: /theme ------------------------------------------------------
+    # The same setting through the other door. F4 is a picker (it says "theme
+    # saved" because the click itself said nothing); `/theme` is a command whose
+    # answer the controller already toasts, so this half is silent and the two
+    # share the mechanics rather than the message.
+
+    def theme_choices(self) -> tuple[str, ...]:
+        return tuple(value for value, _label in THEME_CHOICES)
+
+    def current_theme(self) -> str:
+        return self._config.gui.theme
+
+    def apply_theme(self, name: str) -> None:
+        self._persist_theme(name)
+
+    def _persist_theme(self, theme: str) -> bool:
+        """Wear ``theme``, remember it, repaint the page - and say whether the
+        write landed.
+
+        The repaint is the ``settings`` push: the page only ever paints what that
+        event says (assets/app.css), so re-pushing it is how a theme changed from
+        Python - a slash command, not a radio button - reaches the body class.
+        """
         if theme not in VALID_GUI_THEMES:
-            return
+            return False
         self._config = replace(self._config, gui=GuiConfig(theme=theme))
         try:
             save_gui_theme(theme, self._global_config_path)
         except OSError as exc:
             self.notify(f"could not save the theme: {exc}", severity="warning")
+            saved = False
         else:
-            self.notify(THEME_SAVED, timeout=4)
+            saved = True
         self._push_settings()
+        return saved
 
     # == quitting ==============================================================
 
@@ -2605,8 +2646,24 @@ class GuiView:
         self._editor.delete()
         self._push_editor()
 
+    def svc_prev(self, kind_name: str) -> None:
+        """The arrow left of a thumbnail: show that kind's previous variant."""
+        editor, kind = self._editor, kind_of(kind_name)
+        if editor is None or kind is None:
+            return
+        editor.show_previous(kind)
+        self._push_editor()
+
+    def svc_next(self, kind_name: str) -> None:
+        """The arrow right of a thumbnail: show that kind's next variant."""
+        editor, kind = self._editor, kind_of(kind_name)
+        if editor is None or kind is None:
+            return
+        editor.show_next(kind)
+        self._push_editor()
+
     def svc_clear(self, kind_name: str) -> None:
-        """One appearance's whole stack, gone from disk. No confirm, by design."""
+        """The variant on show, gone from disk. No confirm, by design."""
         editor, kind = self._editor, kind_of(kind_name)
         if editor is None or kind is None:
             return

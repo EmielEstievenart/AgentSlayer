@@ -36,6 +36,11 @@ def help_text() -> str:
 Chat box (bottom of the screen)
   Type a message and press Enter to send it to the model.
   Ctrl+J inserts a newline; pasting keeps its newlines.
+  Up/Down walk back through what you have already sent this run (newest first);
+  Down past the newest hands back whatever you were half-way through typing.
+  They only do that from the FIRST/LAST line of the box - anywhere else in a
+  multi-line message they move the cursor as usual - and the command list
+  below gets them first while it is up.
   Esc clears the box (Ctrl+Z puts the text back); Esc on an EMPTY box frees the
   single-key shortcuts below - press t (or click) to type again.
 
@@ -100,7 +105,7 @@ App
   F1 or ?  this help
   F2  service profiles: sizes, what each service LOOKS like (the captures the
       automation clicks by), and which finish signals it may watch for
-  F3  hide/show the sidebar     F4  appearance (themes)
+  F3  hide/show the sidebar     F4  appearance (themes; also /theme)
   F5  ARM / DISARM the tool (also /armed). Disarmed it still watches and shows
       everything - detection, the crops, the STATE rail - but never clicks,
       pastes, moves your mouse or watches your clipboard. Payloads still land
@@ -110,7 +115,7 @@ App
   F8  hide/show the HARNESS DECISION LOG along the bottom (also /log) - every
       move the loop makes and WHY, as it happens. Scroll up and it holds still;
       scroll back to the bottom and it follows the newest line again.
-  ctrl+p   command palette  ctrl+q  quit (confirms when a turn is mid-flight)
+  ctrl+q  quit (confirms when a turn is mid-flight)
 
 The loop: AgentClip copies a payload - paste it into your chat and send.
 Click the reply's Copy button; AgentClip detects it, shows what's running,

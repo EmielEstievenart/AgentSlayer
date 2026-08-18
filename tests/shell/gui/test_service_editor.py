@@ -503,47 +503,149 @@ def test_the_seven_rows_are_always_all_there(editor: ServiceEditor) -> None:
     assert editor.state()["show_forget"] is False
 
 
+def row_of(editor: ServiceEditor, kind: TemplateKind) -> dict[str, Any]:
+    """One appearance row out of the event the page renders from."""
+    return next(row for row in editor.state()["kinds"] if row["kind"] == str(kind))
+
+
+def stack(profiles: Path, key: str, kind: TemplateKind, *sizes: tuple[int, int]) -> None:
+    """A kind captured ``len(sizes)`` times, each variant its own size.
+
+    Distinguishable by size on purpose: the status line names the SHOWN
+    variant's dimensions, so which picture a row is on is readable from it.
+    """
+    for width, height in sizes:
+        save_template(profiles, key, kind, searchable(width, height))
+
+
 def test_a_kind_is_a_stack_and_the_status_line_says_so(profiles: Path) -> None:
     profile = ServiceProfile("chatgpt")
     assert template_status(profile, TemplateKind.BUSY) == TEMPLATE_UNSET
     profile.put(TemplateKind.BUSY, searchable(24, 12))
     assert template_status(profile, TemplateKind.BUSY) == "24×12 · captured"
     profile.put(TemplateKind.BUSY, searchable(30, 9))
-    # The FIRST image's size, and the count - a second capture ADDS.
-    assert template_status(profile, TemplateKind.BUSY) == "24×12 · 2 images"
+    # Above one image the count becomes a POSITION, with the SHOWN variant's
+    # size beside it - a second capture ADDS, and the row is a window onto the
+    # stack rather than a picture of a slot.
+    assert template_status(profile, TemplateKind.BUSY) == "24×12 · 1/2"
+    assert template_status(profile, TemplateKind.BUSY, 1) == "30×9 · 2/2"
+    # An index from a stack that has since shrunk clamps rather than raising.
+    assert template_status(profile, TemplateKind.BUSY, 99) == "30×9 · 2/2"
     assert templates_line(profile) == "appearance: 1/7 captured"
 
 
-def test_a_captured_kind_carries_a_png_thumbnail_of_its_first_variant(
+def test_a_captured_kind_carries_a_png_thumbnail_of_the_variant_on_show(
     config: Config, profiles: Path
 ) -> None:
     save_template(profiles, "chatgpt", TemplateKind.IDLE, searchable())
     editor = ServiceEditor(config, profiles, "chatgpt", opencv=True)
-    row = next(row for row in editor.state()["kinds"] if row["kind"] == str(TemplateKind.IDLE))
+    row = row_of(editor, TemplateKind.IDLE)
     assert row["png"].startswith("data:image/png;base64,")
+    assert (row["shown"], row["count"]) == (0, 1)
     assert row["can_clear"] is True
-    blank = next(row for row in editor.state()["kinds"] if row["kind"] == str(TemplateKind.BUSY))
+    blank = row_of(editor, TemplateKind.BUSY)
     assert blank["png"] == "" and blank["can_clear"] is False
+    assert (blank["shown"], blank["count"]) == (0, 0)
     assert editor.state()["show_forget"] is True
     assert editor.state()["templates"] == "appearance: 1/7 captured"
 
 
-def test_clear_drops_one_stack_immediately_and_without_a_confirm(
+def test_the_arrows_walk_the_stack_and_wrap_at_both_ends(
+    config: Config, profiles: Path
+) -> None:
+    stack(profiles, "chatgpt", TemplateKind.IDLE, (24, 12), (30, 9), (28, 20))
+    editor = ServiceEditor(config, profiles, "chatgpt", opencv=True)
+    thumbs = []
+    for expected in ("24×12 · 1/3", "30×9 · 2/3", "28×20 · 3/3"):
+        row = row_of(editor, TemplateKind.IDLE)
+        assert row["status"] == expected
+        thumbs.append(row["png"])
+        editor.show_next(TemplateKind.IDLE)
+    # Three different pictures, and the fourth press really came back to the
+    # first one rather than stopping at the end.
+    wrapped = row_of(editor, TemplateKind.IDLE)
+    assert len(set(thumbs)) == 3
+    assert wrapped["status"] == "24×12 · 1/3" and wrapped["png"] == thumbs[0]
+    # ...and left wraps the other way, off the front onto the last.
+    editor.show_previous(TemplateKind.IDLE)
+    assert row_of(editor, TemplateKind.IDLE)["status"] == "28×20 · 3/3"
+
+
+def test_a_kind_with_nothing_to_cycle_stays_where_it_is(
+    config: Config, profiles: Path
+) -> None:
+    """The page keeps the arrows disabled below two images; the model does not
+    take that on trust."""
+    save_template(profiles, "chatgpt", TemplateKind.IDLE, searchable(24, 12))
+    editor = ServiceEditor(config, profiles, "chatgpt", opencv=True)
+    for kind in (TemplateKind.IDLE, TemplateKind.BUSY):
+        editor.show_next(kind)
+        editor.show_previous(kind)
+        assert row_of(editor, kind)["shown"] == 0
+    assert row_of(editor, TemplateKind.IDLE)["status"] == "24×12 · captured"
+
+
+def test_clear_drops_the_variant_on_show_immediately_and_without_a_confirm(
     config: Config, profiles: Path, toasts: Toasts
 ) -> None:
-    save_template(profiles, "chatgpt", TemplateKind.IDLE, searchable())
+    stack(profiles, "chatgpt", TemplateKind.IDLE, (24, 12), (30, 9), (28, 20))
     save_template(profiles, "chatgpt", TemplateKind.BUSY, searchable())
     asked = Answers()
     editor = ServiceEditor(
         config, profiles, "chatgpt", notify=toasts, confirm=asked, opencv=True
     )
+    editor.show_next(TemplateKind.IDLE)  # the middle one
     editor.clear(TemplateKind.IDLE)
     assert asked.asked == []  # no dialog, by design
-    assert not load_profile(profiles, "chatgpt").has(TemplateKind.IDLE)
+    # One image, not the kind: a bad capture does not cost the good ones.
+    assert [
+        (t.width, t.height) for t in load_profile(profiles, "chatgpt").variants(TemplateKind.IDLE)
+    ] == [(24, 12), (28, 20)]
     assert load_profile(profiles, "chatgpt").has(TemplateKind.BUSY)
     assert editor.profiles_changed
-    assert editor.state()["templates"] == "appearance: 1/7 captured"
+    # The index stays put, so what slid into the slot is what is on show.
+    assert row_of(editor, TemplateKind.IDLE)["status"] == "28×20 · 2/2"
+    assert editor.state()["templates"] == "appearance: 2/7 captured"
     assert toasts.saying("idle indicator cleared for chatgpt")
+
+
+def test_clearing_the_last_variant_clamps_back_onto_the_new_last_one(
+    config: Config, profiles: Path
+) -> None:
+    stack(profiles, "chatgpt", TemplateKind.IDLE, (24, 12), (30, 9))
+    editor = ServiceEditor(config, profiles, "chatgpt", opencv=True)
+    editor.show_next(TemplateKind.IDLE)
+    editor.clear(TemplateKind.IDLE)
+    row = row_of(editor, TemplateKind.IDLE)
+    assert (row["shown"], row["count"]) == (0, 1)
+    assert row["status"] == "24×12 · captured"
+    # ...and the last one left empties the row back to "not captured".
+    editor.clear(TemplateKind.IDLE)
+    row = row_of(editor, TemplateKind.IDLE)
+    assert row["status"] == TEMPLATE_UNSET and row["png"] == ""
+    assert (row["shown"], row["count"]) == (0, 0) and row["can_clear"] is False
+    assert editor.state()["templates"] == TEMPLATES_NONE
+
+
+def test_a_shown_index_survives_a_profile_re_read(config: Config, profiles: Path) -> None:
+    """The folder moves under the editor - another service, a forget, a clear -
+    so the index is clamped against what is really there, never trusted."""
+    stack(profiles, "chatgpt", TemplateKind.IDLE, (24, 12), (30, 9), (28, 20))
+    editor = ServiceEditor(config, profiles, "chatgpt", opencv=True)
+    editor.show_next(TemplateKind.IDLE)
+    editor.show_next(TemplateKind.IDLE)
+    assert row_of(editor, TemplateKind.IDLE)["shown"] == 2
+    editor.select("claude")  # a service with nothing captured at all
+    assert row_of(editor, TemplateKind.IDLE)["shown"] == 0
+    editor.select("chatgpt")
+    assert row_of(editor, TemplateKind.IDLE)["shown"] == 0
+    # And a stack that goes away entirely under a live index is a row that
+    # reads as uncaptured, not one pointing past the end of nothing.
+    editor.show_next(TemplateKind.IDLE)
+    editor.show_next(TemplateKind.IDLE)
+    asyncio.run(editor.forget())
+    row = row_of(editor, TemplateKind.IDLE)
+    assert row["status"] == TEMPLATE_UNSET and row["shown"] == 0
 
 
 def test_forget_asks_first_and_deletes_the_whole_profile(
@@ -651,11 +753,17 @@ def test_a_second_capture_adds_a_variant_rather_than_replacing(
 ) -> None:
     wire_capture(monkeypatch, Picker(REGION), searchable(24, 12))
     run_capture(editor, TemplateKind.COPY)
+    first = row_of(editor, TemplateKind.COPY)["png"]
     wire_capture(monkeypatch, Picker(REGION), searchable(30, 9))
     run_capture(editor, TemplateKind.COPY)
     assert len(load_profile(profiles, "chatgpt").variants(TemplateKind.COPY)) == 2
-    row = next(row for row in editor.state()["kinds"] if row["kind"] == str(TemplateKind.COPY))
-    assert row["status"] == "24×12 · 2 images"
+    row = row_of(editor, TemplateKind.COPY)
+    # And the row lands ON what was just drawn: a capture that left the older
+    # picture up would read as one that did not land.
+    assert row["status"] == "30×9 · 2/2" and (row["shown"], row["count"]) == (1, 2)
+    assert row["png"] != first
+    editor.show_previous(TemplateKind.COPY)
+    assert row_of(editor, TemplateKind.COPY)["png"] == first
 
 
 @pytest.mark.parametrize(
@@ -893,6 +1001,28 @@ def test_a_keystroke_repaints_without_asking_the_page_to_rewrite_its_inputs(
     assert harness.flush().last("editor")["reload"] is True
 
 
+def test_an_arrow_press_crosses_and_comes_back_as_the_moved_row(
+    harness: Harness, tmp_path: Path
+) -> None:
+    """The arrows are a press like any other in this modal: they call the model
+    and the whole surface comes back repainted, with no page-side state."""
+    stack(tmp_path / "profiles", "chatgpt", TemplateKind.COPY, (24, 12), (30, 9))
+    harness.view.open_service_editor()
+    harness.view.svc_select("chatgpt")
+    before = harness.flush().last("editor")
+    row = next(r for r in before["kinds"] if r["kind"] == str(TemplateKind.COPY))
+    assert (row["shown"], row["count"]) == (0, 2)
+    harness.view.svc_next("copy")
+    after = harness.flush().last("editor")
+    moved = next(r for r in after["kinds"] if r["kind"] == str(TemplateKind.COPY))
+    assert moved["status"] == "30×9 · 2/2" and moved["png"] != row["png"]
+    # Not a form reload: the page must not rewrite its text inputs for this.
+    assert after["reload"] is False
+    harness.recorder.clear()
+    harness.view.svc_prev("not-an-appearance")  # names no kind: nothing to do
+    assert harness.flush().of_type("editor") == []
+
+
 def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
     """One typed door per intent - a page asking for something else fails here."""
     calls: list[tuple[str, tuple[Any, ...]]] = []
@@ -916,6 +1046,8 @@ def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
     api.svc_reset()
     api.svc_delete()
     api.svc_capture("busy")
+    api.svc_prev("busy")
+    api.svc_next("busy")
     api.svc_clear("busy")
     api.svc_forget()
     api.svc_close()
@@ -931,12 +1063,15 @@ def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
         "svc_reset",
         "svc_delete",
         "svc_capture",
+        "svc_prev",
+        "svc_next",
         "svc_clear",
         "svc_forget",
         "svc_close",
     ]
     assert ("svc_tolerance", (12,)) in calls
     assert ("svc_capture", ("busy",)) in calls
+    assert ("svc_next", ("busy",)) in calls
 
 
 def test_kind_of_reads_a_row_id_back_and_refuses_anything_else() -> None:

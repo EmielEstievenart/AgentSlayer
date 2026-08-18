@@ -150,7 +150,17 @@ Slices (each one commit, suite green, layering test run first):
    `paint_detection(COPY, …)` and the harvest's crop is `paint_elements`, so
    both now carry the paint epoch. `_own_window` became `set_own_window` on the
    controller (OS state, both shells snap back to it) with a read-only
-   compatibility property on `MainScreen`.
+   compatibility property on `MainScreen`. The snapping back became the
+   controller's whole and only too: `snap_back_after_click()` is the
+   `SNAP_BACK_SETTLE_S` beat plus the verified `snap_focus_back()`, no-opping
+   without a handle, and `MainScreen` dropped its one-line wrapper - there was no
+   shell decision left inside it. **That closed a parity gap the GUI had been
+   carrying**: `_new_browser_chat` here never handed the focus back, so a
+   `/new` in the GUI left the user staring at a fresh browser chat while the tool
+   window sat behind it. Both shells now make the same call on a click that
+   LANDED, and neither makes it on one that did not - a refused new-chat click
+   leaves the browser focused, because that is where the user has to finish the
+   job (tui.md §3.3a).
 7. delivery path (`deliver(...)` async; OSC-52 stays TUI-side). **Shipped, with
    one seam the plan did not name and one clarification of the carve-out.**
    `deliver(text, *, clipboard_ok)` is the OS half exactly as designed, and the
@@ -166,12 +176,20 @@ Slices (each one commit, suite green, layering test run first):
    out - the answer to "how did this get parked", which only the STREAM path
    reads. The banner's words moved into `driver/automation/delivery.py` with the beats,
    for the port's own "text, not decisions" rule; the sidebar re-exports them.
-   The two synthetic keystrokes and the delivery's three beats and one chunk
+   The two synthetic keystrokes and the delivery's beats and one chunk
    size joined `ScreenOps`, which is what keeps the Pilot suites' patches biting
-   at `main.py`'s scope. Only the SCHEDULING stayed in the shell (`run_worker`
+   at `main.py`'s scope - and so did the one READ the delivery needs,
+   `foreground_window()`, when the blind settle in front of the Ctrl+V grew an
+   activation poll in front of *it* (`_await_browser_activation`;
+   `ACTIVATION_ATTEMPTS`/`ACTIVATION_POLL_S`/the raised `PASTE_SETTLE_DELAY` are
+   all `ScreenOps` calls for the same reason as the rest, tui.md §3.4b). Only the
+   SCHEDULING stayed in the shell (`run_worker`
    for the retry button and for `c`'s second tap), the slice-6 arrangement
    unchanged; `redeliver_outbound`'s two refusals are the controller's
-   `may_redeliver`.
+   `may_redeliver`. `deliver` also owns where the FOCUS ends up, which is a
+   decision and therefore below both shells: it snaps back to the tool window on
+   the auto-sent outcome alone, and leaves the browser focused on the two whose
+   banner is asking the user for a keystroke there.
 8. cleanup: dead code, doc sync (`architecture.md`, `tui.md` drift), module table.
    **Shipped, plus the one race the extraction surfaced.** Moving the poller off
    the message pump (slice 4) put the UI thread's `reset_trackers` alongside a
@@ -456,16 +474,45 @@ Three deliberate divergences, recorded rather than smuggled:
   quietest place on screen and this banner's whole job is to be seen — and F3
   must not be able to hide the thing asking for a keystroke. It blinks (a CSS
   animation, not a 0.4s timer) and the `Retry insert` button rides with it,
-  shown only under the Ctrl+V variant, exactly as `retry=True` says.
+  shown only under the Ctrl+V variant, exactly as `retry=True` says. It is an
+  **overlay hanging off the titlebar's bottom edge**, not a row in the flow:
+  it lives inside `<header class="titlebar">` and is positioned `top: 100%`
+  across the full width, so the height it hangs at is the titlebar's own and
+  no number in the stylesheet, and raising or dropping it — which happens
+  repeatedly inside one turn — reflows nothing. In the flow it shrank `.body`
+  on every appearance and walked the transcript, the run panel and the composer
+  up and down with it, which is exactly what a banner asking for a keystroke
+  must not do. A shadow (`--shadow`) says "above the page"; its z-index (15)
+  sits over the columns and under the toasts and every scrim.
 - **Three sidebar lines drop their "F2"** (the appearance summary, `STALE_OFF`,
   `PROBE_UNCAPTURED`). The diagnosis is verbatim; the key is not, because this
   shell has no service editor behind F2 yet and naming a key that does nothing
   is worse than naming none. *(Reversed in increment 5, which is that editor.)*
-- **`w`/`i`/`r` refuse out loud.** `check_action`'s three-way footer dimming
-  (§6.6 of the keys brief) has no equivalent here — there is no footer to hide a
-  binding from — so a key that cannot fire toasts why instead of being silently
-  absent. The three states are preserved as *messages*, not as a collapsed
-  "disabled".
+- **`w`/`i`/`r` refuse out loud**, *and* there is now a footer to dim them in.
+  When this increment landed there was none, so `check_action`'s three-way
+  dimming (§6.6 of the keys brief) survived only as *messages*: a key that could
+  not fire toasted why instead of being silently absent. The toasts stay — they
+  are the only thing that answers the press itself — and the **KEY HINT strip**
+  above the status bar now carries the three states as the brief requires:
+  - **normal** — the key fires now.
+  - **dimmed** — it does not, but it will: `u`/`e` mid-turn, `i` outside
+    `AWAITING_REPLY`, `c` with nothing outbound yet, `l`/`r` with no session,
+    `ctrl+x` with nothing running, `y`/`n`/`a` with no gate up. Dimmed, never
+    dropped, so the strip's rows never move under the eye.
+  - **hidden** — it never can, in this mode: `w` while disarmed or in
+    manual-clipboard mode, which is the same `False` the TUI returns.
+  The strip is painted from the one `KEYS` table the dispatcher reads and F1's
+  sheet renders (`foot` is the TUI's `show=`, `avail` is `check_action`'s
+  three-way answer), out of the `state`/`status`/`run` pushes the page already
+  receives — nothing new crosses the bridge for it. The one gate this side
+  cannot see is `r`'s *hidden* branch: whether the active service carries extra
+  instructions is not on any push, so the key is shown and the refusal stays
+  Python's toast. A row is dimmed for a second reason the TUI has no need of:
+  while a text box holds the caret the bare-letter keys are inert (they are
+  going into the sentence being typed), and the strip says so on focus in and
+  out. Nothing in it is focusable or clickable, and it is drawn at all times so
+  its height is reserved — a hint bar that came and went would be the flash
+  banner's mistake at the other end of the window.
 
 Two things landed alongside because the increment is unusable without them: the
 composer's **two-stage Esc** (clear-with-undo, then blur — stages 2 and 3 of the
@@ -630,6 +677,18 @@ assertions.
   one, and the second press is refused **out loud** rather than raced (the claim
   is synchronous, before the coroutine is scheduled, because two js_api presses
   marshal onto the loop as two callbacks).
+- Each row is a **window onto that kind's stack**, not a picture of a slot: an
+  arrow either side of the thumbnail walks the variants (wrapping, disabled
+  below two), the status line names the position (`"24×12 · 2/3"`) with the
+  SHOWN variant's dimensions, and "Clear" drops **that one image** rather than
+  the kind — the stack is how one control drawn several ways is recognised in
+  all of them, and a bad third capture should not cost the two good ones.
+  "Forget appearance" is still the whole-service door. Which variant is showing
+  is the Python model's state (`ServiceEditor._shown`, crossing as `shown` /
+  `count` per row) rather than the page's, like everything else in this modal:
+  it is clamped against the folder on every re-read, so a stack that shrank
+  under a stale index shows its new last variant instead of a hole. A capture
+  lands ON the variant it just drew. This diverges from the TUI — see below.
 - The save is `AgentClipApp._open_service_editor`'s, step for step:
   `save_services` minimal-write into the shell's own `global_config_path`,
   `replace(config, services=...)`, `SessionController.update_config`, the
@@ -638,8 +697,18 @@ assertions.
   the **whole visit** and resumed in a `finally`, because a capture throws a
   fullscreen overlay over the browser they watch.
 
-Three divergences, recorded rather than smuggled:
+Four divergences, recorded rather than smuggled:
 
+- **The appearance row walks its kind's stack, and "Clear" drops one image.**
+  The TUI's row shows `variants[0]` and its Clear calls `drop_template`, which
+  wipes the kind; this shell's row has an arrow either side of the thumbnail,
+  names the shown position in the status line, and clears the shown variant
+  through a new `profile_store.drop_variant`. The reason is that a stack is a
+  set of pictures the user has to be able to LOOK at to debug a match, and a
+  frontend that can only show the first one makes the other variants
+  unreviewable and unfixable except by recapturing all of them. Recorded in
+  the brief itself (§2.7, §3.6, §5.5, §6), because it is a behavior change and
+  not a rendering one — the TUI is free to follow later.
 - **The tolerance control is a real `<input type="range">`.** The TUI's is a
   bespoke track+handle widget with arrow-key nudging, because Textual ships no
   slider; brief §7 says to use the platform's own, and this is it. Only the
@@ -693,6 +762,22 @@ against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
   named functions rather than inline closures precisely so the order is
   readable and assertable. `ev.defaultPrevented` is what stops a composer Esc
   from also firing stage 4 on the way up.
+- **`↑`/`↓` in the composer walk this run's sends** — landed after this
+  increment, filed here because it is one more claimant on the composer's key
+  chain and reads as nothing else. The priority order is the TUI's exactly
+  (`docs/design/tui.md` §3.3d): the slash popup gets the keys
+  first while it is open, then the textarea keeps them unless the caret is at an
+  edge — `↑` recalls only when nothing before `selectionStart` is a newline, `↓`
+  only when nothing after `selectionEnd` is, and a live (non-collapsed)
+  selection is excluded outright, because there the arrows are how a selection
+  is grown. `↓` past the newest entry restores the draft. The list is
+  session-local, in memory, capped at 50, blanks skipped and consecutive
+  duplicates collapsed, grown in **`send()`** — the one send door, so the button
+  and Enter agree — before the box is cleared. The `input` listener that already
+  re-decides the popup also ends the walk, which is the page's version of
+  `ChatComposer._text_changed`. Rule for rule the same as the TUI's
+  `SendHistory` on purpose: these arrows are muscle memory, and two shells that
+  disagreed about them would be worse than one that lacked them.
 - **`t`, `u` and `l` land**, the last of increment 3's deferrals. `u` and `e`
   share one gate (`check_action` has one clause for both), `l` is gated on the
   session alone because the export is a read-only snapshot that never touches
@@ -728,9 +813,16 @@ against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
 Two decisions recorded rather than smuggled:
 
 - **Settings persist in a new `[gui]` table, not `[general] theme`.** That key
-  names a *Textual* theme and is validated against `VALID_THEMES`; the GUI's
-  palettes are CSS and have no Textual equivalent, so writing `"dark"` there
-  would make every TUI launch warn and reset it. `config.py` gains
+  names a *Textual* theme and is validated against `VALID_THEMES`; the GUI's are
+  CSS palettes, so writing `"dark"` there would make every TUI launch warn and
+  reset it. The two tables overlap by two names and that is deliberate, not a
+  leak: `claude-warm` and `claude-dark` exist in both vocabularies so that
+  `/theme claude-dark` means the same thing whichever shell it is typed in — the
+  same name, each shell rendering it in its own medium (a `Theme` object in
+  `shell/tui/app.py`, a `body.theme-claude-dark` block in `assets/app.css`,
+  role-for-role the same colours). `dark`/`light` remain this shell's alone and
+  `textual-light`/`textual-dark` remain the TUI's, so neither table can be
+  pasted into the other. `config.py` gains
   `GuiConfig`/`VALID_GUI_THEMES` and `save_gui_theme`, the last a clone of
   `save_theme` one table over (same atomic write, same "only this key is
   touched" contract). It is the minimum a shell-specific setting can cost, and
@@ -739,12 +831,28 @@ Two decisions recorded rather than smuggled:
   (§2.2 of the brief) — one "Appearance" tab, and it does not touch
   `[notify] bell/toast`, which is file-only in both shells. A **real light
   theme** ships rather than the "dark (light theme planned)" fallback: every
-  colour below `:root` is a token now, so the theme is a palette rather than a
-  second stylesheet, and a test fails on any hard-coded hex that escapes it. The
+  colour below `:root` is a token now, so a theme is a palette rather than a
+  second stylesheet, and a test fails on any hard-coded hex that escapes it.
+  That is also what made the Claude pair cost one CSS block each: `applyTheme`
+  validates the name against the list the `settings` event brought (falling back
+  to the default, never throwing), strips whatever `theme-*` class was worn and
+  adds the new one — and the *default* wears no class at all, because `:root`
+  already is that palette. Adding a fifth is one `THEME_CHOICES` row, one
+  `VALID_GUI_THEMES` name and one block; the page needs no edit. The
   one divergence from the TUI's model: the pick applies **and saves** at once
   rather than staging behind Save/Cancel. The TUI stages because its preview is
   an app-wide reactive that Escape must revert; a class on `<body>` costs nothing
   to try, and there is no Save button to make "revert" mean anything.
+
+  F4 is one of two doors onto this setting: `/theme [name]` is the other, and it
+  is the same list, the same write and the same repaint (`GuiView._persist_theme`,
+  reached from the port's `apply_theme`). The page paints only what the
+  `settings` event says, so a theme changed from Python re-pushes that event and
+  the body class follows — which is what makes a *chat command* able to retheme a
+  page that has no palette to run one from. Neither shell has a command palette:
+  this one never had, and the TUI's Textual default is switched off
+  (`ENABLE_COMMAND_PALETTE = False`), so the composer's slash commands are the
+  single command surface in both.
 
 **Parity increment 7** — the SSH CONNECT DIALOG, against
 `docs/design/ui-briefs/ssh-connect.md` and the six rulings in §4 below. The last

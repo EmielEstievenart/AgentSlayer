@@ -74,7 +74,7 @@ from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.profile_store import (
     ProfileStoreError,
     delete_profile,
-    drop_template,
+    drop_variant,
     load_profile,
     save_template,
 )
@@ -201,20 +201,29 @@ def png_data_uri(image: RegionImage) -> str:
         return ""
 
 
-def template_status(profile: ServiceProfile | None, kind: TemplateKind) -> str:
+def template_status(profile: ServiceProfile | None, kind: TemplateKind, shown: int = 0) -> str:
     """One appearance's status line: what is captured for it, or the unset default.
 
     A kind holds a STACK of images, all of them searched for, so the count
     belongs in the readout: a second capture ADDS, and a line that kept saying
-    "captured" would leave the user believing it had replaced.
+    "captured" would leave the user believing it had replaced. Above one image
+    the count becomes a POSITION ("2/3"), because the row's thumbnail is one
+    variant of several and a line that named only how many there were would
+    leave the user unable to say which one they are looking at - or that the
+    arrows beside it had moved anything.
+
+    The dimensions are the SHOWN variant's, for the same reason: they describe
+    the picture on screen, and variants of one control are routinely different
+    sizes (a send button with a file chip beside it is not the bare one).
     """
     templates = () if profile is None else profile.variants(kind)
     if not templates:
         return TEMPLATE_UNSET
-    first = templates[0]
+    index = min(max(shown, 0), len(templates) - 1)
+    template = templates[index]
     if len(templates) == 1:
-        return f"{first.width}×{first.height} · captured"
-    return f"{first.width}×{first.height} · {len(templates)} images"
+        return f"{template.width}×{template.height} · captured"
+    return f"{template.width}×{template.height} · {index + 1}/{len(templates)}"
 
 
 def templates_line(profile: ServiceProfile | None) -> str:
@@ -360,6 +369,14 @@ class ServiceEditor:
         self._form: dict[str, str] = {}
         self._profile: ServiceProfile | None = None
         self._thumbs: dict[TemplateKind, str] = {}
+        # Which variant of each kind the row is showing. A kind is a STACK and
+        # the row has space for one picture, so WHICH one is a piece of state,
+        # and it lives here rather than on the page: the page renders
+        # :meth:`state` and owns nothing the model does not know. Reconciled
+        # against the folder in ``_show_appearance``, so a stale index (a clear,
+        # a re-read, a different service) clamps instead of pointing past the
+        # end of a stack that shrank under it.
+        self._shown: dict[TemplateKind, int] = {}
         # True on the state push that FOLLOWS a form reload (a selection change,
         # an add, a reset, a delete) and false on every push a live edit caused.
         # The page rewrites its inputs only on the first kind: repainting a text
@@ -464,12 +481,19 @@ class ServiceEditor:
             "show_delete": not is_new and self._selected_key not in BUILTIN_SERVICE_KEYS,
             "show_forget": self._profile is not None and bool(self._profile.captured),
             "templates": templates_line(self._profile),
+            # ``shown``/``count`` are the stack the row is looking into: which
+            # variant its thumbnail and its dimensions are of, and how many
+            # there are to walk. The page needs both - it disables the arrows
+            # below two rather than hiding them, for the reason Clear is
+            # disabled rather than hidden (brief §3.6).
             "kinds": [
                 {
                     "kind": str(kind),
                     "label": kind.label.capitalize(),
-                    "status": template_status(self._profile, kind),
+                    "status": template_status(self._profile, kind, self._shown.get(kind, 0)),
                     "png": self._thumbs.get(kind, ""),
+                    "shown": self._shown.get(kind, 0),
+                    "count": len(self._profile.variants(kind)) if self._profile else 0,
                     "can_clear": not is_new
                     and self._profile is not None
                     and self._profile.has(kind),
@@ -531,7 +555,7 @@ class ServiceEditor:
             return _NEW_PRESET_DEFAULTS
         return self._services[key]
 
-    def _show_appearance(self) -> None:
+    def _show_appearance(self, *, newest: TemplateKind | None = None) -> None:
         """Re-derive everything that is a view of this service's profile folder.
 
         The TUI's ``_show_appearance``: read the folder ONCE and repaint the
@@ -539,19 +563,35 @@ class ServiceEditor:
         anything to forget, and whether a ticked signal has an appearance to run
         against. The thumbnails are encoded HERE rather than in :meth:`state` so
         a keystroke in the form does not re-encode seven PNGs.
+
+        This is also where the per-kind shown-variant index is reconciled, and
+        the only place it can be: the folder is the truth and it moves under the
+        editor (a clear, a capture, a forget, another service selected), so the
+        index is clamped to whatever is really there rather than trusted. Kinds
+        with nothing captured keep no index at all - swapping the whole dict is
+        what stops a stack that emptied and refilled from resuming at a position
+        that meant something about a picture that is gone. ``newest`` is the
+        kind a capture has just landed in, whose LAST variant is the one the
+        user drew and therefore the one to show.
         """
         key = self._selected_key
         self._profile = None if key is None else load_profile(self._profile_root, key)
         thumbs: dict[TemplateKind, str] = {}
+        shown: dict[TemplateKind, int] = {}
         if self._profile is not None:
             for kind in TemplateKind:
                 variants = self._profile.variants(kind)
-                if variants:
-                    # The FIRST of the stack, not all of them: a kind's variants
-                    # are pictures of the same control, the row has space for
-                    # one, and the count is on the status line beside it.
-                    thumbs[kind] = png_data_uri(variants[0].image)
+                if not variants:
+                    continue
+                wanted = len(variants) - 1 if kind is newest else self._shown.get(kind, 0)
+                index = min(max(wanted, 0), len(variants) - 1)
+                shown[kind] = index
+                # ONE of the stack, not all of them: a kind's variants are
+                # pictures of the same control, the row has space for one, and
+                # the arrows beside it are how the others are reached.
+                thumbs[kind] = png_data_uri(variants[index].image)
         self._thumbs = thumbs
+        self._shown = shown
 
     # == the form ==============================================================
 
@@ -785,19 +825,54 @@ class ServiceEditor:
 
     # == appearances ===========================================================
 
-    def clear(self, kind: TemplateKind) -> None:
-        """Drop one appearance's whole stack, immediately and with no confirm.
+    def show_previous(self, kind: TemplateKind) -> None:
+        """Step one row's thumbnail back through the stack, wrapping at the start."""
+        self._step_shown(kind, -1)
 
-        Deliberately NOT the shape of "Forget appearance", which loses a whole
-        service's calibration and therefore asks first: one kind is one capture
-        press away from being back, and a dialog here would cost more attention
-        than the mistake it guards against.
+    def show_next(self, kind: TemplateKind) -> None:
+        """Step one row's thumbnail on through the stack, wrapping at the end."""
+        self._step_shown(kind, 1)
+
+    def _step_shown(self, kind: TemplateKind, step: int) -> None:
+        """Move which variant of ``kind`` is on show. Wraps, and re-encodes one PNG.
+
+        Wrapping rather than stopping at the ends because the stack is a ring of
+        two or three pictures of one control, not a document: there is no "first"
+        variant worth landing on, and an arrow that goes dead is a button the
+        user has to look at to use.
+
+        Nothing is re-read from disk - only this editor writes there, and it
+        re-reads on every write - so one press costs one PNG encode rather than
+        a folder walk and seven.
+        """
+        variants = self._profile.variants(kind) if self._profile is not None else ()
+        if len(variants) < 2:
+            return  # nothing to cycle: the page keeps the arrows disabled anyway
+        index = (self._shown.get(kind, 0) + step) % len(variants)
+        self._shown[kind] = index
+        self._thumbs[kind] = png_data_uri(variants[index].image)
+        self._reload = False
+
+    def clear(self, kind: TemplateKind) -> None:
+        """Drop the variant this row is SHOWING, immediately and with no confirm.
+
+        One picture, not the kind: a stack is how a control drawn several ways
+        is recognised in all of them, and a user who captured a bad third
+        variant wants that one gone, not the two good ones with it. "Forget
+        appearance" is still there for the whole-service case.
+
+        No dialog, deliberately - it is one capture press away from being back,
+        and a confirm here would cost more attention than the mistake it guards
+        against. The row does not follow the picture it dropped: the index stays
+        put, so what slid into the slot is what is on show, and
+        ``_show_appearance``'s clamp is what turns clearing the LAST variant
+        into showing the new last one instead of a hole.
         """
         key = self._selected_key
         if key is None or self._capturing:
             return
         try:
-            drop_template(self._profile_root, key, kind)
+            drop_variant(self._profile_root, key, kind, self._shown.get(kind, 0))
         except ProfileStoreError as exc:
             self._notify(f"could not clear the {kind.label}: {exc}", "error")
             return
@@ -893,7 +968,10 @@ class ServiceEditor:
                 self._notify(f"could not save the {kind.label}: {exc}", "error")
                 return
             self._profiles_changed = True
-            self._show_appearance()
+            # Onto the variant that was just drawn: the user is looking at the
+            # box they dragged, and a row that went on showing the older picture
+            # would read as a capture that did not land.
+            self._show_appearance(newest=kind)
             self._notify(
                 f"{kind.label} captured for {key} ({region.describe()})", "information"
             )

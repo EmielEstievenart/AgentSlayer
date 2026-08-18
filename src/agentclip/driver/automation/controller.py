@@ -1894,6 +1894,54 @@ class AutomationController:
             return False
         return await asyncio.to_thread(self._ops.focus_window, handle)
 
+    async def snap_back_after_click(self) -> bool:
+        """Let a click in the browser register, then take the foreground back.
+
+        The two-line shape every "we clicked over there and the user's next move
+        is over HERE" site had copied out: a beat
+        (``delivery.SNAP_BACK_SETTLE_S``) so the browser has the click before
+        focus moves off it, then the verified snap. False (and no beat at all)
+        when no handle was ever recorded - there is nowhere to snap to, and
+        sleeping for it would only delay the caller.
+
+        It is deliberately NOT called after every browser click. A click whose
+        outcome leaves work for the user IN the browser - a paste the banner is
+        asking them to send, a new-chat button that never landed - keeps the
+        browser focused, because pulling the foreground back would make them
+        click into it again to do what we just told them to do.
+        """
+        if self._own_window is None:
+            return False
+        await asyncio.sleep(self._ops.snap_back_settle())
+        return await self.snap_focus_back()
+
+    async def _await_browser_activation(self) -> bool:
+        """Wait until our own window is no longer the foreground one - i.e. the
+        focus click's activation has actually been granted to the browser.
+
+        The verified half of the paste settle (``delivery.ACTIVATION_ATTEMPTS``
+        / ``ACTIVATION_POLL_S``). True = the foreground moved off us inside the
+        budget; False = it did not, or there is nothing to compare against.
+
+        Never a failure. A budget that runs out means we stop waiting and paste
+        anyway, exactly as the blind sleep always did: the alternative is
+        refusing to deliver a payload that would probably have landed, and the
+        banner plus the retry button already cover a paste that goes nowhere.
+        The same is true when no window handle was ever recorded (a shell that
+        never called ``set_own_window``, or a platform where the read returns
+        None) - with no "us" to compare the foreground to, there is no question
+        to answer, so the poll is skipped rather than spent.
+        """
+        handle = self._own_window
+        if handle is None:
+            return False
+        for _ in range(self._ops.activation_attempts()):
+            current = await asyncio.to_thread(self._ops.foreground_window)
+            if current is not None and current != handle:
+                return True
+            await asyncio.sleep(self._ops.activation_poll())
+        return False
+
     # -- the two clicks every sequence is built out of -------------------------
 
     async def focus_click(self, target: ScreenRegion) -> bool:
@@ -2444,12 +2492,21 @@ class AutomationController:
         if clicked:
             # THE seam between the click and the paste, and the one place it
             # exists: the click above only tells us the OS accepted the input,
-            # never that the chat box has finished taking focus. See
-            # ``delivery.PASTE_SETTLE_DELAY``. Non-blocking, so the shell keeps
+            # never that the chat box has finished taking focus. Two halves,
+            # because the wait has two halves. First WAIT FOR THE ACTIVATION -
+            # poll the foreground until it is somebody else's window, which is
+            # the OS telling us the browser has the click's activation (see
+            # ``_await_browser_activation``); on a machine that hands it over
+            # immediately this costs one read, and on a loaded one it waits
+            # exactly as long as it has to. Then the flat beat
+            # (``delivery.PASTE_SETTLE_DELAY``) for the half no handle reports
+            # on: the page still has to route the click into the chat box and
+            # put a caret there. Non-blocking throughout, so the shell keeps
             # painting (the STATE rail and the flash are what the user has to
             # look at while this happens) - and it covers the streamed delivery
             # below too, since that is the same first Ctrl+V into the same fresh
             # focus.
+            await self._await_browser_activation()
             await asyncio.sleep(self._ops.paste_settle())
             # Streaming needs a clipboard to write each chunk through, so a
             # service that asks for it still falls back to the single burst when
@@ -2520,6 +2577,19 @@ class AutomationController:
             # first is worse than no button at all.
             retry=not pasted,
         )
+        # ...and, on the ONE outcome that leaves the user nothing to do in the
+        # browser, bring them back here. auto_sent means the payload is in the
+        # box and the Enter has been tapped for them: the next thing worth
+        # watching is this window's rail and transcript, and a user who was
+        # reading the chat when the turn came round would otherwise have to
+        # alt-tab back by hand. The other two outcomes deliberately keep the
+        # browser focused - ">>> PRESS ENTER <<<" and ">>> PRESS CTRL+V <<<" are
+        # both instructions to act over THERE, and stealing the foreground while
+        # asking for a keystroke in another window is how the banner ends up
+        # lying about what a press will do. Covers the streamed delivery too:
+        # its auto-submit is this same tap, on this same flag.
+        if auto_sent:
+            await self.snap_back_after_click()
         return pasted
 
     async def _click_after_response(self) -> bool:
@@ -2806,11 +2876,9 @@ class AutomationController:
                 "changed, so the reply is on its way in",
             )
             # The response is on its way to the clipboard - hand focus back to
-            # AgentClip so the user watches the ingest here, not the browser. A
-            # short beat first so the click registers before focus moves away.
-            if self._own_window is not None:
-                await asyncio.sleep(0.15)
-                await self.snap_focus_back()
+            # AgentClip so the user watches the ingest here, not the browser.
+            # The beat before it is ``snap_back_after_click``'s.
+            await self.snap_back_after_click()
             await self._host.ingest_harvest()
             return
 

@@ -182,7 +182,7 @@ the one family whose event is the entire surface rather than one block of it
      signal_warning: str, controls_disabled: bool, can_add: bool,
      show_add: bool, show_reset: bool, show_delete: bool, show_forget: bool,
      templates: str,        # "appearance: 3/7 captured"
-     kinds: [{kind, label, status, png, can_clear}, ...],   # all SEVEN, always
+     kinds: [{kind, label, status, png, shown, count, can_clear}, ...],  # all 7
      capturing: bool, hint: str}
 
 Two fields carry the whole of this surface's page-side contract. ``reload``
@@ -196,11 +196,14 @@ would create, because a blank checklist over a preset born with "screen stops
 changing" ticked is a lie about the only setting the form cannot otherwise
 show.
 
-``png`` on a kind row is a thumbnail of the FIRST image of that kind's stack,
-as a ``data:`` URI, encoded by the same ``screen/png.py`` the elements column
-uses and only when the profile is re-read (a capture, a clear, a forget, a
-selection) - never per keystroke. All seven rows are always present whether or
-not anything is captured.
+``png`` on a kind row is a thumbnail of ONE image of that kind's stack, as a
+``data:`` URI, encoded by the same ``screen/png.py`` the elements column uses
+and only when the profile is re-read (a capture, a clear, a forget, a selection)
+or an arrow moves - never per keystroke. WHICH image is ``shown``, a 0-based
+index into a stack of ``count``, and it is the Python model's state rather than
+the page's: ``status`` names the same position ("2/3") and the dimensions on it
+are that variant's. ``count`` is what the arrows are disabled below two of.
+All seven rows are always present whether or not anything is captured.
 
 The SSH CONNECT DIALOG - the one surface with no TUI equivalent, and the only
 one whose event is a picture of a SEQUENCE running somewhere else
@@ -493,6 +496,8 @@ class JsCalls(Protocol):
     def svc_reset(self) -> None: ...
     def svc_delete(self) -> None: ...
     def svc_capture(self, kind: str) -> None: ...
+    def svc_prev(self, kind: str) -> None: ...
+    def svc_next(self, kind: str) -> None: ...
     def svc_clear(self, kind: str) -> None: ...
     def svc_forget(self) -> None: ...
     def svc_close(self) -> None: ...
@@ -734,9 +739,20 @@ class JsApi:
         event rather than from here."""
         self._safely(lambda: self._calls.svc_capture(kind))
 
+    def svc_prev(self, kind: str = "") -> None:
+        """The arrow left of a thumbnail: the previous variant of that kind,
+        wrapping. A stack is a ring of pictures of one control, so there is no
+        end for an arrow to go dead at."""
+        self._safely(lambda: self._calls.svc_prev(kind))
+
+    def svc_next(self, kind: str = "") -> None:
+        """The arrow right of a thumbnail: the next variant of that kind."""
+        self._safely(lambda: self._calls.svc_next(kind))
+
     def svc_clear(self, kind: str = "") -> None:
-        """One appearance's whole stack, off disk immediately and with no
-        confirm - it is one Capture press away from being back."""
+        """The variant that row is SHOWING, off disk immediately and with no
+        confirm - it is one Capture press away from being back. The rest of the
+        stack stays: "Forget appearance" is the whole-service door."""
         self._safely(lambda: self._calls.svc_clear(kind))
 
     def svc_forget(self) -> None:

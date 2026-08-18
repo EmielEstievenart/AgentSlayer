@@ -310,6 +310,44 @@ def drop_template(root: Path, key: str, kind: TemplateKind) -> None:
             raise ProfileStoreError(f"could not remove the {kind.label}: {exc}") from exc
 
 
+def drop_variant(root: Path, key: str, kind: TemplateKind, index: int) -> None:
+    """Forget ONE image of ``kind`` - the one a row is currently showing.
+
+    :func:`drop_template`'s ordering and posture over a single entry: unlist it
+    first, unlink it after, so a crash in between leaves an unreferenced PNG
+    (harmless, ignored on load, its name reusable) rather than a manifest naming
+    a file that is gone. The stack closes up behind it - capture order is the
+    only order a variant has - and a kind whose last image goes is unlisted
+    entirely, because an empty stack and an uncaptured kind are the same thing.
+
+    An index naming nothing - a row read before another press moved the stack, a
+    kind with nothing in it - is a no-op rather than an error. The caller
+    re-reads the folder after every one of these anyway, so all an exception
+    could add is a complaint about a picture that was already not there.
+    """
+    directory = profile_dir(root, key)
+    templates = _templates_to_rewrite(directory)
+    entries = templates.get(kind.value, [])
+    if not 0 <= index < len(entries):
+        return
+    entry = entries.pop(index)
+    if entries:
+        templates[kind.value] = entries
+    else:
+        templates.pop(kind.value, None)
+    try:
+        _write_manifest(directory, key, templates)
+    except OSError as exc:
+        raise ProfileStoreError(f"could not update the profile for {key!r}: {exc}") from exc
+    filename = _safe_name(entry.get("file"))
+    if filename is None:
+        return
+    try:
+        (directory / filename).unlink(missing_ok=True)
+    except OSError as exc:
+        raise ProfileStoreError(f"could not remove the {kind.label}: {exc}") from exc
+
+
 def delete_profile(root: Path, key: str) -> None:
     """Remove a service's whole profile folder.
 

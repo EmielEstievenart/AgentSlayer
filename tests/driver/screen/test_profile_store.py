@@ -24,6 +24,7 @@ from agentclip.driver.screen.profile_store import (
     ProfileStoreError,
     delete_profile,
     drop_template,
+    drop_variant,
     known_keys,
     load_profile,
     profile_dir,
@@ -154,6 +155,50 @@ def test_drop_template_removes_every_image_of_its_kind(tmp_path: Path) -> None:
     assert set(raw["templates"]) == {"copy"}
     assert sorted(p.name for p in directory.glob("*.png")) == ["copy.png"]
     assert load_profile(tmp_path, "chatgpt").captured == (TemplateKind.COPY,)
+
+
+def test_drop_variant_removes_exactly_the_image_it_names(tmp_path: Path) -> None:
+    """What the GUI editor's per-variant "Clear" asks for: a bad third capture
+    should not cost the two good ones beside it."""
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch(20, 16, shade=1))
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch(24, 24, shade=2))
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch(28, 12, shade=3))
+    drop_variant(tmp_path, "chatgpt", TemplateKind.BUSY, 1)
+    directory = tmp_path / "chatgpt"
+    raw = json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert [entry["file"] for entry in raw["templates"]["busy"]] == ["busy.png", "busy-3.png"]
+    assert not (directory / "busy-2.png").exists()
+    # The stack closes up behind it, in capture order: the survivors are the
+    # first and the third, and nothing renamed itself underneath them.
+    assert [
+        (t.width, t.height) for t in load_profile(tmp_path, "chatgpt").variants(TemplateKind.BUSY)
+    ] == [(20, 16), (28, 12)]
+
+
+def test_dropping_the_last_image_of_a_kind_unlists_the_kind(tmp_path: Path) -> None:
+    """An empty stack and an uncaptured kind are the same thing on disk."""
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch())
+    drop_variant(tmp_path, "chatgpt", TemplateKind.BUSY, 0)
+    raw = json.loads((tmp_path / "chatgpt" / MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert set(raw["templates"]) == {"copy"}
+    assert not (tmp_path / "chatgpt" / "busy.png").exists()
+    assert load_profile(tmp_path, "chatgpt").captured == (TemplateKind.COPY,)
+
+
+@pytest.mark.parametrize("index", [-1, 1, 99])
+def test_an_index_naming_no_image_leaves_the_folder_exactly_as_it_was(
+    tmp_path: Path, index: int
+) -> None:
+    """A stale row is a no-op, not an error: the caller re-reads the folder
+    after every one of these, so all a raise could add is a complaint about a
+    picture that was already not there."""
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
+    before = snapshot(tmp_path / "chatgpt")
+    drop_variant(tmp_path, "chatgpt", TemplateKind.BUSY, index)
+    drop_variant(tmp_path, "chatgpt", TemplateKind.COPY, 0)  # a kind with nothing in it
+    drop_variant(tmp_path, "no-such-service", TemplateKind.BUSY, 0)  # no folder at all
+    assert snapshot(tmp_path / "chatgpt") == before
 
 
 def test_the_numbering_starts_over_after_a_clear(tmp_path: Path) -> None:

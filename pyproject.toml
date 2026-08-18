@@ -49,6 +49,12 @@ gui = [
 
 [project.scripts]
 agentclip = "agentclip.cli:main"
+# The engine half, as a named executable. A remote session is deployed by
+# installing this same package on the SSH target (uv tool install / pipx / pip);
+# the master then launches `agentclip-engine` by name over an exec channel and
+# speaks the JSON-lines wire over its stdio (docs/design/remote-executor.md
+# section 2.6). Nothing is pushed to the target at connect time.
+agentclip-engine = "agentclip.engine.link.__main__:main"
 
 [dependency-groups]
 dev = [

@@ -12,6 +12,12 @@
 > server loop, `RemoteLink` and the localhost e2e suite) shipped in full, so
 > those parts describe code rather than intent. Everything else here is still
 > plan.
+>
+> **Increment 3 (SSH transport + deployment) is in progress.** Its packaging
+> half has landed — the engine entry point is now the `agentclip-engine` console
+> script, so §2.6 describes a decided and partly-built deployment model rather
+> than the SFTP-and-uv plan it used to. The transport itself (exec channel,
+> launch, missing-engine detection) is not built.
 
 ## 1. Goal
 
@@ -173,16 +179,46 @@ This supersedes `remote-ssh.md`'s "target owns the rules, host owns the gate"
 *config* split: the gate **UI** stays local, but all policy data and verdict
 computation are engine-side.
 
-### 2.6 Deployment: SFTP source + uv
+### 2.6 Deployment: a pre-installed engine on the target's PATH
 
-Each connect, push the needed source subtree (executor, engine, protocol,
-config — no shell/driver; the investigation confirmed executor code imports
-nothing from shell/driver) plus a lockfile over the existing SFTP machinery,
-then start it with `uv run` on the target. uv resolves Python ≥3.11 and deps
-(platformdirs, tomli_w, optional `mcp` extra). If uv is missing, offer a
-one-time bootstrap install. No per-arch artifacts; version skew is a non-issue
-because the host pushes exactly its own source. `paramiko` is not shipped
-(the remote half never SSHes out; it uses `LocalHost`).
+**The engine half is a named executable the user installs on the target, and the
+master launches it by name.** The user installs this same `agentclip` package
+over there — `uv tool install agentclip`, `pipx install agentclip`, or plain pip
+into an environment on PATH — which provides the console script
+**`agentclip-engine`** (`[project.scripts]` → `agentclip.engine.link.__main__:main`,
+the same `main` the localhost subprocess tests already run as
+`python -m agentclip.engine.link`). Installing it is the user's job; AgentClip
+ships no installer.
+
+Each connect, the master opens an SSH exec channel running
+`agentclip-engine --project <root> [--service KEY] …` and speaks wire v1 over
+that channel's stdio — the transport the client was already written for (§2.11:
+`RemoteLinkClient` takes two text streams and creates nothing). The process dies
+with the channel, exactly as §2.3 says, so nothing is left behind on the target
+between sessions. On the target, the server reads the **target's own** config and
+platformdirs locations by plain local reads (`.agentclip.toml`, `permissions.json`,
+skill folders) — the same policy-lives-with-the-engine rule as §2.5, with no path
+translation and no remote file access anywhere in the loop. `paramiko` is never
+used over there: the remote half never SSHes out, it uses `LocalHost`.
+
+**The two halves are separate installs**, which is precisely why the handshake
+exchanges both the wire version and the `agentclip` package version and refuses a
+wire mismatch with a sentence naming both (§2.9). Upgrading one machine and not
+the other is an expected state, not a bug — same wire version with different
+package versions is legal and costs one line of the server's log.
+
+An earlier plan — push the source subtree plus a lockfile over the existing SFTP
+machinery each connect and start it with `uv run` — was considered and dropped in
+favour of pre-installed-on-PATH: no first-connect copy step, no uv bootstrap to
+detect and repair, and a target install that is a *version* the user can name and
+upgrade rather than whatever the master happened to be running.
+
+What this costs the package for now: `agentclip-engine` rides along with the full
+install, so a target gets textual, pillow and the rest installed and never
+imported. Acceptable in v1 — the engine half already may not import
+`agentclip.shell` or `agentclip.driver` (pinned by `tests/test_layering.py`), so
+the unused weight is disk, not coupling. A slimmer install (an extra/package
+split, or a standalone binary) is §5 material.
 
 ### 2.7 MCP on target; interactive OAuth out of scope for v1
 
@@ -198,9 +234,12 @@ token-reuse work for a later fix.
 Once the remote-Executor mode reaches parity, the per-call `SshHost` tool path
 (every file read / command as its own round trip; grep/glob pulling whole
 files over SFTP to scan locally) is **deleted**. What survives from
-`executor/hosts/ssh.py`/`connect.py` is the connection/auth/reconnect/SFTP
-machinery, repurposed to deploy and talk to the remote process. One remote
-story, clean break — same style as the opencode.json → permissions.json split.
+`executor/hosts/ssh.py`/`connect.py` is the connection/auth/reconnect machinery,
+repurposed to open the exec channel the remote process is launched and spoken to
+on. Nothing deploys source any more (§2.6), so the SFTP side survives only as
+connect/auth plumbing — no file is pushed to the target at connect time. One
+remote story, clean break — same style as the opencode.json → permissions.json
+split.
 
 ### 2.9 Wire protocol v1 (as built)
 
@@ -304,8 +343,10 @@ a handshake would.
 streams** rather than a socket so the whole protocol can be driven in-process
 over a pair of pipes (tests/engine/link/test_server.py does exactly that, against
 a real Engine on a tmp project). The process form is
-`python -m agentclip.engine.link --project PATH [--service KEY]
-[--global-config PATH] [--home PATH] [--data-root PATH]`, which is argument
+`agentclip-engine --project PATH [--service KEY] [--global-config PATH]
+[--home PATH] [--data-root PATH]` — the console script §2.6 deploys, and
+equivalently `python -m agentclip.engine.link` with the same flags for a
+checkout without an install, which is what the tests spawn — which is argument
 parsing and assembly only: the flags map straight onto `load_config` and
 `make_engine_builder`, and `--global-config`/`--home` are the isolation that
 tests and sandboxed targets need (platformdirs ignores env vars on Windows, so
@@ -482,8 +523,11 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
    `RemoteLinkClient` takes two text streams — so the production transport and
    the deployment that produces it are increment 3's whole job, with no client
    changes owed.
-3. **SSH transport + deployment.** SFTP push + `uv run` bootstrap, `RemoteLink`
-   over the SSH exec channel, reusing `connect_remote` auth/reconnect.
+3. **SSH transport + deployment.** — *in progress.* `RemoteLink` over an SSH exec
+   channel running the pre-installed `agentclip-engine` (§2.6), reusing
+   `connect_remote` auth/reconnect; detecting a target that has no
+   `agentclip-engine` on PATH, and reporting it legibly. The packaging half
+   landed first: the engine entry point is a console script.
 4. **MCP + store on target, parity pass.** Target-side McpManager, stores,
    policy loading; the `/config`-wave permissions.json paths on the target.
 5. **Delete SshHost per-call mode** once parity is verified; amend
@@ -499,9 +543,19 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
   replacement (session-scoped server-side state + thin per-call payload) is
   undesigned. Includes where `backup_hook`, `cancel_event`, and `on_output`
   land in the new shape.
-- **Bootstrap/first-connect UX**: how uv-missing is detected/reported, whether
-  the bootstrap install needs explicit user consent in the connect flow
-  (ui-briefs/ssh-connect.md will need a revision), offline targets.
+- **Install UX on the target**: *detecting* a missing or wire-incompatible
+  `agentclip-engine` is increment-3 transport work and lands there (a launch that
+  fails with "command not found", and the handshake's version refusal). What is
+  open is the UX around it: does the connect flow guide the install/upgrade at
+  all, or only name the command to run — and where does that live
+  (ui-briefs/ssh-connect.md will need a revision either way)? Offline or
+  locked-down targets, where the user cannot install anything, may be the case
+  the standalone binary below is really for.
+- **A standalone single-file binary for the engine half** — a later packaging
+  increment: one artifact copied to the target, no Python required over there,
+  per-arch builds to produce. Optionally, the cheaper version of the same wish: a
+  slim install path (an extra, or a split package) so a target does not drag the
+  GUI/TUI dependencies it never imports (§2.6).
 - **Backup guarantee across the coarser boundary**: capture-before-overwrite
   must be re-verified once the engine (not Host primitives) does file
   mutation on the target — a naive design could batch/reorder and lose it.

@@ -1,4 +1,13 @@
-"""``python -m agentclip.engine.link`` - the remote half, as a process.
+"""``agentclip-engine`` - the remote half, as a process.
+
+Two ways in, one function. On a target this is the **console script**
+``agentclip-engine``, which the user pre-installs there by installing this same
+package (``uv tool install agentclip``, ``pipx``, pip) and which the master
+launches by name over an SSH exec channel - the deployment model of
+docs/design/remote-executor.md section 2.6. In tests and for a checkout without
+an install it is ``python -m agentclip.engine.link``, the same ``main`` reached
+by a different door. The parser names the executable, not the module file,
+because ``--help`` on a target is read by somebody who typed the former.
 
 Argument parsing and assembly, and nothing else: the loop is
 :func:`agentclip.engine.link.server.serve` and the wiring of one session's
@@ -34,7 +43,7 @@ from agentclip.engine.link.server import serve
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m agentclip.engine.link",
+        prog="agentclip-engine",
         description="Host AgentClip engines over the JSON-lines link on stdin/stdout.",
     )
     parser.add_argument(

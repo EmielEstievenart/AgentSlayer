@@ -302,7 +302,8 @@ def test_every_part_of_a_session_gets_the_same_host(tmp_path: Path) -> None:
         data_root=tmp_path / "state",
         home=host.home_dir(),
     )
-    engine = build(EngineRequest(service="claude"))
+    # The factory returns a Link; this test is about what it BUILT, so unwrap.
+    engine = build(EngineRequest(service="claude")).engine
 
     payload = engine.start_task("do it").chunks[0]
     assert "on Linux (ssh)" in payload  # the bootstrap tells the truth

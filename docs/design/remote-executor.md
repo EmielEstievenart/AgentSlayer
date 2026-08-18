@@ -7,10 +7,10 @@
 > the design session for the first increment happens, this document graduates
 > into a binding design doc and `remote-ssh.md` gets amended where superseded.
 >
-> **Exception: §2.2 and §2.9 are built, and binding** — increment 1 (the link
-> seam) and increment 2's first slices (the engine-side package, the wire codec)
-> shipped, so those parts describe code rather than intent. Everything else here
-> is still plan.
+> **Exception: §2.2, §2.9 and §2.10 are built, and binding** — increment 1 (the
+> link seam) and increment 2's first slices (the engine-side package, the wire
+> codec, the server loop) shipped, so those parts describe code rather than
+> intent. Everything else here is still plan.
 
 ## 1. Goal
 
@@ -122,9 +122,9 @@ so the assembly moved down before any wire was written:
   since this package is precisely what runs on the target.
 
 The wire codec landed next, in the same package: `engine/link/wire.py`, the
-shared vocabulary both ends import (§2.9). Still to come in increment 2: the
-JSON-lines server loop and `RemoteLink`, which speak that vocabulary and call
-this same builder.
+shared vocabulary both ends import (§2.9), and then the server loop that speaks
+it beside a bare engine (§2.10). Still to come in increment 2: `RemoteLink`, the
+Shell-side half that speaks the same vocabulary from the other end.
 
 ### 2.3 Disconnect semantics: lossy, honest, simple
 
@@ -262,6 +262,72 @@ three immutable facts the `Link` Protocol exposes synchronously (`chat_name`,
 `role`, `build_warnings`), carried home in that one answer exactly as §2.2 said
 a handshake would.
 
+### 2.10 The server loop (as built)
+
+`src/agentclip/engine/link/server.py` is the engine half's dispatch loop:
+`serve(reader, writer, builder, *, log=sys.stderr) -> int`, taking **text
+streams** rather than a socket so the whole protocol can be driven in-process
+over a pair of pipes (tests/engine/link/test_server.py does exactly that, against
+a real Engine on a tmp project). The process form is
+`python -m agentclip.engine.link --project PATH [--service KEY]
+[--global-config PATH] [--home PATH] [--data-root PATH]`, which is argument
+parsing and assembly only: the flags map straight onto `load_config` and
+`make_engine_builder`, and `--global-config`/`--home` are the isolation that
+tests and sandboxed targets need (platformdirs ignores env vars on Windows, so
+parameters are the only reliable way to keep the real global config and the real
+home out). It re-opens stdin/stdout as UTF-8 with `\n` endings before the first
+frame, because a Windows text stream would otherwise translate the terminator.
+
+**Synchronous, threads, no asyncio.** The engine IS synchronous and the event
+loop lives on the other side of the wire. So:
+
+- **The reader thread only reads and routes.** It never runs an engine method —
+  that is what keeps it free to notice the next line while a turn is running.
+- **Every call runs on a thread of its own**, and the client's one-in-flight
+  contract is enforced by a **per-session busy flag**: a second call for a
+  session whose previous one is unanswered earns `bad_request` rather than a
+  second worker. Dispatch is `wire.decode_params` → `getattr(engine, method)`
+  → `wire.encode_result`, with the method checked against wire's 13-name
+  whitelist first, so no string off the wire ever reaches `getattr` unvetted.
+- **`cancel` is handled on the reader thread**, calling `Engine.request_cancel()`
+  directly — the engine's one thread-safe method (it sets a `threading.Event`),
+  thread-safe precisely so somebody who is not the worker can interrupt the
+  worker. A cancel for an unknown or idle session is logged and ignored, never
+  answered.
+- **One lock guards every frame written**, and each write is encode + write +
+  flush under it, so a 200k-char output delta cannot be spliced through somebody
+  else's result frame and nothing waits on a buffer. §2.9's interleaving
+  guarantee then falls out of the shape rather than being enforced: the hooks
+  fire synchronously inside the engine method, on the worker's own thread, so
+  every progress/output frame is through the lock before `encode_result` runs.
+
+**Sessions.** `build_session` allocates `s1`, `s2`, … , calls the builder, wires
+that engine's progress/output hooks to frames tagged with the new id **before**
+answering (the client may call the instant it reads the `SessionInfo`), and
+answers with the `SessionInfo`. The builder is called **more than once per
+process** on purpose — one server hosts every session of one link, and the
+controller builds sub-agent engines mid-session from the same factory. A build
+that fails (config, project, a server that will not start) costs the client one
+`internal` error and leaves the hosted sessions untouched.
+
+**Failure.** Nothing a handler does kills the server: engine exceptions become
+`error` frames (`budget_exceeded`/`engine_state_error` keep their identity, the
+rest are `internal`), unknown sessions and unknown methods are `bad_request`, and
+a malformed line is answered and read past. Error frames that answer no call
+carry `id: 0` — wire's `error` frames are typed `id: int`, so "unattributable"
+needs a value rather than an absence, and 0 is one no client id can be. **Two
+malformed lines in a row** end the process (nonzero exit): at that point the
+stream is not a stream of frames and answering it politely would be a guess. A
+bad handshake — wrong version, garbage, anything before the hello, EOF — is
+refused with a `bad_request` where a reply is possible and exits nonzero. **EOF
+is the clean shutdown**: no new call can start, any in-flight worker gets a
+bounded 5s to write its answer through the lock, exit 0.
+
+**No MCP in this increment**: the builder is called with `mcp_manager=None`, so a
+hosted session is byte-identical to a pre-MCP one. Increment 4 brings the
+target-side McpManager, and it lands in `__main__.py`'s assembly like every other
+argument.
+
 ## 3. Architecture sketch
 
 ```
@@ -301,7 +367,10 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
    under them would have been churn, not design. See §2.2 "As built".
 2. **Wire protocol + localhost subprocess.** JSON-lines over stdio; run the
    engine half as a local subprocess behind `RemoteLink` in tests only.
-   Streaming (output deltas) and cancel as first-class messages.
+   Streaming (output deltas) and cancel as first-class messages. — *in
+   progress*: the engine-side package (§2.2), the codec (§2.9) and the server
+   loop (§2.10) are built; `RemoteLink` and the subprocess-behind-a-link tests
+   are what is left.
 3. **SSH transport + deployment.** SFTP push + `uv run` bootstrap, `RemoteLink`
    over the SSH exec channel, reusing `connect_remote` auth/reconnect.
 4. **MCP + store on target, parity pass.** Target-side McpManager, stores,

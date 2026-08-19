@@ -11,6 +11,13 @@ the view; pinning resumes once the scroll position is back at the bottom.
 NB: ``anchor()`` belongs on the scroll container - anchoring the event widgets
 themselves (this file's original approach) is a silent no-op in Textual 8.
 
+One INGESTED REPLY is several of those events (prose, then a widget per tool
+call), and the per-event rule above cannot see that: a reply of small widgets
+ends pinned at its last line with its opening scrolled away. So the controller
+brackets the reply - ``begin_reply`` before the first event, ``reveal_reply``
+after the last - and the panel parks the view at the reply's FIRST widget, which
+is the same park a tall event gets, applied to the reply as a whole.
+
 Children are pruned beyond MAX_EVENTS to bound layout cost. ``entries``
 mirrors every event as plain text - it is the assertion surface for the Pilot
 smoke test and a cheap in-memory postmortem.
@@ -69,6 +76,11 @@ class TranscriptPanel(VerticalScroll):
         # True while the view is parked at the top of a response too tall to
         # fit - small follow-up events must not yank the scroll to the bottom.
         self._reading = False
+        # The first widget of the reply being written, and the arm that claims
+        # it: ``begin_reply`` sets the arm, the next event to mount takes it,
+        # ``reveal_reply`` parks the view there. None between replies.
+        self._reply_start: Widget | None = None
+        self._await_reply_start = False
 
     def _record(self, headline: str, body: str = "", *, fenced: bool = False) -> None:
         self.event_log.append(LogEvent(datetime.now().strftime("%H:%M:%S"), headline, body, fenced))
@@ -85,6 +97,9 @@ class TranscriptPanel(VerticalScroll):
         if len(self.entries) > self.MAX_EVENTS:
             del self.entries[: len(self.entries) - self.MAX_EVENTS]
         await self.mount(widget)
+        if self._await_reply_start:
+            self._reply_start = widget
+            self._await_reply_start = False
         if markdown is not None:
             # Markdown mounts its blocks asynchronously; await it so the
             # widget has its real height before the fit-or-park decision.
@@ -106,14 +121,44 @@ class TranscriptPanel(VerticalScroll):
             return
         viewport = self.scrollable_content_region.height
         if viewport > 0 and widget.outer_size.height > viewport:
-            self._reading = True
-            self.release_anchor()  # compositor must stop chasing the bottom
-            self.scroll_to_widget(widget, top=True, animate=False)
+            self._park_at(widget)
             return
         if self._reading and not beat and self.scroll_y < self.max_scroll_y - 1:
             return  # still parked on a tall response - hold the position
         self._reading = False
         self.anchor()
+
+    def _park_at(self, widget: Widget) -> None:
+        """Put ``widget``'s top at the top of the view and hold it there."""
+        if not widget.is_mounted:  # pruned/cleared before the refresh landed
+            return
+        self._reading = True
+        self.release_anchor()  # compositor must stop chasing the bottom
+        self.scroll_to_widget(widget, top=True, animate=False)
+
+    def begin_reply(self) -> None:
+        """The next event to land opens an ingested reply (``reveal_reply``)."""
+        self._reply_start = None
+        self._await_reply_start = True
+
+    def reveal_reply(self) -> None:
+        """Park the view at the top of the reply that just finished landing.
+
+        One reply is prose plus a widget per tool call, and ``_autoscroll``
+        judges each of them alone - so a reply whose every widget fits ends
+        pinned at its LAST line, with the sentence it opened with off the top.
+        This is the same park a single tall event gets, applied to the reply as
+        a whole: its first line at the first row, as much of the rest as fits
+        below it, and the parked rules from there (follow-up noise holds the
+        position, scrolling back to the bottom resumes pinning).
+        """
+        widget = self._reply_start
+        self._reply_start = None
+        self._await_reply_start = False
+        if widget is not None:
+            # After the last event's own _autoscroll, which is queued ahead of
+            # this one: the reply's start is where the view ends up.
+            self.call_after_refresh(self._park_at, widget)
 
     async def add_user(self, text: str) -> None:
         self._record("you", text)
@@ -218,5 +263,7 @@ class TranscriptPanel(VerticalScroll):
         self.entries.clear()
         self.event_log.clear()
         self._reading = False
+        self._reply_start = None
+        self._await_reply_start = False
         self.anchor(False)
         await self.remove_children()

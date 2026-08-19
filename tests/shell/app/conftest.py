@@ -71,6 +71,9 @@ class FakeChatView:
         self.chats_started: list[SessionRef] = []
         self.chats_ended: list[SessionRef] = []
         self.cleared = 0
+        # The reply brackets, kept out of ``events`` because they are a SCROLL
+        # instruction and not a transcript line: "begin"/"reveal", in order.
+        self.reply_marks: list[str] = []
         # The run panel's three channels (§8a): every start_working with the
         # rows it was given, then the per-call progress and output pushed from
         # the engine's worker thread.
@@ -141,6 +144,12 @@ class FakeChatView:
 
     async def add_outbound(self, outbound: Outbound, label: str) -> None:
         self.events.append(("outbound", label))
+
+    async def begin_reply(self) -> None:
+        self.reply_marks.append("begin")
+
+    async def reveal_reply(self) -> None:
+        self.reply_marks.append("reveal")
 
     async def clear_transcript(self) -> None:
         self.cleared += 1

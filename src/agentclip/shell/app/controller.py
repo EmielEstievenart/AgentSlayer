@@ -1751,6 +1751,10 @@ class SessionController:
         """
         link = self._link
         assert link is not None
+        # Everything between these two is ONE reply, however many transcript
+        # events it takes, so the view can show it from its first line rather
+        # than leaving the user at the tail of it (ChatView.begin_reply).
+        await self._view.begin_reply()
         for prose in reply.prose:
             if prose.strip():
                 await self._view.add_prose(prose)
@@ -1761,6 +1765,7 @@ class SessionController:
             await self._view.add_error(
                 "reply arrived truncated - the model will be told to resend the missing tail"
             )
+        await self._view.reveal_reply()
         await self._refresh_status()  # REVIEW
 
         self._turn_glyphs = {c.id: ["•", c.tool] for c in reply.calls}

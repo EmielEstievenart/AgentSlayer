@@ -142,6 +142,23 @@ async def test_every_transcript_add_produces_its_own_event(harness: Harness) -> 
     assert events[5]["turn"] == 2
 
 
+async def test_an_ingested_reply_is_bracketed_so_the_page_can_reveal_it(harness: Harness) -> None:
+    """The page cannot see where a reply starts - a reply is prose plus a node
+    per call, and each is judged on its own - so the brackets say it, in the
+    focused window's transcript like every other add. They carry no content and
+    write nothing to the export."""
+    view = harness.view
+    await view.begin_reply()
+    await view.add_prose("running the tests now")
+    await view.add_call(call("run_command", command="pytest -q"))
+    await view.reveal_reply()
+
+    events = harness.flush().of_type("transcript")
+    assert [event["kind"] for event in events] == ["reply_start", "prose", "call", "reply_reveal"]
+    assert [event["window"] for event in events] == [MASTER_WINDOW] * 4
+    assert "reply" not in view.render_log([])
+
+
 async def test_the_transcript_export_carries_the_verbatim_payloads(harness: Harness) -> None:
     """``render_log`` is the export, and it must survive whatever the page
     prunes - so the text lives here, not in the DOM."""

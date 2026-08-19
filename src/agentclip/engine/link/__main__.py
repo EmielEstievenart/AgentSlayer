@@ -39,6 +39,7 @@ import argparse
 import sys
 from pathlib import Path
 
+from agentclip import __version__
 from agentclip.config import Config, load_config
 from agentclip.engine.link.factory import make_engine_builder
 from agentclip.engine.link.server import serve
@@ -48,6 +49,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentclip-engine",
         description="Host AgentClip engines over the JSON-lines link on stdin/stdout.",
+    )
+    # The one invocation that is neither a session nor a usage error. It exists
+    # for two readers. A HUMAN on a target answers "which agentclip is over
+    # there?" with it - the two halves are separate installs and a version skew
+    # is an expected state (design section 2.6), so the handshake's version
+    # refusal sends people looking for exactly this number. And a BUILD asks it
+    # of a frozen `agentclip-engine` binary as the smoke test
+    # (`scripts/build-exe.sh`): it walks the whole module-level import tree -
+    # config, factory, server, the executor's tool registry - and exits 0
+    # without needing a project, a link peer, or a single frame on stdout.
+    #
+    # argparse runs a `version` action the moment it consumes the flag, before
+    # the `--project` required-check, so this works with no other argument.
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"agentclip-engine {__version__}",
     )
     parser.add_argument(
         "--project",

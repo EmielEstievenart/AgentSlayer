@@ -22,6 +22,7 @@ import subprocess
 
 import pytest
 
+from agentclip import __version__
 from agentclip.engine.link.__main__ import main
 
 
@@ -39,6 +40,32 @@ def test_help_exits_zero_under_the_executable_name(capsys: pytest.CaptureFixture
     # The name a target's user typed, not the module file behind it.
     assert out.out.startswith("usage: agentclip-engine")
     assert "--project" in out.out
+
+
+def test_version_exits_zero_without_a_project() -> None:
+    """``--version``: the frozen build's smoke test, and a target's "which one?".
+
+    ``--project`` is required, so the only reason this can answer at all is that
+    argparse runs a ``version`` action as it consumes the flag - before the
+    required-argument check. That ordering is the whole feature: a build script
+    smoke-testing a frozen ``agentclip-engine`` has no project to point it at,
+    and a human on a target chasing the handshake's version refusal has no
+    session to start.
+    """
+    with pytest.raises(SystemExit) as exc:
+        main(["--version"])
+    assert exc.value.code == 0
+
+
+def test_version_prints_the_package_version_under_the_executable_name(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        main(["--version"])
+    out = capsys.readouterr()
+    # The executable's name and this package's version - the two facts the
+    # handshake's mismatch sentence names (design section 2.6).
+    assert out.out.strip() == f"agentclip-engine {__version__}"
 
 
 def test_missing_project_exits_nonzero_with_a_clean_stdout(

@@ -755,7 +755,7 @@ against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
   work — the data never is.
 - **The Esc chain is the brief's, in the brief's order**, split across the two
   dispatchers that own it: stages 1-3 (popup / clear-with-undo / blur) on the
-  composer, stages 4-7 (reject note / modal-local / cancel a pending `ask_user` /
+  composer, stages 4-7 (reject note / modal-local / dismiss a pending `ask_user` /
   no-op) on the document. Stage
   5 is *checked* first in the document handler and that is not a reordering — a
   GUI modal traps focus behind its scrim, so stages 1-3 cannot be live beside
@@ -764,15 +764,19 @@ against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
   named functions rather than inline closures precisely so the order is
   readable and assertable. `ev.defaultPrevented` is what stops a composer Esc
   from also firing stage 4 on the way up.
-- **Stage 6 is this shell's own** (`modals-keys-esc.md` §3.3): the TUI has no way
-  out of an `ask_user` but to answer it, and a GUI where the only exit is typing
-  something the model will read as an answer is a trap. It is last before the
-  no-op on purpose — the composer is auto-focused while a question is open, so
-  stage 3 spends the first press letting go of the box and the press that cancels
-  is never the press that meant to. It **resolves** the answer future with
-  `"[cancelled by user]"` rather than poisoning it the way `/new` does: poison is
-  safe only when a full session reset follows, and the engine's one exit from
-  `AWAITING_USER` is `answer_user`.
+- **Stage 6 dismisses a pending `ask_user`** (`modals-keys-esc.md` §3.3, `tui.md`
+  §3.3e) — a GUI where the only exit from a question is typing something the
+  model will read as an answer is a trap. It is last before the no-op on purpose
+  — the composer is auto-focused while a question is open, so stage 3 spends the
+  first press letting go of the box and the press that dismisses is never the
+  press that meant to. It **sends nothing**: `dismiss_pending_question()` leaves
+  the answer future open and the engine parked in `AWAITING_USER` (its one exit
+  is `answer_user`, so poisoning would strand it — that is safe only for `/new`,
+  which always resets the session behind it), drops `awaiting_answer` so the
+  banner and answer mode go, and lets the next ordinary message resolve the park
+  with the declined-prefix in front of it. Both shells have this stage now; the
+  TUI's sits one place earlier in its own chain (dismiss before blur), because
+  its composer is not auto-blurred by anything.
 - **The `ask_user` question gets a panel of its own** (`#ask-banner`), pinned
   above the composer, the approval gate's structural twin: a question is a stop,
   and a transcript note scrolls away while a stop must not. **A GUI/TUI

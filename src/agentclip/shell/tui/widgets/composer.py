@@ -4,12 +4,14 @@ A small ``TextArea`` subclass that *sends on Enter* (chat convention) instead of
 inserting a newline, so the steady-state loop reads like any chat app: type a
 message, press Enter. Multi-line input still works two ways - pasting preserves
 newlines (paste is a Paste event, not a stream of Enter keypresses) and ``ctrl+j``
-inserts a literal newline. ``escape`` is two-stage: with text in the box it
-clears the box (keeping focus, so the rewrite starts immediately), and on an
-already-empty box it blurs, so the main screen's single-key shortcuts
-(u/c/i/w/e/x) become reachable again ("command mode"). Clearing is an *edit*, so
-``ctrl+z`` gives the message straight back - a key that can throw away a
-paragraph of typing must never be the last word on it.
+inserts a literal newline. ``escape`` is staged: with text in the box it
+clears the box (keeping focus, so the rewrite starts immediately); on an empty
+box with the model's ``ask_user`` open it dismisses the question (the model is
+left waiting, nothing is sent); and on an empty box otherwise it blurs, so the
+main screen's single-key shortcuts (u/c/i/w/e/x) become reachable again
+("command mode"). Clearing is an *edit*, so ``ctrl+z`` gives the message straight
+back - a key that can throw away a paragraph of typing must never be the last
+word on it.
 
 It also drives the slash-command popup (``CommandPopup``, §3.3a): the box is the
 only thing that knows what has been typed, so it decides when the popup is up
@@ -27,7 +29,10 @@ likes and keeps this widget usable (popup-less) without one.
 
 ``verbatim`` is the suppression switch MainScreen sets: while the next send is
 consumed literally - an answer to the model's ``ask_user`` - a leading slash is
-TEXT, not a command, so no popup may appear.
+TEXT, not a command, so no popup may appear. It is also what makes escape's
+dismiss stage live, and that is the same fact stated twice: the flag is set from
+``awaiting_answer`` and nothing else, so "the box is verbatim" and "a question
+is open and unanswered" are one state.
 
 ``up``/``down`` walk what has already been sent (``SendHistory``), which is the
 third thing those two keys mean here and the last one tried: the popup gets them
@@ -149,6 +154,14 @@ class ChatComposer(TextArea):
         def __init__(self, text: str) -> None:
             self.text = text
             super().__init__()
+
+    class QuestionDismissed(Message):
+        """Posted when escape puts the model's open ``ask_user`` aside.
+
+        A message rather than a controller call because this widget knows no
+        controller - MainScreen owns every bit of routing, here as for
+        ``Submitted``.
+        """
 
     _verbatim: bool = False  # class-level default; MainScreen sets it per mode
 
@@ -307,7 +320,16 @@ class ChatComposer(TextArea):
                 self.history.checkpoint()
                 self.clear()
                 return
-            # Stage two: an empty box has nothing to lose, so escape means what
+            if self._verbatim:
+                # Stage two: an open ask_user. ``verbatim`` is exactly that park
+                # (MainScreen sets it from ``awaiting_answer`` and from nothing
+                # else), so this key is only live while a question is on the
+                # floor and unanswered. It sends nothing - the model is left
+                # waiting and the box goes back to normal - and it comes AFTER
+                # the clear above, so unsent answer text can never be lost to it.
+                self.post_message(self.QuestionDismissed())
+                return
+            # Stage three: an empty box has nothing to lose, so escape means what
             # it always did - drop to the screen's single-key "command mode".
             self.screen.set_focus(None)
             return

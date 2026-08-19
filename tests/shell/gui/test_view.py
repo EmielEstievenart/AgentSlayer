@@ -85,7 +85,7 @@ class ControllerSpy:
         self.decisions: list[tuple[Decision, str | None]] = []
         self.messages: list[str] = []
         self.cancels = 0
-        self.cancelled_questions = 0
+        self.dismissed_questions = 0
         self.permission_mode = "build"
         # The status bar's two fallbacks when there is no snapshot to read.
         self.yolo = False
@@ -100,8 +100,8 @@ class ControllerSpy:
     def cancel_execution(self) -> None:
         self.cancels += 1
 
-    def cancel_pending_question(self) -> None:
-        self.cancelled_questions += 1
+    def dismiss_pending_question(self) -> None:
+        self.dismissed_questions += 1
 
 
 # == the ports are satisfied, all of them =====================================
@@ -229,6 +229,10 @@ def test_focusing_an_unknown_session_is_harmless(harness: Harness) -> None:
     ("kwargs", "mode", "enabled"),
     [
         ({"awaiting_answer": True}, "answer", True),
+        # A dismissed question is the one BUSY state with an open box: the flow
+        # is still parked on the answer future and the way out is a typed
+        # message, so "working - the chat box is paused" would be a dead end.
+        ({"question_dismissed": True, "busy": True}, "message", True),
         ({"pending_approval": True}, "idle", False),
         ({"busy": True}, "idle", False),
         ({}, "message", True),
@@ -295,14 +299,14 @@ async def test_an_ordinary_note_is_not_mistaken_for_a_question(harness: Harness)
     assert harness.flush().last("state")["question"] == ""
 
 
-def test_cancelling_the_question_is_the_controllers_decision(harness: Harness) -> None:
+def test_dismissing_the_question_is_the_controllers_decision(harness: Harness) -> None:
     """Esc's last stage marshals and nothing more: the view does not touch the
-    answer future, because what a cancel MEANS (answer "[cancelled by user]",
-    never poison the park) is the controller's."""
+    answer future, because what a dismissal MEANS (send nothing, leave the park
+    standing, let the next message answer it) is the controller's."""
     spy = ControllerSpy()
     harness.view._controller = spy  # type: ignore[assignment]
-    harness.view.cancel_question()
-    assert spy.cancelled_questions == 1
+    harness.view.dismiss_question()
+    assert spy.dismissed_questions == 1
     assert spy.messages == []  # not a send, and never routed as one
 
 

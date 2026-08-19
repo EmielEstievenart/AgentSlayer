@@ -414,20 +414,22 @@ def test_the_document_handler_owns_stages_four_to_seven() -> None:
     # Stage 5 first, and it returns: a modal owns the keyboard while it is up.
     assert fn.index("ESC STAGE 5") < fn.index("ESC STAGE 4")
     # ...and the question is LAST before the no-op: a pending gate's reject box
-    # is nearer, and stages 2/3 have already spent a press each, so cancelling
+    # is nearer, and stages 2/3 have already spent a press each, so dismissing
     # can never be the press that was meant to empty or leave the composer.
     assert fn.index("ESC STAGE 4") < fn.index("ESC STAGE 6")
 
 
-def test_the_last_stage_cancels_a_pending_question_and_only_then() -> None:
+def test_the_last_stage_dismisses_a_pending_question_and_only_then() -> None:
     """The banner's way out. Guarded on the mirrored flag rather than on the
-    banner's `hidden` attribute, and it ASKS PYTHON - the decision (answer the
-    model "cancelled" rather than abort the turn) is the controller's."""
+    banner's `hidden` attribute, and it ASKS PYTHON - the decision (send nothing,
+    leave the model parked, let the next message answer) is the controller's.
+    The same flag is what makes a SECOND Esc a no-op: the push that follows a
+    dismissal clears `awaiting_answer`, so the stage is no longer live."""
     fn = APP_JS[APP_JS.index("function onDocumentKey(ev)") :]
     fn = fn[: fn.index("\n  }\n")]
     stage = fn[fn.index("ESC STAGE 6") :]
     assert "if (awaitingAnswer) {" in stage
-    assert 'api("cancel_question");' in stage
+    assert 'api("dismiss_question");' in stage
     # The flag is the state push's, so the page never guesses when a question
     # ended - and the banner is painted from the same fact.
     assert "awaitingAnswer = Boolean(event.awaiting_answer);" in APP_JS

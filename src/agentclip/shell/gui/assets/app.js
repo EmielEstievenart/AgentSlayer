@@ -2645,15 +2645,18 @@
                                      (a confirm denies, the summary closes,
                                      a text prompt cancels, help and settings
                                      close, the service editor asks Python)
-       6. an ask_user is open     -> below, last: cancels the question, which
-                                     ANSWERS it "[cancelled by user]" rather
-                                     than tearing the turn down. This shell's
-                                     own stage - the TUI has no way out of a
-                                     question but to answer it - and it is
-                                     deliberately last, so an empty composer
-                                     spends one Esc on stage 3 first and the
-                                     press that cancels is never the press
-                                     that was meant to leave the box
+       6. an ask_user is open     -> below, last: DISMISSES the question.
+                                     Nothing is sent and nothing is torn
+                                     down - the model stays parked and the
+                                     box goes back to normal until the next
+                                     message answers it. Deliberately last,
+                                     so an empty composer spends one Esc on
+                                     stage 3 first and the press that
+                                     dismisses is never the press that was
+                                     meant to leave the box. The TUI has the
+                                     same stage one place earlier in its own
+                                     chain (dismiss before blur), because its
+                                     composer is not auto-blurred by a modal
        7. nothing of the above    -> no-op
 
      Stage 5 is CHECKED first here and that is not a reordering: a GUI modal
@@ -2731,11 +2734,11 @@
       // ESC STAGE 6: an ask_user is on the floor and nothing nearer claimed the
       // key - the composer is empty AND already blurred (stages 2 and 3 spend a
       // press each before this one is reachable, so unsent answer text can never
-      // be lost to it). Python answers the model "[cancelled by user]": the turn
-      // runs on, which is the only thing that can unpark an engine waiting on a
-      // question.
+      // be lost to it). Nothing is SENT: Python leaves the model parked on its
+      // question and hands the box back, and the next ordinary message answers
+      // it with a note saying the user declined and asked for this instead.
       if (awaitingAnswer) {
-        api("cancel_question");
+        api("dismiss_question");
         return;
       }
       // ESC STAGE 7 otherwise: nothing to cancel, nothing happens.

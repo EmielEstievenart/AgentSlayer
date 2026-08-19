@@ -244,26 +244,34 @@ must replicate the order, not just the individual behaviors):
    (`summary.py:53-54`); ServiceEditor closes, first asking a
    discard-edit Confirm if the current field values are invalid
    (`service_editor.py:1274-1301`).
-6. **An `ask_user` question is open** (GUI only) → Esc **cancels the
-   question**: `SessionController.cancel_pending_question()` resolves the
-   answer future with `"[cancelled by user]"`, which the model receives as
-   the `ask_user` result. Deliberately last before the no-op, so the empty
-   composer spends a press on stage 3 first — the key that cancels is never
-   the key that was meant to let go of the box. **The TUI has no such
-   stage**: there the only way out of a question is to answer it (see the
-   note below).
+6. **An `ask_user` question is open** → Esc **dismisses the question**:
+   `SessionController.dismiss_pending_question()` sends nothing at all. The
+   answer future stays open, the engine stays in `AWAITING_USER`, and only
+   this side changes — `awaiting_answer` drops, the composer leaves answer
+   mode, slash lines are commands again, and the next ordinary message
+   resolves the park with `_DECLINED_PREFIX` in front of it. Deliberately
+   last before the no-op in the GUI, so the empty composer spends a press on
+   stage 3 first — the key that dismisses is never the key that was meant to
+   let go of the box. **The TUI has the same stage one place earlier**
+   (dismiss before blur): nothing auto-blurs its composer, so putting the
+   dismissal last would make it unreachable without first pressing `t`.
 7. **Nothing focused, no modal, `reject_open` false** → Esc is a no-op
    (`check_action` returns `False` for `cancel_entry` when
    `reject_open` is false, so the key does not even dispatch).
 
-**Why stage 6 resolves rather than aborts**: the engine's only exit from
+**Why stage 6 neither aborts nor answers**: the engine's only exit from
 `Phase.AWAITING_USER` is `Engine.answer_user` (phase-guarded), so raising
 into the answer future — what `/new` does — would leave a live engine
 parked on a question nobody can answer again. `/new`'s poison is safe
-only because a full session reset always follows it. Cancelling has no
-reset behind it, so it travels the ordinary answer path instead: the
-transcript echoes it like any other answer, the phase advances, and
-`_ask`'s `finally` puts the composer back.
+only because a full session reset always follows it, and a dismissal has
+no reset behind it. Nor may it *invent* an answer: a user who pressed Esc
+did not deny anything, and a synthesized "the user declined" burns a turn
+on a reply to a message the user never wrote. So the park is simply left
+open, and the message the user types instead becomes the answer, carrying
+`"[the user declined to answer the question and continued with a new
+request instead]\n\n"` in front of it. That whole string is what the
+transcript echoes, because the user should see exactly what the model
+will read.
 
 **Two-stage composer note for a GUI**: stage 2 (clear-with-undo) vs stage
 3 (blur) is decided purely by "is the box non-empty right now" — there is
@@ -512,10 +520,14 @@ the view) since `submit_message` is the one door every frontend's
 composer-send routes through.
 
 Because the box has no room left for a command, the way *out* of a
-question is a key, not a line of text: `cancel_pending_question()`, bound
-to Esc's last stage in the GUI (§3.3 stage 6). It is a second door on the
+question is a key, not a line of text: `dismiss_pending_question()`, bound
+to Esc in both shells (§3.3 stage 6). It is a second door on the
 controller for the same reason the sidebar's "New browser chat" button is
-one — it does not compete with the answer for the same keystrokes.
+one — it does not compete with the answer for the same keystrokes. What it
+opens is narrow: the question stays parked and only the *scope* of the
+verbatim rule ends, so `submit_message` reads `_awaiting_answer and not
+_question_dismissed` where it used to read `_awaiting_answer` alone, and
+the invariant above is untouched for as long as the user is answering.
 
 **How the question is SHOWN is where the two shells diverge** (recorded
 in `gui.md`): the TUI leaves it at the `"? …"` transcript note plus the
@@ -531,8 +543,9 @@ rather than growing a `ChatView` method only one shell would implement).
 3. Blur composer (empty box only)
 4. Cancel reject-reason input (screen-level, gated on `reject_open`)
 5. Modal-local escape (each modal owns its own meaning)
-6. Cancel a pending `ask_user` (**GUI only**, gated on `awaiting_answer`;
-   resolves the answer, never poisons it — see §3.3)
+6. Dismiss a pending `ask_user` (gated on `awaiting_answer`; sends nothing
+   and never poisons the park — see §3.3). The TUI runs it *before* stage 3
+   rather than here, because nothing else blurs its composer for it.
 7. No-op
 
 A frontend that collapses steps 2 and 3 into one ("Esc always blurs") or

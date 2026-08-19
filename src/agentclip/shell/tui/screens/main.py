@@ -669,6 +669,10 @@ class MainScreen(Screen[None]):
 
     pending_approval: reactive[bool] = reactive(False, bindings=True)
     awaiting_answer: reactive[bool] = reactive(False, bindings=True)
+    # An ask_user the user pressed Esc on: still parked, no longer answering.
+    # The box stays ENABLED through it even though the flow reads busy, because
+    # the next message is what resolves the park.
+    question_dismissed: reactive[bool] = reactive(False, bindings=True)
     busy: reactive[bool] = reactive(False, bindings=True)
     executing: reactive[bool] = reactive(False, bindings=True)  # tool calls in flight
     session_active: reactive[bool] = reactive(False, bindings=True)
@@ -1387,7 +1391,7 @@ class MainScreen(Screen[None]):
         if action == "submit_composer":
             # ...and during a sub-agent run, where the box exists so /abort can
             # be typed even though the master's flow is busy throughout.
-            if self.awaiting_answer or self.awaiting_new_session:
+            if self.awaiting_answer or self.question_dismissed or self.awaiting_new_session:
                 return True
             if self.sub_running and not self.pending_approval:
                 return True
@@ -1853,6 +1857,7 @@ class MainScreen(Screen[None]):
         )
         self.pending_approval = view.pending_approval
         self.awaiting_answer = view.awaiting_answer
+        self.question_dismissed = view.question_dismissed
         self.busy = view.busy
         self.phase_name = view.snapshot.phase.name if view.snapshot else "IDLE"
         # The two ways the loop settles back to idle, both visible only from a
@@ -1881,7 +1886,11 @@ class MainScreen(Screen[None]):
                 self._paint_mcp()
         if not view.session_active or (
             self._loop_state is LoopState.INTERPRETING
-            and (view.awaiting_answer or not (view.busy or view.pending_approval))
+            and (
+                view.awaiting_answer
+                or view.question_dismissed
+                or not (view.busy or view.pending_approval)
+            )
         ):
             self._set_loop_state(
                 LoopState.IDLE,
@@ -2523,6 +2532,11 @@ class MainScreen(Screen[None]):
     def _on_composer_submitted(self, message: ChatComposer.Submitted) -> None:
         message.stop()
         self._submit_text(message.text)
+
+    @on(ChatComposer.QuestionDismissed)
+    def _on_question_dismissed(self, message: ChatComposer.QuestionDismissed) -> None:
+        message.stop()
+        self._controller.dismiss_pending_question()
 
     def action_submit_composer(self) -> None:
         # Through the widget's own ``submit`` rather than straight to
@@ -3913,6 +3927,14 @@ class MainScreen(Screen[None]):
         elif self.awaiting_answer:
             composer.disabled = False
             composer.border_title = "Answer the model  ·  Enter sends · Ctrl+J newline"
+        elif self.question_dismissed:
+            # The flow is still parked on the question, so every "armed and
+            # idle" test below says no - but this is the one busy state whose
+            # way out is a typed message, so the box has to stay open.
+            composer.disabled = False
+            composer.border_title = (
+                "Question dismissed  ·  your next message answers it · Enter sends"
+            )
         elif self.sub_running and not self.pending_approval:
             # The master's flow is busy for the whole delegation, so the usual
             # "armed and idle" rule would lock the box - but /abort is the only
@@ -3987,6 +4009,11 @@ class MainScreen(Screen[None]):
             return "■ APPROVE NEEDED", "st-attn"
         if self.awaiting_answer:
             return "■ ANSWER NEEDED", "st-attn"
+        if self.question_dismissed:
+            # Before `busy`, which is technically true: the model is parked on a
+            # question the user set aside, and "working..." with a spinner would
+            # be a lie about who the floor belongs to.
+            return "■ QUESTION PARKED", "st-attn"
         if self.awaiting_new_session:
             # _busy is technically True here too (the session worker is parked
             # on the inline prompt) but there is no turn in flight - nothing for

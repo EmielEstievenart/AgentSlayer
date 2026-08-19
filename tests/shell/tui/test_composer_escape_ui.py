@@ -1,10 +1,13 @@
-"""Pilot tests for the chat box's two-stage `Esc` (tui.md §3.3c).
+"""Pilot tests for the chat box's staged `Esc` (tui.md §3.3c).
 
-One key means three things here, and the whole design is the *order* they are
+One key means four things here, and the whole design is the *order* they are
 tried in, so they are tested through real keypresses at the real box rather than
 by calling the handler: the slash popup gets first refusal, then a box with text
-in it is cleared (focus kept), and only an already-empty box blurs to the
-screen's single-key command mode.
+in it is cleared (focus kept), then an empty box with the model's `ask_user` open
+dismisses the question, and only after all of those does an empty box blur to the
+screen's single-key command mode. The dismissal stage needs a live question, so
+it is pinned in ``test_chat_ui.py`` where a session exists; everything else is
+here.
 
 The undo test is the one that earns its keep. Clearing has to go through the
 TextArea's edit history, because the obvious implementation - `load_text("")`,
@@ -120,8 +123,9 @@ async def test_ctrl_z_gives_the_cleared_text_back(tmp_path: Path) -> None:
 
 
 async def test_escape_on_an_empty_box_blurs_to_command_mode(tmp_path: Path) -> None:
-    """Stage two is the old behaviour, unchanged - an empty box has nothing to
-    lose, so Esc drops to the screen's single-key shortcuts."""
+    """The last stage is the old behaviour, unchanged - an empty box with no
+    question behind it has nothing to lose, so Esc drops to the screen's
+    single-key shortcuts."""
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 40)) as pilot:
         await _at_the_prompt(app, pilot)

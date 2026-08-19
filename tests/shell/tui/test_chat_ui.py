@@ -548,6 +548,70 @@ async def test_slash_leading_answer_is_delivered_not_hijacked(tmp_path: Path) ->
         assert main._snap is not None and not main._snap.yolo
 
 
+async def test_escape_dismisses_the_question_after_it_has_cleared_the_box(
+    tmp_path: Path,
+) -> None:
+    """Esc's stages in the order that makes them safe (tui.md §3.3e): the first
+    press only empties the box, so half-typed answer text can never be lost to a
+    key that was meant to scrap it - and the second one, on an empty box, puts
+    the question aside. Nothing is sent either time: the model stays parked and
+    the composer goes back to being an ordinary composer."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        main.post_message(ClipboardCaptured(REPLY_ASK_USER))
+        await _wait_for(pilot, lambda: main.awaiting_answer, "model asked a question")
+        writes_before = len(fake.written)
+
+        main.composer.focus()
+        main.composer.load_text("half an ans")
+        await pilot.press("escape")
+        await pilot.pause(0.1)
+        assert main.composer.text == ""
+        assert main.awaiting_answer  # stage one spent on the text, nothing else
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: not main.awaiting_answer, "the question dismissed")
+
+        assert main.question_dismissed
+        assert not main.composer.disabled  # the next message is the way out
+        assert len(fake.written) == writes_before  # the model was told nothing
+        assert main._controller._answer_future is not None
+
+
+async def test_a_dismissed_question_is_answered_by_the_next_message(
+    tmp_path: Path,
+) -> None:
+    """What the model finally reads: the user's own request, with one line in
+    front saying the question went unanswered. The transcript echoes the whole
+    thing, because the user should see exactly what was sent."""
+    app, fake, _ = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+
+        main.post_message(ClipboardCaptured(REPLY_ASK_USER))
+        await _wait_for(pilot, lambda: main.awaiting_answer, "model asked a question")
+        main.composer.focus()
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: main.question_dismissed, "the question dismissed")
+        writes_before = len(fake.written)
+
+        main.composer.load_text("never mind, tidy the imports")
+        await pilot.press("enter")
+        await _wait_for(
+            pilot, lambda: len(fake.written) > writes_before, "results copied after answering"
+        )
+
+        assert "declined to answer" in fake.written[-1]
+        assert "never mind, tidy the imports" in fake.written[-1]
+        assert not main.question_dismissed
+
+
 async def test_unknown_slash_command_is_reported(tmp_path: Path) -> None:
     """An unknown /command is rejected, not sent to the model as a message."""
     app, fake, _ = _make_app(tmp_path)

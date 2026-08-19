@@ -435,7 +435,7 @@ class JsCalls(Protocol):
     def submit_text(self, text: str) -> None: ...
     def submit_decision(self, choice: str, note: str) -> None: ...
     def cancel_execution(self) -> None: ...
-    def cancel_pending_question(self) -> None: ...
+    def dismiss_pending_question(self) -> None: ...
     def answer_prompt(self, prompt_id: str, value: Any) -> None: ...
     # The keys whose state the sidebar and the status bar show. One method per
     # intent rather than a single ``key(name)`` door, so the marshal is typed
@@ -544,10 +544,10 @@ class JsApi:
         finishes and still reports back - it is not an abort)."""
         self._safely(self._calls.cancel_execution)
 
-    def cancel_question(self) -> None:
-        """Esc at an open ``ask_user``: answer it "cancelled" and let the turn
-        run on. Not an abort - the model is told, and the phase advances."""
-        self._safely(self._calls.cancel_pending_question)
+    def dismiss_question(self) -> None:
+        """Esc at an open ``ask_user``: put it aside without answering. Nothing
+        is sent - the model keeps waiting and the next message answers it."""
+        self._safely(self._calls.dismiss_pending_question)
 
     def prompt(self, prompt_id: str = "", value: Any = None) -> None:
         """One blocking prompt's answer, keyed by the id the modal was opened

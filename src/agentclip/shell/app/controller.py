@@ -149,14 +149,19 @@ _FAILED_NOTE = (
 
 _ABORT_NOTE = "the user aborted the sub-agent run"
 
-# What a CANCELLED ask_user is answered with. Cancelling is an ordinary answer,
-# never a poisoned park: the engine's only way out of AWAITING_USER is
-# ``answer_user`` (engine.py, phase-guarded), so an exception raised into the
-# answer future would leave a live engine parked on a question nobody will ever
-# answer again. This string travels the normal path instead - the model reads it
-# as the tool's result, the phase advances, and ``_ask``'s finally puts the
-# composer back the way any other answer does.
-_CANCELLED_ANSWER = "[cancelled by user]"
+# What a DISMISSED ask_user is eventually answered with, prefixed to the next
+# ordinary message the user sends. Dismissing (Esc) resolves nothing by itself:
+# the model asked, the user simply has something else to say first, and inventing
+# a refusal on their behalf puts words in their mouth and burns a turn. So the
+# park stays open, the composer goes back to normal, and the next message carries
+# both facts at once - the question went unanswered, and here is what the user
+# wants instead. Never poison the park: the engine's only way out of
+# AWAITING_USER is ``answer_user`` (engine.py, phase-guarded), so an exception
+# raised into the answer future would strand a live engine on a question nobody
+# can answer again.
+_DECLINED_PREFIX = (
+    "[the user declined to answer the question and continued with a new request instead]\n\n"
+)
 
 # Noise reason -> toast. "{chat}" is filled with the session's chat name.
 _NOISE_TEXT = {
@@ -467,6 +472,12 @@ class SessionController:
         self._executing = False
         self._pending_approval = False
         self._awaiting_answer = False
+        # Esc at an open question: the park is still live, but the composer has
+        # been handed back to the user. Always read together with
+        # ``_awaiting_answer`` - it means nothing on its own, and it is what
+        # keeps the verbatim-answer rule (submit_message) scoped to the window
+        # where the user is actually answering.
+        self._question_dismissed = False
         self._has_outbound = False
         self._yolo = config.approval.yolo  # auto-approve everything; /yolo toggles it
         # The session's permission mode, mirrored from the engine the way _yolo
@@ -615,10 +626,14 @@ class SessionController:
         text = text.strip()
         if not text:
             return
-        # An ask_user answer ALWAYS wins. While the flow is parked on the answer
-        # future the composer's text IS the answer, verbatim - so a legitimate
-        # answer like "/etc/hosts" or "/no" is delivered, never eaten as a command.
-        if self._awaiting_answer:
+        # An ask_user answer ALWAYS wins - but only while the user is actually
+        # answering. While the flow is parked on the answer future AND the
+        # question has not been dismissed, the composer's text IS the answer,
+        # verbatim, so a legitimate answer like "/etc/hosts" or "/no" is
+        # delivered rather than eaten as a command. Esc (``dismiss_pending_question``)
+        # is the one way to end that window without answering; past it the box is
+        # an ordinary composer again and the routing below applies.
+        if self._awaiting_answer and not self._question_dismissed:
             future = self._answer_future
             if future is not None and not future.done():
                 self._view.reset_composer()
@@ -628,6 +643,26 @@ class SessionController:
             return
         if text.startswith("/"):
             self._handle_command(text)
+            return
+        self._deliver_user_text(text)
+
+    def _deliver_user_text(self, text: str) -> None:
+        """A plain (non-command) composer line, once slash parsing has passed it.
+
+        Two destinations, and which one is not a property of the text: a
+        dismissed question is still parked on the answer future, and the ONLY
+        way to unpark an engine in AWAITING_USER is to answer it. So the message
+        the user typed instead becomes that answer, wrapped in ``_DECLINED_PREFIX``
+        so the model reads what actually happened - the question went unanswered,
+        and this is what the user wants now - rather than a non-sequitur.
+        """
+        if self._awaiting_answer and self._question_dismissed:
+            future = self._answer_future
+            if future is None or future.done():
+                self._view.notify("answer already sent - please wait", severity="warning")
+                return
+            self._view.reset_composer()
+            future.set_result(_DECLINED_PREFIX + text)
             return
         self._send_follow_up(text)
 
@@ -693,7 +728,7 @@ class SessionController:
         sent."""
         self._view.reset_composer()
         if raw.startswith("//"):
-            self._send_follow_up(raw[1:])  # literal-slash message escape
+            self._deliver_user_text(raw[1:])  # literal-slash message escape
             return
         name, _, arg = raw[1:].partition(" ")
         name = name.strip().lower()
@@ -1453,31 +1488,32 @@ class SessionController:
             severity="warning",
         )
 
-    def cancel_pending_question(self) -> None:
-        """Answer a pending ``ask_user`` with "cancelled" and let the turn run on.
+    def dismiss_pending_question(self) -> None:
+        """Put a pending ``ask_user`` aside without answering it - LOCAL ONLY.
 
-        The way OUT of a question the user does not want to answer, and it is a
-        RESOLUTION, not an abort: the future is completed with
-        ``_CANCELLED_ANSWER``, which flows through ``_handle_step``'s ordinary
-        AskUser branch - echoed into the transcript like any other answer, handed
-        to ``engine.answer_user``, and unparking the engine from AWAITING_USER,
-        which nothing else can do. Poisoning the park instead (what ``/new``
-        does) is only safe when a full session reset follows it; here there is
-        none, and the engine would be stranded.
+        The way out of a question the user does not want to answer, and it sends
+        nothing: the model is not told "denied" on the user's behalf, because
+        nobody denied anything - they just have something else to say first. So
+        the flow stays parked on the answer future, the engine stays in
+        AWAITING_USER, and all that changes is on this side of the port: the
+        composer leaves answer mode, slash commands parse again, and the next
+        ordinary message resolves the park with ``_DECLINED_PREFIX`` in front of
+        it (``_deliver_user_text``).
 
-        A no-op when no question is on the floor, and when a send already
-        resolved it a heartbeat earlier."""
-        if not self._awaiting_answer:
+        A no-op with nothing pending, when a send already resolved the park a
+        heartbeat earlier, and on a second press - the page and the composer both
+        press it without knowing which."""
+        if not self._awaiting_answer or self._question_dismissed:
             return
         future = self._answer_future
         if future is None or future.done():
             return
-        # Same two lines an ordinary send makes (``submit_message``), in the same
-        # order: the box is emptied before the flow can repaint it.
+        self._question_dismissed = True
         self._view.reset_composer()
-        future.set_result(_CANCELLED_ANSWER)
+        self._push_state()  # awaiting_answer drops: the composer leaves answer mode
         self._view.notify(
-            "question cancelled - the model is told you did not answer", severity="warning"
+            "question dismissed - the model waits; your next message answers it",
+            severity="warning",
         )
 
     # The three key actions that spawn a flow. ``_turn_aborting`` guards each
@@ -1571,6 +1607,7 @@ class SessionController:
             self._busy = False
             self._pending_approval = False
             self._awaiting_answer = False
+            self._question_dismissed = False
             self._view.stop_working()
             self._view.hide_gate()
             # Last, and after the flags: an aborting /new resumes the instant
@@ -2045,6 +2082,7 @@ class SessionController:
         finally:
             self._answer_future = None
             self._awaiting_answer = False
+            self._question_dismissed = False  # the park it described is over
             self._push_state()
 
     @property
@@ -2492,6 +2530,7 @@ class SessionController:
         self._reply_future = None
         self._sub_aborting = False
         self._turn_aborting = False
+        self._question_dismissed = False  # no park survives a reset to describe
         self._preset = None
         self._snap = None
         self._last_outbound = None
@@ -2661,7 +2700,13 @@ class SessionController:
                 session_active=self._session_active,
                 busy=self._busy,
                 pending_approval=self._pending_approval,
-                awaiting_answer=self._awaiting_answer,
+                # A dismissed question is NOT "awaiting an answer" as far as any
+                # view is concerned: the composer is the user's again and the
+                # verbatim rule is off. The park behind it is what
+                # ``question_dismissed`` reports, so a view can keep the box
+                # enabled while the flow is technically busy.
+                awaiting_answer=self._awaiting_answer and not self._question_dismissed,
+                question_dismissed=self._question_dismissed,
                 has_outbound=self._has_outbound,
                 snapshot=self._snap,
                 session_id=active.id if active is not None else "master",

@@ -300,8 +300,8 @@ class GuiRunner:
     def cancel_execution(self) -> None:
         self.schedule_call(self.view.cancel_execution)
 
-    def cancel_pending_question(self) -> None:
-        self.schedule_call(self.view.cancel_question)
+    def dismiss_pending_question(self) -> None:
+        self.schedule_call(self.view.dismiss_question)
 
     def answer_prompt(self, prompt_id: str, value: Any) -> None:
         self.schedule_call(self.view.answer_prompt, prompt_id, value)

@@ -107,7 +107,7 @@ The five cases, all decided before anything is clicked:
 - **Master tab, no session** (start screen, or already re-prompting after a `/new`) — click and refocus only; there is nothing to reset, and the start screen has just been handed a clean chat to start in.
 - **Sub-agent tab, idle** — click and refocus only, ever. That window hosts delegated runs, which the controller starts and ends (§3.4c); emptying it says nothing about the master's conversation. `/new` never lands here: it pins the slot to the master (§3.3a).
 
-The button is also the **escape hatch from an ask_user park**, and the only one. While the composer is in answer mode its text *is* the answer, verbatim — the standing invariant of `SessionController.submit_message` (§3.3a) — so typing `/new` there delivers the string `/new` to the model, as it must. The press comes in through `request_new_session()` instead, which is not competing for those keystrokes, and the abort above poisons the answer future like any other park.
+The button is also the **escape hatch from an ask_user park** that costs no keystrokes at all. While the composer is in answer mode its text *is* the answer, verbatim — the standing invariant of `SessionController.submit_message` (§3.3a) — so typing `/new` there delivers the string `/new` to the model, as it must. The press comes in through `request_new_session()` instead, which is not competing for those keystrokes, and the abort above poisons the answer future like any other park. (`Esc` is the *other* way out, and a much smaller one: it dismisses the question without ending anything, and slash commands — `/new` typed included — work again the moment it lands. See §3.3e.)
 
 Which slot the press meant is decided **once, before the click**, and carried through as an argument (`_new_browser_chat(slot)` → `_reset_after_new_browser_chat(slot)`) — the same rule the region picker follows (§3.4a) and for the same reason: there are awaits either side of the click, the user can select another tab across them, and re-reading `_calibrating` afterwards would credit the *master* with a chat opened in the sub-agent's window and end the master's session for it. A failed click (any non-`CLICKED` outcome) still runs the reset; what it skips is the refocus, because the browser is where the user has to finish the job. Its toast carries the reason and then hands that job over — see §3.3a's fourth rule.
 
@@ -659,10 +659,11 @@ Six rules, and each one is a decision rather than a default:
 
 ### 3.3c What `Esc` does in the chat box
 
-`Esc` in the composer is **two stages**, decided by whether there is anything in the box, and the popup gets first refusal on the key before either of them (§3.3a):
+`Esc` in the composer is **three stages**, decided by what is in the box and whether the model is waiting on an `ask_user`, and the popup gets first refusal on the key before any of them (§3.3a):
 
 1. **Text in the box → clear it, and keep the focus.** The commonest thing a user wants from `Esc` at a chat box is *scrap this and start again*, and the version that only blurred made that the long way round: blur, `t`, select-all, delete. The cursor stays where it is, so the rewrite begins on the next keystroke.
-2. **Empty box → blur**, exactly as it always did: focus drops to the screen and the single-key shortcuts (`u`/`c`/`i`/`w`/`e`/`x`/`t`/`l`) become reachable again ("command mode", §1.2). Reaching command mode with a half-typed message therefore costs two presses — the first one is what makes it safe to say the second one throws nothing away.
+2. **Empty box, an `ask_user` open → dismiss the question** (`ChatComposer.QuestionDismissed` → `SessionController.dismiss_pending_question()`, §3.3e). It comes *after* the clear, so unsent answer text can never be lost to it, and it is live only while the box is in answer mode — the composer reads its own `verbatim` flag, which `MainScreen` sets from `awaiting_answer` and from nothing else.
+3. **Empty box otherwise → blur**, exactly as it always did: focus drops to the screen and the single-key shortcuts (`u`/`c`/`i`/`w`/`e`/`x`/`t`/`l`) become reachable again ("command mode", §1.2). Reaching command mode with a half-typed message therefore costs two presses — the first one is what makes it safe to say the second one throws nothing away — and from an open question it costs two as well, because the first one hands the question back.
 
 **The clear is an edit, not a reload.** `ChatComposer` calls `TextArea.clear()` behind an explicit `history.checkpoint()`, *not* `load_text` — which resets the undo history, and a single key that can destroy a paragraph of typing has to be one `ctrl+z` from handing it back. The checkpoint is what makes that undo restore exactly what was there: without it the clear can be batched with the last few keystrokes and `ctrl+z` would return a half-typed line. `reset()` — the send path — keeps using `load_text`: a message that has *left* is not a message the box should be able to resurrect.
 
@@ -681,6 +682,19 @@ The list itself (`ChatComposer.SendHistory`) is **session-local, in memory, capp
 **Editing ends the walk.** Any `Changed` that is not the recall's own puts the box back in charge: what is there now is the draft, and the next `↑` starts again from the newest. Telling the two apart needs care — Textual *posts* `Changed` rather than raising it, so a flag set around `load_text` would already be back to `False` when the message arrived and the recall would undo its own browse position. The composer counts the echoes it is owed instead (one recall is one `load_text` is one `Changed`).
 
 The GUI implements the same behaviour key-for-key and rule-for-rule (`docs/design/gui.md` §3), down to the cap and the draft round-trip — the arrows are muscle memory and would be worse than useless if the two shells disagreed.
+
+### 3.3e Dismissing an `ask_user` (`Esc` on an empty box)
+
+A question the user does not want to answer is not a *refusal*: they have simply thought of something else to say first. So `Esc` at an open `ask_user` sends **nothing**. `SessionController.dismiss_pending_question()` sets `_question_dismissed` and pushes state; the flow stays parked on the answer future and the engine stays in `Phase.AWAITING_USER`, because `answer_user` is its only exit and poisoning the park would strand a live engine (that is `/new`'s trick, and it is safe only because a full session reset always follows it).
+
+What changes is all on this side of the port:
+
+- `SessionView.awaiting_answer` goes **false** (`_awaiting_answer and not _question_dismissed`), so the composer leaves answer mode, the slash popup works again and the verbatim rule is off. `SessionView.question_dismissed` carries the park, which is what keeps the box **enabled** while `busy` is still true and what makes the status bar read `■ QUESTION PARKED` rather than `● working...`.
+- Slash lines are **commands again** — the point of the dismissal, and the reason `/new`, `/mode` and the rest are reachable from a question that has gone wrong.
+- The next ordinary (non-command) message resolves the park with `_DECLINED_PREFIX` in front of it: `"[the user declined to answer the question and continued with a new request instead]\n\n"` + the user's text. That whole string is the `ask_user` result body and it is what the transcript echoes — the user should see exactly what the model will read. `//text` reaches the same place, one slash stripped, as it does everywhere else.
+- Dismissing with nothing pending, or twice, is a silent no-op; a send that beat the `Esc` by a frame wins, because the future is already resolved.
+
+The `/new` button remains the escape hatch from the whole *turn* (§1.3) and is unaffected: it poisons the answer future whether or not the question was dismissed.
 
 ### 3.4a Screen regions and the focus click (the "hand me back to the browser" nudge)
 
@@ -1036,7 +1050,7 @@ nothing live; the turn is unaffected.
 - **Two different replies copied quickly**: depth-1 queue per §3.2 (newest wins); the second runs when the turn completes — a mid-turn copy is a deliberate user action, and eligibility knows only the two preconditions (§3.2).
 - **5 MB unrelated clipboard**: Windows pays nothing until seqnum changes; one read + substring scan + hash ≈ ms; no protocol marker → ignored. A hard cap (8 MB) skips parsing entirely with a one-time dim toast.
 - **Terminal resize**: Textual reflows; ActionPanel `max-height: 60%; min-height: 8;` so the transcript never fully disappears; status segments have CSS `text-overflow: ellipsis` with the watcher segment first (highest priority). No "too small" overlay — degrade silently.
-- **`ask_user`**: answering lives on the **persistent chat composer**, not the ActionPanel (the panel is approval-only — its own docstring says so; the original `TextArea#answer` question mode was removed). The question renders in the transcript, the composer switches to answer mode (verbatim — no slash parsing may eat an answer, the §3.3a invariant), plain `Enter` submits; the answer is recorded as the `ask_user` result and the turn continues (remaining calls run), then composes/copies as usual.
+- **`ask_user`**: answering lives on the **persistent chat composer**, not the ActionPanel (the panel is approval-only — its own docstring says so; the original `TextArea#answer` question mode was removed). The question renders in the transcript, the composer switches to answer mode (verbatim — no slash parsing may eat an answer, the §3.3a invariant), plain `Enter` submits; the answer is recorded as the `ask_user` result and the turn continues (remaining calls run), then composes/copies as usual. `Esc` on the empty box **dismisses** the question instead of answering it — nothing is sent, the model stays parked, and the next ordinary message resolves it with the declined-prefix in front (§3.3e).
 - **User quits mid-turn** (`ctrl+q` during `EXECUTING`/gate): ConfirmScreen warns the turn is incomplete and results were never sent; backups for the turn are kept.
 - **LLM emits unknown tool / malformed call body**: that single call gets an `error: unknown tool 'foo'` result entry (LLM self-corrects next turn); the rest of the turn proceeds.
 
@@ -1044,7 +1058,7 @@ nothing live; the turn is unaffected.
 
 ## 10. Key binding table
 
-`Binding(...)` on MainScreen unless noted. Dynamic = gated via `check_action` + `reactive(..., bindings=True)` (`pending_approval`, `awaiting_answer`, `busy`, `executing`, `session_active`, `awaiting_new_session`, `phase_name`, `watch_paused`, `reject_open`, `has_outbound`, `has_extra_instructions`, `sub_running`); `None` returns show dimmed keys in `Footer` for discoverability.
+`Binding(...)` on MainScreen unless noted. Dynamic = gated via `check_action` + `reactive(..., bindings=True)` (`pending_approval`, `awaiting_answer`, `question_dismissed`, `busy`, `executing`, `session_active`, `awaiting_new_session`, `phase_name`, `watch_paused`, `reject_open`, `has_outbound`, `has_extra_instructions`, `sub_running`); `None` returns show dimmed keys in `Footer` for discoverability.
 
 Only keys that are actually bound are listed. Chunk-walk mode (§6) has none yet — its `space` "skip the ACK, arm the next part" binding lands with the feature, not before it, so the footer cannot advertise a key that does nothing.
 
@@ -1065,7 +1079,7 @@ Only keys that are actually bound are listed. Chunk-walk mode (§6) has none yet
 | `enter` | toggle focused Collapsible | native, when focused |
 | `pageup`/`pagedown` | scroll transcript | always (main) |
 | arrows / `pgup`/`pgdn` | scroll focused panel (diff body autofocused at gate) | native |
-| `escape` | close the slash-command popup / cancel reject-reason / clear the composer (undoably, §3.3c) / blur the empty composer to command mode / dismiss modal | contextual, in that order |
+| `escape` | close the slash-command popup / cancel reject-reason / clear the composer (undoably, §3.3c) / dismiss an open `ask_user` (§3.3e) / blur the empty composer to command mode / dismiss modal | contextual, in that order |
 | `F1` / `?` | HelpScreen — its command section renders from `shell/app/commands.py`, so it cannot drift from what `/help` says | global (App) |
 | `F2` | ServiceEditorScreen: sizes, appearances, the finish-signal checklist (§1.4). Refused while the chat-region overlay is up — two fullscreen child processes cannot share a desktop | global (App) |
 | `F3` | show/hide the settings sidebar | MainScreen (priority: works while the composer has focus) |

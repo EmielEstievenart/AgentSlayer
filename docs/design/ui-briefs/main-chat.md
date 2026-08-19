@@ -179,6 +179,10 @@ Transitions are driven entirely by the `SessionView` snapshot pushed via
   concurrently visible (a gate only opens between calls, never mid-call).
 - `awaiting_answer` — composer in verbatim answer mode; action panel closed;
   run panel not visible.
+- `question_dismissed` — the same park after Esc: `awaiting_answer` is false
+  (the composer is ordinary again, commands parse), `busy` is still true, and
+  the box stays **enabled** anyway because the next message is what resolves
+  the park. See `tui.md` §3.3e.
 - `executing` (a.k.a. `busy` while inside `engine.execute()`) — run panel
   visible; composer disabled; action panel closed (no call is gated while
   auto-run calls are in flight).
@@ -301,7 +305,9 @@ Slash commands (typed in the composer, dispatched by
 directly touch this surface's state (approval policy / permission mode
 badge); the rest affect the transcript (a note/listing) or other surfaces.
 Precedence: while `awaiting_answer`, **nothing is parsed as a command** — the
-typed text is always the literal answer (`controller.py:541-551`).
+typed text is always the literal answer (`controller.py`, `submit_message`).
+Esc ends that window without answering (`question_dismissed`), and commands
+parse again from the press onwards.
 
 ## 6. Invariants & edge cases
 

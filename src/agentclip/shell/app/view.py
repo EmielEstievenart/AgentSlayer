@@ -87,6 +87,13 @@ class SessionView:
     session_id: str = "master"
     session_role: Role = "master"
     session_title: str = ""
+    # An ``ask_user`` the user pressed Esc on: the flow is still parked on the
+    # answer future (only ``answer_user`` can unpark the engine) but the composer
+    # has been handed back. Mutually exclusive with ``awaiting_answer`` by
+    # construction, and the reason a view must not read ``busy`` alone to decide
+    # whether the box is usable - here it is, and the next message resolves the
+    # park.
+    question_dismissed: bool = False
 
 
 class ChatView(Protocol):

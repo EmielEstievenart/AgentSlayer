@@ -995,14 +995,15 @@ class GuiView:
         """ctrl+x's equivalent. The controller no-ops when nothing is running."""
         self._controller.cancel_execution()
 
-    def cancel_question(self) -> None:
-        """Esc's last stage: refuse the question the banner is showing.
+    def dismiss_question(self) -> None:
+        """Esc's last stage: put the question the banner is showing aside.
 
-        The decision is the controller's whole (it answers the model
-        "[cancelled by user]" rather than tearing the turn down), so this is the
+        The decision is the controller's whole (nothing is sent - the model
+        keeps waiting and the next ordinary message answers it), so this is the
         marshal and nothing more. A no-op on the far side when no question is
-        open, which is what lets the page press it without knowing."""
-        self._controller.cancel_pending_question()
+        open or one was already dismissed, which is what lets the page press it
+        without knowing."""
+        self._controller.dismiss_pending_question()
 
     def answer_prompt(self, prompt_id: str, value: Any) -> None:
         """Resolve one blocking prompt. Unknown ids are ignored - a modal the
@@ -1388,7 +1389,11 @@ class GuiView:
         # floor is back with the user (an open gate is still interpreting).
         if not view.session_active or (
             self._automation.loop_state is LoopState.INTERPRETING
-            and (view.awaiting_answer or not (view.busy or view.pending_approval))
+            and (
+                view.awaiting_answer
+                or view.question_dismissed
+                or not (view.busy or view.pending_approval)
+            )
         ):
             self._automation.set_loop_state(
                 LoopState.IDLE,
@@ -3408,7 +3413,7 @@ class GuiView:
         snap = view.snapshot if view is not None else None
         mode, placeholder, enabled = self._composer_mode(view)
         # The banner lives and dies with the flag, not with the note: whatever
-        # ended the park (an answer, an Esc cancel, a /new) cleared
+        # ended the park (an answer, an Esc dismissal, a /new) cleared
         # ``awaiting_answer``, and the stashed question goes with it rather than
         # hanging over the composer of a conversation that has moved on.
         awaiting = bool(view and view.awaiting_answer)
@@ -3451,6 +3456,11 @@ class GuiView:
             return "idle", "no session", False
         if view.awaiting_answer:
             return "answer", "Answer the model · Enter sends · Shift+Enter newline", True
+        if view.question_dismissed:
+            # A dismissed question leaves the flow parked, so every "not busy"
+            # test below says no - but this is the one busy state whose way out
+            # is a typed message, so the box stays open and ordinary.
+            return "message", "Question dismissed · your next message answers it", True
         if view.session_role == "subagent" and not view.pending_approval:
             return "abort", "Sub-agent running · /abort ends it and tells the model", True
         if view.pending_approval:
@@ -3560,6 +3570,11 @@ class GuiView:
             return "■ APPROVE NEEDED", "st-attn"
         if view is not None and view.awaiting_answer:
             return "■ ANSWER NEEDED", "st-attn"
+        if view is not None and view.question_dismissed:
+            # Before `busy`, which is technically true: the model is parked on a
+            # question the user set aside, and "working..." would be a lie about
+            # who the floor belongs to.
+            return "■ QUESTION PARKED", "st-attn"
         if self._awaiting_new_session:
             # The session worker is technically busy here too (parked on the
             # inline prompt) but there is no turn in flight - nothing for the

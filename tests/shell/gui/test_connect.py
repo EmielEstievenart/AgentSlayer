@@ -367,6 +367,19 @@ async def test_the_preview_agrees_with_the_grammar_the_backend_parses(
     assert last_connect(harness)["preview"] == "pi@10.0.0.9:2200"
 
 
+async def test_the_preview_unwraps_a_pasted_ssh_command_the_way_resolve_does(
+    harness: RemoteHarness,
+) -> None:
+    """A user pastes their whole command line; the preview must show what will
+    actually be dialled, not the string with the verb still on it."""
+    harness.view.open_connect()
+    harness.view.connect_fields("ssh wsl", REMOTE_ROOT)
+    harness.view.connect_select("saved:spare")  # any repaint
+    harness.view.connect_fields("ssh wsl", REMOTE_ROOT)
+    harness.view.connect_start()
+    assert last_connect(harness)["preview"] == "wsl"
+
+
 # == the checklist =============================================================
 
 

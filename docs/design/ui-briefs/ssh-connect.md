@@ -80,7 +80,7 @@ starts"):
 
 | # | Step | Source | Failure mode today | Exit code |
 |---|------|--------|---------------------|-----------|
-| 1 | Resolve target: `--ssh` value against `[remote.<name>]` saved targets, else `~/.ssh/config` alias, else `[user@]host[:port]` | `config.py:413-434` (`RemoteConfig.selected`) | target has no `root` and none was passed | `cli.py:492-497` → **2** |
+| 1 | Resolve target: a pasted `ssh ` prefix stripped (`ssh_destination`), then the `--ssh` value against `[remote.<name>]` saved targets, else `~/.ssh/config` alias, else `[user@]host[:port]` | `config.py:413-434` (`RemoteConfig.selected`) | the host is blank or still holds whitespace; or the target has no `root` and none was passed | `cli.py:492-497` → **2** |
 | 2 | Parse `~/.ssh/config` for the resolved alias (host, user, port, IdentityFile) | `ssh.py:383-396` | silently falls back to literal alias/defaults on any read error (not fatal) | n/a |
 | 3 | Dial + authenticate: agent keys → default keys → up to 3 password prompts | `ssh.py:398-443` | `SshError` (auth failed / unreachable) | `cli.py:510-512` → **2** |
 | 3a | Unknown host key: SHA256 fingerprint confirm, never auto-added | `ssh.py:138-149`, `ssh.py:445-448` | declined → `SshError` from within connect | folds into step 3 → **2** |
@@ -163,10 +163,15 @@ target-string grammar (`config.py:426-433`, `[user@]host[:port]`):
 - **Target**: single combo field accepting `user@host:port`, a saved name, or
   a bare `~/.ssh/config` alias — same free-form grammar `--ssh` accepts today,
   so muscle memory and any copy-pasted value from a teammate's command line
-  keeps working. Parse client-side using the identical `rpartition`/`partition`
+  keeps working. A whole pasted `ssh <destination>` counts too: the `ssh `
+  prefix is stripped first (`config.ssh_destination`), because the command line
+  is exactly what a user copies when asked to name the machine. Parse
+  client-side using that strip plus the identical `rpartition`/`partition`
   logic in `RemoteConfig.selected` (`config.py:426-433`) so the dialog's
   preview of "connecting as `user@host:port`" never disagrees with what the
-  backend will actually resolve.
+  backend will actually resolve. Anything the strip cannot reduce to a
+  destination (`ssh -p 2222 box`, two words) is not guessed at: step 1 fails
+  with `enter just the machine - an ssh_config alias or [user@]host[:port]`.
 - **Remote root**: text field, required unless a saved target supplies one
   (`cli.py:491-497`). Validate only for non-emptiness client-side — real
   validation (does it exist, is it a directory) cannot happen until after

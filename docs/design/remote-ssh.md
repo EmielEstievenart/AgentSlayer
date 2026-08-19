@@ -164,6 +164,15 @@ session's target comes only from `--ssh`, which takes a saved name, an
 `root` and is required when nothing else supplies one. Nothing in the config file
 selects a target: a session goes remote because the command line said so.
 
+A leading `ssh ` is unwrapped before any of that, so a value pasted whole off a
+shell prompt (`ssh wsl`) names the machine it obviously names (`config.py`,
+`ssh_destination`, applied once in `_load_remote` so the saved-name lookup, the
+parse and the proposed save name all see the destination). Only the plain
+`ssh <destination>` form: flags change what the destination means, so anything
+left holding whitespace fails the resolve step with a sentence saying what a
+destination looks like, rather than ticking green and reaching `getaddrinfo`
+two steps later.
+
 **Remote paths.** The `Host` protocol keeps `pathlib.Path`. `SshHost` normalizes
 every incoming path to a POSIX string on the way to the wire and builds every
 outgoing one from a POSIX string, so a Windows `Path` carrying `/home/dev/app`

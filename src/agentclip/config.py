@@ -414,6 +414,34 @@ class RemoteTarget:
     root: str = ""  # the project root ON the remote machine (POSIX)
 
 
+# A target pasted straight off a shell prompt. People reach for the whole
+# command line - ``ssh wsl`` - because that is the line they KNOW works, and the
+# grammar below would take the space along with it: host "ssh wsl", no such
+# ssh_config alias, and getaddrinfo asked to resolve a name with a space in it
+# two steps later. So the prefix comes off before anything else looks at the
+# string (``_load_remote``, the one place a typed target enters the config).
+#
+# Only the plain ``ssh <destination>`` form is unwrapped. Flags change what the
+# destination MEANS - ``-p 2222``, ``-i key``, ``-J jump`` - and silently
+# dropping them would connect somewhere other than the line says; those fall
+# through to the whitespace check in ``connect.resolve_target``, which names the
+# problem instead of guessing at it.
+_SSH_COMMAND_PREFIX = "ssh "
+
+
+def ssh_destination(spec: str) -> str:
+    """``spec`` with a pasted ``ssh `` prefix removed; otherwise unchanged.
+
+    Never returns empty for a non-empty ``spec``: a blank remainder means the
+    prefix was the whole of it, and answering "" there would quietly turn a
+    remote session into a local one. The raw string comes back instead and fails
+    at the resolve step, where it can be talked about.
+    """
+    if not spec.startswith(_SSH_COMMAND_PREFIX):
+        return spec
+    return spec[len(_SSH_COMMAND_PREFIX) :].strip() or spec
+
+
 @dataclass(frozen=True, slots=True)
 class RemoteConfig:
     """Where this session runs, and the saved targets it could have run on.
@@ -438,6 +466,12 @@ class RemoteConfig:
         ``--remote-root`` overriding its root); anything else is read as
         ``[user@]host[:port]``, which covers both a bare ssh_config alias and a
         fully spelled-out destination.
+
+        ``target`` is already a destination by the time it gets here: a pasted
+        ``ssh <destination>`` was unwrapped by :func:`ssh_destination` where the
+        typed string entered the config (``_load_remote``), so the saved-target
+        lookup, the parse and the ``name`` this hands back all see the machine
+        rather than the command line it was quoted from.
         """
         if not self.target:
             return None
@@ -878,7 +912,16 @@ def _mcp_target(
 def _load_remote(
     table: dict, target: str, root: str, warnings: list[str]
 ) -> RemoteConfig:
-    """Read the ``[remote.<name>]`` saved targets and the session's selection."""
+    """Read the ``[remote.<name>]`` saved targets and the session's selection.
+
+    The one place a typed ``--ssh`` value enters the config, so the one place a
+    pasted ``ssh <destination>`` is unwrapped (:func:`ssh_destination`). Doing it
+    here rather than inside ``selected()`` means everything downstream agrees on
+    what was dialled: the saved-target lookup, the alias notice below, the
+    ``RemoteTarget.name`` a save offer proposes, and the machine name the shells
+    print when they say where a ruleset lives.
+    """
+    target = ssh_destination(target)
     targets: dict[str, RemoteTarget] = {}
     for key, entry in table.items():
         ctx = f"remote.{key}"

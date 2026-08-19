@@ -188,6 +188,37 @@ def test_no_root_anywhere_fails_the_resolve_step_before_dialling(
     assert not host.connected  # nothing was dialled
 
 
+def test_a_target_that_is_not_a_destination_fails_the_resolve_step(
+    local: Path, host: ScriptedHost
+) -> None:
+    """The papercut this check exists for, in its general form.
+
+    A host with whitespace in it cannot be reached by any name service, so the
+    row that ticked green ("Resolve target") was the row that was wrong. Failing
+    here says what a destination looks like; failing at step 2 said
+    ``getaddrinfo failed``, two rows away from the field that caused it.
+    """
+    result, seen = run(local, host, target_spec="ssh -p 2222 box")
+    assert isinstance(result, ConnectError)
+    assert result.step == STEP_RESOLVE
+    assert "enter just the machine" in result.message
+    assert "[user@]host[:port]" in result.message
+    assert beats(seen) == [(STEP_RESOLVE, "running"), (STEP_RESOLVE, "failed")]
+    assert not host.connected  # nothing was dialled
+
+
+def test_a_pasted_ssh_command_resolves_to_the_machine_it_names(
+    local: Path, host: ScriptedHost
+) -> None:
+    """``ssh wsl`` is what a user copies when asked to name a machine."""
+    result, seen = run(local, host, target_spec="ssh wsl")
+    assert not isinstance(result, ConnectError)
+    assert result.target.host == "wsl"
+    assert result.target.name == "wsl"  # what a save offer would propose
+    notes = {(e.step, e.state): e.note for e in seen}
+    assert notes[(STEP_RESOLVE, "ok")] == "wsl"  # the preview agrees
+
+
 def test_a_refused_dial_fails_the_connect_step(
     local: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

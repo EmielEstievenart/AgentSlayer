@@ -141,6 +141,75 @@ def test_a_bare_name_is_taken_as_a_host_or_ssh_config_alias(
     assert any("names no [remote.workbox] target" in w for w in cfg.warnings)
 
 
+# -- a target pasted whole off a shell prompt ----------------------------------
+
+
+def test_a_pasted_ssh_command_names_the_machine_it_obviously_names(
+    project: Path, global_path: Path
+) -> None:
+    """``ssh wsl`` is one line a user KNOWS works, so it is the one they paste.
+
+    Without the strip the grammar takes the space with it: host "ssh wsl", no
+    such alias, and getaddrinfo asked to resolve a name with a space in it.
+    """
+    cfg = _load(project, global_path, remote_target="ssh wsl", remote_root="/srv/app")
+    selected = cfg.remote.selected()
+    assert selected is not None and selected.host == "wsl" and selected.user == ""
+    # The whole config agrees, not just the parse: the notice names the table
+    # that is missing, and the name a save offer would propose is the machine.
+    assert selected.name == "wsl"
+    assert cfg.remote.target == "wsl"
+    assert any("names no [remote.wsl] target" in w for w in cfg.warnings)
+
+
+def test_a_pasted_ssh_command_keeps_the_rest_of_the_grammar(
+    project: Path, global_path: Path
+) -> None:
+    cfg = _load(
+        project, global_path, remote_target="ssh emiel@server:2222", remote_root="/srv/app"
+    )
+    selected = cfg.remote.selected()
+    assert selected is not None
+    assert (selected.host, selected.user, selected.port) == ("server", "emiel", 2222)
+
+
+def test_a_bare_destination_is_left_alone(project: Path, global_path: Path) -> None:
+    """Nothing that is not a pasted command changes - including a host whose own
+    name merely starts with the letters (``sshgate``, no space)."""
+    for spec in ("wsl", "sshgate", "ssh.example.com", "dev@10.0.0.5:2200"):
+        cfg = _load(project, global_path, remote_target=spec, remote_root="/srv/app")
+        selected = cfg.remote.selected()
+        assert selected is not None and selected.name == spec
+
+
+def test_a_saved_name_still_wins_over_the_grammar(project: Path, global_path: Path) -> None:
+    """The strip happens BEFORE the saved-target lookup, so a pasted command
+    reaches the table it names - and a plain saved name is untouched."""
+    global_path.write_text(SAVED, encoding="utf-8")
+    for spec in ("pi", "ssh pi"):
+        cfg = _load(project, global_path, remote_target=spec)
+        selected = cfg.remote.selected()
+        assert selected is not None
+        assert (selected.host, selected.user, selected.port) == (
+            "raspberrypi.local",
+            "emiel",
+            2222,
+        )
+        assert selected.root == "/home/emiel/code/thing"
+        assert not cfg.warnings
+
+
+def test_an_ssh_command_with_nothing_after_it_stays_a_remote_session(
+    project: Path, global_path: Path
+) -> None:
+    """A blank remainder must not answer "": that would silently turn a remote
+    session into a local one. It stays whole and fails at the resolve step."""
+    cfg = _load(project, global_path, remote_target="ssh ", remote_root="/srv/app")
+    assert cfg.remote.is_remote()
+    selected = cfg.remote.selected()
+    assert selected is not None and selected.host == "ssh "
+
+
 # -- where the project's own config comes from ---------------------------------
 
 

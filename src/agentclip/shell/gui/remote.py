@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from agentclip.config import Config, RemoteTarget
+from agentclip.config import Config, RemoteTarget, ssh_destination
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.hosts.connect import (
     CHECKLIST_STEPS,
@@ -380,9 +380,12 @@ def _parse(spec: str) -> RemoteTarget:
 
     The dialog's preview and the backend's resolution must not be able to
     disagree, so this is that method's own ``rpartition``/``partition`` pair and
-    nothing cleverer (brief §3.3). A saved name or a bare alias falls out of it
-    unchanged, which is exactly what happens to it downstream too.
+    nothing cleverer (brief §3.3), preceded by the same unwrapping of a pasted
+    ``ssh <destination>`` the config does before it parses. A saved name or a
+    bare alias falls out of it unchanged, which is exactly what happens to it
+    downstream too.
     """
+    spec = ssh_destination(spec)
     user, _, rest = spec.rpartition("@")
     host, colon, port = rest.partition(":")
     return RemoteTarget(

@@ -253,9 +253,14 @@ def resolve_target(
 
     The LOCAL config decides this - ``[remote.<name>]`` saved targets merged
     from the host PC's files, then the free-form ``[user@]host[:port]`` grammar
-    (``RemoteConfig.selected``). Raises :class:`ConnectError` when nothing
-    supplies a root, which is the failure ``--remote-root`` exists to prevent
-    and the only one that happens before anything is dialled.
+    (``RemoteConfig.selected``, which has already unwrapped a pasted
+    ``ssh <destination>``). Raises :class:`ConnectError` when the string does
+    not name a machine at all, and when nothing supplies a root - the failure
+    ``--remote-root`` exists to prevent. Both happen before anything is dialled,
+    which is the whole point of the check below: a host with a space in it
+    cannot be reached, and finding that out from ``getaddrinfo`` two steps later
+    - after this row has already ticked green - tells the user nothing about
+    what they typed.
     """
     boot = load_config(
         local_root,
@@ -267,6 +272,13 @@ def resolve_target(
     target = boot.remote.selected()
     if target is None:  # pragma: no cover - only reachable with an empty --ssh
         raise ConnectError(STEP_RESOLVE, f"--ssh {target_spec!r} names no machine")
+    if not target.host or any(ch.isspace() for ch in target.host):
+        raise ConnectError(
+            STEP_RESOLVE,
+            f"--ssh {target_spec!r} is not a destination: enter just the machine -"
+            ' an ssh_config alias or [user@]host[:port], e.g. "wsl" or'
+            ' "emiel@server:22".',
+        )
     if not target.root:
         raise ConnectError(
             STEP_RESOLVE,

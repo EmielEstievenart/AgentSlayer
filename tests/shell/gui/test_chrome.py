@@ -4,7 +4,7 @@ Parity increment 2's surface, and the reason it gets a file of its own: what is
 tested here is not "did an event go out" (``tests/shell/gui/test_view.py`` pins that
 for every port method) but the DECISIONS these three widgets encode, all of
 which are made on the Python side so the two shells cannot grow two answers to
-them - the rail's legal-next brightness, the status bar's ten segments and their
+them - the rail's legal-next brightness, the status bar's eleven segments and their
 priority rules, and the keys whose state those surfaces show reaching the same
 controller methods the TUI's bindings do.
 
@@ -187,13 +187,17 @@ def test_a_loop_paint_is_drawn_from_the_controller_not_the_payload(harness: Harn
 # == the status bar ============================================================
 
 
-def test_the_bar_carries_the_ten_segments_in_order(harness: Harness) -> None:
+def test_the_bar_carries_the_eleven_segments_in_order(harness: Harness) -> None:
     view = harness.view
     view._provider = FakeProvider()  # type: ignore[assignment]
     view._mcp_manager = FakeMcp(FakeStatus("fs", "connected", 4))
     view.set_os_armed(False)
     view.render_state(
-        session_view(snapshot=snapshot(instructions_armed=True, has_extra_instructions=True))
+        session_view(
+            snapshot=snapshot(
+                instructions_armed=True, has_extra_instructions=True, unattended=True
+            )
+        )
     )
     assert segment_order(harness) == [
         "mode",
@@ -204,14 +208,16 @@ def test_the_bar_carries_the_ten_segments_in_order(harness: Harness) -> None:
         "turn",
         "instr",
         "edits",
+        "unattended",
         "mcp",
         "root",
     ]
 
 
-def test_the_three_hiding_segments_are_absent_rather_than_blank(harness: Harness) -> None:
-    """``armed``/``instr``/``mcp`` hide by NOT BEING DRAWN, reserving no padding
-    - an install with no MCP servers gets exactly the bar it always had."""
+def test_the_four_hiding_segments_are_absent_rather_than_blank(harness: Harness) -> None:
+    """``armed``/``instr``/``unattended``/``mcp`` hide by NOT BEING DRAWN,
+    reserving no padding - an install with no MCP servers gets exactly the bar it
+    always had."""
     harness.view.render_state(session_view())
     assert segment_order(harness) == ["mode", "watch", "service", "out", "turn", "edits", "root"]
 
@@ -280,6 +286,27 @@ def test_a_disarmed_yolo_session_shows_both_badges(harness: Harness) -> None:
     bar = segments(harness)
     assert bar["armed"]["text"] == "⛔ DISARMED"
     assert bar["edits"]["text"] == "⚡ YOLO"
+
+
+def test_the_unattended_badge_shows_beside_the_yolo_one(harness: Harness) -> None:
+    """The other pair that has to be readable at once: everything auto-approves
+    AND everything auto-denies. Its own slot for exactly that reason."""
+    harness.view.render_state(session_view(snapshot=snapshot(yolo=True, unattended=True)))
+    bar = segments(harness)
+    assert bar["edits"]["text"] == "⚡ YOLO"
+    assert bar["unattended"]["text"] == "⚠ UNATTENDED"
+    assert bar["unattended"]["cls"] == "st-unattended"
+
+
+def test_the_unattended_badge_shows_before_any_session(harness: Harness) -> None:
+    """The mode segment's rule on the toggle a user can throw at the start
+    prompt: with no snapshot, the controller's mirror is what the next session
+    starts in."""
+    spy = ControllerSpy()
+    spy.unattended = True
+    harness.view._controller = spy  # type: ignore[assignment]
+    harness.view.render_state(session_view(session_active=False, snapshot=None))
+    assert segments(harness)["unattended"]["text"] == "⚠ UNATTENDED"
 
 
 def test_arming_again_takes_the_badge_away(harness: Harness) -> None:

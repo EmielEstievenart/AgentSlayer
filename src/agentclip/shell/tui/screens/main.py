@@ -4054,6 +4054,15 @@ class MainScreen(Screen[None]):
             instr="✎ INSTR" if snap and snap.instructions_armed else "",
             edits=edits,
             edits_class=edits_class,
+            # Its own segment for the ARMED reason: "everything auto-approves"
+            # and "everything auto-denies" can be true at once, and that pair is
+            # the one a user must never misread. Same pre-session fallback as
+            # the two beside it.
+            unattended=(
+                "⚠ UNATTENDED"
+                if (snap.unattended if snap else self._controller.unattended)
+                else ""
+            ),
             mcp=mcp,
             root=root,
         )

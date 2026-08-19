@@ -1,18 +1,22 @@
-"""Pilot tests for the permission mode's UI half (tui.md 2.6a, 3.3).
+"""Pilot tests for the permission UI (tui.md 2.6a, 2.6b, 3.3).
 
 Two surfaces and one wire. The surface the user reads is the leftmost status
-segment (``#seg-mode``, always shown, all three modes); the surface they press
-is shift+tab, which has to work from the composer - i.e. from the app's default
+segment (``#seg-mode``, always shown, both modes); the surface they press is
+shift+tab, which has to work from the composer - i.e. from the app's default
 focus - because that is where a user's hands are, and because Textual's own
 Screen binds shift+tab to ``focus_previous``, which the MainScreen binding
 deliberately overrides.
 
-The wire is the last test: switching to plan and then feeding the session a real
-write_file call proves the keystroke reached the *engine's* policy and not just
-the paint - the call is auto-denied, no gate opens, the file is never written,
-and the turn still completes. An edit rather than a command on purpose: it needs
-nothing from the allowlist and no shell, so it stays decoupled from whatever
-``run_command``'s parameters become.
+The wire is the plan-mode test: switching to plan and then feeding the session a
+real write_file call proves the keystroke reached the *engine's* policy and not
+just the paint - the call is auto-denied, no gate opens, the file is never
+written, and the turn still completes. An edit rather than a command on purpose:
+it needs no shell, so it stays decoupled from whatever ``run_command``'s
+parameters become.
+
+The last block is the other switch on that bar, ``#seg-unattended``: a badge
+with a slot of its own, because it and the YOLO badge can be up at once and that
+pair is the one a user must never misread.
 """
 
 from __future__ import annotations
@@ -95,6 +99,12 @@ def _mode_segment(app: AgentClipApp) -> Static:
     main = app.main_screen
     assert main is not None
     return main.status_bar.query_one("#seg-mode", Static)
+
+
+def _unattended_segment(app: AgentClipApp) -> Static:
+    main = app.main_screen
+    assert main is not None
+    return main.status_bar.query_one("#seg-unattended", Static)
 
 
 def _mode_text(app: AgentClipApp) -> str:
@@ -208,3 +218,75 @@ async def test_shift_tab_without_a_session_arms_the_next_one(tmp_path: Path) -> 
 
         assert _mode_text(app) == "MODE:plan"
         assert main._snap is not None and main._snap.mode == "plan"
+
+
+# -- the unattended badge -------------------------------------------------------
+# The toggle's whole UI: a badge that is up whenever it is on, in its own slot
+# beside the YOLO one, painted from the same two sources the segments around it
+# use (the snapshot while a session exists, the controller's mirror before one).
+
+
+async def test_the_unattended_badge_is_absent_until_it_is_switched_on(
+    tmp_path: Path,
+) -> None:
+    app, _fake, _project = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        assert not _unattended_segment(app).display
+
+
+async def test_the_unattended_badge_shows_before_any_session_exists(
+    tmp_path: Path,
+) -> None:
+    """The mode segment's rule on the other switch a user can throw at the start
+    prompt: with no snapshot to read, the controller's mirror is what the next
+    session will start in, so the badge has to say so."""
+    app, _fake, _project = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+
+        main.composer.load_text("/unattended on")
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: _unattended_segment(app).display, "the badge to come up")
+
+        assert str(_unattended_segment(app).render()) == "⚠ UNATTENDED"
+        assert main._controller.unattended is True
+        assert main._snap is None  # no session behind it yet
+        assert main.awaiting_new_session  # still waiting for the task, unharmed
+
+
+async def test_the_unattended_badge_follows_the_toggle_mid_session(tmp_path: Path) -> None:
+    """Live, off the engine's own snapshot - and it is a slot of its own, so it
+    can be up at the same time as the YOLO badge two along, which is exactly the
+    pair a user must never misread."""
+    app, _fake, _project = _make_app(tmp_path)
+    async with app.run_test(size=(110, 40)) as pilot:
+        await _start_session(app, pilot)
+        main = app.main_screen
+        assert main is not None
+        assert not _unattended_segment(app).display
+
+        # Spelled out rather than bare: a lone "/unattended" leaves the
+        # autocomplete popup up, and the first Enter completes the row.
+        main.composer.load_text("/unattended on")
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: _unattended_segment(app).display, "the badge to come up")
+        assert main._snap is not None and main._snap.unattended is True
+
+        edits = main.status_bar.query_one("#seg-edits", Static)
+        main.composer.load_text("/yolo on")
+        await pilot.press("enter")
+        await _wait_for(pilot, lambda: str(edits.render()) == "⚡ YOLO", "the YOLO badge")
+        assert _unattended_segment(app).display, "both badges must be able to show at once"
+
+        main.composer.load_text("/unattended off")
+        await pilot.press("enter")
+        await _wait_for(
+            pilot, lambda: not _unattended_segment(app).display, "the badge to go away"
+        )
+        assert main._snap is not None and main._snap.unattended is False

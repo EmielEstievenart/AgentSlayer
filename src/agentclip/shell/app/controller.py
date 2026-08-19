@@ -42,6 +42,7 @@ future and the single focused transcript be *retargeted* instead of duplicated.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
@@ -212,13 +213,14 @@ _MODE_ALERT_TEXT: dict[str, str] = {
 }
 
 _UNATTENDED_ALERT_TEXT: dict[bool, str] = {
-    True: "UNATTENDED - nothing will ask you",
+    True: "UNATTENDED - anything that would ask you is now auto-denied",
     False: "UNATTENDED off - approvals restored",
 }
 
-# What `/config` writes into a permissions.json that does not exist yet: the
-# rules that were ALREADY in force, spelled out (config.py owns the shape of
-# that file, so the document is built there).
+# What `/config` writes into a permissions.json that does not exist yet, and
+# what `/config reset` writes back over one that does: the rules that were
+# ALREADY in force, spelled out (config.py owns the shape of that file, so the
+# document is built there).
 _CONFIG_TEMPLATE = default_permissions_document()
 
 # Said every time /config names a file, because the read is a LAUNCH read
@@ -665,11 +667,13 @@ class SessionController:
         Every :data:`~agentclip.shell.app.commands.COMMANDS` entry must appear here and
         nothing else may (a test pins the two sets together), so a command added
         to the registry cannot ship as a dead menu row. The uniform ``(arg)``
-        signature is what lets dispatch stay a dict lookup; only the two on/off
-        commands - `/yolo` and `/armed` - read it.
+        signature is what lets dispatch stay a dict lookup; only the on/off
+        commands - `/yolo`, `/unattended`, `/armed` - and the two that name a
+        state (`/mode`, `/config`) read it.
         """
         return {
             "yolo": self._cmd_yolo,
+            "unattended": self._cmd_unattended,
             "mode": self._cmd_mode,
             "new": lambda _arg: self._cmd_new(),
             "abort": lambda _arg: self._cmd_abort(),
@@ -872,6 +876,24 @@ class SessionController:
 
     def set_unattended(self, enabled: bool) -> None:
         self._view.spawn(self._apply_unattended(enabled))
+
+    def _cmd_unattended(self, arg: str) -> None:
+        """`/unattended [on|off]`, bare toggles - `/yolo`'s shape on the other
+        toggle of the pair.
+
+        A toggle rather than `/mode`'s report-when-bare, because the two
+        commands answer different questions: "which ruleset am I under" has
+        three-ish answers worth naming, while "is anyone watching" has one bit
+        the user is either setting or clearing, and they always know which way
+        they meant it."""
+        target = _parse_onoff(arg, current=self._unattended)
+        if target is None:
+            self._view.notify(
+                "usage: /unattended [on|off] - bare /unattended toggles",
+                severity="warning",
+            )
+            return
+        self.set_unattended(target)
 
     async def _apply_unattended(self, target: bool) -> None:
         link = self._link
@@ -1229,7 +1251,8 @@ class SessionController:
         self._view.notify(f"theme: {wanted}")
 
     def _cmd_config(self, arg: str) -> None:
-        """`/config [global|local]`: where the permission + MCP ruleset lives.
+        """`/config [global|local|reset global|reset local]`: where the
+        permission + MCP ruleset lives, and how to get back to the shipped one.
 
         No session gate, `/theme`'s reasoning: a ruleset is a property of a
         machine and a project, not of a conversation - and the moment a user
@@ -1240,20 +1263,30 @@ class SessionController:
         things must not make the user guess which one they are in), and an
         argument that is neither ACTS on nothing at all - `/armed`'s rule that a
         typo is never read as an instruction, which matters more here because
-        the acting branch WRITES a file.
+        the acting branches WRITE a file.
 
-        The two writes are the same write: make sure the file exists (with an
-        empty template, so an editor opens something valid rather than a blank
-        page) and put its path on the clipboard, which is as close to "open it"
-        as a layer that owns no file manager can get.
+        The plain form is the same write for both layers: make sure the file
+        exists (with the defaults spelled out, so an editor opens something
+        valid rather than a blank page) and put its path on the clipboard, which
+        is as close to "open it" as a layer that owns no file manager can get.
+        `reset` is the one that overwrites - the escape hatch for a ruleset that
+        has been edited into a state where nothing runs any more.
         """
-        wanted = arg.strip().lower()
-        if not wanted:
+        # Whitespace-squeezed so the two-word form is one shape, and the leading
+        # word has to BE "reset" rather than merely start with it - "resetglobal"
+        # is a typo, and `/armed`'s rule says a typo never writes a file.
+        wanted = " ".join(arg.split()).lower()
+        first, _, rest = wanted.partition(" ")
+        reset = first == "reset"
+        if reset:
+            wanted = rest
+        elif not wanted:
             self._view.spawn(self._view.add_note(self._config_report()))
             return
         if wanted not in ("global", "local"):
             self._view.notify(
-                "usage: /config [global|local] - bare /config says where both files are",
+                "usage: /config [global|local|reset global|reset local] - "
+                "bare /config says where both files are",
                 severity="warning",
             )
             return
@@ -1262,8 +1295,11 @@ class SessionController:
             # on THIS PC: creating a same-named file locally would put a ruleset
             # nobody will read next to a project that is not here. Said, not
             # guessed at (docs/design/remote-ssh.md, "the target owns its policy").
+            # `reset local` is refused for the same reason and more sharply - it
+            # would overwrite a file that governs nothing.
+            typed = "/config reset local" if reset else "/config local"
             self._view.notify(
-                "/config local is not supported in a remote session yet - the project's "
+                f"{typed} is not supported in a remote session yet - the project's "
                 f"ruleset lives on {self._config.remote.target}; edit it over there",
                 severity="warning",
             )
@@ -1273,7 +1309,8 @@ class SessionController:
             if wanted == "global"
             else project_permissions_path(self._project_root)
         )
-        self._view.spawn(self._apply_config(wanted, path))
+        flow = self._reset_config(wanted, path) if reset else self._apply_config(wanted, path)
+        self._view.spawn(flow)
 
     def _config_report(self) -> str:
         """Both layers and whether each one exists yet - bare `/config`'s answer."""
@@ -1288,6 +1325,7 @@ class SessionController:
             state = "exists" if path.is_file() else "not created yet"
             lines.append(f"  {label}:  {path}  ({state})")
         lines.append("  /config global or /config local creates it and copies the path")
+        lines.append("  /config reset global or /config reset local puts the shipped rules back")
         if self._config.remote.is_remote():
             # Neither local file governs a remote session - the target owns its
             # policy - and a listing that did not say so would read as if this
@@ -1316,6 +1354,58 @@ class SessionController:
         # Both layers are called permissions.json, so the toast names the LAYER:
         # "found permissions.json" would not say which of the two it meant.
         self._view.notify(f"{verb} the {label} ruleset - path copied to the clipboard", timeout=8)
+
+    async def _reset_config(self, label: str, path: Path) -> None:
+        """Put the shipped defaults back into one layer's file, keeping its MCP
+        servers - the way out of a ruleset edited until nothing runs any more.
+
+        Nothing is copied to the clipboard here: `/config <layer>` is the "let me
+        edit this" command, and a reset's answer is what it now says, not where
+        it is. The restart note rides along for its usual reason, which bites
+        harder on this branch: the rules the session is running under were read
+        at launch, so the file the user is looking at is not what is deciding
+        their next gate until AgentClip is started again.
+        """
+        try:
+            kept_mcp = await asyncio.to_thread(self._write_default_config, path)
+        except OSError as exc:
+            self._view.notify(f"could not write {path}: {exc}", severity="error")
+            return
+        mcp_note = "your mcp block was kept" if kept_mcp else "no mcp block to keep"
+        await self._view.add_note(
+            f"⟲ reset {path} to the shipped permission defaults ({mcp_note}). "
+            "The rules a session runs under are read at launch, and not even /new re-reads "
+            "them: restart AgentClip to run under these."
+        )
+        # Both layers are called permissions.json, so the toast names the LAYER:
+        # "reset permissions.json" would not say which of the two it meant.
+        self._view.notify(
+            f"reset the {label} ruleset - restart AgentClip for it to take effect", timeout=8
+        )
+
+    @staticmethod
+    def _write_default_config(path: Path) -> bool:
+        """Overwrite ``path`` with the default document; was an `mcp` block kept?
+
+        The permission blocks go back to the shipped ones wholesale - that is the
+        command - but `mcp` is carried across untouched, because it is the one
+        top-level key that has nothing to do with permissions and losing a
+        configured server to a permissions reset would be a surprise. A file that
+        does not parse has no block to carry, and is replaced outright rather
+        than repaired: it is exactly the file this command exists to get out of.
+        """
+        path.parent.mkdir(parents=True, exist_ok=True)
+        document = json.loads(_CONFIG_TEMPLATE)
+        kept = False
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = None
+        if isinstance(existing, dict) and "mcp" in existing:
+            document["mcp"] = existing["mcp"]
+            kept = True
+        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        return kept
 
     @staticmethod
     def _ensure_config_file(path: Path) -> bool:

@@ -80,6 +80,15 @@ Permission mode (bottom-left of the status bar, e.g. MODE:build)
   plan   edits, commands, MCP calls and delegations are REFUSED, so the model
          can only read and propose. Switch back to build to carry the plan out.
   The key works while you are typing and while a turn is running.
+  Which rules those are is a file: /config says where it lives (one global, one
+  per project), /config reset global|local puts the shipped rules back.
+
+Walking away from the PC (/unattended on, ⚠ UNATTENDED in the status bar)
+  Everything that would have opened a gate is auto-denied instead - the run
+  keeps going and the model is told, so you come back to a finished turn rather
+  than a question nobody answered. /unattended off brings the gates back.
+  It is the opposite of /yolo (⚡ YOLO), and if both are on YOLO wins: it
+  approves what this would have refused.
 
 Session  (press Esc first if the chat box has focus - twice if you have typed)
   u  undo last turn (confirm; copies a revert notice for the model)

@@ -1437,10 +1437,22 @@ button:not(:disabled) {
   font-weight: 700;
 }
 
-.st-unattended,
 .st-instr {
   color: var(--warn);
   font-weight: 700;
+}
+
+/* The UNATTENDED badge, which can sit right next to the YOLO one: it has to
+   carry the same weight, because the pair "everything auto-approves" /
+   "everything auto-denies" is the one a user must never misread. Filled rather
+   than coloured for that reason, and amber rather than red because nothing is
+   being let through here. */
+.st-unattended {
+  color: var(--bg-sunken);
+  background: var(--warn);
+  font-weight: 700;
+  padding: 0 5px;
+  border-radius: 3px;
 }
 
 .st-busy {

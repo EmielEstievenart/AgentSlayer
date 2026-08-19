@@ -32,7 +32,26 @@ from textual.widgets import Static
 # the far right, against ``root``: like the project root it is a fact about the
 # APP RUN rather than about this session's turn, so it stays out of the block
 # that changes as a turn progresses.
-_SEGMENTS = ("mode", "watch", "armed", "service", "out", "turn", "instr", "edits", "mcp", "root")
+# ``unattended`` is the auto-deny toggle's badge and it sits right of ``edits``,
+# because the two say the opposite halves of one thing - what happens when a call
+# reaches a gate - and a user with both on has to see the pair, exactly as they
+# do with DISARMED and YOLO. Its own slot for the same reason, then: neither may
+# hide the other. It hides itself when off, ``armed``'s rule for ``armed``'s
+# reason - the badge is an alarm, and an always-present "attended" cell would be
+# furniture the eye stops reading.
+_SEGMENTS = (
+    "mode",
+    "watch",
+    "armed",
+    "service",
+    "out",
+    "turn",
+    "instr",
+    "edits",
+    "unattended",
+    "mcp",
+    "root",
+)
 
 
 class StatusBar(Horizontal):
@@ -55,6 +74,7 @@ class StatusBar(Horizontal):
         root: str,
         armed: str = "",
         instr: str = "",
+        unattended: str = "",
         mcp: str = "",
     ) -> None:
         mode_seg = self.query_one("#seg-mode", Static)
@@ -79,6 +99,9 @@ class StatusBar(Horizontal):
         edits_seg = self.query_one("#seg-edits", Static)
         edits_seg.update(Text(edits))
         edits_seg.set_classes(f"seg {edits_class}".rstrip())
+        unattended_seg = self.query_one("#seg-unattended", Static)
+        unattended_seg.update(Text(unattended))
+        unattended_seg.display = bool(unattended)
         # Hidden, not blanked, when empty - ``armed``'s rule for ``armed``'s
         # reason: most installs configure no MCP servers, and they must get
         # exactly the bar they always had, padding included.

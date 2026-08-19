@@ -1118,7 +1118,17 @@
         "builder - your permission rules decide, and anything they do not cover " +
         "asks you first; plan REFUSES every edit, command, MCP call and " +
         "delegation, so the model can only read and propose. The key works " +
-        "while you are typing and while a turn is running."
+        "while you are typing and while a turn is running. Which rules decide " +
+        "is a file: /config says where it lives, /config reset global|local " +
+        "puts the shipped rules back."
+    ],
+    [
+      "Walking away from the PC (/unattended on)",
+      "Everything that would have opened a gate is auto-denied instead, so you " +
+        "come back to a finished turn rather than a question nobody answered. " +
+        "The status bar carries an UNATTENDED badge for as long as it is on. It " +
+        "is the opposite of /yolo, and if both are on YOLO wins: it approves " +
+        "what this would have refused."
     ],
     [
       "Sub-agents (only once the sub-agent window is calibrated - see the sidebar)",

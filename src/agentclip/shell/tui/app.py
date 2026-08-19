@@ -446,18 +446,22 @@ class AgentClipApp(App[None]):
        baseline and wears .st-dim so it cannot become furniture; `plan`, the mode
        that CHANGES what happens to a tool call, is the one meant to catch the
        eye. Blue for it (a mode that only ever refuses more - it is safe, not
-       alarming, so it borrows the accent the app already uses for borders), and
-       the warning colour for the unattended switch, which is the "nobody is
-       watching" state (its own badge lands in a later wave; the class is kept so
-       the palette decision is not made twice). Neither is red: red is spoken for
-       by the two badges that mean approvals are OFF (⚡ YOLO) and the OS switch
-       is out (⛔ DISARMED). */
+       alarming, so it borrows the accent the app already uses for borders). Not
+       red: red is spoken for by the two badges that mean approvals are OFF
+       (⚡ YOLO) and the OS switch is out (⛔ DISARMED). */
     .st-plan {
         color: $accent;
         text-style: bold;
     }
-    .st-unattended {
-        color: $warning;
+    /* The UNATTENDED badge. Reverse-video like the other two alarms, because it
+       has to carry the same weight as the YOLO badge it can sit next to - the
+       pair "everything auto-approves" / "everything auto-denies" is exactly the
+       one a user must never misread. Amber rather than red: nothing is being let
+       through here, so it is the third colour the bar's warnings already use.
+       Hidden by the widget whenever gates are answered by a human. */
+    #seg-unattended {
+        color: $text;
+        background: $warning;
         text-style: bold;
     }
     /* A delegated sub-agent run owns the watcher segment while it lasts; magenta

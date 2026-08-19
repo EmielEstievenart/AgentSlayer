@@ -443,13 +443,14 @@ ports and no core change was needed; what changed is that four more families of
   already applied (`active` / `legal` / `dim`). The table is the automation's
   vocabulary and the page has no business holding a copy of it; it stays
   display-only on both sides, as `loop_state.py`'s header requires.
-- `{type: "status"}` carries the ten segments **composed and in order**, because
+- `{type: "status"}` carries the eleven segments **composed and in order**, because
   every one of them is a rule rather than a style: the watch segment's
   nine-branch precedence (including `awaiting_new_session` masking `busy`), YOLO
-  winning the `edits` slot over `auto`, `armed` keeping its own slot so a
-  disarmed YOLO session is visible as the pair it is, and the `◆ SUB-AGENT`
-  rebadge. A segment that must hide is **absent from the list**, which is how
-  the TUI hides `armed`/`instr`/`mcp` too — by not being drawn.
+  winning the `edits` slot over `auto`, `armed` and `unattended` keeping slots of
+  their own so a disarmed YOLO session — or an auto-approving and auto-denying
+  one — is visible as the pair it is, and the `◆ SUB-AGENT` rebadge. A segment
+  that must hide is **absent from the list**, which is how the TUI hides
+  `armed`/`instr`/`unattended`/`mcp` too — by not being drawn.
 - `{type: "sidebar"}` / `{type: "mcp"}` / `{type: "detection"}` carry the PROJECT,
   SERVICE, CHAT WINDOW, MCP and DETECTION blocks already worded. The DETECTION
   block keeps its exclusive owner: `GuiView._paint_detection` is the only writer

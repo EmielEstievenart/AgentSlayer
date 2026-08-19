@@ -172,9 +172,10 @@ same thing in both tools: `sanitize(server) + "_" + sanitize(tool)` with
   json-parses, calls through the manager, and renders the result's text
   content (truncated per `ToolContext.caps`, like every other tool).
 
-`command` for the invoker is deliberate: an MCP tool can do anything, so it
-must be plan-mode-denied and legacy-mode-gated, and reusing the existing
-kind buys both without widening the `Literal`. In the approval UI the
+`command` for the invoker is deliberate: an MCP tool can do anything, so an
+unknown one must fall back to a gated key, and reusing the existing kind buys
+that without widening the `Literal`. Plan mode denies `mcp` in its own right
+(the overlay names the key, not the kind). In the approval UI the
 preview renders `server tool + args` via `ToolSpec.preview`.
 
 Permission wiring:
@@ -183,16 +184,19 @@ Permission wiring:
   `{"mcp": {"github_*": "allow"}}` gate per server or per tool.
   `mcp_schema` takes the default fallback (its own name as key): metadata
   listing stays cheap even where `mcp` is locked down.
-- `default_rules()` appends `("mcp", "*", "ask")`. Without it the built-in
-  `"*": allow` would silently auto-approve every MCP call in ruleset mode -
-  the outcome the DEFAULTS must make impossible on their own. A blanket
+- `DEFAULT_CONFIG` carries `"mcp": "ask"`. The defaults deliberately have no
+  `"*"` key at all, so an unlisted permission falls through to `evaluate`'s
+  implicit ask - but `mcp` says it out loud, because auto-approving every MCP
+  call is the outcome the DEFAULTS must make impossible on their own. A blanket
   `"*": "allow"` the user wrote loads after the defaults and wins, for MCP
   as for everything: that is what the same file means to OpenCode, and this
   design's founding rule is that a rule the user already trusts means here
   exactly what it means there. Yolo may answer the ask; an explicit user
-  `deny` still wins, as everywhere.
-- Legacy mode (no permissions.json ruleset): `mcp` always gates. The command
-  allowlist matches shell prefixes and must not be consulted for MCP ids.
+  `deny` still wins, as everywhere, and `unattended` turns the ask into a
+  denial rather than a question nobody is there to answer.
+- Plan mode's overlay denies `mcp` outright, so no MCP call runs while the
+  user is only exploring; `agent.plan` in permissions.json is where one is
+  bought back deliberately.
 - "Always allow" remembered from the gate maps to
   `PermissionRule("mcp", <tool id>, "allow")` via a new `always_pattern`
   arm - per tool, not per server, because the user approved one tool's

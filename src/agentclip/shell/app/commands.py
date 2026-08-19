@@ -107,8 +107,16 @@ COMMANDS: tuple[ChatCommand, ...] = (
     ),
     ChatCommand(
         name="config",
-        arg="[global|local]",
+        arg="[global|local|reset global|reset local]",
         summary="open the permissions/MCP file: bare /config says where both live",
+    ),
+    # Second-to-last, and for `/yolo`'s reason turned around: it is the other
+    # command that answers gates without asking, so it belongs with it at the
+    # bottom - but it only ever REFUSES, so it goes above the one that approves.
+    ChatCommand(
+        name="unattended",
+        arg="[on|off]",
+        summary="toggle auto-deny for whatever would ask you (you're away from the PC)",
     ),
     ChatCommand(
         name="yolo",

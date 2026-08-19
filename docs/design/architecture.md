@@ -77,7 +77,7 @@ src/agentclip/
 ├── engine/                # the session state machine and the session's own persistence
 │   ├── engine.py          # Engine: the session state machine (the only orchestrator)
 │   ├── states.py          # Phase enum + legal-transition table
-│   ├── approval.py        # ApprovalPolicy: permission rules (or the legacy allowlist), session escalation flags
+│   ├── approval.py        # ApprovalPolicy: the per-mode permission rules + the yolo/unattended toggles
 │   ├── results.py         # ToolResult + middle-truncation to configured size caps
 │   ├── link/              # the ENGINE half of the Shell↔Engine link (remote-executor.md §2.2);
 │   │   │                  #   never imports shell/driver — it is what runs on the target
@@ -275,7 +275,7 @@ class Phase(Enum):
 
 class Decision(Enum):
     APPROVE = auto(); REJECT = auto(); APPROVE_ALL_EDITS = auto()  # escalation sticks for session
-    APPROVE_ALWAYS = auto()       # ruleset mode: remember a permission rule for the session
+    APPROVE_ALWAYS = auto()       # remember a permission rule for the rest of the session
 
 @dataclass(frozen=True, slots=True)
 class PendingAction:
@@ -283,7 +283,7 @@ class PendingAction:
     kind: Literal["edit", "command", "auto"]            # "auto" = no approval needed
     preview: str                  # unified diff for an edit; command line for a command
     auto_reason: str | None       # why it needed no gate (transcript/audit text)
-    always_pattern: str | None    # ruleset mode: what APPROVE_ALWAYS would remember, e.g. "git commit *"
+    always_pattern: str | None    # what APPROVE_ALWAYS would remember, e.g. "git commit *"
 
 class Engine:
     """Synchronous, single-threaded. Host (TUI) calls it from exactly one worker thread."""
@@ -425,13 +425,13 @@ class Workspace:
 
 # engine/approval.py -----------------------------------------------------
 class ApprovalPolicy:
-    auto_accept_edits: bool = False          # legacy mode: flipped by Decision.APPROVE_ALL_EDITS
+    auto_accept_edits: bool = False          # shorthand for one remembered rule: edit["*"]="allow"
     yolo: bool = False                       # auto-approve every ASK; toggled live by /yolo
-    mode: PermissionMode = "ask"             # ask | plan | unattended; set live by /mode
+    unattended: bool = False                 # auto-DENY every ask; toggled live by /unattended
+    mode: PermissionMode = "build"           # build | plan: which RULESET is in force; /mode, shift+tab
     session_rules: list[PermissionRule]      # "always allow" answers; evaluated last
-    ruleset_mode: bool                       # True once a permission ruleset is loaded
+    rules: tuple[PermissionRule, ...]        # the active mode's ruleset (ModeRules.for_mode)
     def verdict(self, spec: ToolSpec, call: ToolCall) -> Verdict
-    def command_auto_allowed(self, command: str) -> str | None  # legacy: glob allowlist + deny tokens
     def rule_for(self, spec: ToolSpec, call: ToolCall) -> PermissionRule
     def always_rule(self, spec: ToolSpec, call: ToolCall) -> PermissionRule
     def remember(self, rule: PermissionRule) -> None
@@ -448,13 +448,21 @@ DENY_VERDICTS = frozenset({"deny", "deny_plan", "deny_unattended"})   # "was thi
 class PermissionRule:
     permission: str; pattern: str; action: Literal["allow", "ask", "deny"]
 
-PermissionMode = Literal["plan", "ask", "unattended"]
-PERMISSION_MODES = ("ask", "plan", "unattended")             # also the /mode cycle order
+PermissionMode = Literal["build", "plan"]                    # OpenCode's two primary agents
+PERMISSION_MODES = ("build", "plan")                         # also the shift+tab cycle order
 def normalize_mode(value: object) -> PermissionMode | None   # None = not a mode
+
+DEFAULT_CONFIG: dict[str, object]                            # THE defaults; what /config writes
+MODE_PERMISSIONS: dict[PermissionMode, dict[str, object]]    # the built-in per-mode overlay
+@dataclass(frozen=True, slots=True)
+class ModeRules:                                             # one effective ruleset per mode
+    build: tuple[PermissionRule, ...]; plan: tuple[PermissionRule, ...]
+    def for_mode(self, mode: PermissionMode) -> tuple[PermissionRule, ...]
 
 def wildcard_match(text: str, pattern: str) -> bool          # OpenCode's Wildcard.match
 def evaluate(permission, pattern, *rulesets) -> PermissionRule   # LAST match wins; no match = "ask"
 def rules_from_config(obj) -> tuple[rules, warnings]         # OpenCode's fromConfig
+def build_mode_rules(shared, per_mode) -> ModeRules          # the five-layer merge (see §2)
 def permission_target(tool, params, approval_kind) -> tuple[str, str]   # tool -> (key, resource)
 def always_pattern(key: str, resource: str) -> str           # "git commit *" / "*"
 
@@ -491,69 +499,71 @@ The TUI wraps the engine: clipboard watcher thread → `post_message(ClipboardCa
 
 ## 2. Config system
 
-**Format:** TOML. **Files and precedence** (later wins, per-key shallow merge per table; lists *replace*, never concatenate — concatenation makes allowlists impossible to tighten per-project):
+**Format:** TOML. **Files and precedence** (later wins, per-key shallow merge per table; lists *replace*, never concatenate — concatenation makes a list impossible to tighten per-project):
 
 1. Built-in defaults (in `config.py`, the table below)
 2. Global: `platformdirs.user_config_dir("agentclip")/config.toml` (`~/.config/agentclip/config.toml` on Linux, `%APPDATA%\agentclip\config.toml` on Windows)
 3. Project: `<root>/.agentclip.toml`
 4. CLI flags (`--service`, `--project`)
 
-**In a remote session** the project layer is read from the target through the Host seam (and so are the permission ruleset and the MCP blocks), while the global `config.toml` is the operator's. **No table is exempt from the merge** — `[approval]` (mode, yolo, allowlist, deny tokens) was pinned to this PC by the `/config` wave and no longer is: policy belongs to the machine the engine runs on (docs/design/remote-executor.md §2.5, superseding remote-ssh.md's "the host owns the gate"). What stays local is the gate's *UI*, not its rules.
+**In a remote session** the project layer is read from the target through the Host seam (and so are the permission ruleset and the MCP blocks), while the global `config.toml` is the operator's. **No table is exempt from the merge** — `[approval]` (mode, yolo, unattended, deny tokens) was pinned to this PC by the `/config` wave and no longer is: policy belongs to the machine the engine runs on (docs/design/remote-executor.md §2.5, superseding remote-ssh.md's "the host owns the gate"). What stays local is the gate's *UI*, not its rules.
 
-**Allowlist matching: glob (`fnmatch.fnmatchcase`) against the full command string.** Rejected regex: users will write allowlists by hand; glob is auditable at a glance and can't catastrophically backtrack. Safety backstop: if a command contains any *deny token* (`;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`, newline), it **always requires approval** even when a glob matches — this prevents `pytest tests; rm -rf ~` from riding the `pytest *` pattern.
+**Commands are gated by the ruleset below, not by a list in `config.toml`.** The `[approval] command_allowlist` key is gone: one mechanism decides every tool, and a `bash` rule says the same thing in the same file as everything else. What survives it is the *deny-token* backstop: if a command contains any of `;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`, newline, it **always requires approval** even when a rule allows it — this prevents `pytest tests; rm -rf ~` from riding an `allow` on `pytest *`.
 
 ### Permission rules: AgentClip's `permissions.json`
 
-Rules live in AgentClip's own JSON file, in two layers, later winning: `platformdirs.user_config_dir("agentclip")/permissions.json` (beside `config.toml`; `~/.config/agentclip/permissions.json` on Linux) then `<project>/.agentclip/permissions.json` — `[permission] permissions_config` overrides the global path, `[permission] enabled = false` switches the whole thing off. The **shape** is `opencode.json`'s, deliberately (the rule model below is OpenCode's, ported), so a ruleset written for that tool reads correctly here when copied across — but nothing falls back to another tool's file: no `opencode.json` is opened, anywhere. `/config [global|local]` creates the file (template `{"permission": {}, "mcp": {}}`) and puts its path on the clipboard; it is read **once at launch**, so an edit needs a restart. Only the top-level `"permission"` key is read: OpenCode's `agent`/`plugin` blocks name OpenCode agents, which have no AgentClip equivalent, and guessing a mapping would grant or refuse things the user never decided. The model can't reach the file either way — it lives outside the workspace.
+Rules live in AgentClip's own JSON file, in two layers, later winning: `platformdirs.user_config_dir("agentclip")/permissions.json` (beside `config.toml`; `~/.config/agentclip/permissions.json` on Linux) then `<project>/.agentclip/permissions.json` — `[permission] permissions_config` overrides the global path, `[permission] enabled = false` switches the whole thing off. The **shape** is `opencode.json`'s, deliberately (the rule model below is OpenCode's, ported), so a ruleset written for that tool reads correctly here when copied across — but nothing falls back to another tool's file: no `opencode.json` is opened, anywhere. `/config [global|local]` creates the file (with `DEFAULT_CONFIG` spelled out, plus an empty `mcp` block — the rules that were already in force, so creating it changes nothing) and puts its path on the clipboard; `/config reset [global|local]` puts that same document *back* over a file edited into a state where nothing runs, keeping only its top-level `"mcp"` block. It is read **once at launch**, so an edit — or a reset — needs a restart; not even `/new` re-reads it (`cli.main` builds one `Config` per process). Two top-level keys are read: `"permission"` and `"agent"`, the latter restricted to `agent.build` / `agent.plan` (OpenCode's `plugin` block and its other agents have no AgentClip equivalent, and guessing a mapping would grant or refuse things the user never decided). The model can't reach the file either way — it lives outside the workspace.
 
 A rule is `(permission key, resource pattern, action)` with `action ∈ {allow, ask, deny}`. `executor/permissions.py` (a stdlib leaf, shared by `config.py` and `engine/approval.py`) ports OpenCode's semantics verbatim:
 
 - **Wildcard matching**, not glob and not regex: `*` crosses spaces *and* slashes, `?` is exactly one character, backslashes normalize to `/` on both sides, matching is whole-string anchored and case-insensitive on Windows. A pattern ending in `" *"` makes the arguments optional, so `ls *` matches a bare `ls`.
 - **Positional precedence**: the LAST matching rule wins — no specificity sorting. That is what lets a config say `"*": "ask"` and carve exceptions under it. No rule matching at all is an implicit `ask`.
-- **Effective ruleset** = built-in defaults (`{"*": "allow", "read": {"*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow"}}`) **then** the user's rules, appended — so anything they write outranks the defaults.
+- **Effective ruleset, per mode** (`build_mode_rules`, later winning): `DEFAULT_CONFIG["permission"]` → the user's shared `permission` block → the mode's built-in overlay (`MODE_PERMISSIONS`) → `DEFAULT_CONFIG["agent"][mode]["permission"]` → the user's `agent.<mode>.permission` block. Two things fall out of that order: a config with no `permissions.json` anywhere evaluates *identically* to one whose file `/config` just created (the same blocks arrive twice in a row, and last-match-wins cannot notice), and the overlay outranks a block written for every mode while still being outrankable by one written *for* that mode — so loosening plan mode is possible, but only where it is unmistakably meant. OpenCode merges its agent overlay earlier, which lets a shared `{"edit": "allow"}` switch plan's denials off by accident.
 
-Tools map onto permission keys: `read_file→read`, `write_file`/`edit_file`/`delete_file→edit`, `list_dir→list`, `glob→glob`, `grep→grep`, `run_command→bash`, `skill→skill`, `delegate→task`. The resource is the file path (workspace-relative, forward slashes), the pattern/name parameter, or the full command line. `ask_user`/`task_done` are AgentClip's own control flow and are never gated.
+Tools map onto permission keys: `read_file→read`, `write_file`/`edit_file`/`delete_file→edit`, `list_dir→list`, `glob→glob`, `grep→grep`, `run_command→bash`, `skill→skill`, `delegate→task`, the MCP invoker→`mcp` (`mcp_schema` keeps its own name). The resource is the file path (workspace-relative, forward slashes), the pattern/name parameter, the composite MCP tool id, or the full command line. `ask_user`/`task_done` are AgentClip's own control flow and are never gated.
 
-**Two modes.** A non-empty ruleset REPLACES the legacy `command_allowlist` mechanism; an empty one (no file, or disabled) leaves today's behaviour untouched.
+**The ruleset IS the permission system** — there is no second gate behind it and no "legacy mode" beside it. An install with no `permissions.json` runs on `DEFAULT_CONFIG` in full, so read-only tools, edits and commands are all judged by the same table:
 
-| | legacy mode (no ruleset) | ruleset mode |
-|---|---|---|
-| read-only tools | always auto | whatever the rules say (`list_dir` gates if nothing allows `list`) |
-| edits | gate until `auto_accept_edits` | whatever the rules say |
-| commands | glob allowlist + deny tokens | rules + deny-token backstop |
-| `/yolo` | auto-approves everything | auto-approves every *ask*; a `deny` still denies |
-| third gate button | Approve + auto-edits (edits only) | **Always: `<pattern>`** (every gated call), `Decision.APPROVE_ALWAYS` |
+| | what decides |
+|---|---|
+| read-only tools | the rules (the shipped defaults allow `list`/`glob`/`grep`/`skill` and `read` except dotenv) |
+| edits | the rules (the shipped default is `ask`); `auto_accept_edits` is one remembered `edit["*"]="allow"` |
+| commands | the rules + the deny-token backstop (shipped: `ask`, with read-only git and `ls`/`dir` allowed) |
+| `/yolo` | auto-approves every *ask*; a `deny` still denies, and the deny-token backstop still gates |
+| `/unattended` | auto-*denies* every ask (`deny_unattended`); allow rules still run |
+| third gate button | **Always: `<pattern>`** (every gated call), `Decision.APPROVE_ALWAYS` |
 
 A `deny` verdict never opens a gate: the call is pre-resolved as a `denied` result carrying OpenCode's `DeniedError` text (protocol.md §4) and the turn *continues* — only an interactive rejection aborts the rest of it. The decision is audited with source `rule`, as are rule-allowed calls (`allowed by rule bash["git status*"]`).
 
-### Permission modes: the dial above both
+### Permission modes: two rulesets, not a dial
 
-`ApprovalPolicy.mode` is session-scoped and says **what the user is doing right now**, above whatever the rules say about a given call. It can only ever refuse more, never allow more. `PermissionMode = Literal["plan", "ask", "unattended"]` lives in `executor/permissions.py` (the leaf `config.py` reads and `approval.py` applies) and is re-exported from `engine/approval.py`, which is where `shell/app` and `shell/tui` import it from.
+`ApprovalPolicy.mode` picks **which ruleset is in force**, and nothing else: `PermissionMode = Literal["build", "plan"]` — OpenCode's two primary agents under their own names — lives in `executor/permissions.py` (the leaf `config.py` reads and `approval.py` applies) and is re-exported from `engine/approval.py`, which is where `shell/app`, `shell/tui` and `shell/gui` import it from. A mode is no longer a dial *above* the rules; it *is* a ruleset, and `ModeRules` holds both so switching is one field.
 
-| mode | what changes |
+| mode | its ruleset |
 |---|---|
-| `ask` (default) | nothing — the table above, exactly, in both modes |
-| `plan` | every call whose `ToolSpec.approval_kind` is `edit` or `command` is auto-denied. Read-only tools are untouched, rules included (a `read` the rules ask about still asks — plan never *loosens*) |
-| `unattended` | anything that would have opened a gate is auto-denied instead: there is nobody there to answer it. Allow rules still auto-run, deny rules still deny |
+| `build` (default) | the user's rules exactly as written — the overlay adds nothing |
+| `plan` | the same, plus a built-in overlay denying `edit`, `bash`, `mcp` and `task`: everything that could change something. Reads, listings, globs, greps and skills behave exactly as in `build`, and a user can buy back specific commands under `agent.plan` (the shipped file does, for `git status`/`git diff`) |
 
-Verdict order, one list for both approval modes: **① explicit `deny` rule** → `deny` (still beats everything, mode included) → **② `plan` + edit/command** → `deny_plan` (before the YOLO check: a mode is what the user wants *now*, a flag is what they set earlier) → **③ allow** → `auto` (ruleset rule, or legacy allowlist/`auto_accept_edits`) → **④ the rest**: YOLO → `auto`; else `unattended` → `deny_unattended`; else `needs_approval`.
+Beside the mode sit **two live toggles**, both booleans on `ApprovalPolicy` and both statements about the *user* rather than about the rules: `yolo` answers every would-be gate "yes", `unattended` answers it "no".
 
-- **YOLO vs `unattended`** is decided in ④: YOLO wins, because it is the user's explicit "approve everything for me" and outranks "I stepped away". The one thing YOLO still does not answer is the **deny-token backstop**, so a chained command riding an allow rule is `deny_unattended` under this mode rather than a gate nobody is at.
+Verdict order: **① the rule that wins** (`evaluate`, last match) — `deny` → `deny_plan` if plan's overlay is the only reason `build` would not have denied it, else `deny` → **② `allow`** → `auto`, unless it is a `bash` resource carrying a deny token, which falls to the gate → **③ everything else (an explicit or implicit `ask`)** → `auto` if YOLO, else the gate → **④ the gate** → `deny_unattended` if unattended, else `needs_approval`.
+
+- **YOLO vs `unattended`** is decided by ③ running before ④: YOLO wins, because it is the user's explicit "approve everything for me" and outranks "I stepped away". The one thing YOLO does not answer is the **deny-token backstop**, so a chained command riding an allow rule reaches ④ — and is `deny_unattended` rather than a gate nobody is at.
 - The three refusals are **distinct verdicts**, not one: `deny_plan` and `deny_unattended` get their own model-facing bodies (protocol.md §4) and their own audit source (`plan` / `unattended`), while a rule `deny` keeps OpenCode's wording byte-for-byte. A model can only pick a different route if it is told which door was shut.
 - **Not retroactive**, exactly like `set_yolo`: a gate already pending stays pending, and the new mode governs every verdict computed after it.
-- Set live by `/mode [plan|ask|unattended]` (bare `/mode` reports) and by `SessionController.cycle_permission_mode()` (`ask → plan → unattended → ask`, what `shift+tab` calls); the first value comes from `[approval] mode`, which falls back to `ask` with a config warning if it is not one of the three. Audited as a `permission_mode` session event.
-- **The dial is the user's, not a session's**, and this is where it parts company with YOLO — the two look alike in `ApprovalPolicy` and are scoped oppositely on purpose. YOLO answers a question about **one conversation** ("approve everything here"), so it is per-engine, dies with the session and reverts to its configured default on a reset. The mode is a statement about **the user** ("I am only exploring", "I am not at my desk"), so `SessionController` owns it and every engine in the app run obeys it:
+- Set live by `/mode [build|plan]` (bare `/mode` reports) and by `SessionController.cycle_permission_mode()` (`build → plan → build`, what `shift+tab` calls); the first value comes from `[approval] mode`, which falls back to `build` with a config warning if it is not one of the two. Audited as a `permission_mode` session event. `unattended` is set by `/unattended [on|off]` (bare toggles) through `Engine.set_unattended`, its first value comes from `[approval] unattended`, and both shells paint a badge for as long as it is on.
+- **The mode is the user's, not a session's**, and this is where it parts company with YOLO — the two look alike in `ApprovalPolicy` and are scoped oppositely on purpose. YOLO answers a question about **one conversation** ("approve everything here"), so it is per-engine, dies with the session and reverts to its configured default on a reset. The mode is a statement about **the user** ("I am only exploring"), so `SessionController` owns it and every engine in the app run obeys it — and `unattended` ("I am not at my desk") is scoped with the mode, not with YOLO, for exactly that reason:
   - it works with **no session at all** — `set_permission_mode`/`cycle_permission_mode` at the start prompt skip only the engine call; the mirror, the transcript note and the status repaint all happen;
   - it **survives `/new`** and every other `_reset_session`, because "I am only exploring today" is still true after a new chat and a mode that silently reverted would hand the next session's first edit to a user who thought they had turned changes off;
-  - it **reaches sub-agents**. `delegate` is never gated (it is AgentClip's own control flow), so a mode stopping at the master would let a model in plan mode make every change it liked by delegating it, and would park an absent `unattended` user on a sub-agent's gate — the mode's own denial bodies promise neither can happen.
-  It can never become hidden state: the status segment shows all three modes and never hides.
+  - it **reaches sub-agents**. `delegate` is never gated (it is AgentClip's own control flow), so a mode stopping at the master would let a model in plan mode make every change it liked by delegating it, and would park an absent `unattended` user on a sub-agent's gate — the denial bodies of both promise neither can happen.
+  Neither can become hidden state: the mode segment shows both modes and never hides, and `unattended` has a badge of its own that is up whenever it is on.
 - **Every engine is armed before it can compute a verdict.** `_session_flow` (master) and `_sub_run` (sub-agent) both call `Engine.set_permission_mode(self._mode)` on the engine they just built, **before `start_task`** — so the first verdict of the first turn already obeys it, and the audit line is at the top of that session's log. Chosen over threading the mode through `EngineRequest`/`ApprovalConfig` because it keeps one carrier for "the mode is now X" instead of two, and the audit event falls out of it.
 - **Across a delegation swap.** Only one engine is reachable at a time (`_apply_mode` writes to whatever `self._engine` currently is), so a cycle made while a sub-agent runs lands on the *sub-agent's* policy — right, since that is the conversation running and the one the user is watching. The mode is therefore the one field `_SessionContext` does **not** restore: `_adopt_ctx` leaves the mirror alone and `_restore_ctx` reconciles towards it, never towards the snapshot. `_SessionContext.engine_mode` records only what the master's *policy* was left at, so `_rearm_master_mode` can give the master a change it slept through — and say nothing when the mode never moved, since re-sending it would arm a spurious note.
 - The model is told at the **next results payload** via the notes channel (protocol.md §4), never in the bootstrap — §2's budget headroom has no room for prose about a mode that may never be used, and each denial body explains itself anyway. `set_permission_mode` arms that note **only when the engine is past `IDLE`**: before `start_task` there is no conversation to interrupt, so a pre-session choice is simply the mode the session started in, and announcing it as a change in the first results payload would be describing something that never happened.
 
 **"Always allow"** appends `Rule(key, always_pattern, "allow")` to an in-memory session list evaluated *last*, so it outranks the file (OpenCode's `approved` array works the same way) and is forgotten on restart. `always_pattern` keeps the first N words of a command per a small arity table (`git commit -m "wip"` → `git commit *`, `npm run build` → `npm run build *`) and is `*` for every other key — remembering an edit means remembering all edits, which is exactly what `APPROVE_ALL_EDITS` already meant. Answering it re-evaluates the other pending calls in the turn and auto-approves the ones the new rule covers.
 
-**Deviation from OpenCode: the deny-token backstop.** OpenCode splits a shell script with tree-sitter and judges every command node separately, so `git status && rm -rf /` is also judged as `rm -rf /`. AgentClip has no shell parser, so instead a command containing any configured deny token (`;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`, newline) can never *silently* auto-run: `allow` is downgraded to a gate, and YOLO does not answer that one for you. A `deny` still wins outright. This is why `command_deny_tokens` stays in `[approval]` even in ruleset mode.
+**Deviation from OpenCode: the deny-token backstop.** OpenCode splits a shell script with tree-sitter and judges every command node separately, so `git status && rm -rf /` is also judged as `rm -rf /`. AgentClip has no shell parser, so instead a command containing any configured deny token (`;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`, newline) can never *silently* auto-run: `allow` is downgraded to a gate, and YOLO does not answer that one for you. A `deny` still wins outright. This is why `command_deny_tokens` is the one command key left in `[approval]`.
 
 **Full default config** (this exact content ships as the built-in default and as a commented `config.toml` written on first run):
 
@@ -572,19 +582,12 @@ poll_interval_ms = 300         # 200–500 sensible range
 [approval]
 auto_accept_edits = false      # session escalation always starts off
 yolo = false                   # auto-approve EVERYTHING (edits + commands); /yolo toggles live
-mode = "ask"                   # ask | plan (no changes) | unattended (gates become denials); /mode sets it live
-command_allowlist = [
-  "pytest*", "python -m pytest*", "python -m unittest*",
-  "ruff check*", "ruff format --check*", "mypy*",
-  "npm test*", "npm run test*", "npx tsc --noEmit*",
-  "cargo check*", "cargo test*", "go test*", "go vet*",
-  "git status", "git diff*", "git log*",   # read-only git; AgentClip itself never uses git
-  "ls*", "dir*",
-]
+mode = "build"                 # build (your rules decide) | plan (nothing that changes anything); /mode, shift+tab
+unattended = false             # auto-DENY whatever would ask you: nobody is at the keyboard; /unattended toggles live
 command_deny_tokens = [";", "&&", "||", "|", "`", "$(", ">", "<"]
 
 [permission]
-enabled = true                 # read the ruleset (see above); false = legacy allowlist only
+enabled = true                 # read permissions.json (see above); false = the shipped defaults only
 permissions_config = ""        # "" = <user_config_dir>/agentclip/permissions.json
 
 [limits]
@@ -744,7 +747,7 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
 3. **Containment:** `candidate == root or candidate.is_relative_to(root)` else `SandboxViolation`. (Case-insensitive comparison hazards on Windows are avoided because both sides come from the same `resolve()` normalization.)
 4. **Exclusion:** if any path component ∈ `paths.exclude` ∪ `{".agentclip", ".agentclip.toml"}` → refused for read *and* write (`.git` may hold credentials in remote URLs; `.agentclip` holds the backups the LLM must not touch). Traversal tools (`list_dir`, `glob`, `grep`) silently skip excluded directories instead of erroring.
 
-`SandboxViolation` is reported back to the LLM as a tool error result (`error: path outside project root`), not hidden — the model can self-correct. `run_command` is *not* path-sandboxed (it runs with `cwd=root`; the allowlist + approval gate is its control) — document this honestly rather than pretending subprocesses are containable.
+`SandboxViolation` is reported back to the LLM as a tool error result (`error: path outside project root`), not hidden — the model can self-correct. `run_command` is *not* path-sandboxed (it runs with `cwd=root`; the `bash` rules + the approval gate are its control) — document this honestly rather than pretending subprocesses are containable.
 
 ---
 
@@ -768,7 +771,7 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
                     └── files/src/utils.py        # mirrored relative paths, pre-change bytes
 ```
 
-**Transcript JSONL** — one event per line, `{"t": <type>, "ts": <iso8601>, ...}` with types: `task`, `outbound` (kind, turn, total_chars, chunk count), `inbound` (raw text), `parsed` (call ids/tools, issues), `decision` (call_id, verdict, source: user|allowlist|auto_edits|yolo|rule|plan|unattended), `permission_mode` (mode), `result` (call_id, ok, truncated, chars), `undo`, `error`. Raw inbound is stored verbatim — it is the audit trail for "what did the LLM actually say".
+**Transcript JSONL** — one event per line, `{"t": <type>, "ts": <iso8601>, ...}` with types: `task`, `outbound` (kind, turn, total_chars, chunk count), `inbound` (raw text), `parsed` (call ids/tools, issues), `decision` (call_id, verdict, source: user|rule|yolo|plan|unattended), `permission_mode` (mode), `yolo`/`unattended` (enabled), `result` (call_id, ok, truncated, chars), `undo`, `error`. Raw inbound is stored verbatim — it is the audit trail for "what did the LLM actually say".
 
 **Resume after restart: NOT supported in MVP.** Decision: a half-finished conversation lives in the chat UI's context, which AgentClip cannot reconstruct reliably; faking resume invites state divergence. On restart you start a new session/task. What *is* supported after restart: backups remain on disk for manual recovery, and M3's `undo` can target the latest session's turns by reading manifests from disk (no in-memory state needed). Transcript is audit-only.
 
@@ -916,7 +919,7 @@ tests/                               # mirrors src/agentclip: one directory per 
 │   ├── test_state_machine.py        # legal/illegal phase transitions, decide/execute ordering
 │   ├── test_roundtrip.py            # full headless loop: start_task → ScriptedLLM reply → approve →
 │   │                                #   execute → results payload → ... → task_done; asserts files on disk
-│   ├── test_approval.py             # both modes: glob allowlist + deny tokens, and rule verdicts/deny/always
+│   ├── test_approval.py             # rule verdicts/deny/always, the deny-token backstop, yolo vs unattended
 │   └── store/
 │       └── test_backups.py          # copy-on-first-touch idempotence, undo created/modified, prune,
 │                                    #   undo-from-disk-after-new-BackupStore (restart scenario)

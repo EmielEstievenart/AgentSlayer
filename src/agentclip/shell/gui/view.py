@@ -3516,6 +3516,12 @@ class GuiView:
             # Lit only between the `r` press and the payload that spends it.
             segments.append({"id": "instr", "text": "✎ INSTR", "cls": "st-instr"})
         segments.append({"id": "edits", "text": edits, "cls": edits_class})
+        # Its own slot beside the edits one, never folded into it: "everything
+        # auto-approves" and "everything auto-denies" can be true at once, and
+        # that is the pair a user must never misread. Absent when off, the way
+        # every hiding segment hides.
+        if snap.unattended if snap else self._controller.unattended:
+            segments.append({"id": "unattended", "text": "⚠ UNATTENDED", "cls": "st-unattended"})
         connected, enabled = self._mcp_counts()
         if enabled is not None:
             segments.append({"id": "mcp", "text": f"mcp {connected}/{enabled}", "cls": ""})

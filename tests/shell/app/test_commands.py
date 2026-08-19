@@ -53,10 +53,12 @@ def test_the_registry_is_the_documented_commands() -> None:
         "mode",
         "theme",
         "config",
+        "unattended",
         "yolo",
     ]
     assert lookup("yolo") is not None and lookup("yolo").arg == "[on|off]"  # type: ignore[union-attr]
     assert lookup("mode") is not None and lookup("mode").arg == "[plan|build]"  # type: ignore[union-attr]
+    assert lookup("unattended") is not None and lookup("unattended").arg == "[on|off]"  # type: ignore[union-attr]
     assert all(command.summary for command in COMMANDS)
 
 
@@ -66,6 +68,9 @@ def test_yolo_is_never_the_first_row() -> None:
     approval gate off. It goes last, behind the reversible ones."""
     assert COMMANDS[-1].name == "yolo"
     assert COMMANDS[0].name == "help"  # ...and the top row is the harmless one
+    # The other gate-answering command sits with it, one row above: it only ever
+    # refuses, so it goes above the one that approves.
+    assert COMMANDS[-2].name == "unattended"
 
 
 def test_lookup_resolves_aliases_and_case() -> None:
@@ -104,7 +109,8 @@ def test_unknown_command_hint_lists_every_command() -> None:
         assert command.slash in hint
     # An English list, not a dump.
     assert hint == (
-        "/help, /new, /abort, /identify, /log, /mcp, /armed, /mode, /theme, /config, or /yolo"
+        "/help, /new, /abort, /identify, /log, /mcp, /armed, /mode, /theme, /config, "
+        "/unattended, or /yolo"
     )
 
 
@@ -572,6 +578,44 @@ async def test_turning_unattended_off_says_the_gates_are_back(
     assert controller._snap is not None and controller._snap.unattended is False
 
 
+async def test_the_unattended_command_sets_it_explicitly(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    controller.submit_message("/unattended on")
+    await settle(view)
+    assert controller.unattended is True
+
+    controller.submit_message("/unattended off")
+    await settle(view)
+    assert controller.unattended is False
+
+
+async def test_a_bare_unattended_toggles_against_the_mirror(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """`/yolo`'s bare form, for its reason: "is anyone watching" is one bit the
+    user is either setting or clearing, so the command toggles rather than
+    reporting the way `/mode` does."""
+    controller.submit_message("/unattended")
+    await settle(view)
+    assert controller.unattended is True
+
+    controller.submit_message("/unattended")
+    await settle(view)
+    assert controller.unattended is False
+
+
+async def test_an_unparseable_unattended_changes_nothing_and_says_so(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    controller.submit_message("/unattended maybe")
+    await settle(view)
+
+    assert controller.unattended is False
+    assert view.notes() == []  # nothing was applied, so nothing was announced
+    assert any("usage: /unattended [on|off]" in message for message in view.toasts())
+
+
 # -- /yolo -----------------------------------------------------------------------
 # YOLO stays one session's policy - audited into that session's log, back to the
 # configured default when it ends - but "approve everything I am about to ask for"
@@ -873,7 +917,7 @@ async def test_a_typo_writes_nothing_and_says_what_would_have_worked(
 
     assert not project_permissions_path(project).exists()
     assert view.parked == []
-    assert any("usage: /config [global|local]" in message for message in view.toasts())
+    assert any("usage: /config [global|local|reset" in message for message in view.toasts())
 
 
 async def test_config_local_refuses_in_a_remote_session(
@@ -902,6 +946,102 @@ async def test_config_local_refuses_in_a_remote_session(
     assert "this session's rules come from dev@box" in note
 
 
+async def test_config_reset_writes_the_shipped_defaults_over_the_file(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """The one branch that overwrites: the way out of a ruleset edited until
+    nothing runs any more. It parks nothing - the answer is what the file now
+    says, not where it is - and it repeats the restart note, which bites hardest
+    here because the session is still running the rules read at launch."""
+    path = project_permissions_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"permission": {"bash": "deny"}}', encoding="utf-8")
+
+    controller.submit_message("/config reset local")
+    await settle(view)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": {}}
+    assert view.parked == []
+    assert any("reset" in note and "restart AgentClip" in note for note in view.notes())
+    # ...and it is truthful about which restart: /new does not re-read the file.
+    assert any("not even /new re-reads them" in note for note in view.notes())
+
+
+async def test_config_reset_keeps_the_mcp_block_it_found(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """`mcp` is the one top-level key that has nothing to do with permissions, so
+    losing a configured server to a permissions reset would be a surprise."""
+    path = project_permissions_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    servers = {"fs": {"command": "npx", "args": ["-y", "server-filesystem"]}}
+    path.write_text(json.dumps({"permission": {"bash": "deny"}, "mcp": servers}), encoding="utf-8")
+
+    controller.submit_message("/config reset local")
+    await settle(view)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": servers}
+    assert any("mcp block was kept" in note for note in view.notes())
+
+
+async def test_config_reset_replaces_a_file_that_does_not_parse(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """Exactly the file this branch exists to get out of: nothing to carry
+    across, so it is replaced outright rather than repaired."""
+    path = project_permissions_path(project)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"permission": {,,,', encoding="utf-8")
+
+    controller.submit_message("/config reset local")
+    await settle(view)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": {}}
+
+
+async def test_config_reset_global_creates_the_directories_it_needs(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """A reset on an install that never created the file is still a reset: it
+    writes the defaults, parent directories and all."""
+    path = agentclip.config.default_permissions_config_path()
+    assert not path.exists()
+
+    controller.submit_message("/config reset global")
+    await settle(view)
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": {}}
+
+
+async def test_config_reset_local_refuses_in_a_remote_session(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """`/config local`'s refusal, and more sharply: the file it would overwrite
+    governs nothing, because the project is on the target."""
+    remote = replace(app_config, remote=replace(app_config.remote, target="dev@box"))
+    controller = SessionController(remote, make_factory(project), project, view=view)
+    view.controller = controller
+
+    controller.submit_message("/config reset local")
+    await settle(view)
+
+    assert not project_permissions_path(project).exists()
+    assert any("not supported in a remote session" in m for m in view.toasts())
+
+
+async def test_a_reset_typo_writes_nothing_either(
+    controller: SessionController, view: FakeChatView, project: Path
+) -> None:
+    """The leading word has to BE "reset": the branch that overwrites a file is
+    the last one that may be reached by a near miss."""
+    for typo in ("/config resetlocal", "/config reset", "/config reset locl"):
+        controller.submit_message(typo)
+        await settle(view)
+
+    assert not project_permissions_path(project).exists()
+    assert all("usage: /config" in message for message in view.toasts())
+
+
 async def test_config_works_with_no_session_of_any_kind(
     controller: SessionController, view: FakeChatView
 ) -> None:
@@ -924,6 +1064,7 @@ def test_match_prefix_narrows_as_the_user_types() -> None:
     assert [c.name for c in match_prefix("/c")] == ["config"]
     assert [c.name for c in match_prefix("/n")] == ["new"]
     assert [c.name for c in match_prefix("/t")] == ["theme"]
+    assert [c.name for c in match_prefix("/u")] == ["unattended"]
     assert [c.name for c in match_prefix("/yolo")] == ["yolo"]
     assert [c.name for c in match_prefix("/YO")] == ["yolo"]
 

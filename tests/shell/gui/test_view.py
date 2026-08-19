@@ -86,8 +86,10 @@ class ControllerSpy:
         self.messages: list[str] = []
         self.cancels = 0
         self.cancelled_questions = 0
-        self.permission_mode = "ask"
-        self.yolo = False  # the status bar's fallback when there is no snapshot
+        self.permission_mode = "build"
+        # The status bar's two fallbacks when there is no snapshot to read.
+        self.yolo = False
+        self.unattended = False
 
     def submit_decision(self, decision: Decision, note: str | None) -> None:
         self.decisions.append((decision, note))

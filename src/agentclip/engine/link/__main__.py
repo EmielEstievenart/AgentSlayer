@@ -23,11 +23,14 @@ every terminator to ``\\r\\n`` - tolerable for a JSON reader, but the framing
 says one ``"\\n"``-terminated line per frame and a protocol should not depend on
 the peer being forgiving.
 
-No MCP in this increment: the builder is called with ``mcp_manager=None``, so a
-session hosted here is byte-identical to a pre-MCP one. Increment 4
-(docs/design/remote-executor.md section 4) brings the target-side McpManager -
-which is the whole point of running the engine over there - and it lands here,
-in the assembly, exactly like every other argument below.
+MCP needs no argument here at all, and that is the point of section 2.7: the
+builder constructs its own manager from the config THIS process reads, so the
+servers of a hosted session are the target's, spawned on the target, with the
+target's environment. ``mcp_remote_target`` stays "" precisely because this
+process IS its machine - the stdio refusal it turns on belongs to the legacy
+per-call ``SshHost`` path, where the config describes one box and the process is
+on another. The builder is closed on the way out, which is what hands its loop
+thread back.
 """
 
 from __future__ import annotations
@@ -102,15 +105,22 @@ def main(argv: list[str] | None = None) -> int:
         get_config,
         project_root,
         # This process runs ON the machine the project is on, so its Host is the
-        # local one - the remote half never SSHes out (design section 2.6).
+        # local one - the remote half never SSHes out (design section 2.6). Its
+        # MCP servers are local to it for the same reason, which is why no
+        # remote target is named.
         host=None,
         data_root=data_root,
         home=home,
-        mcp_manager=None,
     )
     sys.stdin.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
     sys.stdout.reconfigure(encoding="utf-8", newline="\n")  # type: ignore[union-attr]
-    return serve(sys.stdin, sys.stdout, builder)
+    try:
+        return serve(sys.stdin, sys.stdout, builder)
+    finally:
+        # The MCP loop thread is a daemon, so this is not what keeps the process
+        # from exiting - it is what closes the clients (and stops the spawned
+        # servers) in an orderly way when the link goes away.
+        builder.close()
 
 
 if __name__ == "__main__":

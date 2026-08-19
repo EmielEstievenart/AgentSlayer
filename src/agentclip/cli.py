@@ -16,7 +16,7 @@ from agentclip import __version__
 from agentclip.config import Config, default_remote_state_dir, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.screen.matchers import MATCHERS, select_matcher
-from agentclip.engine.link.factory import EngineRequest, make_engine_builder
+from agentclip.engine.link.factory import EngineBuilder, EngineRequest, make_engine_builder
 from agentclip.engine.link.wire import EngineLinkError
 from agentclip.engine.store.session import prune_sessions
 from agentclip.executor.hosts.base import Host
@@ -33,7 +33,7 @@ from agentclip.executor.hosts.connect import (
     remote_environment,
 )
 from agentclip.executor.hosts.local import LocalHost
-from agentclip.executor.mcp.client import McpManager
+from agentclip.executor.mcp.types import McpServerStatus
 from agentclip.shell.app.engine_launch import classify_launch_failure, engine_command
 from agentclip.shell.app.link import Link, LocalLink
 from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLinkClient
@@ -42,6 +42,46 @@ from agentclip.shell.tui.graphics import probe_terminal
 
 if TYPE_CHECKING:  # paramiko rides in with SshHost, so the real import stays lazy
     from agentclip.executor.hosts.ssh import LinkChannel, SshHost
+
+
+class LinkFactory:
+    """The local mode's session factory: the shared builder, behind a LocalLink.
+
+    The assembly itself lives in
+    :class:`agentclip.engine.link.factory.EngineBuilder` - engine-side, so a
+    server process on a target machine can run it without a shell in the process
+    (docs/design/remote-executor.md section 2.2). All this adds is the seam the
+    Shell drives a session through: what a call returns is a
+    :class:`~agentclip.shell.app.link.Link`, never the engine itself, and the
+    remote mode this prepares for hands back a ``RemoteLink`` over the same
+    interface without the Shell noticing which side of the wire its session is
+    on. Wrapping happens HERE rather than in the builder because `cli` is the one
+    module allowed to know both halves.
+
+    It is also the MCP status source both shells are handed. The builder owns
+    the runtime (section 2.7: servers spawn where the engine runs), and this
+    re-states the two calls a status pane makes under the names the shells
+    already consume - ``statuses()`` and ``set_status_hook()`` - so neither
+    shell has to grow an ``executor.mcp`` import to paint a sidebar block.
+    """
+
+    __slots__ = ("_builder",)
+
+    def __init__(self, builder: EngineBuilder) -> None:
+        self._builder = builder
+
+    def __call__(self, request: EngineRequest | str) -> Link:
+        return LocalLink(self._builder(request))
+
+    def statuses(self) -> tuple[McpServerStatus, ...]:
+        return self._builder.mcp_statuses()
+
+    def set_status_hook(self, cb: Callable[[McpServerStatus], None] | None) -> None:
+        self._builder.set_mcp_status_hook(cb)
+
+    def close(self) -> None:
+        """Hand back what the builder owns - today, the MCP loop thread."""
+        self._builder.close()
 
 
 def make_engine_factory(
@@ -53,42 +93,44 @@ def make_engine_factory(
     os_name: str | None = None,
     data_root: Path | None = None,
     home: Path | None = None,
-    mcp_manager: McpManager | None = None,
-) -> Callable[[EngineRequest | str], Link]:
-    """The local mode's session factory: the shared builder, behind a LocalLink.
-
-    The assembly itself lives in
-    :func:`agentclip.engine.link.factory.make_engine_builder` - engine-side, so a
-    server process on a target machine can run it without a shell in the process
-    (docs/design/remote-executor.md section 2.2). All this adds is the seam the
-    Shell drives a session through: what comes back is a
-    :class:`~agentclip.shell.app.link.Link`, never the engine itself, and the
-    remote mode this prepares for will hand back a ``RemoteLink`` over the same
-    interface without the Shell noticing which side of the wire its session is
-    on. Wrapping happens HERE rather than in the builder because `cli` is the one
-    module allowed to know both halves.
+    mcp_remote_target: str = "",
+    mcp_enabled: bool = True,
+) -> LinkFactory:
+    """One :class:`LinkFactory` over one engine-side builder.
 
     Every argument is the builder's - see its docstring for what each one means
     and for the per-session rules (fresh config read, fresh chat name, one host
-    per session, MCP catalog sizing). The name stays ``make_engine_factory``
-    because an engine is still exactly what it builds - the link is how the
-    caller reaches it.
+    per session, MCP construction and catalog sizing). The name stays
+    ``make_engine_factory`` because an engine is still exactly what it builds -
+    the link is how the caller reaches it.
     """
-    builder = make_engine_builder(
-        get_config,
-        project_root,
-        chat_name,
-        host=host,
-        os_name=os_name,
-        data_root=data_root,
-        home=home,
-        mcp_manager=mcp_manager,
+    return LinkFactory(
+        make_engine_builder(
+            get_config,
+            project_root,
+            chat_name,
+            host=host,
+            os_name=os_name,
+            data_root=data_root,
+            home=home,
+            mcp_remote_target=mcp_remote_target,
+            mcp_enabled=mcp_enabled,
+        )
     )
 
-    def build(request: EngineRequest | str) -> Link:
-        return LocalLink(builder(request))
 
-    return build
+def _mcp_source(factory: LinkFactory) -> LinkFactory | None:
+    """The status source a shell is handed - or None when there is nothing to show.
+
+    Both shells treat "no manager" as "no MCP block", and unconfigured MCP is
+    the everyday case, so the absence is passed on rather than a source that
+    would answer every paint with an empty tuple. Asking is also what BUILDS the
+    runtime (the builder makes it on first ask), which puts the connects exactly
+    where ``main()`` used to kick them off: at launch, overlapping the terminal
+    probe, the first paint and the user typing their task, so the first
+    bootstrap usually lists real tools rather than an empty listing.
+    """
+    return factory if factory.statuses() else None
 
 
 # How long a failed launch is given to report an exit status before the failure
@@ -353,8 +395,8 @@ class GuiRuntime:
 
     project_root: Path
     config: Config
-    engine_factory: Callable[[EngineRequest], Link]
-    mcp_manager: McpManager | None
+    engine_factory: LinkFactory
+    mcp_manager: LinkFactory | None
     host: Host
     target: str
 
@@ -523,37 +565,24 @@ def main(argv: list[str] | None = None) -> int:
     # terminal questions over stdin/stdout, and there is no terminal on the GUI
     # path, so it stays below the branch.
     provider = select_provider(config.clipboard.provider)
-    # The MCP runtime: built ONCE per process, the same lifetime as skill
-    # discovery (docs/design/mcp.md section 3). Every configured server goes in
-    # - disabled ones too, so statuses() can say "disabled" - but nothing
-    # connects until the first session build calls ensure_started(). With no
-    # servers (or [mcp] enabled=false, which loads none) there is NO manager at
-    # all: the factory and the app hold None and behave exactly as before MCP
-    # existed.
+    # The MCP runtime is not built here any more: the engine-side builder owns
+    # it, because servers must spawn on the machine the engine runs on
+    # (docs/design/remote-executor.md section 2.7). What ``main`` still decides
+    # is the two facts only a launch knows.
     #
-    # A launch with a connect PENDING builds none of it: those servers would be
-    # this PC's, read from this PC's permissions.json, for a session that is about
-    # to belong to another machine - and "the host PC's file is not consulted at
-    # all in a remote session" is the rule, not a preference
+    # ``mcp_remote_target`` is the legacy per-call SshHost path's one oddity:
+    # the config came off the target while the process spawning servers is this
+    # PC, so stdio entries are refused BY NAME and a dial that fails says who
+    # dialled it. The host's name, not a bare flag - a status line that names
+    # the box beats one that says "remote".
+    #
+    # A launch with a connect PENDING builds no MCP at all: those servers would
+    # be this PC's, read from this PC's permissions.json, for a session that is
+    # about to belong to another machine - and "the host PC's file is not
+    # consulted at all in a remote session" is the rule, not a preference
     # (docs/design/remote-ssh.md, "the target owns its policy"). The runtime the
     # connect builds carries the target's instead.
-    mcp_manager: McpManager | None = None
-    if config.mcp.enabled and config.mcp_servers.servers and pending_connect is None:
-        # The host's name, not a bare flag: in a remote session it is what the
-        # refused stdio servers and the "dialed from this PC" note are ABOUT,
-        # and a status line that names the box beats one that says "remote".
-        mcp_manager = McpManager(
-            config.mcp_servers.servers,
-            launch.project_root,
-            remote_target=launch.host.name if config.remote.is_remote() else "",
-        )
-        # Kick the connects off NOW, not at the first session build: they
-        # overlap the terminal probe, the shell's first paint and the user
-        # typing their task, so the first bootstrap usually lists real tools
-        # instead of the guaranteed-empty listing a build-time kick-off produced
-        # (the connect has not begun when the catalog snapshot is taken
-        # microseconds later). Still non-blocking - a slow server delays nothing.
-        mcp_manager.ensure_started()
+    mcp_remote_target = launch.host.name if config.remote.is_remote() else ""
     # The fork between the two shells (docs/design/gui.md section 0). It sits
     # here, after everything about WHERE the session runs is settled and before
     # the first TUI-only step. Imported inside the function because pywebview is
@@ -572,10 +601,21 @@ def main(argv: list[str] | None = None) -> int:
         from agentclip.shell.gui.shell import run_gui
 
         live_config = [config]
+        gui_factory = make_engine_factory(
+            lambda: live_config[0],
+            launch.project_root,
+            host=launch.host,
+            os_name=launch.os_name,
+            data_root=(launch.data_root if launch.data_root != launch.project_root else None),
+            home=launch.home,
+            mcp_remote_target=mcp_remote_target,
+            mcp_enabled=pending_connect is None,
+        )
         # What the process currently OWNS, as opposed to what it was launched
         # with: an in-app connect replaces both, and the teardown below has to
-        # close what is live rather than what was true at startup.
-        owned: dict[str, Any] = {"mcp": mcp_manager, "host": launch.host}
+        # close what is live rather than what was true at startup. The factory
+        # is what holds the MCP runtime now, so it is what gets closed.
+        owned: dict[str, Any] = {"factory": gui_factory, "host": launch.host}
 
         def adopt_config(edited: Config) -> None:
             live_config[0] = edited
@@ -598,15 +638,21 @@ def main(argv: list[str] | None = None) -> int:
             live_config[0] = remote.config
             remote.data_root.mkdir(parents=True, exist_ok=True)
             prune_sessions(remote.data_root, remote.config.backup.keep_sessions)
-            manager: McpManager | None = None
-            if remote.config.mcp.enabled and remote.config.mcp_servers.servers:
-                manager = McpManager(
-                    remote.config.mcp_servers.servers,
-                    remote.project_root,
-                    remote_target=remote.host.name,
-                )
-                manager.ensure_started()
-            previous, owned["mcp"] = owned["mcp"], manager
+            factory = make_engine_factory(
+                lambda: live_config[0],
+                remote.project_root,
+                host=remote.host,
+                os_name=remote.os_name,
+                data_root=remote.data_root,
+                home=remote.home,
+                mcp_remote_target=remote.host.name,
+            )
+            # Asking for the status source is what BUILDS the target's MCP
+            # runtime (the builder makes it on first ask), and it happens here
+            # rather than at the return so the new one is up and connecting
+            # before the old one is closed - the order the swap has always had.
+            source = _mcp_source(factory)
+            previous, owned["factory"] = owned["factory"], factory
             if previous is not None:
                 previous.close()
             old_host, owned["host"] = owned["host"], remote.host
@@ -617,16 +663,8 @@ def main(argv: list[str] | None = None) -> int:
             return GuiRuntime(
                 project_root=remote.project_root,
                 config=remote.config,
-                engine_factory=make_engine_factory(
-                    lambda: live_config[0],
-                    remote.project_root,
-                    host=remote.host,
-                    os_name=remote.os_name,
-                    data_root=remote.data_root,
-                    home=remote.home,
-                    mcp_manager=manager,
-                ),
-                mcp_manager=manager,
+                engine_factory=factory,
+                mcp_manager=source,
                 host=remote.host,
                 target=remote.host.target,
             )
@@ -636,18 +674,8 @@ def main(argv: list[str] | None = None) -> int:
                 launch,
                 provider=provider,
                 on_config_change=adopt_config,
-                engine_factory=make_engine_factory(
-                    lambda: live_config[0],
-                    launch.project_root,
-                    host=launch.host,
-                    os_name=launch.os_name,
-                    data_root=(
-                        launch.data_root if launch.data_root != launch.project_root else None
-                    ),
-                    home=launch.home,
-                    mcp_manager=mcp_manager,
-                ),
-                mcp_manager=mcp_manager,
+                engine_factory=gui_factory,
+                mcp_manager=_mcp_source(gui_factory),
                 host=launch.host,
                 remote=RemoteConnect(
                     local_root=Path(args.project).resolve(),
@@ -660,8 +688,8 @@ def main(argv: list[str] | None = None) -> int:
             # The same hand-back the TUI path does below, over what is LIVE: a
             # --ssh launch has a connection open by now whichever shell it was
             # headed for, and so does one the user dialled from the dialog.
-            if owned["mcp"] is not None:
-                owned["mcp"].close()
+            if owned["factory"] is not None:
+                owned["factory"].close()
             close = getattr(owned["host"], "close", None)
             if close is not None:
                 close()
@@ -671,28 +699,40 @@ def main(argv: list[str] | None = None) -> int:
     # ELEMENTS column ends up silently drawing blocks on a terminal that can do
     # sixel (tui.graphics, tui.md 1.7).
     probe_terminal()
+    # app.app_config is reassigned in place when the service editor saves, so
+    # the factory's closure keeps reading whatever config is current. The box is
+    # what lets that closure exist BEFORE the app does: the factory is built
+    # first now (asking it for statuses is what builds the MCP runtime, and that
+    # has to happen before the app is handed a status source), and until the
+    # constructor returns there is no ``app`` to read - only the launch config,
+    # which is what ``app.app_config`` is about to be set to anyway.
+    live_app: list[AgentClipApp | None] = [None]
+
+    def tui_config() -> Config:
+        current = live_app[0]
+        return config if current is None else current.app_config
+
+    tui_factory = make_engine_factory(
+        tui_config,
+        launch.project_root,
+        host=launch.host,
+        os_name=launch.os_name,
+        data_root=launch.data_root if launch.data_root != launch.project_root else None,
+        home=launch.home,
+        mcp_remote_target=mcp_remote_target,
+    )
     app = AgentClipApp(
         config=config,
         provider=provider,
-        # app.app_config is reassigned in place when the service editor saves, so
-        # this closure keeps reading whatever config is current.
-        engine_factory=make_engine_factory(
-            lambda: app.app_config,
-            launch.project_root,
-            host=launch.host,
-            os_name=launch.os_name,
-            data_root=launch.data_root if launch.data_root != launch.project_root else None,
-            home=launch.home,
-            mcp_manager=mcp_manager,
-        ),
+        engine_factory=tui_factory,
         project_root=launch.project_root,
-        mcp_manager=mcp_manager,
+        mcp_manager=_mcp_source(tui_factory),
     )
+    live_app[0] = app
     try:
         app.run()
     finally:
-        if mcp_manager is not None:
-            mcp_manager.close()
+        tui_factory.close()
         close = getattr(launch.host, "close", None)
         if close is not None:
             close()

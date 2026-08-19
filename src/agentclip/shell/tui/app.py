@@ -24,11 +24,10 @@ from agentclip.config import (
 )
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
-from agentclip.executor.mcp.client import McpManager
 from agentclip.shell.app.link import Link
 from agentclip.shell.tui.screens.confirm import ConfirmScreen
 from agentclip.shell.tui.screens.help import HelpScreen
-from agentclip.shell.tui.screens.main import MainScreen
+from agentclip.shell.tui.screens.main import MainScreen, McpStatusSource
 from agentclip.shell.tui.screens.service_editor import ServiceEditorScreen
 from agentclip.shell.tui.screens.settings import SettingsScreen
 
@@ -694,19 +693,21 @@ class AgentClipApp(App[None]):
         project_root: Path,
         global_config_path: Path | None = None,
         profile_root: Path | None = None,
-        mcp_manager: McpManager | None = None,
+        mcp_manager: McpStatusSource | None = None,
     ) -> None:
         super().__init__()
         self.app_config = config
         self.provider = provider
         self.engine_factory = engine_factory
         self.project_root = project_root
-        # The process-wide MCP runtime, or None when MCP is unconfigured.
-        # cli.py owns its lifecycle (built in main(), closed in main()'s
-        # finally) and the engine factory holds its own reference for the
-        # tools; this one is handed to MainScreen at mount, which paints the
-        # sidebar block + statusbar segment off statuses() and bridges
-        # set_status_hook onto Textual's loop (docs/design/mcp.md section 6).
+        # The session factory's view of the MCP runtime, or None when MCP is
+        # unconfigured. The engine half OWNS the runtime now (it builds it and
+        # holds it for the tools; docs/design/remote-executor.md section 2.7)
+        # and cli.py closes the factory in main()'s finally; what arrives here
+        # is the two-call status source (statuses / set_status_hook), handed to
+        # MainScreen at mount, which paints the sidebar block + statusbar
+        # segment off statuses() and bridges set_status_hook onto Textual's loop
+        # (docs/design/mcp.md section 6).
         self.mcp_manager = mcp_manager
         # Where the service editor and the settings screen persist edits.
         # Defaults to the real global config.toml; tests override it to a tmp

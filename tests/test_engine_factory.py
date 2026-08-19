@@ -16,8 +16,9 @@ from typing import Any
 
 import pytest
 
-from agentclip.cli import make_engine_factory
-from agentclip.config import Config, load_config
+import agentclip.engine.link.factory as factory_mod
+from agentclip.cli import LinkFactory, make_engine_factory
+from agentclip.config import Config, load_config, project_permissions_path
 from agentclip.engine.engine import Engine
 from agentclip.engine.link.factory import (
     _MCP_SECTION6_SCAFFOLD,
@@ -25,7 +26,6 @@ from agentclip.engine.link.factory import (
     EngineRequest,
 )
 from agentclip.executor.mcp.client import McpManager
-from agentclip.executor.mcp.types import McpLocalServer
 from agentclip.executor.tools.registry import default_registry
 from agentclip.protocol.spec import render_spec
 from agentclip.shell.app.link import Link, LocalLink
@@ -102,8 +102,11 @@ def test_a_pinned_chat_name_wins_over_the_generator(build) -> None:
 
 # == MCP catalog sizing (docs/design/mcp.md section 5: the budget rule) ========
 #
-# These go through the REAL McpManager over the SDK's in-process transport
-# (the `_inproc_targets` seam, exactly like tests/executor/mcp/test_client.py): real
+# The builder OWNS the MCP runtime now (docs/design/remote-executor.md section
+# 2.7), so these configure servers the way a user does - an `mcp` block in the
+# project's permissions.json - and let it build its own manager. That manager is
+# still the REAL McpManager over the SDK's in-process transport (the
+# `_inproc_targets` seam, exactly like tests/executor/mcp/test_client.py): real
 # protocol, real cached tool listing, no subprocess. The budget arithmetic is
 # exercised by writing a project .agentclip.toml whose service budget is
 # derived from a measured MCP-free spec, so the tests hold as the spec prose
@@ -139,19 +142,76 @@ def _demo_server() -> Any:
 
 
 @pytest.fixture
-def mcp_manager(tmp_path: Path) -> Iterator[McpManager]:
-    manager = McpManager(
-        [McpLocalServer(name="demo", command=("never-spawned",))],
-        tmp_path,
-        _inproc_targets={"demo": _demo_server()},
-    )
-    # Settled BEFORE any engine is built, so the listing the catalog renders is
-    # deterministic (the production path tolerates a racing connect; a test
-    # asserting listing content must not).
-    manager.ensure_started()
-    assert manager.wait_ready(READY_S)
-    yield manager
-    manager.close()
+def inproc_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every manager the builder constructs, wired to an in-process server.
+
+    The `_inproc_targets` seam (docs/design/mcp.md section 7) is now injected
+    where the BUILDER reaches for the class, because the builder is what
+    constructs the manager - there is no manager argument to hand a
+    pre-connected one in through any more. ``ensure_started`` also settles
+    before it returns, so the listing the catalog renders is deterministic (the
+    production path tolerates a racing connect; a test asserting listing content
+    must not).
+    """
+
+    class _InProcManager(McpManager):
+        def __init__(
+            self,
+            servers: Any,
+            project_root: Path,
+            *,
+            remote_target: str = "",
+            _inproc_targets: Any = None,
+        ) -> None:
+            super().__init__(
+                servers,
+                project_root,
+                remote_target=remote_target,
+                _inproc_targets={"demo": _demo_server()},
+            )
+
+        def ensure_started(self) -> None:
+            super().ensure_started()
+            assert self.wait_ready(READY_S)
+
+    monkeypatch.setattr(factory_mod, "McpManager", _InProcManager)
+
+
+@pytest.fixture
+def factories() -> Iterator[Callable[[Path], LinkFactory]]:
+    """Factories over a tmp project, all closed at the end of the test.
+
+    Closing is the test's job now for the same reason it is ``cli.main``'s: the
+    factory owns the MCP loop thread, so the thing to hand back is the factory.
+    """
+    made: list[LinkFactory] = []
+
+    def make(root: Path) -> LinkFactory:
+        factory = make_engine_factory(
+            lambda: _cfg(root),
+            root,
+            chat_name=PINNED_CHAT,
+            os_name="TestOS",
+            # The tmp project doubles as HOME so the developer's real skill folders
+            # cannot leak into the catalog these budgets are derived from.
+            home=root,
+        )
+        made.append(factory)
+        return factory
+
+    yield make
+    for factory in made:
+        factory.close()
+
+
+def _cfg(root: Path) -> Config:
+    """The project's config, read from the project and nothing else.
+
+    ``home`` is the tmp project too: the builder reads its MCP servers out of
+    the config now, and a developer's real permissions.json must not be able to
+    put a server into a test run.
+    """
+    return load_config(root, global_config_path=root / "no-such-global.toml", home=root)
 
 
 def _project_with_budget(root: Path, max_paste_chars: int) -> None:
@@ -162,9 +222,19 @@ def _project_with_budget(root: Path, max_paste_chars: int) -> None:
     )
 
 
+def _project_with_servers(root: Path, **servers: Any) -> None:
+    """The user-facing way to configure MCP: the `mcp` block of permissions.json."""
+    path = project_permissions_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"mcp": servers}), encoding="utf-8")
+
+
+DEMO_SERVER = {"type": "local", "command": ["never-spawned"]}
+
+
 def _mcp_free_spec_len(root: Path) -> int:
-    """What build() measures: the MCP-free sections 1-5 for the tuned preset."""
-    cfg = load_config(root, global_config_path=root / "no-such-global.toml")
+    """What the builder measures: the MCP-free sections 1-5 for the tuned preset."""
+    cfg = _cfg(root)
     return len(
         render_spec(
             cfg.preset(),
@@ -174,21 +244,6 @@ def _mcp_free_spec_len(root: Path) -> int:
             "TestOS",
             PINNED_CHAT,
             role="master",
-        )
-    )
-
-
-def _mcp_factory(root: Path, manager: McpManager | None):
-    return _engines(
-        make_engine_factory(
-            lambda: load_config(root, global_config_path=root / "no-such-global.toml"),
-            root,
-            chat_name=PINNED_CHAT,
-            os_name="TestOS",
-            # The tmp project doubles as HOME so the developer's real skill folders
-            # cannot leak into the catalog these budgets are derived from.
-            home=root,
-            mcp_manager=manager,
         )
     )
 
@@ -210,97 +265,130 @@ def _tuned_root(tmp_path: Path, room: int) -> Path:
     return root
 
 
-def test_no_manager_is_todays_exact_registry(tmp_path: Path) -> None:
-    """Zero behaviour change when MCP is unconfigured: no manager means the
-    registry (and therefore the whole bootstrap) is byte-for-byte pre-MCP."""
+def test_no_servers_configured_is_todays_exact_registry(tmp_path: Path, factories) -> None:
+    """Zero behaviour change when MCP is unconfigured: no servers means no
+    manager, and the registry (and whole bootstrap) is byte-for-byte pre-MCP."""
     root = tmp_path / "project"
     root.mkdir()
-    engine = _mcp_factory(root, None)("claude")
+    factory = factories(root)
+    assert factory.statuses() == ()
+    engine = _engines(factory)("claude")
     assert engine._registry.names() == default_registry().names()
     assert engine.build_warnings == ()
     payload = engine.start_task("t").chunks[0]
     assert "mcp" not in payload
 
 
-def test_mcp_tools_advertised_when_they_fit(tmp_path: Path, mcp_manager: McpManager) -> None:
+def test_the_builder_makes_its_own_manager_from_the_config(
+    tmp_path: Path, inproc_mcp, factories
+) -> None:
+    """Ownership, as built: nobody hands the factory a manager any more - it
+    reads permissions.json itself and stands one up (remote-executor.md 2.7).
+    Two servers, one disabled, so the statuses prove it read the real block."""
+    root = tmp_path / "project"
+    root.mkdir()
+    _project_with_servers(
+        root, demo=DEMO_SERVER, off={"type": "local", "command": ["nope"], "enabled": False}
+    )
+    factory = factories(root)
+    assert {(s.name, s.state) for s in factory.statuses()} == {
+        ("demo", "connected"),
+        ("off", "disabled"),
+    }
+    # Idempotent, and the closed runtime is not silently rebuilt behind it.
+    factory.close()
+    factory.close()
+    assert factory.statuses() == ()
+
+
+def test_the_status_hook_reaches_the_manager(tmp_path: Path, inproc_mcp, factories) -> None:
+    """The Shell's other MCP call: a hook registered on the factory is the one
+    the manager fires, so the sidebar repaints without importing executor.mcp."""
+    root = tmp_path / "project"
+    root.mkdir()
+    _project_with_servers(root, demo=DEMO_SERVER)
+    factory = factories(root)
+    seen: list[str] = []
+    factory.set_status_hook(lambda status: seen.append(status.state))
+    # The connect settled inside ensure_started, so the transitions have fired.
+    assert [s.state for s in factory.statuses()] == ["connected"]
+    assert "connected" in seen
+
+
+def test_mcp_tools_advertised_when_they_fit(
+    tmp_path: Path, inproc_mcp, factories
+) -> None:
     root = _tuned_root(tmp_path, room=6_000)
-    engine = _mcp_factory(root, mcp_manager)("tuned")
+    _project_with_servers(root, demo=DEMO_SERVER)
+    engine = _engines(factories(root))("tuned")
     assert engine.build_warnings == ()
     payload = engine.start_task("t").chunks[0]
     assert "mcp_schema(tool)" in payload
     assert "mcp(tool*, args)" in payload
     assert "demo_tool_00" in payload  # the composite id, listed
-    assert len(payload) <= load_config(
-        root, global_config_path=root / "no-such-global.toml"
-    ).preset().max_paste_chars
+    assert len(payload) <= _cfg(root).preset().max_paste_chars
 
 
 def test_listing_degrades_before_the_budget_breaks(
-    tmp_path: Path, mcp_manager: McpManager
+    tmp_path: Path, inproc_mcp, factories
 ) -> None:
     """Mid-sized room: the listing is clipped with the +N more footer rather
     than the specs being dropped - degradation step 2 before step 3."""
     root = _tuned_root(tmp_path, room=1_500)
-    engine = _mcp_factory(root, mcp_manager)("tuned")
+    _project_with_servers(root, demo=DEMO_SERVER)
+    engine = _engines(factories(root))("tuned")
     assert engine.build_warnings == ()
     payload = engine.start_task("t").chunks[0]
     assert "mcp(tool*, args)" in payload
     assert "more MCP tool(s) not listed" in payload  # the full 6k listing did not ride
-    budget = load_config(
-        root, global_config_path=root / "no-such-global.toml"
-    ).preset().max_paste_chars
+    budget = _cfg(root).preset().max_paste_chars
     assert len(payload) <= budget
 
 
 def test_mcp_dropped_with_warning_when_room_is_hopeless(
-    tmp_path: Path, mcp_manager: McpManager
+    tmp_path: Path, inproc_mcp, factories
 ) -> None:
     """The binding invariant: a preset that bootstrapped before MCP existed
     must never raise BudgetExceeded because MCP appeared. With ~40 chars of
     room the specs are dropped, the warning surfaces on the engine, and the
     bootstrap still arms."""
     root = _tuned_root(tmp_path, room=40)
-    engine = _mcp_factory(root, mcp_manager)("tuned")
+    _project_with_servers(root, demo=DEMO_SERVER)
+    engine = _engines(factories(root))("tuned")
     assert engine.build_warnings != ()
     assert "paste budget too small for MCP tools" in engine.build_warnings[0]
     payload = engine.start_task("Fix the date parser in src/utils.py.").chunks[0]  # no raise
     assert "tool=mcp" not in payload
-    budget = load_config(
-        root, global_config_path=root / "no-such-global.toml"
-    ).preset().max_paste_chars
+    budget = _cfg(root).preset().max_paste_chars
     assert len(payload) <= budget
 
 
 @pytest.mark.parametrize("room", [0, 120, 400, 900, 2_500, 8_000])
 def test_mcp_never_pushes_a_bootstrap_over_budget(
-    tmp_path: Path, mcp_manager: McpManager, room: int
+    tmp_path: Path, inproc_mcp, factories, room: int
 ) -> None:
     """Sweep the room: whatever fits rides, whatever does not is dropped with a
     warning - and the bootstrap NEVER raises BudgetExceeded because of MCP."""
     root = _tuned_root(tmp_path, room=room)
-    engine = _mcp_factory(root, mcp_manager)("tuned")
+    _project_with_servers(root, demo=DEMO_SERVER)
+    engine = _engines(factories(root))("tuned")
     payload = engine.start_task("Fix the date parser.").chunks[0]  # must not raise
-    budget = load_config(
-        root, global_config_path=root / "no-such-global.toml"
-    ).preset().max_paste_chars
+    budget = _cfg(root).preset().max_paste_chars
     assert len(payload) <= budget
     included = "mcp(tool*, args)" in payload
     assert included == (engine.build_warnings == ())
 
 
-def test_all_disabled_servers_add_no_catalog_text(tmp_path: Path) -> None:
+def test_all_disabled_servers_add_no_catalog_text(tmp_path: Path, factories) -> None:
     """A manager exists (statuses can say 'disabled') but degradation step 1
     holds: no enabled server, no MCP prose in the catalog, no warning either."""
     root = _tuned_root(tmp_path, room=6_000)
-    manager = McpManager(
-        [McpLocalServer(name="demo", command=("never-spawned",), enabled=False)], root
-    )
-    try:
-        engine = _mcp_factory(root, manager)("tuned")
-        assert engine.build_warnings == ()
-        assert engine._registry.names() == default_registry().names()
-    finally:
-        manager.close()
+    _project_with_servers(root, demo={"type": "local", "command": ["nope"], "enabled": False})
+    factory = factories(root)
+    engine = _engines(factory)("tuned")
+    assert [s.state for s in factory.statuses()] == ["disabled"]
+    assert engine.build_warnings == ()
+    assert engine._registry.names() == default_registry().names()
 
 
 def test_the_session_log_records_role_and_parent(tmp_path: Path) -> None:

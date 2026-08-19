@@ -18,8 +18,11 @@
 > §2.5 is decided and built — `config.py`'s pinned-to-this-PC `[approval]` branch
 > is deleted, so the engine reads the whole of `[approval]` from its own
 > machine's config layers — and the stores (§2.4) and skills discovery were
-> verified engine-side without a code change. Both sections carry an "as built"
-> note. Still owed by this increment: the target-side `McpManager`.
+> verified engine-side without a code change. Its MCP slice has landed too: the
+> manager is constructed by the engine half's builder from the config that side
+> reads (§2.7 "as built"), so `agentclip-engine` spawns its servers on the
+> target. What increment 4 still owes is the parity *verdict* — running the
+> remote engine against the per-call path and flipping the default.
 >
 > **The default `--ssh` mode is still the per-call `SshHost` path.** Increment 3
 > built the remote-engine transport and left it *additive*: `cli.make_remote_link_factory`
@@ -293,6 +296,36 @@ supports stdio servers and header/token-authenticated HTTP servers; a server
 requiring an interactive OAuth flow fails at startup with a clear "not
 supported over SSH yet" warning. Ties into the existing MCP phase-2
 token-reuse work for a later fix.
+
+**As built (increment 4).** MCP construction moved into the engine half:
+`engine/link/factory.py`'s `EngineBuilder` builds the `McpManager` itself, from
+the config *its* side reads, at the same altitude as skill discovery — one
+runtime per builder, however many sessions it goes on to build. `cli.py` has no
+`McpManager` construction site left (it had two: `main()` and the GUI's
+reconnect), and neither shell gained an `executor.mcp` import: the builder
+exposes `mcp_statuses()` / `set_mcp_status_hook()` / `close()`, and `cli`'s
+`LinkFactory` re-states the first two under the `statuses()` /
+`set_status_hook()` names the panes already consumed. So in the
+`agentclip-engine` process the reversal is now real — `__main__.py` passes no
+manager and no remote target, the builder reads the target's own
+permissions.json, and a stdio server spawns **there**, with the target's
+environment and cwd. Interactive OAuth is unchanged and still out of scope: the
+401/403 → `needs_auth` mapping in `client.py` was already unconditional, so it
+means the same thing on either machine.
+
+The runtime is built on the builder's *first ask* rather than in its
+constructor, because the config closure a Shell hands in usually closes over the
+object it is about to be passed to (`lambda: app.app_config`). Every production
+caller asks immediately — `cli.main` reads the statuses to decide whether the
+shells get a status source at all — so the connects still kick off at launch,
+overlapping the first paint exactly as they did when `main()` built the manager.
+
+What did **not** move is the legacy per-call `SshHost` path: it is still the
+default `--ssh` mode, its config still comes off the target while the process
+spawning servers is this PC, so `cli` passes `mcp_remote_target=<host name>`
+there and `client.py`'s stdio refusal and "dialled from this PC" note fire
+exactly as before. That parameter is `""` everywhere else, including in
+`agentclip-engine`. It goes when §2.8 does, in increment 5.
 
 ### 2.8 SshHost per-call mode is replaced outright
 
@@ -711,10 +744,13 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
 4. **MCP + store on target, parity pass.** — **in progress.** Target-side
    McpManager, stores, policy loading; the `/config`-wave permissions.json paths
    on the target. Done so far: policy loading, by deleting the one branch that
-   still pinned `[approval]` to the operator's PC (§2.5 "as built"), plus the
+   still pinned `[approval]` to the operator's PC (§2.5 "as built"); the
    verification that stores (§2.4) and skills already live with the engine and
-   needed no change. Remaining: the target-side `McpManager`, which lands in
-   `engine/link/__main__.py`'s assembly where `mcp_manager=None` is passed today.
+   needed no change; and MCP, by moving construction out of `cli.py`'s two sites
+   into the engine half's `EngineBuilder`, which is what makes
+   `engine/link/__main__.py` need no MCP argument at all (§2.7 "as built").
+   Remaining: the parity verdict itself — exercising the remote engine against
+   what the per-call path does, then flipping the default `--ssh` mode.
 5. **Delete SshHost per-call mode** once parity is verified; amend
    `remote-ssh.md`.
 

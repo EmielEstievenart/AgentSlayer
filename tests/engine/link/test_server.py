@@ -35,10 +35,11 @@ import pytest
 
 from agentclip import __version__
 from agentclip.config import Config, load_config
-from agentclip.engine.link import wire
+from agentclip.engine.link import factory, wire
 from agentclip.engine.link.factory import make_engine_builder
 from agentclip.engine.link.server import EngineBuilder, serve
 from agentclip.engine.states import Decision
+from agentclip.executor.mcp.types import McpServerStatus
 
 # The chat name every engine this file builds is pinned to, so the canned
 # replies below can hard-code it on their EOM line (as the root conftest does).
@@ -343,6 +344,48 @@ def test_one_server_hosts_several_sessions(link: _Link) -> None:
     link.ask("start_task", session=first.session, task="the master task")
     assert link.ask("status", session=first.session).phase.name == "AWAITING_REPLY"
     assert link.ask("status", session=second.session).phase.name == "IDLE"
+
+
+def test_every_session_a_server_hosts_shares_one_mcp_runtime(
+    project: Path, link: _Link, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One process, one MCP runtime - even though the builder is called per
+    session (docs/design/mcp.md section 3, remote-executor.md 2.7).
+
+    Which is also where the servers of a hosted session COME from: the block in
+    the target's own permissions.json, read by the builder, never handed over
+    the wire. The manager is stubbed out because what is under test is
+    ownership, not connecting: an all-disabled runtime adds no catalog text, so
+    no SDK and no subprocess are involved either way.
+    """
+    made: list[Any] = []
+
+    class _StubManager:
+        def __init__(self, servers: Any, root: Path, *, remote_target: str = "") -> None:
+            made.append((servers, root, remote_target))
+
+        def statuses(self) -> tuple[McpServerStatus, ...]:
+            return (McpServerStatus(name="demo", state="disabled"),)
+
+        def ensure_started(self) -> None: ...
+        def set_status_hook(self, cb: Any) -> None: ...
+        def close(self) -> None: ...
+
+    monkeypatch.setattr(factory, "McpManager", _StubManager)
+    rules = project / ".agentclip" / "permissions.json"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text(
+        json.dumps({"mcp": {"demo": {"type": "local", "command": ["never-spawned"]}}}),
+        encoding="utf-8",
+    )
+
+    link.hello()
+    link.ask("build_session", service="claude")
+    link.ask("build_session", service="claude")
+    assert len(made) == 1
+    # "" and not a target name: this process IS the machine its servers spawn
+    # on, so the stdio refusal of the legacy per-call path stays switched off.
+    assert made[0][1:] == (project, "")
 
 
 def test_a_build_failure_leaves_the_server_running(link: _Link) -> None:

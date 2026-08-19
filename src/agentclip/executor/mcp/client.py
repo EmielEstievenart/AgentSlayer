@@ -165,9 +165,11 @@ async def _quiet_aclose(stack: AsyncExitStack) -> None:
 class McpManager:
     """The process-wide MCP runtime (docs/design/mcp.md section 3).
 
-    Built once in `cli.py:main()`, handed to the app for status display and into
-    the engine factory's closure for the tools, closed in the same `finally` as
-    `host.close()`. Every method is synchronous and callable from any thread.
+    Built once by the engine half's `EngineBuilder`, which holds it for the
+    tools and re-states its status calls for a Shell, and closes it - in
+    `cli.py:main()`'s `finally` beside `host.close()` for a local run, in the
+    `agentclip-engine` process's for a remote one. Every method is synchronous
+    and callable from any thread.
     """
 
     def __init__(

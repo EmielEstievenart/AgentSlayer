@@ -104,13 +104,22 @@ reverse.
 
 ## 3. Runtime: one manager, one loop thread, per process
 
-`McpManager` (`agentclip/executor/mcp/client.py`) is built once per process in
-`cli.py:main()` - the same lifetime as skill discovery - and handed both to
-`AgentClipApp` (for status display) and into `make_engine_factory`'s closure
-(for the tools). It owns a single background thread running an asyncio loop;
-all SDK objects live on that loop, and the synchronous facade the tool
-handlers call (`list_tools()`, `schema()`, `call()`, `statuses()`) crosses
-via `asyncio.run_coroutine_threadsafe` with the per-server timeout. That
+`McpManager` (`agentclip/executor/mcp/client.py`) is built once per session
+factory by `engine/link/factory.py`'s `EngineBuilder` - the same lifetime as
+skill discovery, which is the builder's other once-per-process read - and it is
+the builder that holds it, both for the tools and for the status display a
+Shell reaches through `mcp_statuses()` / `set_mcp_status_hook()` (`cli`'s
+`LinkFactory` re-states those two as `statuses()` / `set_status_hook()`, the
+names `AgentClipApp` and the GUI view consume). It used to be built in
+`cli.py:main()` and handed both ways; it moved down when the engine went remote,
+because a server has to spawn on the machine the engine runs on - see
+docs/design/remote-executor.md §2.7 "as built", which is also where the
+"built on first ask" wrinkle is written down.
+
+It owns a single background thread running an asyncio loop; all SDK objects
+live on that loop, and the synchronous facade the tool handlers call
+(`list_tools()`, `schema()`, `call()`, `statuses()`) crosses via
+`asyncio.run_coroutine_threadsafe` with the per-server timeout. That
 matches the existing threading contract: handlers already run on a worker
 thread (`controller._engine_call` / `asyncio.to_thread`) and must not touch
 Textual's loop.
@@ -126,8 +135,13 @@ answering 401/403 maps to `needs_auth` (phase 1 has no OAuth; the status
 tells the user to authenticate via headers or OpenCode - §9). Tool lists are
 cached at connect; `tools/list_changed` refresh is out of scope.
 
-**In a remote session** (`McpManager(..., remote_target=...)`) two things
-change, both from remote-ssh.md's "the target owns its policy". A `local`
+**In a remote session over the per-call `SshHost` path**
+(`McpManager(..., remote_target=...)`) two things change, both from
+remote-ssh.md's "the target owns its policy". That path is the one arrangement
+where the config describes one machine and the process that would spawn a
+server is on another; with the engine itself on the target
+(remote-executor.md §2.7) the target name is `""` and neither applies, because
+the servers are simply local to the engine. A `local`
 entry never reaches a connect at all: it is `failed` from construction, with
 a detail naming the machine its command belongs to - the same
 never-connects shape as `disabled`, and like `disabled` it is seen through
@@ -138,8 +152,9 @@ how `http://localhost:8080` fails by reaching the wrong machine. A 401 does
 not get that note: the server answered, so the dial plainly worked.
 
 Teardown: `McpManager.close()` joins the loop thread after closing every
-client, wired into `cli.py:main()`'s existing `finally` beside
-`host.close()`.
+client, reached through `EngineBuilder.close()` - `cli.py:main()`'s existing
+`finally` beside `host.close()` for a local run, and the `agentclip-engine`
+process's own `finally` for a remote one.
 
 ## 4. Two tools: `mcp_schema` reads, `mcp` acts
 
@@ -194,14 +209,15 @@ budget.** Mechanism, in order of degradation:
    server is configured and enabled.
 2. The listing inside the catalog doc (composite ids + one-line clipped
    descriptions, `skill_listing`-style with a `+N more` footer) is bounded
-   by a budget derived in `cli.py:build()` from the preset - and the
-   *whole* MCP addition (fixed prose + listing) must fit in
-   `max_paste_chars` minus a measured MCP-free bootstrap size minus margin.
+   by a budget derived per session build from the preset, in
+   `engine/link/factory.py`'s `_sized_registry` - and the *whole* MCP
+   addition (fixed prose + listing) must fit in `max_paste_chars` minus a
+   measured MCP-free bootstrap size minus margin.
 3. If the remainder cannot hold even the fixed prose plus one listing line,
    both specs are dropped for that session and a warning surfaces in the
    TUI ("paste budget too small for MCP tools on this service").
 
-Build() measures rather than guesses: render the MCP-free spec once per
+The build measures rather than guesses: render the MCP-free spec once per
 preset (`render_spec` is pure) and size the addition from the real number.
 
 ## 6. TUI surface

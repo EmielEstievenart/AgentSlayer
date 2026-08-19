@@ -11,6 +11,18 @@ below); this brief does not revisit any decision recorded there — it proposes
 UI for the semantics that document already settled, and flags where the GUI
 forces a new decision remote-ssh.md left open (§6).
 
+> **Amendment (2026-08-19): the engine does not stay on this PC.** When this
+> brief was written, "connect" meant *this* process reaching the target one
+> primitive at a time. Since `docs/design/remote-executor.md` §2.12's flip, a
+> connect ends by launching `agentclip-engine` **on the target** and speaking to
+> it over one wire connection — so the session's tools, stores, backups, policy,
+> skills and MCP servers are all over there. Everything this brief specifies
+> about the six-step sequence is unchanged (it is the same
+> `connect_remote`, in the same order, for the same reason). What it gains is a
+> **seventh checklist row**, described in §3.4 below, and the wording anywhere
+> here that implies the harness keeps doing the work locally should be read with
+> that correction.
+
 ## 1. Purpose
 
 Today, going remote means: type `agentclip --ssh <target> --remote-root
@@ -192,13 +204,28 @@ pending → active → done/failed:
    `[approval]` table in the remote project's `.agentclip.toml`,
    `config.py:896-901`) as non-blocking notices attached to this step, not as
    failures — `load_config` itself never raises
+7. **Start the engine on the target** (`connect.STEP_ENGINE`, added 2026-08-19)
+   — launch `agentclip-engine` over an exec channel and shake hands with it
+   (remote-executor.md §2.6, §2.12). **Fatal**, and the last thing that can go
+   wrong: every row above it can be green and there is still no session if
+   nothing over there answers. Two failures, both arriving as one already-
+   classified sentence which the row shows verbatim: the engine is not installed
+   ("`agentclip-engine` is not installed on *target* — install it with e.g. `uv
+   tool install agentclip`") or the two installs speak different wire versions
+   (the refusal names both `agentclip` versions). It is not a step of
+   `connect_remote` itself — that module lives in the host seam and may not
+   import a protocol — so it is reported by whoever runs the launch, which is
+   `cli`; the vocabulary is `CONNECT_STEPS` (the sequence's six) plus
+   `CHECKLIST_STEPS` (the seven a human watches).
 
-Each stage that can fail (1, 3, 4; 5/6 are non-fatal per the table) shows its
+Each stage that can fail (1, 3, 4, 7; 5/6 are non-fatal per the table) shows its
 failure inline and halts the checklist there — later stages stay pending, not
 skipped-with-a-checkmark. This directly answers the "no partial-progress UI"
 complaint in §1 while preserving the "half-connected session is not a thing"
 rule from §2: the checklist visualizes progress, but no tool/chat surface
-unlocks until stage 6 finishes clean.
+unlocks until stage 7 finishes clean. **Retry covers stage 7 like any other**,
+and this is the case it earns most: the fix for "no engine on the box" is to
+install one and press the button, without relaunching AgentClip.
 
 ### 3.5 Password prompt dialog (3 attempts)
 
@@ -317,19 +344,26 @@ happy-path notice, only for wiring it to the dialog:
   default.
 - The banner also names where the gate's own policy comes from — one line, so a
   user who set `[approval]` in either file knows which one is answering. **As
-  built, and revised (2026-08-19):** the line used to read "`[approval]` (mode,
-  yolo, command rules) stays on this PC", matching the pinning `config.py` then
-  enforced; that pinning is gone (docs/design/remote-executor.md §2.5 — the
-  engine owns policy wholesale), so the line now reads "`[approval]` (mode, yolo,
-  command rules) merges this PC's config.toml with the target's `.agentclip.toml`"
-  (`shell/gui/remote.py:APPROVAL_POLICY`).
-- Any refused stdio MCP server (remote-ssh.md "MCP stdio servers are not
-  supported in a remote session") is listed by name in this same
-  post-connect summary — today it only reaches the TUI's MCP status pane
-  (`/mcp`, sidebar, statusbar count) with no toast (remote-ssh.md line
-  ~249-255); the GUI's connect-summary screen is a natural place to surface
-  it once, up front, rather than requiring the user to go find the MCP panel
-  to discover a server silently didn't attach.
+  built, and revised twice.** It first read "`[approval]` (mode, yolo, command
+  rules) stays on this PC", matching the pinning `config.py` then enforced. That
+  pinning went (docs/design/remote-executor.md §2.5 — the engine owns policy
+  wholesale) and the line became "merges this PC's config.toml with the target's
+  `.agentclip.toml`", which was right for exactly as long as the engine ran here.
+  Since the flip (§2.12) it reads "`[approval]` (mode, yolo, command rules) is
+  read entirely on *target*: its config.toml merged with its `.agentclip.toml`" —
+  because the engine doing the merge is over there and this PC's config.toml is
+  not reachable from it (`engine_command` sends no `--global-config`, §2.6).
+  (`shell/gui/remote.py:APPROVAL_POLICY`.)
+- Any stdio MCP server is listed by name in this same post-connect summary, with
+  the machine that starts it. **Revised (2026-08-19):** this bullet used to be
+  about a *refusal* — stdio servers were not supported in a remote session,
+  because the process that would have spawned them was this PC's. Since the
+  engine moved to the target they start, over there, with the target's argv,
+  environment and cwd (remote-executor.md §2.7 reverses remote-ssh.md), so the
+  line names the box instead of apologising: "stdio MCP servers for this session
+  are started on *target*: *names*" (`shell/gui/remote.py:STDIO_ON_TARGET`). The
+  reason for having the line at all is unchanged — which machine a server really
+  runs on is exactly what a user should not have to find the MCP panel to learn.
 
 ## 4. Mid-session semantics
 
@@ -408,7 +442,11 @@ happy-path notice, only for wiring it to the dialog:
 - **Accelerated bulk-search / stdio-server-on-target** — both explicitly
   deferred in remote-ssh.md itself (decision 3's escape hatch; "MCP stdio
   servers are not supported," "a plausible later wave"), so out of scope
-  here too.
+  here too. **Both landed (2026-08-19), and neither as a dialog concern:**
+  remote-executor.md moved the whole executor to the target, so bulk search is
+  an ordinary local scan over there and stdio servers spawn there too
+  (§2.7). All this surface gained from it is the seventh checklist row (§3.4)
+  and the banner line above.
 
 ## 6. Open questions
 

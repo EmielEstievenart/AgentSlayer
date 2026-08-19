@@ -22,9 +22,12 @@ import pytest
 from agentclip.cli import make_engine_factory
 from agentclip.config import Config, RemoteTarget, load_config, project_permissions_path
 from agentclip.driver.clip.base import select_provider
+from agentclip.engine.link.wire import EngineLinkError
 from agentclip.executor.hosts.connect import (
+    CHECKLIST_STEPS,
     CONNECT_STEPS,
     STEP_CONNECT,
+    STEP_ENGINE,
     STEP_PROBE,
     STEP_RESOLVE,
     STEP_ROOT,
@@ -166,8 +169,16 @@ def harness(
     # rather than a constructor argument because `cli.main` builds this per
     # connect: it is the box's runtime, so it cannot exist before the dial.
     remote_mcp: list[Any] = [None]
+    # How the engine launch goes. ``cli.build_runtime`` opens an exec channel on
+    # the box and shakes hands with ``agentclip-engine`` over it - so from this
+    # shell's side, "the target has no engine on it" is exactly an
+    # ``EngineLinkError`` out of ``build`` (docs/design/remote-executor.md
+    # §2.12), and this cell is how a test asks for one.
+    launch_error: list[EngineLinkError | None] = [None]
 
     def build(remote: ConnectedRemote) -> FakeRuntime:
+        if launch_error[0] is not None:
+            raise launch_error[0]
         runtime = FakeRuntime(
             project_root=remote.project_root,
             config=remote.config,
@@ -199,6 +210,7 @@ def harness(
     holder["h"] = RemoteHarness(view, bridge, recorder)
     holder["h"].built = built  # type: ignore[attr-defined]
     holder["h"].remote_mcp = remote_mcp  # type: ignore[attr-defined]
+    holder["h"].launch_error = launch_error  # type: ignore[attr-defined]
     return holder["h"]
 
 
@@ -300,7 +312,7 @@ async def test_selecting_a_saved_target_prefills_and_connects_nothing(
     event = last_connect(harness)
     assert (event["target"], event["root"]) == ("box", REMOTE_ROOT)
     assert event["phase"] == "form"  # one Connect action, one thing
-    assert rows(event) == dict.fromkeys(CONNECT_STEPS, "pending")
+    assert rows(event) == dict.fromkeys(CHECKLIST_STEPS, "pending")
 
 
 async def test_selecting_an_alias_leaves_the_root_to_be_typed(
@@ -358,16 +370,24 @@ async def test_the_preview_agrees_with_the_grammar_the_backend_parses(
 # == the checklist =============================================================
 
 
-async def test_a_clean_connect_ticks_all_six_steps_in_order(
+async def test_a_clean_connect_ticks_all_seven_steps_in_order(
     harness: RemoteHarness, dial: Any
 ) -> None:
+    """Six from ``connect_remote``, and a seventh the sequence does not run.
+
+    Starting ``agentclip-engine`` on the target is what a remote session now IS
+    (docs/design/remote-executor.md §2.12), so it is a row a human watches -
+    fed by ``cli.build_runtime`` rather than by the sequence, which may not
+    import a protocol.
+    """
     harness.view.open_connect()
     harness.view.connect_fields("box", REMOTE_ROOT)
     await run_connect(harness)
     event = last_connect(harness)
     assert event["phase"] == "done"
-    assert [row["step"] for row in event["steps"]] == list(CONNECT_STEPS)
-    assert rows(event) == dict.fromkeys(CONNECT_STEPS, "ok")
+    assert [row["step"] for row in event["steps"]] == list(CHECKLIST_STEPS)
+    assert CHECKLIST_STEPS[-1] == STEP_ENGINE
+    assert rows(event) == dict.fromkeys(CHECKLIST_STEPS, "ok")
 
 
 @pytest.mark.parametrize("fails", [STEP_RESOLVE, STEP_CONNECT, STEP_PROBE, STEP_ROOT])
@@ -385,9 +405,85 @@ async def test_a_failure_marks_its_own_row_and_leaves_the_rest_pending(
     assert event["failed_step"] == fails
     assert fails in event["failure"]
     marks = rows(event)
-    after = CONNECT_STEPS[CONNECT_STEPS.index(fails) + 1 :]
+    after = CHECKLIST_STEPS[CHECKLIST_STEPS.index(fails) + 1 :]
     assert marks[fails] == "failed"
+    # ...including the engine row: a connect that never finished never launched
+    # anything on the target, and a checkmark there would say it had.
     assert all(marks[step] == "pending" for step in after)
+
+
+async def test_a_target_with_no_engine_on_it_fails_the_engine_row(
+    harness: RemoteHarness, dial: Any
+) -> None:
+    """The one failure that happens AFTER the six steps are green.
+
+    Every beat of the dial worked - the box is up, authenticated, the root is
+    real, its config was read - and there is still no session, because nothing
+    over there answers the handshake. The row shows the classified sentence
+    verbatim (§2.12): the target by name, and the command that fixes it.
+    """
+    harness.launch_error[0] = EngineLinkError(  # type: ignore[attr-defined]
+        "link_closed",
+        "agentclip-engine is not installed on dev@box"
+        " - install it with e.g. `uv tool install agentclip`",
+    )
+    harness.view.open_connect()
+    harness.view.connect_fields("box", REMOTE_ROOT)
+    await run_connect(harness)
+
+    event = last_connect(harness)
+    assert event["phase"] == "failed"
+    assert event["failed_step"] == STEP_ENGINE
+    assert "agentclip-engine is not installed on dev@box" in event["failure"]
+    assert "uv tool install agentclip" in event["failure"]
+    # ...and the six that DID work still say so, so the user can see how far it got.
+    assert all(rows(event)[step] == "ok" for step in CONNECT_STEPS)
+    # Nothing was adopted: the window is still on the machine it was already on.
+    assert harness.view._remote_target == ""
+
+
+async def test_a_wire_version_mismatch_names_both_installs(
+    harness: RemoteHarness, dial: Any
+) -> None:
+    """The other shape a dead launch takes, and the one the far side ANSWERED.
+
+    ``hello()`` already built the sentence (§2.9); this shell must not improve
+    on it - the two ``agentclip`` versions are the only half a human can act on.
+    """
+    harness.launch_error[0] = EngineLinkError(  # type: ignore[attr-defined]
+        "version_mismatch",
+        "the engine on the target speaks wire v2 (agentclip 0.1.0); this AgentClip"
+        " speaks wire v1 (agentclip 0.4.2) - update the target's install",
+    )
+    harness.view.open_connect()
+    harness.view.connect_fields("box", REMOTE_ROOT)
+    await run_connect(harness)
+
+    event = last_connect(harness)
+    assert event["failed_step"] == STEP_ENGINE
+    assert "agentclip 0.1.0" in event["failure"] and "agentclip 0.4.2" in event["failure"]
+    # The kind is plumbing, not a sentence: it must not reach the checklist.
+    assert "version_mismatch:" not in event["failure"]
+
+
+async def test_a_failed_engine_launch_can_be_retried_in_place(
+    harness: RemoteHarness, dial: Any
+) -> None:
+    """The whole point of the surface, applied to the newest failure: the user
+    installs the engine on the box and presses Retry, without relaunching."""
+    harness.launch_error[0] = EngineLinkError(  # type: ignore[attr-defined]
+        "link_closed", "agentclip-engine is not installed on dev@box"
+    )
+    harness.view.open_connect()
+    harness.view.connect_fields("box", REMOTE_ROOT)
+    await run_connect(harness)
+    assert last_connect(harness)["phase"] == "failed"
+
+    harness.launch_error[0] = None  # they installed it
+    await run_connect(harness)
+    event = last_connect(harness)
+    assert event["phase"] == "done"
+    assert rows(event)[STEP_ENGINE] == "ok"
 
 
 async def test_a_failure_offers_edit_back_to_the_form_with_the_values_in_it(
@@ -627,7 +723,11 @@ async def test_the_policy_banner_names_the_machine_and_where_policy_comes_from(
     await run_connect(harness)
     lines = last_connect(harness)["policy"]
     assert any("No permission ruleset found on dev@box" in line for line in lines)
-    assert APPROVAL_POLICY in lines
+    # ...and the whole of [approval] is read over there too, now that the engine
+    # is: this PC's config.toml is not even reachable from the target
+    # (docs/design/remote-executor.md §2.5, §2.6).
+    assert APPROVAL_POLICY.format(target="dev@box") in lines
+    assert not any("this PC's config.toml" in line for line in lines)
 
 
 async def test_the_project_block_keeps_saying_it_after_the_dialog_closes(
@@ -832,11 +932,19 @@ def test_the_dialog_model_needs_no_view_at_all(
     assert rows(dialog.event())[STEP_PROBE] == "pending"
 
 
-def test_the_banner_lists_a_refused_stdio_server_by_name(
+def test_the_banner_says_which_machine_starts_the_stdio_servers(
     project: Path, tmp_path: Path
 ) -> None:
-    """Brief §3.9's last bullet: today a refused stdio server only reaches the
-    MCP pane, and a connect summary is where a user would look for it."""
+    """Brief §3.9's last bullet, after the reversal it outlived.
+
+    Stdio servers used to be REFUSED in a remote session, because the process
+    that would have spawned them was this PC's and their argv described another
+    machine. Since the engine moved to the target they start - over there, with
+    the target's environment and cwd (remote-executor.md §2.7) - so the banner
+    names the machine instead of apologising for a refusal that no longer
+    happens. Which box a server really runs on is the same question the two
+    lines above it answer.
+    """
     rules = project_permissions_path(project)
     rules.parent.mkdir(parents=True, exist_ok=True)
     rules.write_text(
@@ -844,4 +952,5 @@ def test_the_banner_lists_a_refused_stdio_server_by_name(
     )
     config = load_config(project, global_config_path=tmp_path / "none.toml")
     lines = policy_lines(config, "dev@box")
-    assert any("stdio MCP servers are not supported" in line and "tools" in line for line in lines)
+    assert any("started on dev@box" in line and "tools" in line for line in lines)
+    assert not any("not supported" in line for line in lines)

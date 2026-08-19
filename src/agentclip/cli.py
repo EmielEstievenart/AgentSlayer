@@ -223,13 +223,20 @@ def make_remote_link_factory(
     TARGET's config over there, and a service key is the one part of it a local
     flag legitimately overrides (§2.5).
 
-    **Not wired into ``main``'s ``--ssh`` branch, and not into the GUI's connect
-    flow.** This increment ships the transport, not the switch: the default
-    remote mode stays the per-call ``SshHost`` path until increment 4's parity
-    pass (MCP on the target, policy verification) says the remote engine can do
-    everything the per-call path does. §2.8's deletion of that path is increment
-    5. Flipping the default before then would trade a mode that works for one
-    that has not been shown to.
+    **This is what ``--ssh`` and the GUI's connect dialog do now.** Increment 3
+    shipped it additive and increment 4's parity pass flipped the default: a
+    remote session runs its engine, its stores, its policy, its skills and its
+    MCP servers on the target, and this is the one place that connection is
+    made. The legacy per-call ``SshHost`` assembly
+    (:func:`make_engine_factory` with a ``host=``) still works when called
+    directly and is still tested, but nothing in either shell reaches it any
+    more; §2.8's deletion of it is increment 5.
+
+    Failure has one shape and it is an :class:`EngineLinkError`: a target with
+    no engine on it, a wire-version mismatch, or a launch that died some other
+    way. Every caller turns ``exc.detail`` into what the user reads - a line on
+    stderr and exit 2 for the terminal launch, the checklist's ``engine`` row
+    for the dialog - because the sentence is already the classified one (§2.12).
     """
     host = connected.host
     channel = host.open_link_channel(engine_command(connected.project_root.as_posix(), service))
@@ -415,6 +422,14 @@ class Launch:
     decision 4). ``data_root`` is where the ``.agentclip`` tree goes - beside
     the project locally, on this PC for a remote one - and ``home`` is whose
     home directory holds the global skill folders.
+
+    ``remote`` is the dialled machine itself, and it is what tells ``main``
+    which kind of session this is. A remote launch now runs the ENGINE on the
+    target (docs/design/remote-executor.md §2.12, increment 4's flip), so the
+    session factory is built from this rather than from the four
+    where-does-it-run fields: those describe a session assembled HERE over an
+    ``SshHost``, which is the legacy per-call path, still constructable and no
+    longer the default. ``None`` for every local launch.
     """
 
     project_root: Path
@@ -423,6 +438,7 @@ class Launch:
     os_name: str
     data_root: Path
     home: Path
+    remote: ConnectedRemote | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -431,15 +447,22 @@ class GuiRuntime:
 
     What the GUI's connect dialog gets back when it goes remote mid-window
     (``shell/gui/remote.py:RemoteRuntime``, structurally): the config read off the
-    target, the engine factory over its host, and the MCP runtime built from ITS
-    servers. The TUI has no equivalent because its launch cannot change - the
-    process is already inside ``app.run()`` by the time a user could ask.
+    target, the session factory that reaches its engine, and the MCP runtime of
+    ITS servers. The TUI has no equivalent because its launch cannot change -
+    the process is already inside ``app.run()`` by the time a user could ask.
+
+    Since the flip (§2.12) the factory is a ``RemoteLink`` factory over an
+    engine running on the target and ``mcp_manager`` is the
+    :class:`RemoteEngine` that owns the channel it speaks on - which is also the
+    status source, because MCP servers spawn where the engine runs (§2.7). Both
+    fields are typed as what a Shell needs rather than as the concrete class, so
+    the local shapes (a :class:`LinkFactory` in both slots) still satisfy them.
     """
 
     project_root: Path
     config: Config
-    engine_factory: LinkFactory
-    mcp_manager: LinkFactory | None
+    engine_factory: Callable[[EngineRequest | str], Link]
+    mcp_manager: RemoteEngine | LinkFactory | None
     host: Host
     target: str
 
@@ -561,6 +584,10 @@ def remote_launch(args: argparse.Namespace) -> Launch | int:
         # launches resolve their state dir here.
         data_root=default_remote_state_dir(remote.host.target, remote.project_root.as_posix()),
         home=remote.home,
+        # What ``main`` launches the engine over. Carried whole rather than
+        # flattened, because ``make_remote_link_factory`` takes the dialled
+        # machine (host + project root), not a launch's summary of it.
+        remote=remote,
     )
 
 
@@ -599,8 +626,17 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{marker} {key:<16} {preset.max_paste_chars:>9,} chars  {preset.label}")
         return 0
 
-    launch.data_root.mkdir(parents=True, exist_ok=True)
-    prune_sessions(launch.data_root, config.backup.keep_sessions)
+    # The session tree, for the launches that keep one HERE. A remote launch no
+    # longer does: the engine runs on the target, so its ``SessionStore`` and
+    # ``BackupStore`` land in ``<project>/.agentclip/`` over there and this PC's
+    # ``<user_data_dir>/agentclip/remote/...`` directory would be created empty
+    # and pruned forever (docs/design/remote-executor.md §2.4 - "the flip of the
+    # default is also the moment a remote session's transcripts stop being
+    # local"). ``Launch.data_root`` is still computed because the legacy
+    # assembly still takes one; nothing on the default path writes to it.
+    if launch.remote is None:
+        launch.data_root.mkdir(parents=True, exist_ok=True)
+        prune_sessions(launch.data_root, config.backup.keep_sessions)
     # The clipboard backend and the MCP runtime are shell-agnostic - both shells
     # drive the same AutomationController and the same engine factory - so they
     # are built ABOVE the fork, exactly as gui.md section 0 said they would rise
@@ -617,7 +653,10 @@ def main(argv: list[str] | None = None) -> int:
     # the config came off the target while the process spawning servers is this
     # PC, so stdio entries are refused BY NAME and a dial that fails says who
     # dialled it. The host's name, not a bare flag - a status line that names
-    # the box beats one that says "remote".
+    # the box beats one that says "remote". Since the flip it evaluates to ""
+    # on every path that still builds a local builder (a remote session's
+    # servers are the target's, spawned by the target's own engine), and it goes
+    # with §2.8's deletion in increment 5.
     #
     # A launch with a connect PENDING builds no MCP at all: those servers would
     # be this PC's, read from this PC's permissions.json, for a session that is
@@ -656,9 +695,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         # What the process currently OWNS, as opposed to what it was launched
         # with: an in-app connect replaces both, and the teardown below has to
-        # close what is live rather than what was true at startup. The factory
-        # is what holds the MCP runtime now, so it is what gets closed.
-        owned: dict[str, Any] = {"factory": gui_factory, "host": launch.host}
+        # close what is live rather than what was true at startup. ``engine`` is
+        # whatever holds the live engine - a :class:`LinkFactory` (and with it
+        # this PC's MCP loop thread) at launch, a :class:`RemoteEngine` (and with
+        # it the SSH exec channel the target's engine dies with) after a connect.
+        # Both answer ``close()``, which is all a teardown needs to know.
+        owned: dict[str, Any] = {"engine": gui_factory, "host": launch.host}
 
         def adopt_config(edited: Config) -> None:
             live_config[0] = edited
@@ -666,36 +708,36 @@ def main(argv: list[str] | None = None) -> int:
         def build_runtime(remote: ConnectedRemote) -> GuiRuntime:
             """A successful in-app connect, turned into a session's ingredients.
 
-            Everything ``main`` does above for a launch, done again for the box
-            that was just dialled - the session tree, the pruning, the MCP
-            runtime against the TARGET's servers, and an engine factory over the
-            remote host, root, OS name and home. It lives here rather than in
+            Since increment 4's flip this is the launch of an engine ON the
+            target: ``agentclip-engine`` over an exec channel, a wire handshake,
+            and a factory that mints one ``RemoteLink`` per session
+            (docs/design/remote-executor.md §2.12). It lives here rather than in
             the shell for the reason ``run_gui`` is handed its factory at all:
             how a session is BUILT is a launch question, and a second
             construction site is a second thing to drift.
 
-            The previous host and MCP runtime are closed as the new ones take
-            over - one session, one host (remote-ssh.md decision 4), and a link
-            nobody can reach any more is a socket, not a session.
+            Nothing local is set up for the box any more - no session tree, no
+            pruning, no MCP runtime on this PC. All three belong to the machine
+            the engine runs on and are its own doing (§2.4, §2.7).
+
+            The launch comes FIRST, before anything is swapped: a failed one
+            raises :class:`EngineLinkError` carrying the classified sentence and
+            must leave the window exactly as it was, on the machine it was
+            already on. The dialled host is closed on the way out, because the
+            failing path is the one that must not leak a connection per retry.
+            Only then are the previous engine and host handed back - engine
+            before host, so the link channel is closed before the transport
+            under it.
             """
+            try:
+                factory, engine = make_remote_link_factory(remote, service=args.service)
+            except EngineLinkError:
+                closer = getattr(remote.host, "close", None)
+                if closer is not None:
+                    closer()
+                raise
             live_config[0] = remote.config
-            remote.data_root.mkdir(parents=True, exist_ok=True)
-            prune_sessions(remote.data_root, remote.config.backup.keep_sessions)
-            factory = make_engine_factory(
-                lambda: live_config[0],
-                remote.project_root,
-                host=remote.host,
-                os_name=remote.os_name,
-                data_root=remote.data_root,
-                home=remote.home,
-                mcp_remote_target=remote.host.name,
-            )
-            # Asking for the status source is what BUILDS the target's MCP
-            # runtime (the builder makes it on first ask), and it happens here
-            # rather than at the return so the new one is up and connecting
-            # before the old one is closed - the order the swap has always had.
-            source = _mcp_source(factory)
-            previous, owned["factory"] = owned["factory"], factory
+            previous, owned["engine"] = owned["engine"], engine
             if previous is not None:
                 previous.close()
             old_host, owned["host"] = owned["host"], remote.host
@@ -707,7 +749,12 @@ def main(argv: list[str] | None = None) -> int:
                 project_root=remote.project_root,
                 config=remote.config,
                 engine_factory=factory,
-                mcp_manager=source,
+                # The RemoteEngine IS the MCP status source in remote mode, and
+                # unconditionally: unlike a local builder it has nothing to
+                # report until the first session build carries the target's
+                # settle home (§2.7), so gating it on a non-empty reading would
+                # drop the source before it could ever answer.
+                mcp_manager=engine,
                 host=remote.host,
                 target=remote.host.target,
             )
@@ -730,9 +777,13 @@ def main(argv: list[str] | None = None) -> int:
         finally:
             # The same hand-back the TUI path does below, over what is LIVE: a
             # --ssh launch has a connection open by now whichever shell it was
-            # headed for, and so does one the user dialled from the dialog.
-            if owned["factory"] is not None:
-                owned["factory"].close()
+            # headed for, and so does one the user dialled from the dialog. The
+            # order is the flip's: the ENGINE goes first (which, remotely, closes
+            # the exec channel its process dies with), then the transport under
+            # it - a host closed first would take the channel with it and turn
+            # an orderly shutdown into a dropped link.
+            if owned["engine"] is not None:
+                owned["engine"].close()
             close = getattr(owned["host"], "close", None)
             if close is not None:
                 close()
@@ -755,27 +806,72 @@ def main(argv: list[str] | None = None) -> int:
         current = live_app[0]
         return config if current is None else current.app_config
 
-    tui_factory = make_engine_factory(
-        tui_config,
-        launch.project_root,
-        host=launch.host,
-        os_name=launch.os_name,
-        data_root=launch.data_root if launch.data_root != launch.project_root else None,
-        home=launch.home,
-        mcp_remote_target=mcp_remote_target,
-    )
+    # The two modes, and the whole of what ``--ssh`` now means. A remote launch
+    # runs its engine ON the target and drives it over the wire; a local one
+    # builds the engine in this process. Below this branch the TUI is handed the
+    # same two things either way - something that mints a ``Link`` per session,
+    # and something that answers ``statuses()``/``set_status_hook()`` - because
+    # that is the whole of what a shell is allowed to know about where its
+    # engine is (docs/design/remote-executor.md §2.2, §2.7).
+    #
+    # The Config built from the TARGET's project file still drives THIS side's
+    # knobs - the service preset, the clipboard backend, the paste budget the
+    # composer displays - and it is still what ``tui_config`` hands the local
+    # builder. The remote engine does not read it: it re-derives its own from
+    # the target's layers, per service, on every session build (§2.5, §2.6),
+    # which is why none of ``os_name``/``data_root``/``home`` is passed over
+    # there. They describe a session assembled here, and there is not one.
+    tui_factory: Callable[[EngineRequest | str], Link]
+    tui_mcp: RemoteEngine | LinkFactory | None
+    stop_engine: Callable[[], None]
+    if launch.remote is not None:
+        try:
+            tui_factory, remote_engine = make_remote_link_factory(
+                launch.remote, service=args.service
+            )
+        except EngineLinkError as exc:
+            # The classified sentence, and nothing about links or wires: a
+            # target with no engine on it is told how to install one, a version
+            # mismatch names both installs (§2.9, §2.12). Same stream and same
+            # exit code as every other fatal step of going remote.
+            print(f"agentclip: {exc.detail or exc}", file=sys.stderr)
+            close = getattr(launch.host, "close", None)
+            if close is not None:
+                close()
+            return 2
+        # Unconditionally the status source: it has nothing to report until the
+        # first session build carries the target's settle home, so gating it on
+        # a non-empty reading would drop it before it could ever answer (§2.7).
+        tui_mcp = remote_engine
+        stop_engine = remote_engine.close
+    else:
+        local_factory = make_engine_factory(
+            tui_config,
+            launch.project_root,
+            host=launch.host,
+            os_name=launch.os_name,
+            data_root=launch.data_root if launch.data_root != launch.project_root else None,
+            home=launch.home,
+            mcp_remote_target=mcp_remote_target,
+        )
+        tui_factory = local_factory
+        tui_mcp = _mcp_source(local_factory)
+        stop_engine = local_factory.close
     app = AgentClipApp(
         config=config,
         provider=provider,
         engine_factory=tui_factory,
         project_root=launch.project_root,
-        mcp_manager=_mcp_source(tui_factory),
+        mcp_manager=tui_mcp,
     )
     live_app[0] = app
     try:
         app.run()
     finally:
-        tui_factory.close()
+        # Engine first, then the transport under it - remotely that is the link
+        # channel before the SSH connection, and the remote process dies with
+        # the channel by design (§2.3).
+        stop_engine()
         close = getattr(launch.host, "close", None)
         if close is not None:
             close()

@@ -25,7 +25,7 @@ from typing import Any, Protocol
 from agentclip.config import Config, RemoteTarget
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.hosts.connect import (
-    CONNECT_STEPS,
+    CHECKLIST_STEPS,
     STEP_LABELS,
     ConnectedRemote,
     ConnectError,
@@ -57,28 +57,43 @@ MISSING_ROOT = "this target has no saved root - give the project directory on th
 # is the footgun (docs/design/remote-ssh.md, "the target owns its policy").
 NO_RULESET = "No permission ruleset found on {target}; falling back to the allowlist gate"
 RULESET_FROM = "Permissions and MCP servers for this session come from {source}"
-# [approval] used to be pinned to this PC. It is not any more: the engine owns
-# policy wholesale, so the mode, yolo and the command rules merge this PC's
-# config.toml with the TARGET's .agentclip.toml - the same merge every other
-# table gets (docs/design/remote-executor.md section 2.5). The banner says so
+# [approval] used to be pinned to this PC, then briefly merged this PC's
+# config.toml with the target's .agentclip.toml. It is neither now: the engine
+# owns policy wholesale AND the engine runs on the target, so the whole merge
+# happens over there and this PC's config.toml is not even reachable from it -
+# `engine_command` deliberately sends no --global-config
+# (docs/design/remote-executor.md sections 2.5, 2.6, 2.12). The banner says so
 # for the same reason it names the ruleset's machine: a policy fact the user
 # cannot see is a footgun whichever way it points.
 APPROVAL_POLICY = (
-    "[approval] (mode, yolo, command rules) merges this PC's config.toml "
-    "with the target's .agentclip.toml"
+    "[approval] (mode, yolo, command rules) is read entirely on {target}: "
+    "its config.toml merged with its .agentclip.toml"
 )
-STDIO_REFUSED = "not started - stdio MCP servers are not supported in a remote session: {names}"
+# Stdio servers used to be refused in a remote session, because the process that
+# would have spawned them was this PC's and their argv described another machine.
+# Since the flip the process IS on that machine (section 2.7 reverses
+# remote-ssh.md here), so they start - and WHERE is the fact worth stating, since
+# it is the same "which box is this really happening on" question the two lines
+# above answer.
+STDIO_ON_TARGET = "stdio MCP servers for this session are started on {target}: {names}"
 
 
 class RemoteRuntime(Protocol):
     """Everything a session is built from, rebuilt against a machine.
 
-    Structural, and produced by ``cli.main``: the engine factory, the MCP
-    runtime and the session-tree pruning are launch questions, and a second
-    construction site for them is a second thing to drift (the same reason
-    ``run_gui`` is HANDED its factory rather than building one). What this shell
-    does with it is the session boundary - "one session, one host" means the
-    controller is rebuilt, not patched (remote-ssh.md decision 4).
+    Structural, and produced by ``cli.main``: launching the engine, reaching its
+    MCP runtime and deciding where a session's state lives are launch questions,
+    and a second construction site for them is a second thing to drift (the same
+    reason ``run_gui`` is HANDED its factory rather than building one). What this
+    shell does with it is the session boundary - "one session, one host" means
+    the controller is rebuilt, not patched (remote-ssh.md decision 4).
+
+    Since the flip (docs/design/remote-executor.md §2.12) the factory behind
+    ``engine_factory`` mints a ``RemoteLink`` per session over an engine running
+    ON the target, and ``mcp_manager`` is the object that owns the channel it
+    speaks on. Neither fact is visible here, deliberately: this shell asks for a
+    ``Link`` and for something that answers ``statuses()``, and which machine
+    supplies them is exactly what the seam exists to hide.
     """
 
     @property
@@ -102,7 +117,10 @@ class RemoteConnect:
     ``local_root`` and ``service_override`` are the two command-line facts step
     1 of the sequence reads (the LOCAL config names the target); ``build`` is
     how a successful connect becomes a session, and it belongs to ``cli.main``
-    for the reason :class:`RemoteRuntime` gives. ``pending`` is
+    for the reason :class:`RemoteRuntime` gives. It is also where the engine is
+    LAUNCHED on the target, so it can fail after the six steps have all ticked -
+    the view runs it as the checklist's seventh row and shows what it raised.
+    ``pending`` is
     ``--gui --ssh``: the launch that used to block on the terminal before the
     window existed, deferred into the dialog with its fields already filled.
     """
@@ -177,14 +195,14 @@ def policy_lines(config: Config, target_label: str) -> list[str]:
         lines.append(RULESET_FROM.format(source=config.permission_source))
     else:
         lines.append(NO_RULESET.format(target=target_label))
-    lines.append(APPROVAL_POLICY)
+    lines.append(APPROVAL_POLICY.format(target=target_label))
     stdio = [
         str(getattr(server, "name", ""))
         for server in config.mcp_servers.servers
         if not getattr(server, "url", "")
     ]
     if stdio:
-        lines.append(STDIO_REFUSED.format(names=", ".join(stdio)))
+        lines.append(STDIO_ON_TARGET.format(target=target_label, names=", ".join(stdio)))
     return lines
 
 
@@ -327,7 +345,12 @@ class ConnectDialog:
             "saved": [_row(row) for row in self.saved],
             "aliases": [_row(row) for row in self.aliases],
             "error": self.error,
-            "steps": [self._row_of(step) for step in CONNECT_STEPS],
+            # CHECKLIST_STEPS, not CONNECT_STEPS: the seventh row is the engine
+            # launch on the target, which is not a beat of ``connect_remote``
+            # (that module may not import a protocol) but IS a beat of going
+            # remote - and since increment 4's flip it is the one that decides
+            # whether there is a session at all.
+            "steps": [self._row_of(step) for step in CHECKLIST_STEPS],
             "failed_step": self.failed_step,
             "failure": self.failure,
             "policy": list(self.policy),
@@ -392,7 +415,7 @@ __all__ = [
     "PHASE_FORM",
     "PHASE_RUNNING",
     "RULESET_FROM",
-    "STDIO_REFUSED",
+    "STDIO_ON_TARGET",
     "ConnectDialog",
     "RemoteConnect",
     "RemoteRuntime",

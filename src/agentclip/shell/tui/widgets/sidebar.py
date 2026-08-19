@@ -102,7 +102,7 @@ from agentclip.driver.automation.loop_state import LOOP_TRANSITIONS, LoopState
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot, SlotCalibration, can_delegate, missing
-from agentclip.executor.mcp.types import McpServerStatus
+from agentclip.shell.app.link import McpStatusLine
 
 _HINT = "F3 hides this column · F7 elements · F5 armed · F2 settings · F1 help"
 
@@ -207,7 +207,7 @@ def mcp_row_id(index: int) -> str:
     return f"side-mcp-{index}"
 
 
-def mcp_line(status: McpServerStatus) -> str:
+def mcp_line(status: McpStatusLine) -> str:
     """One server's line: name + human state (+ tools when connected, + the
     detail on the two states that are questions until it is read). A 30-cell
     column cuts long details mid-sentence (CSS ellipsis); the full text is
@@ -387,7 +387,7 @@ class Sidebar(Vertical):
         config: Config,
         project_root: Path,
         *,
-        mcp_statuses: Sequence[McpServerStatus] | None = None,
+        mcp_statuses: Sequence[McpStatusLine] | None = None,
         id: str | None = None,  # noqa: A002 - Textual API
     ) -> None:
         super().__init__(id=id)
@@ -398,7 +398,7 @@ class Sidebar(Vertical):
         # manager and the column stays exactly what it always was. The count is
         # fixed for the process - ``show_mcp`` repaints these rows, it never
         # adds one - see MCP_TITLE above.
-        self._mcp_statuses: tuple[McpServerStatus, ...] = tuple(mcp_statuses or ())
+        self._mcp_statuses: tuple[McpStatusLine, ...] = tuple(mcp_statuses or ())
         self._flash_timer: Timer | None = None
         # The service the ServiceChanged message last reported. Textual fires
         # Select.Changed for the value compose sets as readily as for a user's
@@ -646,7 +646,7 @@ class Sidebar(Vertical):
 
     # -- the MCP servers -------------------------------------------------------
 
-    def show_mcp(self, statuses: Sequence[McpServerStatus]) -> None:
+    def show_mcp(self, statuses: Sequence[McpStatusLine]) -> None:
         """Repaint the MCP block from a fresh ``McpManager.statuses()`` tuple.
 
         Display only, like ``show_profile``: MainScreen owns the manager and

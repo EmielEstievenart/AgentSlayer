@@ -79,8 +79,10 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot, can_delegate, missing
 from agentclip.engine.engine import Decision, PendingAction
 from agentclip.engine.link.factory import EngineRequest
+from agentclip.engine.link.wire import EngineLinkError
 from agentclip.executor.hosts.connect import (
     PASSWORD_ATTEMPTS,
+    STEP_ENGINE,
     ConnectedRemote,
     ConnectError,
     ConnectPrompts,
@@ -2260,6 +2262,13 @@ class GuiView:
         opened and awaited ON the loop and the worker parks on the answer, which
         is the only arrangement in which a blocking auth flow and a single-
         threaded UI can both be told the truth.
+
+        Then a seventh beat the sequence does not run: starting the engine on
+        the target and shaking hands with it. It is the same shape - blocking,
+        on a worker thread, reported as a checklist row - and it is what makes
+        the connect real, because since the flip the session's engine, stores,
+        policy, skills and MCP servers are all over there
+        (docs/design/remote-executor.md §2.12).
         """
         remote = self._remote
         dialog = self._dialog
@@ -2291,8 +2300,24 @@ class GuiView:
                 on_step=report,
                 global_config_path=remote.global_config_path,
             )
+            # The seventh row, and the one that decides whether there is a
+            # session at all: ``build`` launches ``agentclip-engine`` on the box
+            # and shakes hands with it (docs/design/remote-executor.md §2.12).
+            # It goes to a worker thread for the same reason the sequence does -
+            # it opens a channel and waits on a process across a network - and
+            # it is inside this ``try`` so the dialog stays busy until the engine
+            # is really answering.
+            self._connect_step(StepEvent(STEP_ENGINE, "running"))
+            runtime = await asyncio.to_thread(remote.build, connected)
+            self._connect_step(StepEvent(STEP_ENGINE, "ok"))
         except ConnectError as err:
             dialog.failed(err)
+            return
+        except EngineLinkError as exc:
+            # A launch that produced no handshake, or a target running another
+            # wire version: both arrive already classified into the sentence a
+            # human can act on (§2.9, §2.12), so the row shows it verbatim.
+            self._connect_step(StepEvent(STEP_ENGINE, "failed", exc.detail or str(exc)))
             return
         except Exception as exc:  # noqa: BLE001 - a dial can fail in ways paramiko owns
             dialog.failed(ConnectError(dialog.failed_step or "connect", str(exc)))
@@ -2300,7 +2325,7 @@ class GuiView:
         finally:
             self._connecting = False
             self._push_connect()
-        await self._adopt_remote(remote.build(connected), connected)
+        await self._adopt_remote(runtime, connected)
         dialog.succeeded(
             connected=self._remote_target,
             policy=policy_lines(self._config, self._remote_target),

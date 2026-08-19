@@ -20,6 +20,14 @@ There is deliberately no "not installed" variant here. Making a target that HAS
 the engine temporarily not have it means editing somebody's PATH, and the failure
 it would prove is already pinned without a network in
 tests/executor/hosts/test_link_channel.py and tests/shell/app/test_engine_launch.py.
+
+**Since increment 4's flip this is the path a real ``--ssh`` takes**, not an
+opt-in one beside it (docs/design/remote-executor.md §2.12). Nothing here had to
+change for that - what these two prove is exactly what the flip made the default:
+one exec channel, a handshake, a session and a turn that all happen on the target,
+and a process that dies with the channel. The assembly ABOVE them - which shell
+calls the factory, and what it closes on the way out - is pinned without a network
+in tests/test_launch_remote.py.
 """
 
 from __future__ import annotations

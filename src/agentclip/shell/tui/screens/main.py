@@ -257,11 +257,10 @@ from agentclip.driver.screen.template import (
 )
 from agentclip.engine.engine import Decision, PendingAction, StatusSnapshot
 from agentclip.engine.link.factory import EngineRequest
-from agentclip.executor.mcp.types import McpServerStatus
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
-from agentclip.shell.app.link import Link
+from agentclip.shell.app.link import Link, McpStatusLine
 from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.tui.messages import (
@@ -587,10 +586,18 @@ class McpStatusSource(Protocol):
     stub with neither the SDK nor a loop thread behind it - the screen only
     ever paints from ``statuses()`` and bridges the hook; connecting is the
     manager's business and stays untested here.
+
+    The ROWS are structural too (``shell.app.link.McpStatusLine``), and that is
+    not tidiness: since ``--ssh`` runs the engine on the target
+    (docs/design/remote-executor.md §2.12), the source this screen is handed can
+    be ``cli.RemoteEngine``, whose rows came off the wire and are not
+    ``McpServerStatus`` objects at all - they are values carrying the same four
+    fields (§2.7). Naming the concrete class here would have made the remote
+    mode a type error and the local mode a coincidence.
     """
 
-    def statuses(self) -> tuple[McpServerStatus, ...]: ...
-    def set_status_hook(self, cb: Callable[[McpServerStatus], None] | None) -> None: ...
+    def statuses(self) -> tuple[McpStatusLine, ...]: ...
+    def set_status_hook(self, cb: Callable[[McpStatusLine], None] | None) -> None: ...
 
 
 class MainScreen(Screen[None]):
@@ -1746,7 +1753,7 @@ class MainScreen(Screen[None]):
 
     # -- MCP status (docs/design/mcp.md section 6) -----------------------------
 
-    def _mcp_status_hook(self, status: McpServerStatus) -> None:
+    def _mcp_status_hook(self, status: McpStatusLine) -> None:
         """The manager's status listener: hand off to the UI loop, nothing else.
 
         Called from the manager's loop thread (and, for missing_sdk, from

@@ -60,7 +60,7 @@ from agentclip.driver.automation.harness_log import HarnessEntry
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import TemplateKind
-from agentclip.executor.mcp.types import McpServerStatus
+from agentclip.shell.app.link import McpStatusLine
 
 
 class ClipboardCaptured(Message):
@@ -124,7 +124,7 @@ class McpStatusChanged(Message):
     tick, not the state.
     """
 
-    def __init__(self, status: McpServerStatus) -> None:
+    def __init__(self, status: McpStatusLine) -> None:
         self.status = status
         super().__init__()
 

@@ -7,27 +7,27 @@
 > the design session for the first increment happens, this document graduates
 > into a binding design doc and `remote-ssh.md` gets amended where superseded.
 >
-> **Exception: §2.2, §2.6, §2.9, §2.10, §2.11 and §2.12 are built, and
-> binding** — increment 1 (the link seam), increment 2 (the engine-side package,
-> the wire codec, the server loop, `RemoteLink` and the localhost e2e suite) and
-> increment 3 (the console script, the SSH link channel, launch-failure
-> classification and the opt-in remote factory) shipped in full, so those parts
-> describe code rather than intent. Everything else here is still plan.
+> **Exception: §2.2, §2.4, §2.5, §2.6, §2.7, §2.9, §2.10, §2.11 and §2.12 are
+> built, and binding** — increment 1 (the link seam), increment 2 (the
+> engine-side package, the wire codec, the server loop, `RemoteLink` and the
+> localhost e2e suite), increment 3 (the console script, the SSH link channel,
+> launch-failure classification and the remote factory) and increment 4 (policy,
+> stores, skills, MCP on the target — and the flip) shipped in full, so those
+> parts describe code rather than intent. Everything else here is still plan.
 >
-> **Increment 4 (the parity pass) is in progress.** Its policy slice has landed:
-> §2.5 is decided and built — `config.py`'s pinned-to-this-PC `[approval]` branch
-> is deleted, so the engine reads the whole of `[approval]` from its own
-> machine's config layers — and the stores (§2.4) and skills discovery were
-> verified engine-side without a code change. Its MCP slice has landed too: the
-> manager is constructed by the engine half's builder from the config that side
-> reads (§2.7 "as built"), so `agentclip-engine` spawns its servers on the
-> target. What increment 4 still owes is the parity *verdict* — running the
-> remote engine against the per-call path and flipping the default.
+> **The default `--ssh` mode IS the remote engine.** Increment 4's last slice
+> flipped it: a remote session — terminal launch or in-app connect — dials the
+> target as before, then launches `agentclip-engine` over an exec channel and
+> drives it through `RemoteLink` (§2.12 "the flip"). Everything that used to be
+> a per-call round trip is now local to the target: tools, stores, backups,
+> policy, skills and MCP servers.
 >
-> **The default `--ssh` mode is still the per-call `SshHost` path.** Increment 3
-> built the remote-engine transport and left it *additive*: `cli.make_remote_link_factory`
-> is reachable and tested, and nothing calls it yet. The flip waits on increment
-> 4's parity pass (§4), and §2.8's deletion on increment 5.
+> **The per-call `SshHost` path still exists in the code and is no longer
+> reachable from either shell.** `make_engine_factory(host=…)` still assembles
+> an engine here over an `SshHost`, and its tests still pin it; nothing calls it
+> with a remote host. §2.8's deletion is increment 5, and that is the only thing
+> the two remaining paragraphs of §2.4/§2.7 about "the legacy per-call path" are
+> still describing.
 
 ## 1. Goal
 
@@ -753,36 +753,104 @@ Anything else stays honest instead of guessing: the status the channel ended wit
 mismatch never reaches here — the far side answered, and `hello()` already built
 the sentence naming both installs (§2.9, §2.11).
 
-**The factory, and why it is not the default.** `cli.make_remote_link_factory(connected,
-*, service=None)` takes what `connect_remote` hands back, opens the channel,
-wraps its streams in a `RemoteLinkClient`, says hello, and returns
-`(factory, RemoteEngine)` — the factory building one `RemoteLink` per
-`EngineRequest`, the `RemoteEngine` carrying the client and the channel because
-*one* server process on *one* channel hosts every session of a remote run (§2.10)
-and closing that channel is how the engine is stopped. A failed handshake closes
-the channel and re-raises the `EngineLinkError` carrying the classified message;
-the exit status is polled for up to a second first, because EOF and the exit
-status arrive from two different places on the transport and "exit 127" is the
-difference between naming the fault and quoting stderr at somebody.
+**The factory.** `cli.make_remote_link_factory(connected, *, service=None)` takes
+what `connect_remote` hands back, opens the channel, wraps its streams in a
+`RemoteLinkClient`, says hello, and returns `(factory, RemoteEngine)` — the
+factory building one `RemoteLink` per `EngineRequest`, the `RemoteEngine`
+carrying the client and the channel because *one* server process on *one* channel
+hosts every session of a remote run (§2.10) and closing that channel is how the
+engine is stopped. A failed handshake closes the channel and re-raises the
+`EngineLinkError` carrying the classified message; the exit status is polled for
+up to a second first, because EOF and the exit status arrive from two different
+places on the transport and "exit 127" is the difference between naming the fault
+and quoting stderr at somebody.
 
-It is **not** wired into `main()`'s `--ssh` branch or the GUI's connect dialog.
-Increment 3 ships the transport, not the switch. The remote engine still has no
-MCP (`__main__.py` passes `mcp_manager=None`), and nobody has verified that the
-target's policy loading, stores and skills behave as §2.4/§2.5 say they will —
-that is increment 4's parity pass, and flipping the default before it would trade
-a mode that works for one that has not been shown to. §2.8's deletion of the
-per-call path is increment 5.
+### The flip (as built, increment 4)
+
+**Both shells now call it, and nothing calls the per-call assembly.** `--ssh` and
+the GUI's connect dialog run the same two beats: `connect_remote` as before, then
+`make_remote_link_factory` over what it handed back. What each shell does with
+the pair is where the two differ, and each difference is a decision:
+
+- **The terminal launch** carries the dialled machine home on `cli.Launch.remote`
+  — the whole `ConnectedRemote`, not a flattening of it, because the factory
+  takes the host and the remote root and a launch's summary of them is a second
+  place to get them wrong. `main` then branches once, and below that branch the
+  TUI is handed the same two things either way: something that mints a `Link` per
+  session, and something answering `statuses()`/`set_status_hook()`. A launch
+  failure is `exc.detail` on stderr and exit 2 — the same stream and the same
+  code as every other fatal step of going remote, and *`detail`* rather than
+  `str(exc)` because "link_closed:" is the wire's vocabulary, not a sentence.
+- **The dialog** runs the launch as a **seventh checklist row**
+  (`connect.STEP_ENGINE`, "Start the engine on the target"). It cannot be a step
+  of `connect_remote` — that module is in the host seam and may not import a
+  protocol — so the vocabulary is split in two: `CONNECT_STEPS` is the sequence's
+  own six and `CHECKLIST_STEPS` is the seven a human watches, with the seventh
+  reported by whoever does the launch. It is the one row that can fail after
+  every other row is green, and it shows the classified sentence verbatim.
+  Failing it leaves the window on the machine it was already on, and Retry
+  re-runs the whole thing in place — the point of the surface, now covering the
+  newest failure (install the engine on the box, press Retry).
+
+**What the shell still keeps locally**, and why the flip does not change it: the
+`Config` built from the target's project file (connect step 6) still drives THIS
+side's knobs — the service preset, the clipboard backend, the paste budget the
+composer displays. The engine does not read it. It re-derives its own from the
+target's layers, per service, on every session build (§2.5, §2.6), which is why
+`engine_command` sends `--project` and at most `--service` and why none of
+`os_name`/`data_root`/`home` is passed over there: they describe a session
+assembled here, and there is not one. `os_name` in particular is now the target's
+own answer — `make_engine_builder`'s `os_name=None` default reads
+`platform.system()` in the process it runs in, which over there IS the target.
+
+**Teardown is engine-then-transport, on both shells.** `RemoteEngine.close()`
+closes the link channel; the host's `close()` closes the SSH connection under it.
+A host closed first would take the channel with it and turn an orderly shutdown
+into a dropped link. The GUI's ownership cell holds whichever object is live
+(`LinkFactory` at launch, `RemoteEngine` after a connect — both answer `close()`,
+which is all a teardown needs to know), and a reconnect closes the previous
+engine before the previous host for the same reason. A launch that FAILS closes
+the freshly dialled host on the way out: the failing path is the one that must
+not leak a connection per retry.
+
+**Two things stopped happening on this PC.** No local session tree is created or
+pruned for a remote run — the store follows the engine (§2.4), so an empty
+`<user_data_dir>/agentclip/remote/…` directory would be a history that is not
+there. And `mcp_remote_target` now evaluates to `""` on every path that still
+builds a local builder, because a remote session's servers are the target's and
+its own engine spawns them; the parameter goes with §2.8's deletion.
+
+**The RemoteEngine is the status source unconditionally**, where the local
+`LinkFactory` is passed through `_mcp_source` and dropped when it has no rows.
+The asymmetry is the cadence's (§2.7): the remote settle only arrives with the
+first `build_session`, so gating on a non-empty reading would drop the source
+before it could ever answer. That also made one type honest that had been
+coincidentally true: the TUI's `McpStatusSource` named `McpServerStatus`, and the
+rows a remote session paints came off the wire and are not those objects. Both
+shells now declare the structural `shell.app.link.McpStatusLine` — the four
+fields a status line IS — so the local mode stops being a coincidence and the
+remote mode stops being a type error.
 
 **Tested by** `tests/executor/hosts/test_link_channel.py` (framing across chunk
 boundaries, a multibyte character split across one, EOF, the bytes actually sent,
 the stderr tail and its bound, exit status before/after, the bare command line,
 and a `FakeSSHClient`-backed host whose engine exits 127 producing the
 not-installed sentence out of `make_remote_link_factory`),
-`tests/shell/app/test_engine_launch.py` (the two pure functions), and — gated
-behind `AGENTCLIP_SSH_TESTS=1`, needing `agentclip` actually installed on the
-target — `tests/executor/hosts/test_link_real.py`. There is deliberately no
-fake-SSH end-to-end `serve()` conversation: the localhost subprocess suite
-already proves the wire, and these prove the transport under it.
+`tests/shell/app/test_engine_launch.py` (the two pure functions),
+`tests/test_launch_remote.py` (the flip itself: `cli.main` end to end over a
+`FakeSshHost` whose `open_link_channel` serves a **scripted handshake** — the real
+connect sequence, the real factory, the real client, and no network — pinning the
+command line, the `--service` pass-through, the absent local session tree, the
+`RemoteEngine` as the shells' MCP source, channel-before-host teardown, and both
+dead-launch sentences arriving on stderr with exit 2; plus the legacy assembly,
+kept and renamed, still building a whole session over one host),
+`tests/shell/gui/test_connect.py` (the seventh row: seven steps in order, a
+not-installed launch failing that row with the six before it still green and
+nothing adopted, a version mismatch naming both installs, and a retry in place),
+and — gated behind `AGENTCLIP_SSH_TESTS=1`, needing `agentclip` actually
+installed on the target — `tests/executor/hosts/test_link_real.py`. There is
+deliberately no fake-SSH end-to-end `serve()` conversation: the localhost
+subprocess suite already proves the wire, and these prove the transport under it.
 
 ## 3. Architecture sketch
 
@@ -836,23 +904,22 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
    half first (the engine entry point is a console script), then
    `SshHost.open_link_channel` + `LinkChannel`, `shell/app/engine_launch.py`'s
    two pure functions, and `cli.make_remote_link_factory` — see §2.12. The
-   default `--ssh` mode is deliberately **not** flipped: the factory is additive
-   and nothing calls it, because parity (below) has not been shown.
-4. **MCP + store on target, parity pass.** — **in progress.** Target-side
-   McpManager, stores, policy loading; the `/config`-wave permissions.json paths
-   on the target. Done so far: policy loading, by deleting the one branch that
-   still pinned `[approval]` to the operator's PC (§2.5 "as built"); the
-   verification that stores (§2.4) and skills already live with the engine and
-   needed no change; and MCP, by moving construction out of `cli.py`'s two sites
-   into the engine half's `EngineBuilder`, which is what makes
-   `engine/link/__main__.py` need no MCP argument at all (§2.7 "as built"); and
-   the Shell's side of the same, so the surfaces a user actually reads work in
-   remote mode — `/mcp` through the live link, `rebind` carrying the MCP source
-   with the other three ingredients, `cli.RemoteEngine` as the status source the
-   sidebars consume, and a repaint on the session-start edge (§2.7 "the cadence
-   in each mode"). Remaining: the parity verdict itself — exercising the remote
-   engine against what the per-call path does, then flipping the default `--ssh`
-   mode.
+   default `--ssh` mode was deliberately **not** flipped by this increment: the
+   factory shipped additive, because parity (below) had not been shown.
+4. **MCP + store on target, parity pass, and the flip.** — **done.** Policy
+   loading, by deleting the one branch that still pinned `[approval]` to the
+   operator's PC (§2.5 "as built"); the verification that stores (§2.4) and
+   skills already live with the engine and needed no change; MCP, by moving
+   construction out of `cli.py`'s two sites into the engine half's
+   `EngineBuilder`, which is what makes `engine/link/__main__.py` need no MCP
+   argument at all (§2.7 "as built"); the Shell's side of the same, so the
+   surfaces a user actually reads work in remote mode — `/mcp` through the live
+   link, `rebind` carrying the MCP source with the other three ingredients,
+   `cli.RemoteEngine` as the status source the sidebars consume, and a repaint
+   on the session-start edge (§2.7 "the cadence in each mode"); and finally the
+   **flip** — `--ssh` and the GUI's connect dialog both launch the engine on the
+   target, the dialog showing it as a seventh checklist row, and neither reaches
+   the per-call assembly any more (§2.12 "the flip").
 5. **Delete SshHost per-call mode** once parity is verified; amend
    `remote-ssh.md`.
 
@@ -861,7 +928,9 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
 - **RunPanel latency over a real link**: framing, versioning/handshake, streaming
   deltas and cancel are decided and built (§2.9). What is still open is the
   budget for the RunPanel's ~5/sec peek cadence over a real SSH connection — a
-  cadence that is free in-process and unmeasured on the wire.
+  cadence that is free in-process and unmeasured on the wire. The flip makes this
+  the *default* remote experience rather than an opt-in one, so it is the open
+  point most likely to be felt before it is measured.
 - **A real MCP push over the wire**: v1's cadence is a pull (§2.9) — the settle
   rides `build_session`, the shells repaint from it at the session-start edge,
   and `/mcp` re-asks through the link (§2.7 "the cadence in each mode"). A server
@@ -878,17 +947,17 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
   replacement (session-scoped server-side state + thin per-call payload) is
   undesigned. Includes where `backup_hook`, `cancel_event`, and `on_output`
   land in the new shape.
-- **Install UX on the target**: *detection* is **resolved** — a launch that dies
-  without a handshake is classified from the channel's exit status and stderr
-  tail, and a missing engine produces a sentence naming the target and the
-  install command (§2.12); a wire-incompatible one is the handshake's version
-  refusal (§2.9). What remains open is the UX around it: does the connect flow
-  *guide* the install/upgrade — offer to run it, re-check after — or only name
-  the command to run, and where does that live (ui-briefs/ssh-connect.md will
-  need a revision either way)? Nothing surfaces these messages in a UI yet,
-  because nothing calls the remote factory yet. Offline or locked-down targets,
-  where the user cannot install anything, may be the case the standalone binary
-  below is really for.
+- **Install UX on the target**: *detection* and *surfacing* are **resolved** — a
+  launch that dies without a handshake is classified from the channel's exit
+  status and stderr tail, a missing engine produces a sentence naming the target
+  and the install command (§2.12), a wire-incompatible one is the handshake's
+  version refusal (§2.9), and both now reach a human: stderr + exit 2 from the
+  terminal launch, the checklist's `engine` row in the dialog, where Retry
+  re-runs the attempt in place. What remains open is whether the connect flow
+  should *guide* the install/upgrade — offer to run it, re-check after — rather
+  than only naming the command. Offline or locked-down targets, where the user
+  cannot install anything, may be the case the standalone binary below is really
+  for.
 - **A standalone single-file binary for the engine half** — a later packaging
   increment: one artifact copied to the target, no Python required over there,
   per-arch builds to produce. Optionally, the cheaper version of the same wish: a
@@ -900,12 +969,19 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
   Increment 4 settled *where* the backups land (§2.4) and nothing else about
   this: the ordering guarantee still has to be re-argued when a tool call
   becomes one wire message instead of a sequence of Host primitives.
-- **Session listing/cleanup on target**: stores now accumulate on the target;
-  who prunes them, and does the Shell get a way to browse/pull a past remote
-  transcript?
+- **Session listing/cleanup on target**: stores now accumulate on the target —
+  and since the flip they really do, on every remote run, with nothing pruning
+  them: `main` used to call `prune_sessions` over the local remote-state tree and
+  that tree is not where a session lives any more. Who prunes the target's, and
+  does the Shell get a way to browse/pull a past remote transcript?
 - **Delegate/sub-agent sessions in remote mode**: sub-agent chats are still
   local browser chats — confirm the delegate flow's pause/resume shape needs
   nothing extra over the wire beyond what ask_user needs.
-- **`remote-ssh.md` amendments**: enumerate exactly which sections are
+- ~~**`remote-ssh.md` amendments**: enumerate exactly which sections are
   superseded (MCP-stays-local, backups-local, rules/gate split) when this doc
-  graduates to binding.
+  graduates to binding.~~ **Done with the flip.** `remote-ssh.md` now carries
+  superseded markers on decision 2 (per-call exec channels), decision 8 (remote
+  kill-tree), the phase-3 MCP mechanics (MCP-stays-on-the-host, the stdio
+  refusal), and "where a remote session's own state lives" — each pointing at the
+  section here that replaced it, each saying that the machinery it describes is
+  still in the code until §2.8's deletion, and none of them deleted.

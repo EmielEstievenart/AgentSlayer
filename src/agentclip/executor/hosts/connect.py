@@ -66,6 +66,19 @@ CONNECT_STEPS: tuple[str, ...] = (
     STEP_CONFIG,
 )
 
+# The seventh beat, and the ONE this module does not run: launching
+# ``agentclip-engine`` on the target and shaking hands with it over the exec
+# channel (docs/design/remote-executor.md §2.6, §2.12). Since increment 4's flip
+# that launch is what a remote session IS - the engine runs over there - so it
+# belongs in the same checklist a human watches. It cannot be a step of
+# :func:`connect_remote` because this module may not import a protocol (the seam
+# is the stdlib-and-paramiko leaf); it is reported by whoever does the launch,
+# which is ``cli`` on both shells' paths. Hence two tuples: the sequence's own
+# six, and the seven a checklist shows.
+STEP_ENGINE = "engine"
+
+CHECKLIST_STEPS: tuple[str, ...] = (*CONNECT_STEPS, STEP_ENGINE)
+
 # What each step is called where a human reads it. Here rather than in a shell,
 # because a step's name is part of the sequence's vocabulary: two shells naming
 # the same beat differently is the drift this module exists to prevent.
@@ -76,6 +89,7 @@ STEP_LABELS: Mapping[str, str] = {
     STEP_ROOT: "Check the remote root",
     STEP_ENV: "Capture home and environment",
     STEP_CONFIG: "Load the remote config",
+    STEP_ENGINE: "Start the engine on the target",
 }
 
 # How many times a password may be asked for, per connect. The truth is
@@ -86,12 +100,16 @@ STEP_LABELS: Mapping[str, str] = {
 # double-count reconnects (ssh-connect.md §2).
 PASSWORD_ATTEMPTS = 3
 
-# Which steps are fatal to a connect attempt. The last two are not: a home that
-# cannot be resolved falls back to the POSIX convention, an unusable `printenv`
-# means an empty environment (which is what an unset variable already
+# Which steps are fatal to a connect attempt. STEP_ENV and STEP_CONFIG are not:
+# a home that cannot be resolved falls back to the POSIX convention, an unusable
+# `printenv` means an empty environment (which is what an unset variable already
 # substitutes to), and load_config never raises - its complaints become
-# Config.warnings (ssh-connect.md §2, rows 6-8).
-FATAL_STEPS: frozenset[str] = frozenset({STEP_RESOLVE, STEP_CONNECT, STEP_PROBE, STEP_ROOT})
+# Config.warnings (ssh-connect.md §2, rows 6-8). STEP_ENGINE is fatal for the
+# plainest reason of all: a remote session with no engine on the target has
+# nothing to run.
+FATAL_STEPS: frozenset[str] = frozenset(
+    {STEP_RESOLVE, STEP_CONNECT, STEP_PROBE, STEP_ROOT, STEP_ENGINE}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -457,11 +475,13 @@ def _no_step(event: StepEvent) -> None:
 
 
 __all__ = [
+    "CHECKLIST_STEPS",
     "CONNECT_STEPS",
     "FATAL_STEPS",
     "PASSWORD_ATTEMPTS",
     "STEP_CONFIG",
     "STEP_CONNECT",
+    "STEP_ENGINE",
     "STEP_ENV",
     "STEP_LABELS",
     "STEP_PROBE",

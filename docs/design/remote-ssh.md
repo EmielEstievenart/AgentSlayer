@@ -1,6 +1,24 @@
 # Remote development over SSH
 
-Status: **agreed design** (grilling session 2026-08-11). Binding for implementation.
+Status: **agreed design** (grilling session 2026-08-11), **implemented in full**,
+and **substantially superseded** (2026-08-19) by
+`docs/design/remote-executor.md`, which moved the engine itself onto the target.
+
+> **What `--ssh` does now.** This document describes a mode where AgentClip runs
+> here and reaches the target one primitive at a time — an exec channel per
+> command, an SFTP read per file. That mode is no longer what `--ssh` starts.
+> Since remote-executor.md's increment 4, a remote session launches
+> `agentclip-engine` on the target and drives it over one wire connection
+> (remote-executor.md §2.12 "the flip"); tools, stores, backups, policy, skills
+> and MCP servers are all local to the target and no primitive crosses the link.
+>
+> Everything below is kept: it is the history of how the seam got built, most of
+> it is still the code (the connect/auth/reconnect machinery is exactly what the
+> link channel is opened on), and the per-call machinery **still exists** —
+> `make_engine_factory(host=…)` still assembles an engine here over an `SshHost`
+> — it is simply unreachable from either shell. Its deletion is
+> remote-executor.md §2.8, increment 5. Individual sections that no longer
+> describe what a remote session does carry their own marker below.
 
 ## Goal
 
@@ -14,9 +32,17 @@ local.
 1. **All-remote scope.** When a remote session is active, *every* OS-touching tool
    (run_command, read/write/edit/delete, list_dir, glob, grep, skill discovery) runs
    against the remote host. No hybrid local-files/remote-shell mode — one source of
-   truth.
+   truth. *(Still true, and more so: the whole executor is over there now.)*
 
-2. **Persistent connection, fresh shell per command.** Connect + authenticate once at
+2. **Persistent connection, fresh shell per command.** — **SUPERSEDED (2026-08-19)
+   by remote-executor.md §2.1/§2.12.** Kept for the record; the per-call
+   machinery is still in the code (`SshHost.spawn`, `SshExec`, the wrapper) and
+   no longer reached by a session. What a `--ssh` connect opens now is ONE
+   long-lived exec channel running `agentclip-engine`, and a `run_command` is a
+   wire message to a process that is already on the box — it does not cross the
+   link at all. The no-state-between-commands semantics below still hold, because
+   the engine over there runs each command the way a local engine does.
+   *(Original text.)* Connect + authenticate once at
    launch. Each `run_command` runs on its own exec channel as `bash -lc '<cmd>'` from
    the workspace root. The login shell sources profile/rc files every time — the same
    semantics native CLI agents (e.g. Claude Code) have locally, and the same
@@ -67,7 +93,14 @@ local.
    honor `known_hosts`, prompt-to-accept on unknown host keys. Fail fast: connect,
    authenticate, probe `uname` and remote root existence *before* the TUI starts.
 
-8. **Remote cancel/kill.** Closing a Paramiko channel does not kill the remote
+8. **Remote cancel/kill.** — **SUPERSEDED (2026-08-19) by remote-executor.md
+   §2.9/§2.12.** Kept for the record; the machinery is still in `SshHost` and no
+   longer reached by a session. A cancel is now a `cancel` frame on the wire and
+   the kill happens ON the target, by the engine over there, using the ordinary
+   local kill-tree — which is also why the LINK channel is opened bare, with no
+   `setsid`: the engine process must die WITH the channel (§2.3), where a tool's
+   command must survive its own. *(Original text.)* Closing a Paramiko channel
+   does not kill the remote
    process. Launch via `setsid bash -lc '…'` capturing the PID; cancel/timeout issues
    a separate `kill -- -<pgid>` exec — the remote twin of `_kill_tree`.
 
@@ -83,8 +116,15 @@ local.
 - `Workspace` (sandbox path jail) resolves through Host `realpath`/`lstat` so escape
   detection works identically on both sides. Remote paths are POSIX; keep local
   Windows semantics intact.
-- Backups (`backup_hook`) keep storing locally: read remote bytes before overwrite.
+- ~~Backups (`backup_hook`) keep storing locally: read remote bytes before
+  overwrite.~~ **Superseded (2026-08-19) by remote-executor.md §2.4:** the
+  `BackupStore` is built by the engine, on the target, over its own `LocalHost` —
+  the bytes never travel.
 - Bootstrap: only the existing `on {os_name}` slot changes (e.g. `on Linux (ssh)`).
+  **Amended (2026-08-19):** the slot is now filled by the target's own
+  `platform.system()`, because the process rendering the bootstrap is over there
+  (remote-executor.md §2.12); `cli` no longer supplies an `os_name` for a remote
+  session at all.
   Paste budget has ~200 chars slack under 12k — add **no** new bootstrap prose.
 - Permission gate is upstream of handlers (`Engine._build_plan`) and needs no changes.
 - Launch order: CLI + local global config → connect SSH → read remote
@@ -103,6 +143,14 @@ local.
   over there, and stdio MCP servers are refused and reported. `[approval]` was
   pinned to this PC by this phase and is **no longer** (remote-executor.md §2.5
   took the last table with it). See the revision section below.
+  **Its MECHANICS are superseded (2026-08-19)** even where its *conclusions*
+  survive: policy still belongs to the target, but nothing is read "off the
+  target through the Host" any more — the engine is over there and reads its own
+  machine's files locally (remote-executor.md §2.5, §2.6). The two consequences
+  worth naming are that MCP no longer stays on this PC (§2.7 reverses it — stdio
+  servers spawn on the target, and the refusal below fires only on the legacy
+  path) and that `{file:}`/`{env:}` are plain local reads over there rather than
+  SFTP and a cached `printenv`. Marked per-paragraph below.
 
 ## As built (phase 2)
 
@@ -135,7 +183,15 @@ are on, not from `os.name`.
 undone creation may leave one empty. No general directory API: no tool may create
 or remove directories. Undo no longer preserves mtime/mode (the seam moves bytes).
 
-**Where a remote session's own state lives.** Sessions, transcripts and backups
+**Where a remote session's own state lives.** — **SUPERSEDED (2026-08-19) by
+remote-executor.md §2.4.** The store follows the ENGINE, and the engine is on the
+target: a remote session's transcripts and backups now land in
+`<project>/.agentclip/` over there, and `cli.main` no longer creates or prunes
+the local tree for one. `default_remote_state_dir` and `SessionStore`'s
+`data_root` both still exist, for the per-call path and for the localhost e2e
+suite's isolation. The accepted cost of the new answer is stated in §2.4:
+transcripts and backups are unreachable while the target is. *(Original text.)*
+Sessions, transcripts and backups
 are AgentClip's state, so they stay local — but the project root they normally
 sit beside is on another machine. A remote session therefore keeps its
 `.agentclip` tree under `<user_data_dir>/agentclip/remote/<target>-<root>-<hash>/`
@@ -248,7 +304,16 @@ token sitting beside `permissions.json` on the box is found where its author put
 connect (`bash -lc printenv`) and cached for the session — for the same reason: the
 person who wrote `{env:API_TOKEN}` into a file on that box exported it on that box.
 
-**MCP transport stays on the host.** The config describing an HTTP server is read
+**MCP transport stays on the host.** — **SUPERSEDED (2026-08-19) by
+remote-executor.md §2.7**, which reverses it outright: the MCP manager is built by
+the engine, so every server — stdio or HTTP — is spawned and dialled BY THE
+TARGET, with the target's environment and cwd. The premise changed, not the
+reasoning: this paragraph was written for a world where the only process
+AgentClip had over there was an exec channel. Its "accepted cost" paragraph below
+is the exact cost the reversal PAYS OFF — a `http://localhost:<port>` on the box
+now resolves to the box. `mcp_remote_target` (the "dialled from this PC" note and
+the stdio refusal) survives only for the per-call path and is `""` everywhere
+else. *(Original text.)* The config describing an HTTP server is read
 from the target, but the connection is dialed by AgentClip itself, from the host PC.
 Tunnelling it through paramiko (`direct-tcpip`) so it originated from the target was
 considered and rejected: it is new transport code with its own lifecycle and
@@ -263,7 +328,14 @@ thing rather than by failing, the connection error for a remote-session HTTP ser
 must say which machine dialed it. A bare timeout would send the user looking on the
 wrong box.
 
-**MCP stdio servers are not supported in a remote session.** A `type: "local"` entry
+**MCP stdio servers are not supported in a remote session.** — **SUPERSEDED
+(2026-08-19) by remote-executor.md §2.7.** They are supported, and they are the
+case the reversal was FOR: a stdio server now spawns on the target, by the
+engine, with the target's argv, environment and cwd — exactly the "plausible
+later wave" the last sentence below predicted. The refusal still exists in
+`McpManager` and still fires when `mcp_remote_target` is set, which since the
+flip means the per-call path alone; the GUI's connect banner keeps naming refused
+stdio servers for the same reason. *(Original text.)* A `type: "local"` entry
 in the target's config is reported as an unsupported-here server in the MCP status
 pane, with its name. It is not spawned on the host PC (its argv and `cwd` describe
 the target) and not silently dropped. Spawning stdio servers on the target over an

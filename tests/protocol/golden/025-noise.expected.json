@@ -1,0 +1,19 @@
+{
+  "kind": "noise",
+  "calls": [],
+  "prose": [
+    "Hello! How can I help you today?"
+  ],
+  "warnings": [],
+  "eom": {
+    "present": false,
+    "calls": null,
+    "turn": null,
+    "chat": null
+  },
+  "truncated": false,
+  "ack_part": null,
+  "ack_total": null,
+  "ack_chat": null,
+  "nack_reason": null
+}

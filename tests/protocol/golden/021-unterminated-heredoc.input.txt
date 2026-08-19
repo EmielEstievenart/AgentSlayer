@@ -1,0 +1,5 @@
+===CLIP:CALL id=1 tool=write_file===
+path: src/big.py
+content <<EOT
+def main():
+    print("hello"

@@ -1,0 +1,1970 @@
+/* The GUI shell's chrome. Flat, and only as big as what exists: after parity
+   increment 6 that is the window tabs, the per-window transcripts, the
+   composer and its slash-command popup, the run panel, the approval gate, the
+   toasts, the modals (the session summary, the help sheet and the settings
+   picker among them), the sidebar, the status bar, the harness log pane, the
+   elements column and the service editor - and it still invents no vocabulary
+   the remaining increment (the SSH dialog) would argue with.
+   Only system fonts - nothing here may reach the network. */
+
+/* The palettes, and the whole difference between them is this region: every
+   colour in the file below is a variable, so a theme is a set of values rather
+   than a second stylesheet to keep in sync. `dark` is the default and is what
+   :root carries; every other theme is a class on <body> that redefines the same
+   names, and nothing outside this region may name a colour at all (a test
+   fails on the first hex that escapes it). Which one is worn is config
+   (`[gui] theme`) and arrives as a `settings` event - the page never decides,
+   it only paints (docs/design/gui.md §3). */
+:root {
+  --bg: #14161a;
+  --bg-sunken: #101215; /* under the shell: the status bar */
+  --bg-raised: #1b1e24;
+  --line: #2a2f38;
+  --text: #dfe3ea;
+  --text-dim: #8b93a1;
+  --accent: #6ea8fe;
+  --ok: #6fce8f;
+  --warn: #e3b341;
+  --warn-deep: #b98c22; /* the flash's off beat */
+  --err: #f0736a;
+  --magenta: #d98fe0; /* the SUB-AGENT status segment */
+  /* What text on a solid --warn/--err/--accent field is coloured. Not "black":
+     it flips with the theme, which is the whole reason it is a name. */
+  --on-solid: #14161a;
+  --scrim: rgba(0, 0, 0, 0.55);
+  --scrim-deep: rgba(0, 0, 0, 0.6);
+  --shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  --radius: 8px;
+  --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+}
+
+/* The light theme. Written honestly rather than by inverting: the accents are
+   darkened until they carry text on a white field (the same colours at dark-
+   theme brightness are unreadable on paper), and --on-solid becomes the light
+   ground so a warning chip still reads as filled. The rgba tints further down
+   (diff rows, the armed banner) are alpha over whatever the surface is, so they
+   need no override - that is what makes them tints rather than colours. */
+body.theme-light {
+  --bg: #f6f7f9;
+  --bg-sunken: #e9ecf1;
+  --bg-raised: #ffffff;
+  --line: #d3d8e0;
+  --text: #1c2027;
+  --text-dim: #5c6470;
+  --accent: #2563c9;
+  --ok: #1f8a4c;
+  --warn: #a97400;
+  --warn-deep: #7d5600;
+  --err: #c0362c;
+  --magenta: #9333a8;
+  --on-solid: #ffffff;
+  --scrim: rgba(28, 32, 39, 0.4);
+  --scrim-deep: rgba(28, 32, 39, 0.45);
+  --shadow: 0 6px 18px rgba(28, 32, 39, 0.18);
+}
+
+/* The two Claude themes, which are the TUI's own (shell/tui/app.py registers
+   them as Textual themes with these exact names) rendered in this shell's
+   variable set. Same command, same name, two mediums: `/theme claude-dark`
+   means one thing whichever shell it is typed in, and the values below are the
+   Textual theme's role-by-role - background/surface/panel/foreground and the
+   five semantic colours - with the four this shell has and Textual does not
+   (--bg-sunken, --line, --warn-deep, --magenta) DERIVED from them rather than
+   invented, so a change to the Textual theme has an obvious answer here.
+
+   Warm is the paper one. Its "raised" is the Textual `surface`, which is a
+   shade DARKER than the page rather than a whiter white - that is what a warm
+   light palette does, and inverting it to #fff would put a cold rectangle in
+   the middle of it. */
+body.theme-claude-warm {
+  --bg: #faf9f5; /* Textual background */
+  --bg-sunken: #e8e4d8; /* Textual panel: the deepest of the three grounds */
+  --bg-raised: #f0eee6; /* Textual surface */
+  --line: #d6d0be; /* panel, pushed until an edge reads as an edge */
+  --text: #3d3929; /* Textual foreground */
+  --text-dim: #6f6a56; /* foreground muted - NOT `secondary`, which is an accent */
+  --accent: #c96442; /* Textual primary */
+  --ok: #3f7d4f;
+  --warn: #b8720f;
+  --warn-deep: #8a5409; /* the flash's off beat, one step down from --warn */
+  --err: #b3261e;
+  --magenta: #8e4b9c; /* SUB-AGENT: plum, so it cannot be read as the terracotta accent */
+  --on-solid: #faf9f5; /* Textual button-color-foreground */
+  --scrim: rgba(61, 57, 41, 0.4); /* the foreground, as the light theme does it */
+  --scrim-deep: rgba(61, 57, 41, 0.45);
+  --shadow: 0 6px 18px rgba(61, 57, 41, 0.18);
+}
+
+/* ...and the dark one, where "raised" and "sunken" mean what they usually do
+   again: surface sits above the page, and the status bar's ground is dug a step
+   below it. The scrims are black here for the same reason :root's are - over a
+   dark page, a tinted scrim is a smear rather than a dimming. */
+body.theme-claude-dark {
+  --bg: #262624; /* Textual background */
+  --bg-sunken: #1c1c1a; /* under the shell: the status bar */
+  --bg-raised: #30302e; /* Textual surface */
+  --line: #4a4844; /* Textual panel, pushed up until it separates */
+  --text: #f0eee6; /* Textual foreground */
+  --text-dim: #a8a49a; /* foreground muted - NOT `secondary`, which is an accent */
+  --accent: #d97757; /* Textual primary */
+  --ok: #7fb069;
+  --warn: #e0a548;
+  --warn-deep: #a8792f; /* the flash's off beat */
+  --err: #e0605a;
+  --magenta: #c68fd6; /* SUB-AGENT: a violet the warm accent cannot be confused with */
+  --on-solid: #262624; /* Textual button-color-foreground */
+  --scrim: rgba(0, 0, 0, 0.55);
+  --scrim-deep: rgba(0, 0, 0, 0.6);
+  --shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+/* -- header --------------------------------------------------------------- */
+
+.titlebar {
+  /* The paste flash hangs off this element's bottom edge (below), which is the
+     whole reason it is a positioning context: "just under the titlebar" is then
+     a fact the browser works out rather than a pixel number in here that a
+     padding change would silently falsify. */
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-raised);
+  user-select: none;
+}
+
+.mark {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.pill {
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.pill.warn {
+  border-color: var(--err);
+  background: var(--err);
+  color: var(--on-solid);
+  font-weight: 700;
+}
+
+.spacer {
+  flex: 1;
+}
+
+.version {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The "your move" banner: as loud as the TUI's, for the same reason - the user
+   is looking at their browser, not at this window. It blinks, which the TUI
+   does on a 0.4s timer; the cadence is not load-bearing, only "obnoxious enough
+   to notice", so this is one CSS animation and no JavaScript. Its quiet sibling
+   (.side-armed) deliberately never animates.
+
+   An OVERLAY, not a row: it hangs off the titlebar's bottom edge across the
+   full width and covers the top of whatever is below, so raising and dropping
+   it - which happens repeatedly inside one turn - costs ZERO layout. In the
+   flow it shrank .body on every appearance and walked the transcript, the run
+   panel and the composer up and down with it. The shadow is what says "above",
+   so the strip cannot be read as a row of the page that painted wrong. */
+.flash {
+  position: absolute;
+  top: 100%; /* the titlebar's own height, whatever it is */
+  left: 0;
+  right: 0;
+  /* Over the page, under the toasts (20) and every scrim (25/26/30). */
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 8px 18px;
+  background: var(--warn);
+  color: var(--on-solid);
+  box-shadow: var(--shadow);
+  font-weight: 700;
+  text-align: center;
+  white-space: pre-line;
+  animation: blink 0.8s steps(1, end) infinite;
+}
+
+@keyframes blink {
+  0%,
+  49% {
+    background: var(--warn);
+  }
+  50%,
+  100% {
+    background: var(--warn-deep);
+  }
+}
+
+.flash button {
+  flex: none;
+  padding: 4px 12px;
+  border-color: var(--on-solid);
+  color: var(--on-solid);
+  font-weight: 700;
+}
+
+/* -- the two columns ------------------------------------------------------ */
+
+.body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+}
+
+.chat {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* -- window tabs ----------------------------------------------------------
+   A tab is a browser WINDOW, not a session view (tui.md 1.6). Two rows, one
+   selection across both: row 1 the master windows, row 2 the selected master's
+   sub-agent windows, indented so the second reads as belonging to the first
+   rather than as a second, equal set. */
+
+.wintabs {
+  flex: none;
+  padding: 6px 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.win-row {
+  display: flex;
+  gap: 4px;
+}
+
+.win-row-sub {
+  padding-left: 22px;
+}
+
+.win-row:empty {
+  display: none;
+}
+
+.win-tab {
+  padding: 4px 12px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: none;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.win-tab:hover {
+  color: var(--text);
+}
+
+.win-tab.selected {
+  border-color: var(--line);
+  background: var(--bg-raised);
+  color: var(--text);
+  font-weight: 700;
+}
+
+/* The three run states a window's tab reports, plus "never run" (no colour at
+   all). The glyph rides in the label; this is the second half of the same
+   signal, and the distinction itself is what parity requires - not the glyphs
+   (ui-briefs/tabs-delegation-summary.md 7). */
+.win-tab.running {
+  color: var(--accent);
+}
+
+.win-tab.ok {
+  color: var(--ok);
+}
+
+.win-tab.failed {
+  color: var(--err);
+}
+
+/* The one moment the two pointers visibly disagree: output is landing in this
+   window while the user is reading another one. */
+.win-tab.writing {
+  border-color: var(--accent);
+  border-bottom: none;
+}
+
+/* -- transcripts (one per window) ------------------------------------------ */
+
+.transcripts {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.transcript {
+  position: relative; /* append() parks by offsetTop, which needs this */
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px;
+}
+
+.transcript[hidden] {
+  display: none;
+}
+
+.empty {
+  margin: 0;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.ev {
+  margin: 0 0 14px;
+}
+
+.ev :first-child {
+  margin-top: 0;
+}
+
+.ev p,
+.ev ul,
+.ev ol,
+.ev h1,
+.ev h2,
+.ev h3 {
+  margin: 0 0 8px;
+}
+
+.ev pre {
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.ev code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-raised);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.ev-head {
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ev-user {
+  padding-left: 12px;
+  border-left: 3px solid var(--ok);
+}
+
+.ev-user .ev-head {
+  color: var(--ok);
+}
+
+.ev-prose {
+  padding-left: 12px;
+  border-left: 3px solid var(--accent);
+}
+
+.ev-prose .ev-head {
+  color: var(--accent);
+}
+
+.ev-call {
+  margin-left: 14px;
+  color: var(--text-dim);
+}
+
+.ev-summary {
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.ev-note {
+  margin-left: 14px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* A call's outcome, coloured from the glyph the controller wrote (app.js's
+   noteClass): ✓ approved/done, ✗ rejected/failed, ? a question, ! a warning. */
+.ev-note.ok {
+  color: var(--ok);
+}
+
+.ev-note.bad {
+  color: var(--err);
+}
+
+.ev-note.ask {
+  color: var(--accent);
+}
+
+.ev-note.warn {
+  color: var(--warn);
+}
+
+/* The sub-run divider: the only thing saying where one delegated task ended
+   and the next began inside a window's one, never-cleared transcript. */
+.ev-divider {
+  margin: 22px 0 14px;
+  color: var(--text-dim);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-align: center;
+}
+
+.ev-error {
+  padding: 8px 12px;
+  border-left: 3px solid var(--err);
+  background: rgba(240, 115, 106, 0.12);
+  color: var(--err);
+}
+
+.ev details summary {
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+/* -- run panel ------------------------------------------------------------ */
+
+.run {
+  padding: 8px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+  cursor: pointer; /* the whole panel is the ctrl+o toggle */
+}
+
+.run-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.run-head .hint {
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* The "working" animation. The TUI spins braille frames on a 100ms timer; a
+   page has an animation loop already and does not need to be told to paint,
+   so this is one element and no JavaScript (main-chat.md section 7). */
+.spinner {
+  width: 10px;
+  height: 10px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--warn);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: scale(0.7);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* No row windowing: _MAX_ROWS = 8 is a terminal-real-estate compromise the TUI
+   makes so the composer is not pushed off screen. This panel scrolls instead. */
+.run-rows {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 168px;
+  overflow-y: auto;
+}
+
+.run-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.run-row .rid {
+  min-width: 1.5em;
+  text-align: right;
+}
+
+.run-row .rtool {
+  min-width: 11ch;
+}
+
+.run-row .rdetail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.run-row .rhint {
+  color: var(--accent);
+  font-size: 11.5px;
+}
+
+.run-row.running {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.run-row.ok .rg {
+  color: var(--ok);
+}
+
+.run-row.bad {
+  color: var(--err);
+}
+
+.run-row.pending,
+.run-row.skipped {
+  opacity: 0.65;
+}
+
+.run-tail-head {
+  margin-top: 8px;
+  color: var(--text-dim);
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+}
+
+.run-tail-head .hint {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.run-tail {
+  max-height: 180px;
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: pre;
+}
+
+/* -- approval gate -------------------------------------------------------- */
+/* A panel, never a modal: the transcript has to stay readable behind the diff
+   (docs/design/ui-briefs/main-chat.md section 6). */
+
+.gate {
+  border-top: 2px solid var(--warn);
+  background: var(--bg-raised);
+  padding: 10px 18px 14px;
+}
+
+.gate-title {
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--warn);
+  color: var(--on-solid);
+  font-weight: 700;
+}
+
+/* The queue strip: what else this turn is about to ask for, one chip per call,
+   coloured with the run panel's glyph alphabet so a row does not change
+   language halfway through the turn. */
+.gate-queue {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.qchip {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+
+.qchip.ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.qchip.bad {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.qchip.running {
+  border-color: var(--warn);
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.qchip.skipped {
+  opacity: 0.5;
+}
+
+.gate-preview {
+  max-height: 260px;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  /* Long diff lines are not wrapped: wrapping breaks the hunk's column
+     alignment, which is the one thing a diff is read for. */
+  white-space: pre;
+}
+
+.gate-preview pre {
+  margin: 0;
+  font: inherit;
+}
+
+/* -- the preview bodies, coloured by hand (app.js renderPreview) ----------- */
+
+.d-add {
+  color: var(--ok);
+  background: rgba(111, 206, 143, 0.09);
+}
+
+.d-del {
+  color: var(--err);
+  background: rgba(240, 115, 106, 0.09);
+}
+
+.d-hunk {
+  margin-top: 4px;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.d-file {
+  color: var(--text-dim);
+  font-weight: 700;
+}
+
+.d-meta {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+.new-file {
+  margin-bottom: 6px;
+  color: var(--ok);
+  font-weight: 700;
+}
+
+/* Line numbers from a CSS counter - no gutter markup, nothing to escape. */
+.gate-preview ol.code {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: line;
+}
+
+.gate-preview ol.code li {
+  counter-increment: line;
+}
+
+.gate-preview ol.code li::before {
+  display: inline-block;
+  width: 3.5em;
+  margin-right: 10px;
+  color: var(--text-dim);
+  content: counter(line);
+  text-align: right;
+}
+
+.gate-preview .cmd {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.gate-preview .reason {
+  margin-top: 2px;
+  color: var(--accent);
+  font-style: italic;
+}
+
+.gate-preview .args-label {
+  margin-top: 8px;
+  font-weight: 700;
+}
+
+.gate-preview .args {
+  color: var(--text);
+  white-space: pre-wrap;
+}
+
+.gate-preview .why {
+  margin-top: 8px;
+  color: var(--text-dim);
+}
+
+.gate-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.gate-actions .hint {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.gate-reject {
+  display: flex;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.gate-reject input {
+  flex: 1;
+}
+
+/* -- the ask_user banner --------------------------------------------------- */
+/* The gate's twin in weight and in placement - pinned above the composer, its
+   own rules rather than the `#gate` ones so neither panel can be restyled by
+   accident through the other. Coloured --accent where the gate is --warn: both
+   are stops, but only one of them is about to change your files. */
+
+.ask {
+  border-top: 2px solid var(--accent);
+  background: var(--bg-raised);
+  padding: 10px 18px 12px;
+}
+
+.ask-title {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--accent);
+  color: var(--on-solid);
+  font-weight: 700;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+}
+
+.ask-question {
+  margin-top: 8px;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  /* The model writes these, so they may be long and may carry newlines: wrapped,
+     and never a scrollbar of their own - the question is what the panel is. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.ask-hint {
+  margin-top: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* -- composer ------------------------------------------------------------- */
+
+.composer {
+  position: relative; /* the slash popup hangs off this */
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 12px 18px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+
+/* -- the slash-command popup ----------------------------------------------
+   Over the transcript, not in the flow: narrowing the list must not shove the
+   conversation around. Nothing in here is focusable and nothing is clickable -
+   the caret stays in the box for the whole interaction, which is what the TUI
+   buys by making its popup a single non-focusable Static. Rows never wrap
+   (nowrap + ellipsis): a summary that wrapped would put the highlight bar on a
+   different line from the command it is about, and the bottom of the list
+   would silently fall out of the box. */
+.cmd-popup {
+  position: absolute;
+  bottom: 100%;
+  left: 18px;
+  right: 18px;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding: 4px 0;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+  z-index: 10;
+}
+
+.cmd-row {
+  display: flex;
+  gap: 10px;
+  padding: 3px 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cmd-row.on {
+  background: var(--accent);
+  color: var(--on-solid);
+}
+
+.cmd-name {
+  flex: none;
+  font-family: var(--mono);
+  font-weight: 700;
+}
+
+.cmd-row .cmd-why {
+  overflow: hidden;
+  color: var(--text-dim);
+  text-overflow: ellipsis;
+}
+
+.cmd-row.on .cmd-why {
+  color: var(--on-solid);
+}
+
+.composer textarea {
+  flex: 1;
+  resize: none;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+.composer textarea::placeholder {
+  color: var(--text-dim);
+}
+
+textarea:disabled,
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button,
+input[type="text"] {
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+button:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+/* -- toasts --------------------------------------------------------------- */
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 420px;
+  z-index: 20;
+}
+
+.toast {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+}
+
+.toast.warning {
+  border-left-color: var(--warn);
+}
+
+.toast.error {
+  border-left-color: var(--err);
+}
+
+/* -- modals --------------------------------------------------------------- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--scrim);
+  z-index: 30;
+}
+
+.modal {
+  width: min(720px, 90vw);
+  max-height: 82vh;
+  overflow: auto;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.modal-title {
+  margin-bottom: 10px;
+  font-weight: 700;
+}
+
+.modal-body input[type="text"] {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* The summary's keys line. The buttons above are this shell's real affordance;
+   this says the single letters work too. */
+.modal-hint {
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+/* -- the help sheet (F1) and the settings picker (F4) ----------------------
+   Both ride the ONE modal element above; only their bodies differ. The help
+   sheet is wide because its key table has three columns and a wrapped shortcut
+   is unreadable. */
+.modal.wide {
+  width: min(900px, 94vw);
+}
+
+.help-section {
+  margin-top: 16px;
+}
+
+.help-section:first-child {
+  margin-top: 0;
+}
+
+.help-head {
+  margin-bottom: 6px;
+  color: var(--accent);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.help-note {
+  margin: 0 0 6px;
+  color: var(--text-dim);
+}
+
+.help-rows {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.help-rows td {
+  padding: 2px 0;
+  vertical-align: top;
+}
+
+.help-rows .k {
+  width: 190px;
+  padding-right: 14px;
+  color: var(--text);
+  font-family: var(--mono);
+  white-space: nowrap;
+}
+
+.help-rows .k.cmd {
+  width: 220px;
+}
+
+.help-rows .d {
+  color: var(--text-dim);
+}
+
+/* The theme picker: real radios, because that is what "one of these" is. */
+.set-choice {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 0;
+}
+
+.set-choice input {
+  accent-color: var(--accent);
+}
+
+.stats {
+  width: 100%;
+  margin-bottom: 10px;
+  border-collapse: collapse;
+}
+
+.stats th {
+  width: 40%;
+  padding: 2px 8px 2px 0;
+  color: var(--text-dim);
+  font-weight: 400;
+  text-align: left;
+}
+
+.stats td {
+  padding: 2px 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.payload {
+  max-height: 50vh;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  user-select: all;
+}
+
+/* -- sidebar (F3) --------------------------------------------------------- */
+/* Live status plus the two things you steer with, and nothing that has to be
+   configured (sidebar-status-log.md section 2.1). */
+
+.sidebar {
+  flex: none;
+  width: 300px;
+  overflow-y: auto;
+  padding: 14px 16px 18px;
+  border-left: 1px solid var(--line);
+  background: var(--bg-raised);
+  font-size: 12.5px;
+}
+
+.side-title {
+  margin: 14px 0 4px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.sidebar > .side-title:first-child {
+  margin-top: 0;
+}
+
+.side-status {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.side-hint {
+  margin-top: 16px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.sidebar select,
+.sidebar button {
+  width: 100%;
+  margin: 2px 0 6px;
+  padding: 6px 10px;
+  font-size: 12.5px;
+}
+
+.sidebar select {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+}
+
+.sidebar select:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* The STATE rail: the active row is marked and reversed, LOOP_TRANSITIONS's
+   legal next moves read at normal brightness, everything else is dim. Display
+   only - nothing reads it back to decide anything. */
+.rail {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.rail li {
+  padding: 0 4px;
+  color: var(--text-dim);
+  opacity: 0.55;
+  white-space: pre;
+}
+
+.rail li.legal {
+  color: var(--text);
+  opacity: 1;
+}
+
+.rail li.active {
+  background: var(--text);
+  color: var(--bg);
+  font-weight: 700;
+  opacity: 1;
+}
+
+/* Never blinks: a standing fact meant to survive being looked at for an hour,
+   unlike the flash which is asking for a keystroke right now. */
+.side-armed {
+  margin-top: 10px;
+  padding: 6px 8px;
+  border: 1px solid var(--err);
+  border-radius: var(--radius);
+  background: rgba(240, 115, 106, 0.14);
+  color: var(--err);
+  font-weight: 700;
+  white-space: pre-line;
+}
+
+.mcp-row {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  /* One server, one row, whatever its detail says: a failed server's
+     explanation can run to a sentence, and wrapping it would walk every block
+     below it up and down the column as servers connect and fail. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-row.connected {
+  color: var(--ok);
+}
+
+.mcp-row.failed,
+.mcp-row.needs_auth {
+  color: var(--warn);
+}
+
+/* -- elements column (F7) -------------------------------------------------
+   A sibling of the sidebar with its own toggle, never nested inside it
+   (elements-panel.md 2.1). Narrower than the sidebar because a row is a short
+   label over a small picture, and scrolling because seven rows of both is
+   taller than most windows. */
+
+.elements {
+  flex: none;
+  width: 210px;
+  overflow-y: auto;
+  padding: 14px 14px 18px;
+  border-left: 1px solid var(--line);
+  background: var(--bg-raised);
+  font-size: 12.5px;
+}
+
+.elements > .side-title:first-child {
+  margin-top: 0;
+}
+
+.el-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Every row is the same height whether or not it holds a picture, so a match
+   landing cannot make the column dance (elements-panel.md 2.2). */
+.el-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.el-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.el-name {
+  color: var(--text);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.el-verdict {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.el-row.found .el-verdict {
+  color: var(--ok);
+}
+
+/* "Searched and not there" is a live verdict, not an absence: it reads warm,
+   while "nothing has ever been searched for this" stays dim. */
+.el-row.missing .el-verdict {
+  color: var(--warn);
+}
+
+/* The crop box: a fixed slot the picture is fitted INTO, so an icon and a
+   848x5 chat-box strip both land in the same row height without either being
+   distorted. object-fit keeps the crop's own aspect ratio and pixelated
+   rendering keeps a doubled 12px icon the blocky thing the detector matched
+   rather than a smoothed guess at one (brief 7: the intent carries over, the
+   terminal cell arithmetic does not). */
+.el-crop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 36px;
+}
+
+.el-crop img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+/* -- harness log pane (F8, /log) ------------------------------------------ */
+
+.logpane {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  height: 30%;
+  min-height: 90px;
+  max-height: 260px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-raised);
+}
+
+.logpane-head {
+  flex: none;
+  padding: 6px 18px 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.logpane-head .hint {
+  font-weight: 400;
+  letter-spacing: 0;
+}
+
+/* One entry is exactly one line: the printed form is a COLUMN layout (time,
+   kind, sentence) and a wrapped sentence would break the column the eye scans,
+   so a long line scrolls sideways rather than reflowing. */
+.log-lines {
+  flex: 1;
+  margin: 0;
+  padding: 0 18px 8px;
+  overflow: auto;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+/* -- key hints ------------------------------------------------------------
+   The TUI's stock Footer, in this shell's chrome: one compact row of "key
+   what", above the status bar and sharing its ground so the two read as one
+   strip of chrome rather than two bars. Always drawn - a hint bar that came and
+   went would be the flash banner's mistake one end of the window down - so its
+   height is reserved for the whole run and a state change costs no layout at
+   all.
+
+   One row, never two: the row is a cheatsheet read sideways, and a bar that
+   grew a second line when a gate opened would move the composer. What does not
+   fit is clipped, in the table's own order, which puts the app keys and the
+   approval keys first. */
+
+.keyhints {
+  display: flex;
+  flex: none;
+  flex-wrap: nowrap;
+  gap: 14px;
+  padding: 4px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-sunken);
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  /* Not focusable, not selectable: a click on it must not be a way to lose the
+     caret out of the chat box (app.js also refuses the mousedown). */
+  user-select: none;
+}
+
+.kh {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.kh-key {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-weight: 700;
+}
+
+/* The middle of the footer's three states: the key does not fire right now but
+   it will - a turn has to finish, a gate has to open, the caret has to leave
+   the chat box. Dimmed rather than dropped, because a row that vanished and
+   came back would teach the user nothing about when it works. The third state
+   is being absent from the strip entirely, which is a decision in app.js. */
+.kh.dim {
+  opacity: 0.4;
+}
+
+/* -- status bar ----------------------------------------------------------- */
+
+.statusbar {
+  display: flex;
+  flex: none;
+  gap: 16px;
+  padding: 5px 18px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+.seg {
+  color: var(--text);
+}
+
+.st-dim {
+  color: var(--text-dim);
+}
+
+.st-plan {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.st-unattended,
+.st-instr {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.st-busy {
+  color: var(--warn);
+}
+
+.st-attn {
+  color: var(--warn);
+  font-weight: 700;
+}
+
+.st-done,
+.st-armed {
+  color: var(--ok);
+}
+
+.st-err {
+  color: var(--err);
+}
+
+/* Red is reserved for the two "something is off" badges, and they get their own
+   slots so a disarmed YOLO session is visible as the pair it is. */
+.st-yolo,
+.st-disarmed {
+  color: var(--err);
+  font-weight: 700;
+}
+
+.st-sub {
+  color: var(--magenta);
+  font-weight: 700;
+}
+
+/* The status bar's last segment (the project root) is the one that may be
+   sacrificed when the window is narrow. */
+#seg-root {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+/* -- the service editor (F2) ----------------------------------------------
+   A page modal over the whole per-service profile. Its own scrim, one z-index
+   BELOW the confirm/summary one, because two of its actions ("Forget
+   appearance" and the discard-the-pending-edit close) open a confirm over it.
+
+   Three columns and a footer strip - the TUI's information hierarchy without
+   any of its cell arithmetic: fixed lanes for the settings and the appearance
+   rows, one flexible column for the editable form, and a footer whose width no
+   column can squeeze (ui-briefs/service-editor.md §7). Nothing here is pinned
+   in character cells and the appearance column scrolls like any other list;
+   both of those constraints exist only because sixel escapes bypass a
+   terminal's compositor. */
+
+.svc-scrim {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--scrim-deep);
+  z-index: 25;
+}
+
+.svc-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(1120px, 96vw);
+  max-height: 92vh;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.svc-title {
+  margin-bottom: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.svc-body {
+  display: grid;
+  grid-template-columns: 260px minmax(220px, 1fr) 320px;
+  gap: 18px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.svc-col {
+  min-width: 0;
+}
+
+.svc-col > .side-title:first-child {
+  margin-top: 0;
+}
+
+.svc-col select,
+.svc-col input[type="text"],
+.svc-col textarea {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+}
+
+.svc-col textarea {
+  resize: vertical;
+}
+
+.svc-col input:disabled,
+.svc-col select:disabled,
+.svc-col textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Checkboxes and radios read as one list of sentences: the label carries the
+   row, and a disabled one is dimmed rather than removed so the column cannot
+   reflow while a new service is being filled in (brief §3.5). */
+.svc-check {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.svc-check input {
+  margin: 0;
+  flex: none;
+}
+
+.svc-check.off {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.svc-slider {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.svc-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.svc-slider-value {
+  min-width: 2.5em;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
+}
+
+/* Both inline readouts are advisory, not failures: the matcher one says a
+   saved choice will silently fall back, the signal one says a ticked detector
+   has no appearance to run against. Empty most of the time, and collapsed when
+   it is (no reserved band that would make the column jump). */
+.svc-warn:empty {
+  display: none;
+}
+
+.svc-warn {
+  margin: 4px 0 2px;
+  color: var(--warn);
+  font-size: 11.5px;
+}
+
+.svc-error:empty {
+  display: none;
+}
+
+.svc-error {
+  margin-top: 8px;
+  color: var(--err);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.svc-kinds {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.svc-kind {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+/* The crop box and the two arrows that walk its stack, as one unit: the arrows
+   are drawn (disabled) even for a kind with one image, so a second capture
+   landing cannot reflow the column under the pointer. */
+.svc-variants {
+  display: flex;
+  flex: none;
+  gap: 2px;
+  align-items: center;
+}
+
+.svc-arrow {
+  padding: 3px 5px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* The crop box is drawn whether or not it holds a picture, so a capture
+   landing cannot walk every row below it down the column. */
+.svc-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 64px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.svc-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  image-rendering: pixelated;
+}
+
+.svc-kind-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.svc-kind-name {
+  font-size: 12.5px;
+}
+
+.svc-kind-status {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.svc-kind-actions {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+
+.svc-kind-actions button {
+  padding: 3px 8px;
+  font-size: 11.5px;
+}
+
+.svc-footer {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.svc-footer .hint {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.svc-modal button.danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.svc-modal button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* == the SSH connect dialog (parity increment 7) ==========================
+   The service editor's frame, one surface over: a scrim, a raised panel, a
+   footer strip. What is different is that the middle is a picture of something
+   RUNNING somewhere else, so the checklist is the only part of this shell that
+   has to read as time passing - hence one row per step, in the sequence's own
+   order, with a state colour and nothing that moves except the running row. */
+.conn-scrim {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: var(--scrim-deep);
+  z-index: 26;
+}
+
+.conn-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(860px, 96vw);
+  max-height: 92vh;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+}
+
+.conn-head {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.conn-body {
+  overflow-y: auto;
+  flex: 1;
+  min-height: 0;
+}
+
+.conn-cols {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  gap: 18px;
+}
+
+.conn-col {
+  min-width: 0;
+}
+
+.conn-col > .side-title:first-child {
+  margin-top: 0;
+}
+
+.conn-col input[type="text"] {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* The two picker sections. A row is a button so it is reachable by keyboard
+   without this dialog inventing a focus model of its own. */
+.conn-list {
+  margin: 0 0 6px;
+  padding: 0;
+  list-style: none;
+}
+
+.conn-list:empty::after {
+  content: "none";
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.conn-row {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conn-row:hover {
+  border-color: var(--line);
+  background: var(--bg);
+}
+
+.conn-row-detail {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.conn-error:empty,
+.conn-failure:empty {
+  display: none;
+}
+
+.conn-error,
+.conn-failure {
+  margin-top: 8px;
+  color: var(--err);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+/* One row per step, all six, always. `pending` is the resting state and it is
+   what a row AFTER a failure keeps: a stage that vanished, or ticked, would say
+   the opposite of what happened (ssh-connect.md §3.4). */
+.conn-steps {
+  margin: 4px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.conn-step {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.conn-step-mark {
+  width: 1.4em;
+  flex: none;
+  text-align: center;
+}
+
+.conn-step-note {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.conn-step-pending {
+  color: var(--text-dim);
+}
+
+.conn-step-running .conn-step-mark {
+  color: var(--accent);
+}
+
+.conn-step-ok .conn-step-mark {
+  color: var(--ok);
+}
+
+.conn-step-failed {
+  color: var(--err);
+}
+
+/* The target-owns-its-policy banner. Deliberately not a toast: it is the one
+   thing about a remote session a user will otherwise discover by wondering why
+   their own rules stopped applying (remote-ssh.md, "the target owns its
+   policy"). */
+.conn-policy {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg);
+}
+
+.conn-policy div {
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.conn-save {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.conn-save input[type="text"] {
+  width: 200px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+.conn-footer {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+/* The sidebar's standing remote marker. Bordered rather than plain text: it is
+   a fact about a different machine sitting in a column otherwise entirely about
+   this one. */
+.side-remote {
+  margin: 4px 0 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+}
+
+.side-remote div {
+  padding: 1px 0;
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.side-remote div:first-child {
+  color: var(--text);
+  font-family: var(--mono);
+}
+
+.side-remote-lost div:nth-child(2) {
+  color: var(--warn);
+}

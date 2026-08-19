@@ -1,0 +1,118 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentclip"
+version = "0.1.0"
+description = "Use any web-chat LLM as a coding agent over the clipboard"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "textual>=8.2,<9",
+    "copykitten>=2.0,<3",
+    "pyperclip>=1.11,<2",
+    "platformdirs>=4",
+    "tomli-w>=1.2.0",
+    "pillow>=11,<12",
+    "textual-image>=0.8,<1",
+    # The SSH host (hosts/ssh.py): one persistent connection, exec channels and
+    # SFTP in one synchronous library. Imported lazily, so a local session never
+    # pays for it (docs/design/remote-ssh.md decision 7).
+    "paramiko>=3.4,<4",
+]
+
+[project.optional-dependencies]
+# The OpenCV matcher backend (screen.matchers), opt in per service in the
+# service editor's MATCHING block. Deliberately NOT a runtime dependency: it is
+# ~60MB of compiled wheels against a project that ships as a PyInstaller
+# one-file build, and the built-in anchor search needs nothing at all. Both are
+# imported lazily inside functions and the backend falls back to anchors when
+# they are absent, so an install without this extra is fully functional.
+cv = [
+    "opencv-python-headless>=4.10",
+    "numpy>=2",
+]
+mcp = [
+    "mcp>=2,<3",
+]
+# The GUI shell (agentclip.shell.gui): a native window rendering the packaged
+# HTML/CSS/JS frontend through the WebView2 runtime Windows already ships
+# (docs/design/gui.md section 2). An extra rather than a runtime dependency for
+# the same reason as the others: the TUI is the default shell and must not pay
+# for a GUI it never opens, so `agentclip.shell.gui.shell` imports pywebview
+# lazily inside its functions and cli.py only reaches for the package on --gui.
+gui = [
+    "pywebview>=5.3,<6",
+]
+
+[project.scripts]
+agentclip = "agentclip.cli:main"
+# The engine half, as a named executable. A remote session is deployed by
+# installing this same package on the SSH target (uv tool install / pipx / pip);
+# the master then launches `agentclip-engine` by name over an exec channel and
+# speaks the JSON-lines wire over its stdio (docs/design/remote-executor.md
+# section 2.6). Nothing is pushed to the target at connect time.
+agentclip-engine = "agentclip.engine.link.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.25",
+    "pytest-textual-snapshot",
+    "textual-dev",
+    "ruff",
+    "mypy",
+    "mcp>=2,<3",
+    "pywebview>=5.3,<6",
+]
+build = [
+    "pyinstaller>=6.11",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentclip"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "real_os: exercises real OS input/clipboard/screen APIs; opt in with AGENTCLIP_OS_TESTS=1",
+    "real_ssh: talks to a real remote machine; opt in with AGENTCLIP_SSH_TESTS=1 + AGENTCLIP_SSH_TARGET",
+]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+ignore = ["E501", "SIM108"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+mypy_path = "src"
+
+# The optional cv extra's stubs are not checked: numpy's bundled .pyi files use
+# `type` statements, which are 3.12 syntax, and this project type-checks at its
+# real floor of 3.11. Skipping them costs nothing here - both packages are
+# imported inside functions in exactly one module (screen.matchers), which
+# guards every use with its own try/except.
+# Paramiko ships no type information (no py.typed, no stubs), so its names are
+# Any here. Only hosts/ssh.py imports it, and that module's own signatures are
+# annotated - what is untyped is the library surface, not our use of it.
+[[tool.mypy.overrides]]
+module = ["paramiko", "paramiko.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["cv2", "cv2.*", "numpy", "numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true
+ignore_errors = true
+ignore_missing_imports = true

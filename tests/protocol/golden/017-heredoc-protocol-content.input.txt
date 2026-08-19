@@ -1,0 +1,13 @@
+~~~~
+===CLIP:CALL id=1 tool=write_file===
+path: docs/wire-example.txt
+mode: overwrite
+content <<EOT3
+===CLIP:END===
+>>>
+EOT2
+```
+EOT3
+===CLIP:END===
+===CLIP:EOM calls=1===
+~~~~

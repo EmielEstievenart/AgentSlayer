@@ -1,0 +1,5 @@
+﻿===CLIP:CALL id=1 tool=list_dir===
+path: .
+depth: 2
+===CLIP:END===
+===CLIP:EOM calls=1===

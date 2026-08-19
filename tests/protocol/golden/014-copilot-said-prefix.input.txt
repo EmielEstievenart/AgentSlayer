@@ -1,0 +1,8 @@
+Copilot said:
+I'll read the file first.
+~~~~
+===CLIP:CALL id=1 tool=read_file===
+path: src/app.py
+===CLIP:END===
+===CLIP:EOM calls=1===
+~~~~

@@ -1,0 +1,19 @@
+{
+  "kind": "ack",
+  "calls": [],
+  "prose": [
+    "Got it."
+  ],
+  "warnings": [],
+  "eom": {
+    "present": false,
+    "calls": null,
+    "turn": null,
+    "chat": null
+  },
+  "truncated": false,
+  "ack_part": 2,
+  "ack_total": 3,
+  "ack_chat": "amber-falcon",
+  "nack_reason": null
+}

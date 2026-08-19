@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import queue
 import subprocess
 import sys
 import threading
@@ -38,6 +39,7 @@ import time
 from collections.abc import Iterator
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -48,6 +50,7 @@ from agentclip.engine.link import wire
 from agentclip.engine.link.factory import EngineRequest, make_engine_builder
 from agentclip.engine.link.wire import EngineLinkError
 from agentclip.engine.states import Decision, EngineStateError
+from agentclip.executor.mcp.types import McpServerStatus
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.shell.app.link import LocalLink
 from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLink, RemoteLinkClient
@@ -361,6 +364,169 @@ async def test_one_process_hosts_a_second_session(server: _Server) -> None:
     await asyncio.wait_for(master.start_task("the master task"), DEADLINE)
     assert (await asyncio.wait_for(master.status(), DEADLINE)).phase.name == "AWAITING_REPLY"
     assert (await asyncio.wait_for(sub.status(), DEADLINE)).phase.name == "IDLE"
+
+
+async def test_the_mcp_settle_rides_build_session_and_the_pull_round_trips(
+    server: _Server,
+) -> None:
+    """MCP status crosses as a LINK-SCOPED call, and a snapshot rides the build.
+
+    The target here has no MCP configured (the isolation flags point HOME and the
+    global config at paths that do not exist, so no permissions.json contributes
+    a server), which makes the empty tuple the honest answer and the round trip
+    the thing under test: a `()` that arrived over the wire is a `()` the codec,
+    the dispatch and the client all agreed on.
+    """
+    # Before any session exists - which is when a Shell first wants to paint the
+    # block, and exactly what "link-scoped" buys.
+    assert await asyncio.to_thread(server.client.mcp_statuses) == ()
+
+    link = server.session()
+    # The settle came home on build_session's one answer, on both the object the
+    # controller holds and the connection that minted it.
+    assert link.build_mcp_statuses == ()
+    assert server.client.build_mcp_statuses == ()
+    # ...and the pull is available through the Link seam itself, no session named.
+    assert await asyncio.wait_for(link.mcp_statuses(), DEADLINE) == ()
+
+    # A session call still works afterwards: the link-scoped call left the
+    # connection exactly where it found it.
+    await asyncio.wait_for(link.start_task("Write the note file."), DEADLINE)
+    assert (await asyncio.wait_for(link.status(), DEADLINE)).phase.name == "AWAITING_REPLY"
+
+
+# == one reader on the connection, on scripted streams =========================
+#
+# The client-level lock cannot be shown against a real server, because a real
+# server answers too fast to catch two calls overlapping. So the far side is a
+# pair of hand-driven streams: nothing is answered until the test says so, which
+# makes "the second call had not even written its frame" an assertion about
+# ORDER rather than about timing.
+
+
+class _Gated:
+    """A reader and a writer whose every line is released by hand.
+
+    Satisfies ``LineReader`` and ``LineWriter`` structurally, which is the whole
+    reason those are Protocols: a transport is whatever can do these three
+    things.
+    """
+
+    def __init__(self) -> None:
+        self.written: list[dict[str, Any]] = []
+        self._answers: queue.Queue[str] = queue.Queue()
+        self._wrote = threading.Semaphore(0)
+
+    # -- the reader half -------------------------------------------------------
+
+    def readline(self) -> str:
+        return self._answers.get()
+
+    # -- the writer half -------------------------------------------------------
+
+    def write(self, s: str, /) -> int:
+        self.written.append(wire.decode_line(s))
+        self._wrote.release()
+        return len(s)
+
+    def flush(self) -> None: ...
+
+    # -- driving ---------------------------------------------------------------
+
+    def answer(self, frame: dict[str, Any]) -> None:
+        self._answers.put(wire.encode_line(frame))
+
+    def wrote_a_frame(self, timeout: float = DEADLINE) -> bool:
+        return self._wrote.acquire(timeout=timeout)
+
+    def methods(self) -> list[str]:
+        return [frame["method"] for frame in self.written if frame["type"] == "call"]
+
+
+def test_a_link_scoped_call_cannot_interleave_with_a_session_call() -> None:
+    """The reason the serialization moved into the client.
+
+    A per-link ``asyncio.Lock`` serializes calls on ONE link, and that used to be
+    enough because every call belonged to a link. ``mcp_statuses`` belongs to
+    none, so nothing would stand between it and a session call's reads - two
+    readers on one stream, each consuming frames the other is waiting for. Here
+    the session call is parked mid-read and the link-scoped one is started: it
+    must not have put so much as its call frame on the wire, and the answer that
+    then arrives must reach the call it was meant for.
+    """
+    gated = _Gated()
+    client = RemoteLinkClient(gated, gated)
+    rows = (McpServerStatus(name="github", state="connected", tool_count=17),)
+    session_answer: list[object] = []
+    link_answer: list[object] = []
+    failures: list[BaseException] = []
+
+    def run(target, sink: list[object]) -> None:  # type: ignore[no-untyped-def]
+        try:
+            sink.append(target())
+        except BaseException as exc:  # noqa: BLE001 - reported, not raised, off-thread
+            failures.append(exc)
+
+    def a_session_call() -> object:
+        return client.roundtrip("s1", "set_yolo", wire.encode_params("set_yolo", enabled=True))
+
+    session_call = threading.Thread(target=run, args=(a_session_call, session_answer), daemon=True)
+    session_call.start()
+    assert gated.wrote_a_frame(), "the session call never wrote its frame"
+    assert gated.methods() == ["set_yolo"]
+
+    link_call = threading.Thread(target=run, args=(client.mcp_statuses, link_answer), daemon=True)
+    link_call.start()
+    # Parked on the client's lock: not on the wire, therefore not in a read
+    # either. A bounded proof of ABSENCE - the only kind there is.
+    assert not gated.wrote_a_frame(0.25)
+    assert gated.methods() == ["set_yolo"]
+
+    # The answer to call 1 belongs to call 1. An unserialized second reader is
+    # exactly what would steal it (and then fail on the id it never sent).
+    gated.answer(wire.result_frame(1, wire.encode_result("set_yolo", True)))
+    session_call.join(DEADLINE)
+    assert session_answer == [True]
+
+    # ...and only now does the link-scoped call get its turn.
+    assert gated.wrote_a_frame(), "the link-scoped call never got the connection"
+    assert gated.methods() == ["set_yolo", "mcp_statuses"]
+    gated.answer(wire.result_frame(2, wire.encode_result("mcp_statuses", rows)))
+    link_call.join(DEADLINE)
+    assert link_answer == [rows]
+    assert not failures, failures
+
+
+def test_a_cancel_is_written_while_a_call_holds_the_connection() -> None:
+    """The one frame that must NOT wait for the call lock.
+
+    ``request_cancel`` is sync and out-of-band precisely so it can be called from
+    the event loop mid-turn; a cancel that queued behind the call lock would
+    queue behind the very call it exists to interrupt.
+    """
+    gated = _Gated()
+    client = RemoteLinkClient(gated, gated)
+    answer: list[object] = []
+
+    call = threading.Thread(
+        target=lambda: answer.append(
+            client.roundtrip("s1", "execute", wire.encode_params("execute"))
+        ),
+        daemon=True,
+    )
+    call.start()
+    assert gated.wrote_a_frame(), "the execute call never wrote its frame"
+
+    client.send_cancel("s1")  # from "the event loop", with the call outstanding
+    assert gated.wrote_a_frame(), "the cancel never reached the wire"
+    assert [frame["type"] for frame in gated.written] == ["call", "cancel"]
+
+    done = wire.decode_step_result(
+        {"kind": "Done", "summary": "cancelled", "outbound": None, "result": ""}
+    )
+    gated.answer(wire.result_frame(1, wire.encode_result("execute", done)))
+    call.join(DEADLINE)
+    assert type(answer[0]).__name__ == "Done"
 
 
 # == a whole turn, in another process ==========================================

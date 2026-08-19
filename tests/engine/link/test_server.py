@@ -26,7 +26,7 @@ import os
 import queue
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -329,6 +329,9 @@ def test_build_session_answers_with_the_immutable_facts(link: _Link) -> None:
     assert info.chat_name == CHAT
     assert info.role == "master"
     assert info.build_warnings == ()
+    # No MCP configured on this "target", which is the everyday case: the field
+    # is present and empty rather than absent.
+    assert info.mcp_statuses == ()
 
 
 def test_one_server_hosts_several_sessions(link: _Link) -> None:
@@ -388,6 +391,77 @@ def test_every_session_a_server_hosts_shares_one_mcp_runtime(
     assert made[0][1:] == (project, "")
 
 
+class _StubBuilder:
+    """The smallest thing ``serve`` will take: a build, and an MCP reading.
+
+    Two members and not one, because the builder OWNS the MCP runtime engine-side
+    (docs/design/remote-executor.md section 2.7) and the server asks it for the
+    statuses - on the link-scoped call, and again for every SessionInfo it
+    answers with.
+    """
+
+    def __init__(
+        self,
+        build: Callable[[Any], Any] | None = None,
+        statuses: tuple[McpServerStatus, ...] = (),
+    ) -> None:
+        self._build = build
+        self._statuses = statuses
+        self.status_reads = 0
+
+    def __call__(self, request: Any) -> Any:
+        if self._build is None:
+            raise AssertionError("this stub builder was never meant to build")
+        return self._build(request)
+
+    def mcp_statuses(self) -> tuple[McpServerStatus, ...]:
+        self.status_reads += 1
+        return self._statuses
+
+
+_ROWS: tuple[McpServerStatus, ...] = (
+    McpServerStatus(name="github", state="connected", detail="", tool_count=17),
+    McpServerStatus(name="db", state="failed", detail="spawn failed: ENOENT"),
+)
+
+
+def test_mcp_statuses_answers_the_builders_rows_with_no_session_named() -> None:
+    """The link-scoped pull. No session on the frame, because the MCP runtime
+    belongs to the PROCESS: one builder, one manager, however many sessions."""
+    stub = _StubBuilder(statuses=_ROWS)
+    conn = _Link(stub)
+    try:
+        conn.hello()
+        assert conn.ask("mcp_statuses") == _ROWS
+        # A pull, not a subscription: asking again asks the builder again, which
+        # is how a Shell sees a server that finished connecting after the build.
+        assert conn.ask("mcp_statuses") == _ROWS
+        assert stub.status_reads == 2
+    finally:
+        assert conn.shutdown() == 0
+
+
+def test_a_builder_with_no_mcp_answers_an_empty_tuple(link: _Link) -> None:
+    link.hello()
+    assert link.ask("mcp_statuses") == ()
+
+
+def test_build_session_carries_the_settle_the_builder_already_has(builder: Any) -> None:
+    """The rows ride home on build_session's answer, so a Shell that has just
+    armed a session need not spend a second round trip learning what the far
+    side already knew."""
+    stub = _StubBuilder(builder, _ROWS)
+    conn = _Link(stub)
+    try:
+        conn.hello()
+        info = conn.ask("build_session", service="claude")
+        assert info.chat_name == CHAT
+        assert info.mcp_statuses == _ROWS
+        assert stub.status_reads == 1  # exactly one read, on the way to the answer
+    finally:
+        assert conn.shutdown() == 0
+
+
 def test_a_build_failure_leaves_the_server_running(link: _Link) -> None:
     """A builder that raises costs the client one call, not the process."""
     boom = threading.Event()
@@ -396,7 +470,7 @@ def test_a_build_failure_leaves_the_server_running(link: _Link) -> None:
         boom.set()
         raise RuntimeError("no such project on this machine")
 
-    conn = _Link(exploding)
+    conn = _Link(_StubBuilder(exploding))
     try:
         conn.hello()
         error = conn.ask_error("build_session", service="claude")

@@ -55,13 +55,14 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from typing import Any, TextIO
+from typing import Any, Protocol, TextIO
 
 from agentclip import __version__
 from agentclip.engine.engine import CallProgress, Engine
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.engine.link.wire import (
     BUILD_SESSION,
+    MCP_STATUSES,
     SESSION_METHODS,
     CallFrame,
     SessionInfo,
@@ -81,8 +82,24 @@ from agentclip.engine.link.wire import (
     read_hello,
     result_frame,
 )
+from agentclip.executor.mcp.types import McpServerStatus
 
-EngineBuilder = Callable[[EngineRequest | str], Engine]
+
+class EngineBuilder(Protocol):
+    """What ``serve`` needs of the object it builds engines from.
+
+    A Protocol rather than the ``Callable`` alias this used to be, because the
+    builder is no longer only a function: the MCP runtime is owned engine-side
+    (docs/design/remote-executor.md section 2.7), so the server has to be able to
+    ASK it what that runtime looks like - both to answer the link-scoped
+    ``mcp_statuses`` call and to put the settle in ``build_session``'s answer.
+    :class:`agentclip.engine.link.factory.EngineBuilder` satisfies it as it
+    stands; nothing else in ``src`` builds engines for a link.
+    """
+
+    def __call__(self, request: EngineRequest | str, /) -> Engine: ...
+
+    def mcp_statuses(self) -> tuple[McpServerStatus, ...]: ...
 
 EXIT_OK = 0
 EXIT_PROTOCOL = 1
@@ -170,7 +187,9 @@ def serve(
     ``builder`` is :func:`agentclip.engine.link.factory.make_engine_builder`'s
     return value - and it is called MORE THAN ONCE over a process's life: one
     server hosts every session of one link, and the controller builds sub-agent
-    engines mid-session from the same factory.
+    engines mid-session from the same factory. It is also asked for its
+    ``mcp_statuses`` (see :class:`EngineBuilder`), which is the whole of what
+    this process tells the Shell about the MCP runtime it owns.
 
     Text streams rather than a socket or a subprocess so the loop can be driven
     in-process by tests over a pair of pipes; in production they are the
@@ -301,6 +320,9 @@ class _Server:
         if call.method == BUILD_SESSION:
             self._spawn(self._run_build, call)
             return
+        if call.method == MCP_STATUSES:
+            self._spawn(self._run_mcp_statuses, call)
+            return
         if call.method not in _DISPATCHABLE:
             # read_call already refused a method the wire does not define; this
             # is the whitelist that stands between a string off the wire and
@@ -399,8 +421,37 @@ class _Server:
             chat_name=engine.chat_name,
             role=engine.role,
             build_warnings=engine.build_warnings,
+            # The settle rides home with the session it settled for: the build
+            # above already waited on the catalog (factory._sized_registry gives
+            # a pending/connecting runtime 0.5s), so by now these rows are the
+            # ones the Shell wants to paint - and asking for them cost this
+            # process nothing, where a second round trip would have cost the
+            # Shell a whole one.
+            mcp_statuses=self._builder.mcp_statuses(),
         )
         self._out.send(result_frame(call.id, encode_result(BUILD_SESSION, info)))
+
+    def _run_mcp_statuses(self, call: CallFrame) -> None:
+        """The link-scoped read: what the MCP runtime of THIS PROCESS looks like.
+
+        On a worker thread like ``build_session``, and for the same reason - the
+        first ask is what BUILDS the manager (the builder is lazy), so it is not
+        work the reader thread may sit down to. No session is involved: one
+        builder owns one manager however many sessions it hosts, so this answer
+        belongs to the connection (wire.LINK_METHODS).
+        """
+        try:
+            decode_params(MCP_STATUSES, call.params)
+        except WireError as exc:
+            self._out.send(error_frame(call.id, "bad_request", str(exc)))
+            return
+        try:
+            statuses = self._builder.mcp_statuses()
+        except Exception as exc:  # noqa: BLE001 - a status read is not a crash
+            _log(self._log, f"mcp_statuses failed: {type(exc).__name__}: {exc}")
+            self._out.send(error_frame_for(call.id, exc))
+            return
+        self._out.send(result_frame(call.id, encode_result(MCP_STATUSES, statuses)))
 
     def _emit_progress(self, sid: str, progress: CallProgress) -> None:
         self._out.send(progress_frame(sid, progress))

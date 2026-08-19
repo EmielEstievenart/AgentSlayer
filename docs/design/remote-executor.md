@@ -320,6 +320,19 @@ caller asks immediately — `cli.main` reads the statuses to decide whether the
 shells get a status source at all — so the connects still kick off at launch,
 overlapping the first paint exactly as they did when `main()` built the manager.
 
+**Status now crosses the link.** The builder's `mcp_statuses()` is no longer
+reachable only in-process: it is a link-scoped wire method and a field on
+`SessionInfo` (§2.9), so a Shell driving a *remote* engine reads the target's MCP
+runtime the same way it reads a local one — `await link.mcp_statuses()`, with no
+`executor.mcp` import on either path. The `Link` Protocol grew the one call, and
+`LocalLink` answers it from a statuses callable `cli.LinkFactory` hands it at
+construction (its own `statuses`, which is the builder's). Layering is unchanged
+and deliberately so: the Protocol's return type is a **shell-side structural
+Protocol**, `shell.app.link.McpStatusLine` (moved down from `controller.py`,
+which now imports it), so nothing in `shell/app` names `McpServerStatus` — the
+real rows arrive as values, out of the builder in local mode and out of wire's
+codec in remote mode.
+
 What did **not** move is the legacy per-call `SshHost` path: it is still the
 default `--ssh` mode, its config still comes off the target while the process
 spawning servers is this PC, so `cli` passes `mcp_remote_target=<host name>`
@@ -359,7 +372,8 @@ versions" below; the ack also carries a uuid4 `server_id`, which names the
 PROCESS and exists so §2.3's detach/reattach mode can be added without a
 protocol redesign — v1 only checks it is non-empty);
 `call` (`id`, `method`, `params`, plus `session` for the 13 session-scoped
-methods — `build_session` has none, because it is what mints one); `result`
+methods — the two **link-scoped** ones have none: `build_session` because it is
+what mints a session, `mcp_statuses` because it never has one); `result`
 (`id`, `value`); `error` (`id`, `kind`, `detail`, optional `data`); `progress`
 and `output` (session-scoped events, no `id`); `cancel`.
 
@@ -426,13 +440,44 @@ unknown method or an unknown parameter all raise `WireError`. A boundary that
 guesses is a boundary that acts on a message it got wrong.
 
 **Per-method plumbing.** `encode_params`/`decode_params` and
-`encode_result`/`decode_result` are table-driven over the 14 methods, so the
+`encode_result`/`decode_result` are table-driven over the 15 methods, so the
 server and the `RemoteLink` each hold one line per method and everything that
 could drift between them is stated once. `build_session`'s params ARE
 `EngineRequest`'s fields; its result is a `SessionInfo` — the session id plus the
 three immutable facts the `Link` Protocol exposes synchronously (`chat_name`,
 `role`, `build_warnings`), carried home in that one answer exactly as §2.2 said
 a handshake would.
+
+**Link-scoped vs session-scoped, and why `mcp_statuses` is the former.**
+`wire.LINK_METHODS` is `(build_session, mcp_statuses)` and `is_link_method` is
+what the server's dispatch routes on: a link-scoped call is served by the
+**builder**, never by `getattr` on a hosted engine. `mcp_statuses` is there
+because the MCP runtime is owned by the builder — one manager per process,
+however many sessions it goes on to build (mcp.md §3, §2.7 above) — so every
+session of one connection would answer it identically, and naming a session on
+it would invent a per-session fact that does not exist. Its result is a list of
+`McpServerStatus` (all four fields; `state` strict-decoded against the seven-name
+lifecycle, so a state this side has never heard of is a `WireError` rather than a
+status line nobody can act on).
+
+**The settle rides `build_session`.** `SessionInfo` carries a fourth field,
+`mcp_statuses` — the runtime's rows as they stood when the session was built. It
+is a *snapshot*, not an immutable fact, and it rides along for the same reason
+`build_warnings` does: the Shell wants to paint the settle at the top of a
+session, and a round trip to learn what the far side already knew is a round trip
+spent on nothing. It is also mostly *settled* by then — `factory._sized_registry`
+has already given a pending/connecting runtime up to 0.5s while sizing the
+catalog — so the states are usually final rather than "connecting". "Usually",
+not "always", which is exactly what the link-scoped pull is for.
+
+**Cadence, v1: the Shell pulls; nothing is pushed.** There is no
+`mcp_status`-shaped event frame. The builder's `set_mcp_status_hook` fires
+engine-side and stays engine-side, so a server that finishes connecting after
+`build_session` answered does not tell the Shell — the Shell asks again. That is
+an accepted limitation of v1 and not an oversight: a push would need a background
+reader on the client (see §5), and the states that matter most (`failed`,
+`missing_sdk`, `disabled`, and the connected ones the catalog was sized against)
+are already final by the time the settle rides home.
 
 ### 2.10 The server loop (as built)
 
@@ -525,12 +570,29 @@ remotely.)
 
 **One reader, inside the call.** There is no background reader thread.
 `roundtrip` writes its call frame and then reads frames itself until that call's
-answer arrives. This is sound because of the contract the whole seam already
-rests on — **one call in flight per connection**: the controller serializes per
-link and only one link is live, so whoever is inside `roundtrip` is the only one
-entitled to read, and the server's per-session busy rule refuses a second call
-anyway. A reader thread would have bought nothing and cost a queue, a shutdown
-protocol and a second place for a frame to go missing.
+answer arrives. That rests on **one call in flight per connection** — and since
+link-scoped calls exist, the per-link `asyncio.Lock` can no longer promise it:
+`mcp_statuses` belongs to no link, so no per-link lock stands between it and a
+session call's reads, and two readers on one stream would each consume frames the
+other was waiting for. So the serialization now lives **in the client**: a
+`threading.Lock` held across the whole of `roundtrip`, write and
+read-until-answer together. The per-link locks stay on top of it — they are the
+`Link` contract, and they mirror the server's per-session busy rule — and the
+double-serialization costs nothing, because a connection that allowed two calls
+at once would have nowhere to put the second one's answer. A reader thread would
+have bought the same guarantee and cost a queue, a shutdown protocol and a second
+place for a frame to go missing.
+
+`send_cancel` stays **outside** the call lock (it takes only the send lock, as
+below): waiting for the call lock is precisely waiting for the call it exists to
+interrupt.
+
+**The MCP surface on this side.** `RemoteLinkClient.mcp_statuses()` is a sync
+link-scoped roundtrip — usable from a worker thread *before any session exists*,
+which is when a Shell first wants to paint the block — and `RemoteLink`
+`await`s it through `asyncio.to_thread` behind the link's own lock. The settle
+that came home on `build_session` is kept as `build_mcp_statuses` on both the
+client and the link it minted, so the first paint costs no round trip at all.
 
 **Events reach the link they belong to.** `progress`/`output` frames met on the
 way to an answer are dispatched **by session id** through the client's registry,
@@ -760,6 +822,14 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
   deltas and cancel are decided and built (§2.9). What is still open is the
   budget for the RunPanel's ~5/sec peek cadence over a real SSH connection — a
   cadence that is free in-process and unmeasured on the wire.
+- **A real MCP push over the wire**: v1's cadence is a pull (§2.9) — the settle
+  rides `build_session` and the Shell re-asks with `mcp_statuses`. A server that
+  connects (or fails) *after* the build therefore goes unnoticed until something
+  asks again. Turning the builder's `set_mcp_status_hook` into an event frame
+  needs a place on the client for an unsolicited frame to land while no call is
+  outstanding — a background reader thread (with the queue and shutdown protocol
+  §2.11 deliberately avoided) or a poll timer in the Shell. Which one, and
+  whether the cost is worth a status pane that updates itself, is open.
 - **ToolContext redesign**: agreed it can't cross the wire, but its remote
   replacement (session-scoped server-side state + thin per-call payload) is
   undesigned. Includes where `backup_hook`, `cancel_event`, and `on_output`

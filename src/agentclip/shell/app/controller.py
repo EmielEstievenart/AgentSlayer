@@ -47,7 +47,7 @@ from collections.abc import Awaitable, Callable, Coroutine, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol, TypeVar
+from typing import Any, TypeVar
 
 from agentclip.config import (
     Config,
@@ -80,7 +80,7 @@ from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.parser import peek_chat_name
 from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus, ToolCall
 from agentclip.shell.app.commands import command_list, help_text, lookup
-from agentclip.shell.app.link import Link
+from agentclip.shell.app.link import Link, McpStatusLine
 from agentclip.shell.app.types import SessionRef, SessionStats
 from agentclip.shell.app.view import ChatView, RunCall, SessionView, Severity
 
@@ -301,26 +301,6 @@ def _budget_body(exc: BudgetExceeded) -> str:
     )
 
 
-class McpStatusLine(Protocol):
-    """One MCP server's status row, as `/mcp` reads it.
-
-    Structural on purpose: the real rows are ``agentclip.executor.mcp.types
-    .McpServerStatus``, but the app layer does not import ``agentclip.executor.mcp``
-    (test_layering.py RULES - mcp is a leaf below config, and this layer's
-    only use for it is four read-only fields). Read-only properties so the
-    frozen dataclass satisfies it.
-    """
-
-    @property
-    def name(self) -> str: ...
-    @property
-    def state(self) -> str: ...
-    @property
-    def detail(self) -> str: ...
-    @property
-    def tool_count(self) -> int: ...
-
-
 def _mcp_server_line(status: McpStatusLine) -> str:
     """One transcript row per server: name, state, tools when connected, and
     the detail whenever there is one (a failure's whole value is its detail,
@@ -407,7 +387,7 @@ class SessionController:
         # Where /mcp reads its listing, or None when the app runs without an
         # MCP manager. A supplier of duck-typed rows rather than the manager
         # itself, so this layer stays clear of agentclip.executor.mcp (see
-        # McpStatusLine); the TUI passes McpManager.statuses, bound.
+        # link.McpStatusLine); the shells pass cli.LinkFactory.statuses, bound.
         self._mcp_statuses = mcp_statuses
 
         self._link: Link | None = None

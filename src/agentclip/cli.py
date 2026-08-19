@@ -71,7 +71,10 @@ class LinkFactory:
         self._builder = builder
 
     def __call__(self, request: EngineRequest | str) -> Link:
-        return LocalLink(self._builder(request))
+        # The link gets the same status source the shells do, so
+        # ``await link.mcp_statuses()`` answers in local mode exactly as it does
+        # over the wire - one seam, two modes, no branch in the caller.
+        return LocalLink(self._builder(request), mcp_statuses=self.statuses)
 
     def statuses(self) -> tuple[McpServerStatus, ...]:
         return self._builder.mcp_statuses()

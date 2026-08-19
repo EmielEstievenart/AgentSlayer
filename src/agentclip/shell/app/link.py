@@ -64,6 +64,31 @@ from agentclip.protocol.types import Outbound, ResultStatus
 _T = TypeVar("_T")
 
 
+class McpStatusLine(Protocol):
+    """One MCP server's status row, as a Shell reads it.
+
+    Structural on purpose, and it lives HERE rather than in the controller
+    because the seam is now what serves it: the real rows are
+    ``agentclip.executor.mcp.types.McpServerStatus``, but this layer does not
+    import ``agentclip.executor.mcp`` (test_layering.py RULES - mcp is a leaf
+    below config, and everything above the engine wants exactly four read-only
+    fields off it). ``LocalLink`` gets the real objects from the builder's
+    ``mcp_statuses`` callable and ``RemoteLink`` gets them out of wire's codec;
+    neither module names the type, and both hand back rows that satisfy this.
+
+    Read-only properties so the frozen dataclass satisfies it.
+    """
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def state(self) -> str: ...
+    @property
+    def detail(self) -> str: ...
+    @property
+    def tool_count(self) -> int: ...
+
+
 class Link(Protocol):
     """What a Shell may ask of an engine, wherever that engine is running."""
 
@@ -113,6 +138,24 @@ class Link(Protocol):
 
     async def arm_extra_instructions(self) -> ArmResult: ...
 
+    # -- what the engine's MACHINE is running, not what the session is --------
+
+    async def mcp_statuses(self) -> tuple[McpStatusLine, ...]:
+        """The MCP runtime's rows, as they stand right now.
+
+        Async and on the link because the runtime lives WHERE THE ENGINE DOES
+        (docs/design/remote-executor.md section 2.7): local mode reads it off
+        the builder in this process, remote mode asks the target across the
+        wire. It is deliberately NOT session-scoped - one builder owns one
+        manager however many sessions it makes - so a Shell may call it before
+        any session exists, and the answer is the same for all of them.
+
+        A PULL, not a subscription: v1 has no push over the wire, so a Shell
+        that wants a fresh reading takes one. ``()`` means MCP is unconfigured
+        on that machine, which is the everyday case.
+        """
+        ...
+
     # -- out-of-band, from the event loop, mid-call ---------------------------
 
     def request_cancel(self) -> None:
@@ -142,8 +185,19 @@ class LocalLink:
     tests, which assert on what was BUILT) should not have to fake one.
     """
 
-    def __init__(self, engine: Engine) -> None:
+    def __init__(
+        self,
+        engine: Engine,
+        *,
+        mcp_statuses: Callable[[], tuple[McpStatusLine, ...]] | None = None,
+    ) -> None:
         self.engine = engine
+        # Where this link reads the MCP runtime, or None when the caller has no
+        # runtime to read. A callable rather than the manager, for the layering
+        # reason McpStatusLine gives: `cli.LinkFactory` passes its own
+        # `statuses`, which is the builder's - so the same object that BUILT
+        # this engine is the one that answers for the servers beside it.
+        self._mcp_statuses = mcp_statuses
         # One in flight per link. Per-link rather than per-controller because
         # the link IS the resource being serialized; the controller only ever
         # calls the session that is currently live, so this is exactly the
@@ -210,6 +264,21 @@ class LocalLink:
 
     async def arm_extra_instructions(self) -> ArmResult:
         return await self._call(self.engine.arm_extra_instructions)
+
+    # -- the machine's MCP runtime ---------------------------------------------
+
+    async def mcp_statuses(self) -> tuple[McpStatusLine, ...]:
+        """Off the event loop, but NOT through the link's lock.
+
+        The runtime is the process's, not this session's, so serializing the
+        read behind whatever turn the engine is halfway through would make a
+        status pane wait on a 20-second command for a fact the command cannot
+        change. The thread hop stays: the first ask is what builds the manager,
+        and a manager's status read takes its own lock.
+        """
+        if self._mcp_statuses is None:
+            return ()
+        return await asyncio.to_thread(self._mcp_statuses)
 
     # -- out-of-band -----------------------------------------------------------
 

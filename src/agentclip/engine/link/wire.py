@@ -49,8 +49,12 @@ message the user finally reads names two installs rather than two integers.
 ``{"type":"call","id":<int>,"method":"<str>","params":{...}}``
     A request. ``id`` is client-chosen, strictly increasing, and echoed by
     exactly one ``result`` or ``error``. Session-scoped methods (the 13 `Link`
-    methods) also carry ``"session":"<sid>"``; ``build_session`` does not,
-    because it is what MINTS a session id.
+    methods) also carry ``"session":"<sid>"``; the two LINK-SCOPED ones do not.
+    ``build_session`` is link-scoped because it is what MINTS a session id;
+    ``mcp_statuses`` is link-scoped because MCP is process-wide - one builder
+    owns one manager however many sessions it goes on to build
+    (docs/design/mcp.md section 3), so the answer belongs to the CONNECTION and
+    would mean the same thing whichever session was named on it.
 ``{"type":"result","id":<int>,"value":<encoded value>}``
     The successful answer. ``value`` is whatever :func:`encode_result` makes of
     that method's return, and is ``null`` for the methods that return None.
@@ -134,6 +138,7 @@ from agentclip.engine.engine import (
 from agentclip.engine.link.factory import EngineRequest, Role
 from agentclip.engine.states import Decision, EngineStateError, Phase
 from agentclip.engine.store.backups import UndoReport
+from agentclip.executor.mcp.types import McpServerState, McpServerStatus
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.types import (
     EomInfo,
@@ -249,13 +254,36 @@ SESSION_METHODS: tuple[str, ...] = (
 )
 
 BUILD_SESSION = "build_session"
+MCP_STATUSES = "mcp_statuses"
 
-METHODS: tuple[str, ...] = (BUILD_SESSION, *SESSION_METHODS)
+# The calls that belong to the CONNECTION rather than to any one session, and
+# therefore travel without a ``session`` on the frame. There are two, and they
+# are link-scoped for two different reasons:
+#
+# * ``build_session`` has no session yet - it is what mints one;
+# * ``mcp_statuses`` has no session ever. The MCP runtime is owned by the
+#   BUILDER, one manager per process however many sessions it goes on to build
+#   (docs/design/mcp.md section 3, remote-executor.md section 2.7), so every
+#   session of one link would answer this identically. Naming a session on it
+#   would invent a per-session fact that does not exist.
+LINK_METHODS: tuple[str, ...] = (BUILD_SESSION, MCP_STATUSES)
+
+METHODS: tuple[str, ...] = (*LINK_METHODS, *SESSION_METHODS)
 
 
 def is_session_method(method: str) -> bool:
     """Does a ``call`` frame for this method have to carry a ``session``?"""
     return method in SESSION_METHODS
+
+
+def is_link_method(method: str) -> bool:
+    """Is this one of the calls the CONNECTION answers, with no session on it?
+
+    The complement of :func:`is_session_method` over :data:`METHODS`, and the
+    predicate the server's dispatch routes on: a link-scoped call is served by
+    the builder itself, never by ``getattr`` on a hosted engine.
+    """
+    return method in LINK_METHODS
 
 
 # -- lines ---------------------------------------------------------------------
@@ -729,6 +757,52 @@ def decode_engine_request(value: Any, what: str = "request") -> EngineRequest:
     )
 
 
+# -- the MCP runtime's status rows ---------------------------------------------
+#
+# The engine half owns the MCP runtime (docs/design/remote-executor.md section
+# 2.7: servers spawn where the engine runs), so a Shell's whole read of it is
+# these four fields. They cross as themselves rather than as pre-formatted text
+# because the two shells format them differently - a sidebar block and a `/mcp`
+# listing - and a wire that shipped a sentence would have picked one.
+
+# Read off the type, so a state added to the lifecycle is on the wire the same
+# day it is in the runtime.
+_MCP_STATES: tuple[str, ...] = get_args(McpServerState)
+
+
+def encode_mcp_status(value: McpServerStatus) -> dict[str, Any]:
+    return {
+        "name": value.name,
+        "state": value.state,
+        "detail": value.detail,
+        "tool_count": value.tool_count,
+    }
+
+
+def decode_mcp_status(value: Any, what: str = "mcp_status") -> McpServerStatus:
+    data = _mapping(value, what)
+    # Strict against the lifecycle's seven names: a state this side has never
+    # heard of would be painted as a status line nobody can act on, which is
+    # exactly the guess a protocol boundary must not make.
+    state: McpServerState = _literal_at(data, "state", _MCP_STATES, what)
+    return McpServerStatus(
+        name=_str_at(data, "name", what),
+        state=state,
+        detail=_str_at(data, "detail", what),
+        tool_count=_int_at(data, "tool_count", what),
+    )
+
+
+def encode_mcp_statuses(value: Any) -> Any:
+    return [encode_mcp_status(status) for status in value]
+
+
+def decode_mcp_statuses(value: Any, what: str = "mcp_statuses") -> tuple[McpServerStatus, ...]:
+    return tuple(
+        decode_mcp_status(item, f"{what}[{i}]") for i, item in enumerate(_as_list(value, what))
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SessionInfo:
     """What ``build_session`` answers with: an id plus the immutable facts.
@@ -738,12 +812,24 @@ class SessionInfo:
     construction and can never change for the life of a session, which is why a
     remote link may carry them home in this one answer and then read them with
     no await, the way the local one reads them off the engine.
+
+    ``mcp_statuses`` is the fourth, and it is a SNAPSHOT rather than a fact:
+    the MCP runtime's rows as they stood the moment the session was built. It
+    rides here for the same reason ``build_warnings`` does - the Shell wants to
+    paint the settle at the top of a session, and a second round trip to learn
+    what the far side already knew is a round trip spent on nothing. And by this
+    point the settle is mostly done: ``factory._sized_registry`` has already
+    waited up to 0.5s on the catalog for any server still pending/connecting, so
+    the states here are usually final rather than "connecting". "Usually", not
+    "always" - a server that is still settling keeps its state, and the
+    link-scoped :data:`MCP_STATUSES` call is how a Shell asks again later.
     """
 
     session: str
     chat_name: str
     role: Role
     build_warnings: tuple[str, ...] = ()
+    mcp_statuses: tuple[McpServerStatus, ...] = ()
 
 
 def encode_session_info(value: SessionInfo) -> dict[str, Any]:
@@ -752,6 +838,7 @@ def encode_session_info(value: SessionInfo) -> dict[str, Any]:
         "chat_name": value.chat_name,
         "role": value.role,
         "build_warnings": list(value.build_warnings),
+        "mcp_statuses": encode_mcp_statuses(value.mcp_statuses),
     }
 
 
@@ -762,6 +849,9 @@ def decode_session_info(value: Any, what: str = "session_info") -> SessionInfo:
         chat_name=_str_at(data, "chat_name", what),
         role=decode_role(_field(data, "role", what), f"{what}.role"),
         build_warnings=_strs_at(data, "build_warnings", what),
+        mcp_statuses=decode_mcp_statuses(
+            _field(data, "mcp_statuses", what), f"{what}.mcp_statuses"
+        ),
     )
 
 
@@ -974,6 +1064,9 @@ _PARAMS: dict[str, tuple[_Param, ...]] = {
         _Param("parent_chat_name", *_OPT_STR, None),
         _Param("task_chars", *_INT, 0),
     ),
+    # Link-scoped and parameterless: the connection's MCP runtime has nothing to
+    # be asked ABOUT - it is one manager, and the answer is every row of it.
+    MCP_STATUSES: (),
     "start_task": (_Param("task", *_STR),),
     "follow_up": (_Param("text", *_STR),),
     "ingest": (_Param("text", *_STR),),
@@ -999,6 +1092,7 @@ _PARAMS: dict[str, tuple[_Param, ...]] = {
 
 _RESULTS: dict[str, _Value] = {
     BUILD_SESSION: _Value(encode_session_info, decode_session_info),
+    MCP_STATUSES: _Value(encode_mcp_statuses, decode_mcp_statuses),
     "start_task": _Value(encode_outbound, decode_outbound),
     "follow_up": _Value(encode_outbound, decode_outbound),
     "ingest": _Value(encode_ingest_result, decode_ingest_result),

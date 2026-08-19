@@ -36,6 +36,7 @@ from agentclip.engine.link import wire
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.engine.states import Decision, EngineStateError, Phase
 from agentclip.engine.store.backups import UndoReport
+from agentclip.executor.mcp.types import McpServerState, McpServerStatus
 from agentclip.executor.permissions import PermissionMode
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.types import EomInfo, Outbound, ParsedReply, ParseIssue, ToolCall
@@ -238,6 +239,74 @@ def test_engine_request_round_trips() -> None:
     assert wire.decode_engine_request(wire.encode_engine_request(request)) == request
 
 
+def test_mcp_status_round_trips_with_every_field() -> None:
+    status = McpServerStatus(
+        name="github", state="connected", detail="2 ids shadowed by built-ins", tool_count=17
+    )
+    assert wire.decode_mcp_status(wire.encode_mcp_status(status)) == status
+
+
+@pytest.mark.parametrize("state", get_args(McpServerState))
+def test_every_mcp_state_survives(state: McpServerState) -> None:
+    """All seven of the lifecycle, including the two that are not failures -
+    `disabled` and `missing_sdk` are healthy states a status pane must show."""
+    status = McpServerStatus(name="demo", state=state, detail="", tool_count=0)
+    assert wire.decode_mcp_status(wire.encode_mcp_status(status)).state == state
+
+
+def test_an_unknown_mcp_state_is_refused() -> None:
+    payload = wire.encode_mcp_status(McpServerStatus(name="demo", state="pending"))
+    payload["state"] = "brooding"
+    with pytest.raises(wire.WireError):
+        wire.decode_mcp_status(payload)
+
+
+def test_mcp_statuses_is_a_link_scoped_method_of_its_own() -> None:
+    """A sibling of build_session, not a 14th session call: MCP is process-wide
+    (one builder, one manager), so the call belongs to the CONNECTION."""
+    assert wire.MCP_STATUSES in wire.METHODS
+    assert wire.MCP_STATUSES not in wire.SESSION_METHODS
+    assert set(wire.LINK_METHODS) == {wire.BUILD_SESSION, wire.MCP_STATUSES}
+    assert wire.is_link_method(wire.MCP_STATUSES)
+    assert not wire.is_session_method(wire.MCP_STATUSES)
+    # ...so its frame carries no session, and one that did is refused.
+    frame = wire.call_frame(1, wire.MCP_STATUSES, wire.encode_params(wire.MCP_STATUSES))
+    assert "session" not in frame
+    assert wire.read_call(frame).session is None
+    with pytest.raises(wire.WireError):
+        wire.call_frame(2, wire.MCP_STATUSES, {}, session="s-1")
+
+
+def test_session_info_carries_the_mcp_settle() -> None:
+    """The rows ride home on build_session's one answer, so the Shell can paint
+    the settle without a round trip of its own."""
+    info = wire.SessionInfo(
+        session="s1",
+        chat_name="brisk-otter",
+        role="master",
+        build_warnings=(),
+        mcp_statuses=(
+            McpServerStatus(name="github", state="connected", tool_count=17),
+            McpServerStatus(name="db", state="failed", detail="spawn failed: ENOENT"),
+        ),
+    )
+    back = wire.decode_session_info(wire.encode_session_info(info))
+    assert back == info
+    assert [row.name for row in back.mcp_statuses] == ["github", "db"]
+
+
+def test_a_session_info_with_no_mcp_at_all_round_trips() -> None:
+    """The everyday case - MCP unconfigured on that machine - and the field is
+    still written in full, because decode never fills one in for a peer."""
+    info = wire.SessionInfo(session="s1", chat_name="brisk-otter", role="master")
+    payload = wire.encode_session_info(info)
+    assert payload["mcp_statuses"] == []
+    assert wire.decode_session_info(payload) == info
+    del payload["mcp_statuses"]
+    with pytest.raises(wire.WireError):
+        wire.decode_session_info(payload)
+
+
 def test_call_progress_round_trips_both_phases() -> None:
     running = CallProgress(call_id=3, tool="run_command", phase="running")
     done = CallProgress(call_id=3, tool="run_command", phase="done", status="ok")
@@ -248,24 +317,33 @@ def test_call_progress_round_trips_both_phases() -> None:
 # -- per-method plumbing -------------------------------------------------------
 
 
-def test_session_methods_are_exactly_the_links_async_surface() -> None:
-    """The table and the Protocol must name the same 13 calls.
+def test_the_method_table_is_exactly_the_links_async_surface() -> None:
+    """The table and the Protocol must name the same calls.
 
     This is the drift guard the whole table exists for: a method added to `Link`
     without a wire entry is a call a remote session simply cannot make, and the
     only place that shows up otherwise is a remote run.
+
+    The split matters as much as the total. Thirteen of the Protocol's awaits are
+    SESSION-scoped and carry a session id; ``mcp_statuses`` is on the Protocol
+    too (a Shell asks its link, wherever the engine is) but is LINK-scoped on the
+    wire, because the MCP runtime belongs to the process, not to any one session.
+    ``build_session`` is the mirror image: link-scoped, and not on the Protocol
+    at all, because it is what MINTS the object the Protocol describes.
     """
     async_methods = {
         name
         for name, member in vars(Link).items()
         if not name.startswith("_") and inspect.iscoroutinefunction(member)
     }
-    assert async_methods == set(wire.SESSION_METHODS)
+    assert async_methods == set(wire.SESSION_METHODS) | {wire.MCP_STATUSES}
+    assert wire.BUILD_SESSION not in async_methods
     assert set(wire.METHODS) == set(wire._PARAMS) == set(wire._RESULTS)
 
 
 _PARAM_CASES: dict[str, dict[str, object]] = {
     "build_session": {"service": "claude", "role": "subagent", "task_chars": 40},
+    "mcp_statuses": {},
     "start_task": {"task": "port the parser"},
     "follow_up": {"text": "and add tests"},
     "ingest": {"text": "===CLIP:EOM turn=1==="},
@@ -315,7 +393,15 @@ def test_build_session_params_are_an_engine_request() -> None:
 
 _RESULT_CASES: dict[str, object] = {
     "build_session": wire.SessionInfo(
-        session="s-1", chat_name="brisk-otter", role="master", build_warnings=("mcp dropped",)
+        session="s-1",
+        chat_name="brisk-otter",
+        role="master",
+        build_warnings=("mcp dropped",),
+        mcp_statuses=(McpServerStatus(name="github", state="connected", tool_count=17),),
+    ),
+    "mcp_statuses": (
+        McpServerStatus(name="github", state="connected", tool_count=17),
+        McpServerStatus(name="db", state="needs_auth", detail="401 from the server"),
     ),
     "start_task": _outbound(),
     "follow_up": _outbound(),

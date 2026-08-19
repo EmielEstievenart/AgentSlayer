@@ -10,7 +10,9 @@ to make good on over a wire:
 * ``request_cancel`` is out-of-band and reaches the engine WHILE a call holds
   the lock, which is the whole reason it is not async;
 * the immutable session facts are readable synchronously, with no await;
-* exceptions cross unchanged, because the controller catches them by type.
+* exceptions cross unchanged, because the controller catches them by type;
+* the MCP rows come from the source the link was BUILT with, since the runtime
+  belongs to the machine the engine runs on and not to the engine.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+from dataclasses import dataclass
 
 import pytest
 
@@ -111,6 +114,38 @@ async def test_engine_exceptions_cross_the_seam_unchanged(make_engine) -> None:
 
     with pytest.raises(EngineStateError, match="nothing to undo"):
         await link.undo_last_turn()
+
+
+async def test_mcp_statuses_reads_the_source_it_was_built_with(make_engine) -> None:
+    """The MCP runtime is the BUILDER's, not the engine's, so the link is handed
+    a callable rather than reaching for a manager it must not import
+    (docs/design/remote-executor.md section 2.7)."""
+    @dataclass(frozen=True)
+    class Row:  # duck-typed McpStatusLine, exactly as the app layer types it
+        name: str
+        state: str
+        detail: str = ""
+        tool_count: int = 0
+
+    rows = (Row("github", "connected", tool_count=17), Row("db", "failed", "spawn failed"))
+    calls: list[None] = []
+
+    def statuses() -> tuple[Row, ...]:
+        calls.append(None)
+        return rows
+
+    link = LocalLink(make_engine(), mcp_statuses=statuses)
+    assert await link.mcp_statuses() == rows
+    # A pull, every time: a second ask reads the source again rather than a
+    # snapshot taken at construction.
+    assert await link.mcp_statuses() == rows
+    assert len(calls) == 2
+
+
+async def test_mcp_statuses_is_empty_when_the_link_was_given_no_source(make_engine) -> None:
+    """Unconfigured MCP is the everyday case, so the seam answers it rather than
+    making every caller branch on a None."""
+    assert await LocalLink(make_engine()).mcp_statuses() == ()
 
 
 async def test_the_hooks_are_wired_straight_through(make_engine) -> None:

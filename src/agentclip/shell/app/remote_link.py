@@ -23,14 +23,19 @@ One reader, inside the call
 ---------------------------
 There is no background reader thread. ``roundtrip`` writes its call frame and
 then reads frames itself until that call's answer arrives, dispatching the
-progress/output events it meets on the way. This is sound because of the client
-contract the whole seam is built on: **one call in flight per connection**. The
-controller serializes per link (:class:`RemoteLink` holds the same
-``asyncio.Lock`` ``LocalLink`` does) and only one link is ever live, so whoever
-is inside ``roundtrip`` is the only one entitled to read - and the server's
-per-session busy rule refuses a second call anyway. A reader thread would buy
-nothing and cost a queue, a shutdown protocol and a second place for a frame to
-be lost.
+progress/output events it meets on the way. That is sound only while **one call
+is in flight per connection**, and since link-scoped calls exist
+(``mcp_statuses``, ``build_session``) the per-link ``asyncio.Lock`` cannot
+promise it on its own: a link-scoped call belongs to no link, so no per-link
+lock stands between it and a session call's reads, and two readers on one stream
+would each consume frames the other was waiting for. So the serialization lives
+HERE, in a ``threading.Lock`` held across the whole of ``roundtrip`` - write and
+read-until-answer together. The per-link locks stay on top of it (they are the
+``Link`` contract, and they are what the server's per-session busy rule
+mirrors); the double-serialization costs nothing, because a connection that
+allowed two calls at once would have nowhere to put the second one's answer.
+A reader thread would buy the same guarantee and cost a queue, a shutdown
+protocol and a second place for a frame to be lost.
 
 Events reach the link they belong to, not the caller
 ----------------------------------------------------
@@ -76,6 +81,7 @@ from agentclip.engine.link import wire
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.engine.link.wire import (
     BUILD_SESSION,
+    MCP_STATUSES,
     EngineLinkError,
     SessionInfo,
     WireError,
@@ -84,7 +90,7 @@ from agentclip.engine.link.wire import (
 from agentclip.engine.states import Decision
 from agentclip.engine.store.backups import UndoReport
 from agentclip.protocol.types import Outbound, ResultStatus
-from agentclip.shell.app.link import Link
+from agentclip.shell.app.link import Link, McpStatusLine
 
 # The two ``EngineLinkError`` kinds this side raises on its own account. The
 # wire's four kinds (``bad_request``, ``internal``, and the two that rebuild as
@@ -154,12 +160,16 @@ class RemoteLinkClient:
     THREAD CONTRACT, and the reason the design is this simple:
 
     * :meth:`roundtrip` runs on a worker thread (``asyncio.to_thread``, from
-      :class:`RemoteLink`) and is the ONLY reader. One call in flight per
-      connection is the client contract - the controller serializes per link and
-      only one link is live - so there is never a second reader to race.
+      :class:`RemoteLink`) and is the ONLY reader. It holds :attr:`_call` for
+      its whole length, so "one call in flight per connection" is enforced here
+      rather than merely relied on: the per-link locks above cannot serialize a
+      link-scoped call against a session one, because a link-scoped call belongs
+      to no link.
     * :meth:`send_cancel` runs on the EVENT LOOP thread, in the middle of
-      somebody else's roundtrip. It takes the send lock (which the roundtrip
-      released the moment its call frame was flushed) and never the reader.
+      somebody else's roundtrip. It takes the SEND lock (which the roundtrip
+      released the moment its call frame was flushed) and never the call lock or
+      the reader - taking the call lock is exactly the wait a cancel must not do,
+      since the call it is cancelling is the one holding it.
     * :meth:`hello` and :meth:`build_session` are ordinary blocking calls made
       before/between links, and count as roundtrips for the rule above.
     """
@@ -171,6 +181,10 @@ class RemoteLinkClient:
         # across the read that follows: a cancel has to get out while the call
         # it cancels is still outstanding.
         self._send = threading.Lock()
+        # Guards a WHOLE call - the write and the read-until-answer. See the
+        # module docstring: with link-scoped calls in the vocabulary, this is
+        # the only lock that can promise one reader on this stream.
+        self._call = threading.Lock()
         self._next_id = 0
         # Session id -> the link that owns it. Written by build_session, read by
         # whichever roundtrip meets an event frame; both happen on a worker
@@ -183,6 +197,10 @@ class RemoteLinkClient:
         # show WHICH install is answering, and so a support question about a
         # remote session has an answer that does not need another round trip.
         self.server_package: str = ""
+        # The MCP settle the most recent ``build_session`` carried home. ()
+        # until the first session is built, and a SNAPSHOT rather than a live
+        # reading - :meth:`mcp_statuses` is how a Shell asks again.
+        self.build_mcp_statuses: tuple[McpStatusLine, ...] = ()
 
     # -- the handshake ---------------------------------------------------------
 
@@ -254,18 +272,46 @@ class RemoteLinkClient:
         )
         if not isinstance(info, SessionInfo):  # pragma: no cover - wire's codec guarantees it
             raise EngineLinkError(LINK_PROTOCOL, f"build_session answered with {type(info).__name__}")
+        # Kept where a Shell can paint it without a second round trip: the far
+        # side already waited on the catalog before it answered (wire's
+        # SessionInfo), so this is the settle as it stood when the session was
+        # built. On the client because it is the CONNECTION's runtime, and on
+        # the link because that is what a session-shaped caller holds.
+        self.build_mcp_statuses = info.mcp_statuses
         link = RemoteLink(self, info)
         self._links[info.session] = link
         return link
+
+    # -- the connection's MCP runtime ------------------------------------------
+
+    def mcp_statuses(self) -> tuple[McpStatusLine, ...]:
+        """The target's MCP rows, right now - a link-scoped roundtrip.
+
+        Sync and session-free on purpose: it is callable from a worker thread
+        BEFORE any session exists, which is exactly when a Shell wants to paint
+        the block (the local mode's ``cli.LinkFactory`` answers the same
+        question at launch, off the builder).
+        """
+        statuses = self.roundtrip(None, MCP_STATUSES, wire.encode_params(MCP_STATUSES))
+        return tuple(statuses)
 
     # -- one call --------------------------------------------------------------
 
     def roundtrip(self, sid: str | None, method: str, params: dict[str, Any]) -> Any:
         """Write one call and read until its answer, dispatching events on the way.
 
-        ``sid`` is the session the call belongs to, or None for
-        ``build_session`` - the one method that has no session yet because it is
-        what mints one.
+        ``sid`` is the session the call belongs to, or None for the two
+        link-scoped methods - ``build_session``, which has no session yet
+        because it is what mints one, and ``mcp_statuses``, which has none ever
+        because the MCP runtime is the process's rather than any session's.
+
+        THE LOCK IS THE CONTRACT. It is held from the first byte written to the
+        answer read, so this connection has exactly one reader at a time. The
+        per-link ``asyncio.Lock`` above cannot do that job once link-scoped
+        calls exist: a ``mcp_statuses`` fired while a session's ``execute`` is
+        outstanding would otherwise start reading the frames that turn is
+        waiting for. ``send_cancel`` stays outside it, and must - it is the one
+        frame written while somebody else's call is blocked in a read.
 
         Everything that is not this call's answer is either an event (dispatched
         to whichever link owns it and read past) or a protocol violation. A
@@ -273,35 +319,36 @@ class RemoteLinkClient:
         call in flight there is no other call it could belong to, so the two ends
         disagree about what is outstanding and going on would be guessing.
         """
-        req_id = self._write_call(sid, method, params)
-        while True:
-            frame = self._read_frame()
-            try:
-                kind = wire.frame_type(frame)
-            except WireError as exc:
-                raise EngineLinkError(LINK_PROTOCOL, str(exc)) from exc
-            if kind == "progress":
-                self._dispatch_progress(frame)
-                continue
-            if kind == "output":
-                self._dispatch_output(frame)
-                continue
-            if kind == "result":
-                answer_id, value = self._read(wire.read_result, frame)
-                self._check_id(answer_id, req_id, method)
+        with self._call:
+            req_id = self._write_call(sid, method, params)
+            while True:
+                frame = self._read_frame()
                 try:
-                    return wire.decode_result(method, value)
+                    kind = wire.frame_type(frame)
                 except WireError as exc:
-                    raise EngineLinkError(LINK_PROTOCOL, f"{method}: {exc}") from exc
-            if kind == "error":
-                error = self._read(wire.read_error, frame)
-                self._check_id(error.id, req_id, method)
-                # BudgetExceeded and EngineStateError come back AS THEMSELVES
-                # here (wire.error_exception): the controller catches exactly
-                # those two by type, and a link that wrapped them would silently
-                # break both branches.
-                raise wire.error_exception(error)
-            raise EngineLinkError(LINK_PROTOCOL, f"a client does not receive a {kind!r} frame")
+                    raise EngineLinkError(LINK_PROTOCOL, str(exc)) from exc
+                if kind == "progress":
+                    self._dispatch_progress(frame)
+                    continue
+                if kind == "output":
+                    self._dispatch_output(frame)
+                    continue
+                if kind == "result":
+                    answer_id, value = self._read(wire.read_result, frame)
+                    self._check_id(answer_id, req_id, method)
+                    try:
+                        return wire.decode_result(method, value)
+                    except WireError as exc:
+                        raise EngineLinkError(LINK_PROTOCOL, f"{method}: {exc}") from exc
+                if kind == "error":
+                    error = self._read(wire.read_error, frame)
+                    self._check_id(error.id, req_id, method)
+                    # BudgetExceeded and EngineStateError come back AS THEMSELVES
+                    # here (wire.error_exception): the controller catches exactly
+                    # those two by type, and a link that wrapped them would
+                    # silently break both branches.
+                    raise wire.error_exception(error)
+                raise EngineLinkError(LINK_PROTOCOL, f"a client does not receive a {kind!r} frame")
 
     def send_cancel(self, sid: str) -> None:
         """The out-of-band frame, written from the event loop mid-roundtrip.
@@ -416,6 +463,11 @@ class RemoteLink:
         self.chat_name: str = info.chat_name
         self.role: Literal["master", "subagent"] = info.role
         self.build_warnings: tuple[str, ...] = info.build_warnings
+        # The MCP rows as they stood when this session was built, off the same
+        # answer. Not one of the immutable facts - the runtime keeps settling -
+        # but the reading a Shell wants at the top of a session, and it cost no
+        # round trip of its own. :meth:`mcp_statuses` takes a fresh one.
+        self.build_mcp_statuses: tuple[McpStatusLine, ...] = info.mcp_statuses
         # Fired from the worker thread, inside a roundtrip. Plain attributes, no
         # lock: they are set once before the first call (the seam's "sync
         # registration") and cleared only by the thread that fires them.
@@ -491,6 +543,20 @@ class RemoteLink:
 
     async def arm_extra_instructions(self) -> ArmResult:
         return await self._call("arm_extra_instructions")
+
+    # -- the target's MCP runtime ----------------------------------------------
+
+    async def mcp_statuses(self) -> tuple[McpStatusLine, ...]:
+        """One link-scoped roundtrip, off the event loop.
+
+        The link's lock is taken even though the call carries no session: the
+        Link contract is one call in flight per link, and honouring it here
+        keeps this method indistinguishable from every other await the
+        controller makes. The connection's own serialization (the client's call
+        lock) is what actually protects the stream.
+        """
+        async with self._lock:
+            return await asyncio.to_thread(self._client.mcp_statuses)
 
     # -- out-of-band -----------------------------------------------------------
 

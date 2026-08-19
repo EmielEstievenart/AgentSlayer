@@ -433,12 +433,14 @@ async def test_a_target_with_no_engine_on_it_fails_the_engine_row(
     Every beat of the dial worked - the box is up, authenticated, the root is
     real, its config was read - and there is still no session, because nothing
     over there answers the handshake. The row shows the classified sentence
-    verbatim (§2.12): the target by name, and the command that fixes it.
+    verbatim (§2.12): the target by name, both spellings that were tried, and
+    the command that fixes it.
     """
     harness.launch_error[0] = EngineLinkError(  # type: ignore[attr-defined]
         "link_closed",
-        "agentclip-engine is not installed on dev@box"
-        " - install it with e.g. `uv tool install agentclip`",
+        "agentclip-engine is not on the non-interactive PATH of dev@box (tried"
+        " 'agentclip-engine' and '~/.local/bin/agentclip-engine') - install it with"
+        " e.g. `uv tool install agentclip`, or symlink it into /usr/local/bin",
     )
     harness.view.open_connect()
     harness.view.connect_fields("box", REMOTE_ROOT)
@@ -447,7 +449,8 @@ async def test_a_target_with_no_engine_on_it_fails_the_engine_row(
     event = last_connect(harness)
     assert event["phase"] == "failed"
     assert event["failed_step"] == STEP_ENGINE
-    assert "agentclip-engine is not installed on dev@box" in event["failure"]
+    assert "is not on the non-interactive PATH of dev@box" in event["failure"]
+    assert "'~/.local/bin/agentclip-engine'" in event["failure"]
     assert "uv tool install agentclip" in event["failure"]
     # ...and the six that DID work still say so, so the user can see how far it got.
     assert all(rows(event)[step] == "ok" for step in CONNECT_STEPS)

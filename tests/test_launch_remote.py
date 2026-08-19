@@ -19,6 +19,7 @@ is increment 5.
 from __future__ import annotations
 
 import argparse
+import shlex
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +77,11 @@ class FakeSshHost(FakeHost):
         self.link_exit: int | None = None  # None = still running
         self.channels: list[RecordingChannel] = []
         self.order: list[str] = []
+        # Which spellings of the engine can actually be RUN over there. None
+        # means every one can (a box with it on PATH); a set is how a target
+        # whose non-interactive PATH hides ~/.local/bin looks from here - the
+        # plain name exits 127, the explicit path does not.
+        self.runnable: set[str] | None = None
 
     def run_blocking(self, command: str, *, timeout: float = 60.0) -> tuple[int, str]:
         return self.blocking.get(command, (0, ""))
@@ -97,12 +103,18 @@ class FakeSshHost(FakeHost):
     def open_link_channel(self, command: str) -> LinkChannel:
         """``SshHost.open_link_channel``, over a scripted channel."""
         self.link_commands.append(command)
+        executable = shlex.split(command)[0]
+        absent = self.runnable is not None and executable not in self.runnable
         chan = RecordingChannel(
             FakeCommandScript(
-                hangs=self.link_exit is None,
-                exit_code=self.link_exit or 0,
-                chunks=list(self.link_chunks),
-                stderr_chunks=list(self.link_stderr),
+                hangs=self.link_exit is None and not absent,
+                exit_code=127 if absent else (self.link_exit or 0),
+                chunks=[] if absent else list(self.link_chunks),
+                stderr_chunks=(
+                    [f"bash: {executable}: command not found\n".encode()]
+                    if absent
+                    else list(self.link_stderr)
+                ),
             ),
             self.order,
         )
@@ -471,19 +483,69 @@ def test_the_link_channel_is_closed_before_the_transport_under_it(
     assert host.order == ["channel", "host"]
 
 
-def test_a_target_without_the_engine_is_fatal_and_says_how_to_install_it(
+def test_an_install_hidden_from_sshds_path_is_found_under_local_bin(
+    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp]
+) -> None:
+    """The everyday target: `uv tool install agentclip`, and a dead launch.
+
+    ``uv tool install`` writes ``~/.local/bin`` and sshd's non-interactive exec
+    channel does not have it on PATH - the rule on Ubuntu, not the exception -
+    so launching by name exits 127 on a box that HAS the engine. One retry at
+    the well-known path, and the session proceeds exactly as if the plain name
+    had worked, handshake and all.
+    """
+    host.runnable = {"/home/dev/.local/bin/agentclip-engine"}
+
+    assert cli.main(argv(args)) == 0
+
+    assert host.link_commands == [
+        f"agentclip-engine --project {REMOTE_ROOT}",
+        f"/home/dev/.local/bin/agentclip-engine --project {REMOTE_ROOT}",
+    ]
+    assert b'"hello"' in bytes(host.channels[1].sent)  # ...and it really shook hands
+    assert host.channels[0].closed  # the dead attempt did not leak a channel
+    assert launched(tui).ran == 1
+
+
+def test_the_fallback_is_only_reached_when_the_plain_name_is_missing(
     args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp], capsys
 ) -> None:
-    """The failure every first connect hits, on the stream every other fatal
-    step of going remote uses, with the same exit code (§2.12)."""
-    host.link_chunks = []  # EOF instead of a handshake
-    host.link_exit = 127
-    host.link_stderr = [b"bash: agentclip-engine: command not found\n"]
+    """A launch that DIED is a diagnosis, not a reason to try another path.
+
+    A broken install, a traceback, a killed process: retrying somewhere else
+    would replace the target's own words with a worse guess.
+    """
+    host.link_chunks = []
+    host.link_exit = 3
+    host.link_stderr = [b"ImportError: no agentclip\n"]
 
     assert cli.main(argv(args)) == 2
 
+    assert host.link_commands == [f"agentclip-engine --project {REMOTE_ROOT}"]
     err = capsys.readouterr().err
-    assert "agentclip-engine is not installed on dev@box" in err
+    assert "exit 3" in err and "ImportError: no agentclip" in err
+
+
+def test_a_target_without_the_engine_anywhere_is_fatal_and_says_what_was_tried(
+    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp], capsys
+) -> None:
+    """The failure every first connect hits, on the stream every other fatal
+    step of going remote uses, with the same exit code (§2.12).
+
+    Both spellings are named, because both were tried: "not installed" to
+    somebody who just installed it reads as a broken tool.
+    """
+    host.runnable = set()  # neither the name nor the path runs
+
+    assert cli.main(argv(args)) == 2
+
+    assert host.link_commands == [
+        f"agentclip-engine --project {REMOTE_ROOT}",
+        f"/home/dev/.local/bin/agentclip-engine --project {REMOTE_ROOT}",
+    ]
+    err = capsys.readouterr().err
+    assert "agentclip-engine is not on the non-interactive PATH of dev@box" in err
+    assert "'~/.local/bin/agentclip-engine'" in err
     assert "uv tool install agentclip" in err
     assert "link_closed" not in err  # the wire's own vocabulary is not a sentence
     assert tui.last is None  # ...and no TUI was opened on top of a dead link

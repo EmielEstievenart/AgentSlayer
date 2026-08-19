@@ -214,10 +214,18 @@ pending → active → done/failed:
    (remote-executor.md §2.6, §2.12). **Fatal**, and the last thing that can go
    wrong: every row above it can be green and there is still no session if
    nothing over there answers. Two failures, both arriving as one already-
-   classified sentence which the row shows verbatim: the engine is not installed
-   ("`agentclip-engine` is not installed on *target* — install it with e.g. `uv
-   tool install agentclip`") or the two installs speak different wire versions
-   (the refusal names both `agentclip` versions). It is not a step of
+   classified sentence which the row shows verbatim: nothing of that name can be
+   run over there ("`agentclip-engine` is not on the non-interactive PATH of
+   *target* (tried '`agentclip-engine`' and '`~/.local/bin/agentclip-engine`') —
+   install it with e.g. `uv tool install agentclip`, or symlink it into
+   `/usr/local/bin`") or the two installs speak different wire versions (the
+   refusal names both `agentclip` versions). The row only reaches that first
+   sentence after **two** attempts: `uv tool install` — the method we document —
+   writes `~/.local/bin`, and sshd's non-interactive exec channel gets the stock
+   `PATH` without it, so a 127 on the plain name is retried once at
+   `<remote home>/.local/bin/agentclip-engine` and proceeds normally if that
+   answers. Never under `bash -lc`: a profile's output would prepend to the
+   first JSON line and corrupt the handshake. It is not a step of
    `connect_remote` itself — that module lives in the host seam and may not
    import a protocol — so it is reported by whoever runs the launch, which is
    `cli`; the vocabulary is `CONNECT_STEPS` (the sequence's six) plus

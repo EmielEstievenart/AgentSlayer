@@ -58,6 +58,10 @@ root = "/home/emiel/code/thing"
 
 It connects, authenticates (agent, keys, then a password prompt) and probes the machine *before* the TUI starts, so a bad target fails in the terminal rather than inside the app. Your permission rules stay local; the project's `.agentclip.toml` and its skills come off the remote machine. Backups and transcripts are kept on your PC. See `docs/design/remote-ssh.md`.
 
+The target needs `agentclip-engine` on it — `uv tool install agentclip` over there, or the standalone binary below.
+
+> `uv tool install` writes `~/.local/bin`, which sshd's *non-interactive* shell does not have on `PATH` (that comes from `~/.profile`, and no profile is read for `ssh host command`). AgentClip therefore also tries `~/.local/bin/agentclip-engine` before giving up. If you installed somewhere else, symlink the binary into `/usr/local/bin`.
+
 ### Standalone executable (Windows)
 
 To use `agentclip` from any directory without the checkout, freeze it into a single self-contained exe:

@@ -680,7 +680,7 @@ deadlocked every `python -c …` the e2e suite ran until this landed.
 
 The client was written over two text streams and told to create nothing (§2.11).
 This is the increment that produces them: `SshHost.open_link_channel(command) ->
-LinkChannel`, in `src/agentclip/executor/hosts/ssh.py`, plus two pure functions
+LinkChannel`, in `src/agentclip/executor/hosts/ssh.py`, plus the pure functions
 in `src/agentclip/shell/app/engine_launch.py` and one factory in `cli.py`. The
 three live in three layers on purpose — the seam may not import a protocol, the
 Shell may not import the seam, and `cli` is the module allowed to know both.
@@ -736,26 +736,56 @@ there would be both meaningless and a policy leak. (The localhost e2e suite
 passes all three, because there the two machines are one and the isolation is the
 whole point.)
 
+**Two spellings, because sshd's PATH is not the user's** (added 2026-08-19, after
+a live target). `uv tool install agentclip` — the method this document tells
+people to use — puts the console script in `~/.local/bin`, and sshd's
+*non-interactive* exec channel gets the stock
+`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin` with nothing of
+the user's own added: `~/.local/bin` is on an interactive PATH because
+`~/.profile` puts it there, and no profile is read for `ssh host command`. On
+Ubuntu that is the rule, not the exception, so our own documented install
+produced a launch our own launcher called uninstalled. So a launch that comes
+back "no such command" (`is_missing_engine`: exit 127, or `command not
+found`/`not found` in the tail) is retried **once**, at
+`fallback_engine_command(home, root, service)` — `<remote home>/.local/bin/
+agentclip-engine`, joined POSIX-style onto the home connect step 5 already
+captured, passed resolved rather than as a `~` since a bare exec channel has no
+shell to expand one. If that answers, the session proceeds exactly as if the
+plain name had worked. One well-known location and no further PATH-guessing:
+anything past it is a guess about a machine we can see one command at a time.
+
+**And never `bash -lc`.** A login shell would fix the PATH and break the
+protocol: stdout of that process IS the wire (§2.9), and a `.profile`/`.bashrc`
+that prints anything — a banner, an SDK's shell hook, a stray `echo` — prepends
+its text to the first JSON line and corrupts the handshake. The command stays
+bare (which is also what §2.3's die-with-the-channel needs), and the PATH problem
+is solved by naming the path instead of by summoning a shell.
+
 **A launch that produced no handshake gets a sentence.** From the client's side a
 missing engine, a broken install and a killed process are all EOF, so
 `classify_launch_failure(exit_status, stderr_tail, target)` is handed the two
 values the *channel* knows and returns what the user reads. It takes plain values
 rather than a channel precisely because it lives in `shell.app`, which may not
-import `executor.hosts` — which also makes it testable without a network. Exit
-127, or `command not found`/`not found` in the tail, is the case worth naming
-apart, because it is the one every first connect hits and the one with an action
-attached:
+import `executor.hosts` — which also makes it testable without a network. The
+"no such command" case is worth naming apart, because it is the one every first
+connect hits and the one with an action attached — and by the time it is
+classified BOTH spellings have been tried, so the sentence says so rather than
+claiming an install that may well be sitting right there:
 
-> `agentclip-engine is not installed on dev@box - install it with e.g. `uv tool install agentclip``
+> `agentclip-engine is not on the non-interactive PATH of dev@box (tried 'agentclip-engine' and '~/.local/bin/agentclip-engine') - install it with e.g. `uv tool install agentclip`, or symlink it into /usr/local/bin`
 
 Anything else stays honest instead of guessing: the status the channel ended with
-(or "it is still running") and the target's own stderr, verbatim. A **version**
-mismatch never reaches here — the far side answered, and `hello()` already built
-the sentence naming both installs (§2.9, §2.11).
+(or "it is still running") and the target's own stderr, verbatim — and it is also
+what stops the retry, since a traceback or a killed process is a diagnosis and
+trying another path would replace it with a worse one. A **version** mismatch
+never reaches here — the far side answered, and `hello()` already built the
+sentence naming both installs (§2.9, §2.11); it does not retry either, since the
+install this one found is the one to update.
 
 **The factory.** `cli.make_remote_link_factory(connected, *, service=None)` takes
-what `connect_remote` hands back, opens the channel, wraps its streams in a
-`RemoteLinkClient`, says hello, and returns `(factory, RemoteEngine)` — the
+what `connect_remote` hands back, opens a channel per spelling (`_launch_engine`,
+above), wraps its streams in a `RemoteLinkClient`, says hello, and returns
+`(factory, RemoteEngine)` — the
 factory building one `RemoteLink` per `EngineRequest`, the `RemoteEngine`
 carrying the client and the channel because *one* server process on *one* channel
 hosts every session of a remote run (§2.10) and closing that channel is how the
@@ -834,13 +864,17 @@ remote mode stops being a type error.
 **Tested by** `tests/executor/hosts/test_link_channel.py` (framing across chunk
 boundaries, a multibyte character split across one, EOF, the bytes actually sent,
 the stderr tail and its bound, exit status before/after, the bare command line,
-and a `FakeSSHClient`-backed host whose engine exits 127 producing the
-not-installed sentence out of `make_remote_link_factory`),
-`tests/shell/app/test_engine_launch.py` (the two pure functions),
+and a `FakeSSHClient`-backed host whose engine exits 127 at both spellings,
+producing the tried-both sentence out of `make_remote_link_factory`, with the
+fallback built from the home the connect sequence captured),
+`tests/shell/app/test_engine_launch.py` (the pure functions, including the
+fallback spelling and the predicate the retry hangs on),
 `tests/test_launch_remote.py` (the flip itself: `cli.main` end to end over a
 `FakeSshHost` whose `open_link_channel` serves a **scripted handshake** — the real
 connect sequence, the real factory, the real client, and no network — pinning the
-command line, the `--service` pass-through, the absent local session tree, the
+command line, the `~/.local/bin` retry on a 127 and the launch proceeding
+normally after it, a non-127 failure NOT retrying, the `--service` pass-through,
+the absent local session tree, the
 `RemoteEngine` as the shells' MCP source, channel-before-host teardown, and both
 dead-launch sentences arriving on stderr with exit 2; plus the legacy assembly,
 kept and renamed, still building a whole session over one host),

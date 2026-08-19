@@ -34,7 +34,12 @@ from agentclip.executor.hosts.connect import (
 )
 from agentclip.executor.hosts.local import LocalHost
 from agentclip.executor.mcp.types import McpServerStatus
-from agentclip.shell.app.engine_launch import classify_launch_failure, engine_command
+from agentclip.shell.app.engine_launch import (
+    classify_launch_failure,
+    engine_command,
+    fallback_engine_command,
+    is_missing_engine,
+)
 from agentclip.shell.app.link import Link, LocalLink, McpStatusLine
 from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLinkClient
 from agentclip.shell.tui.app import AgentClipApp
@@ -237,19 +242,23 @@ def make_remote_link_factory(
     way. Every caller turns ``exc.detail`` into what the user reads - a line on
     stderr and exit 2 for the terminal launch, the checklist's ``engine`` row
     for the dialog - because the sentence is already the classified one (§2.12).
+
+    **Two spellings, one launch.** The plain name is tried first, and a "no such
+    command" verdict is retried once at ``<remote home>/.local/bin/`` - which is
+    exactly where ``uv tool install agentclip``, the method we document, puts the
+    console script, and exactly what sshd's non-interactive PATH leaves out
+    (``engine_launch.USER_BIN_DIR``). Without the retry our own install
+    instructions produce a target this function calls uninstalled.
     """
     host = connected.host
-    channel = host.open_link_channel(engine_command(connected.project_root.as_posix(), service))
-    client = RemoteLinkClient(channel.reader, channel.writer)
-    try:
-        client.hello()
-    except EngineLinkError as exc:
-        if exc.kind == LINK_VERSION:
-            # The far side ANSWERED: ``hello`` already built the sentence naming
-            # both installs (§2.9), and no channel fact can improve on it.
-            channel.close()
-            raise
-        raise _launch_failed(channel, host.target, exc) from exc
+    root = connected.project_root.as_posix()
+    channel, client = _launch_engine(
+        host,
+        (
+            engine_command(root, service),
+            fallback_engine_command(connected.home.as_posix(), root, service),
+        ),
+    )
 
     def build(request: EngineRequest | str) -> Link:
         # A bare service key is the same shorthand the local builder accepts;
@@ -260,25 +269,61 @@ def make_remote_link_factory(
     return build, RemoteEngine(client=client, channel=channel, target=host.target)
 
 
-def _launch_failed(channel: LinkChannel, target: str, exc: EngineLinkError) -> EngineLinkError:
+def _launch_engine(
+    host: SshHost, commands: tuple[str, ...]
+) -> tuple[LinkChannel, RemoteLinkClient]:
+    """Start the engine on the target: each spelling in turn, until one answers.
+
+    One channel per attempt - a channel whose command died is finished, and the
+    engine dies with its channel (§2.3), so there is nothing to reuse. Only a
+    "no such command" verdict moves on to the next spelling; every other failure
+    is the answer, and trying a second path after a version mismatch or a
+    traceback would replace a real diagnosis with a worse one.
+
+    Whatever the last attempt failed with is what the caller raises, so a target
+    with no engine anywhere reports the classified sentence naming BOTH
+    spellings (``classify_launch_failure``), not the first attempt's alone.
+    """
+    for attempt, command in enumerate(commands):
+        channel = host.open_link_channel(command)
+        client = RemoteLinkClient(channel.reader, channel.writer)
+        try:
+            client.hello()
+        except EngineLinkError as exc:
+            if exc.kind == LINK_VERSION:
+                # The far side ANSWERED: ``hello`` already built the sentence
+                # naming both installs (§2.9), and no channel fact can improve
+                # on it - nor is another path worth trying, since the install
+                # this one found is the one to update.
+                channel.close()
+                raise
+            status, tail = _launch_verdict(channel)
+            channel.close()
+            if is_missing_engine(status, tail) and attempt + 1 < len(commands):
+                continue
+            message = classify_launch_failure(status, tail, host.target)
+            raise EngineLinkError(exc.kind, message) from exc
+        return channel, client
+    raise ValueError("no engine command to try")  # pragma: no cover - callers pass two
+
+
+def _launch_verdict(channel: LinkChannel) -> tuple[int | None, str]:
     """Turn "the link closed" into what actually happened on the target.
 
     A handshake that never arrived is the one failure the protocol cannot
     explain: from the client's side a missing engine, a broken install and a
     killed process are all EOF. The channel knows better - it has an exit status
-    and the target's own stderr - so the error is re-raised carrying that instead
-    (§2.12).
+    and the target's own stderr - so those two values are what the failure is
+    described from (§2.12).
 
-    The channel is closed on the way out. A half-built remote session is not a
-    thing, and the failing path is the one that must not leak a channel per
-    retry.
+    The exit status is polled for up to a second first, because EOF and the exit
+    status arrive from two different places on the transport and "exit 127" is
+    the difference between naming the fault and quoting stderr at somebody.
     """
     deadline = time.monotonic() + _LAUNCH_VERDICT_S
     while channel.exit_status() is None and time.monotonic() < deadline:
         time.sleep(_LAUNCH_POLL_S)
-    message = classify_launch_failure(channel.exit_status(), channel.stderr_tail(), target)
-    channel.close()
-    return EngineLinkError(exc.kind, message)
+    return channel.exit_status(), channel.stderr_tail()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

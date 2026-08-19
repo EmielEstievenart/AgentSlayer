@@ -8,7 +8,12 @@ makes the sentence a user reads testable without a network or a paramiko.
 
 from __future__ import annotations
 
-from agentclip.shell.app.engine_launch import classify_launch_failure, engine_command
+from agentclip.shell.app.engine_launch import (
+    classify_launch_failure,
+    engine_command,
+    fallback_engine_command,
+    is_missing_engine,
+)
 
 TARGET = "dev@box"
 
@@ -40,31 +45,64 @@ def test_the_command_never_carries_this_machines_paths() -> None:
     assert "--data-root" not in line
 
 
+# -- the fallback spelling -----------------------------------------------------
+
+
+def test_the_fallback_names_the_binary_under_the_targets_own_home() -> None:
+    """Where `uv tool install` actually puts it, and where sshd's PATH is not."""
+    line = fallback_engine_command("/home/dev", "/srv/app")
+    assert line == "/home/dev/.local/bin/agentclip-engine --project /srv/app"
+
+
+def test_the_fallback_is_the_resolved_home_never_a_tilde() -> None:
+    """A bare exec channel has no shell expanding `~` for us."""
+    assert "~" not in fallback_engine_command("/home/dev", "/srv/app")
+
+
+def test_the_fallback_carries_the_service_and_quotes_like_the_plain_one() -> None:
+    line = fallback_engine_command("/home/dev with space", "/srv/my app", "chatgpt")
+    assert line == (
+        "'/home/dev with space/.local/bin/agentclip-engine'"
+        " --project '/srv/my app' --service chatgpt"
+    )
+
+
 # -- the failure ---------------------------------------------------------------
 
 
-def test_exit_127_is_the_engine_not_being_installed() -> None:
+def test_exit_127_is_nothing_of_that_name_being_runnable() -> None:
+    assert is_missing_engine(127, "")
     message = classify_launch_failure(127, "", TARGET)
-    assert "agentclip-engine is not installed on dev@box" in message
+    assert "agentclip-engine is not on the non-interactive PATH of dev@box" in message
     assert "uv tool install agentclip" in message
+
+
+def test_the_sentence_names_both_spellings_that_were_tried() -> None:
+    """By classification time the fallback has been tried too, so "not
+    installed" would be a guess - and usually the wrong one."""
+    message = classify_launch_failure(127, "", TARGET)
+    assert "'agentclip-engine'" in message
+    assert "'~/.local/bin/agentclip-engine'" in message
+    assert "symlink it into /usr/local/bin" in message
 
 
 def test_a_shells_own_words_say_the_same_thing() -> None:
     """A login shell that exits some other way still leaves the sentence."""
+    assert is_missing_engine(1, "bash: agentclip-engine: command not found\n")
     message = classify_launch_failure(
         1, "bash: agentclip-engine: command not found\n", TARGET
     )
-    assert "agentclip-engine is not installed on dev@box" in message
+    assert "is not on the non-interactive PATH of dev@box" in message
     assert "uv tool install agentclip" in message
 
 
 def test_any_other_failure_quotes_the_status_and_the_targets_stderr() -> None:
-    message = classify_launch_failure(
-        3, "Traceback (most recent call last):\nImportError: no agentclip\n", TARGET
-    )
+    tail = "Traceback (most recent call last):\nImportError: no agentclip\n"
+    assert not is_missing_engine(3, tail)  # ...so nothing retries another path
+    message = classify_launch_failure(3, tail, TARGET)
     assert "exit 3" in message
     assert "ImportError: no agentclip" in message
-    assert "not installed" not in message
+    assert "PATH" not in message
 
 
 def test_a_process_still_running_is_said_so_rather_than_guessed_at() -> None:

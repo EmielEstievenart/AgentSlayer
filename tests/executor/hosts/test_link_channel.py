@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import paramiko
@@ -226,29 +227,51 @@ def connected(host: SshHost, tmp_path: Path) -> ConnectedRemote:
     )
 
 
-def test_a_target_without_the_engine_says_how_to_install_it(tmp_path: Path) -> None:
+def missing() -> FakeCommandScript:
+    """A channel whose command did not exist: what a stock PATH answers with."""
+    return FakeCommandScript(
+        exit_code=127,
+        hangs=False,
+        stderr_chunks=[b"bash: agentclip-engine: command not found\n"],
+    )
+
+
+def test_a_target_without_the_engine_says_what_was_tried_and_how_to_install_it(
+    tmp_path: Path,
+) -> None:
     """The whole point of §2.12's classification, end to end over a fake link."""
-    FakeSSHClient.scripts = [
-        FakeCommandScript(
-            exit_code=127,
-            hangs=False,
-            stderr_chunks=[b"bash: agentclip-engine: command not found\n"],
-        )
-    ]
+    FakeSSHClient.scripts = [missing(), missing()]  # neither spelling runs
     host = make_host(tmp_path)
     with pytest.raises(EngineLinkError) as caught:
         cli.make_remote_link_factory(connected(host, tmp_path))
     message = str(caught.value)
-    assert "agentclip-engine is not installed on dev@box" in message
+    assert "agentclip-engine is not on the non-interactive PATH of dev@box" in message
+    assert "'~/.local/bin/agentclip-engine'" in message
     assert "uv tool install agentclip" in message
-    assert FakeSSHClient.instances[0].channels[0].closed is True
+    assert all(chan.closed for chan in FakeSSHClient.instances[0].channels)
 
 
 def test_the_engine_command_carries_the_remote_root(tmp_path: Path) -> None:
     """The launch line is built from the CONNECTED root, not a local path."""
-    FakeSSHClient.scripts = [FakeCommandScript(exit_code=127, hangs=False)]
+    FakeSSHClient.scripts = [missing(), missing()]
     host = make_host(tmp_path)
     with pytest.raises(EngineLinkError):
         cli.make_remote_link_factory(connected(host, tmp_path), service="chatgpt")
-    sent = FakeSSHClient.instances[0].commands[0]
-    assert sent == f"agentclip-engine --project {ROOT} --service chatgpt"
+    assert FakeSSHClient.instances[0].commands == [
+        f"agentclip-engine --project {ROOT} --service chatgpt",
+        f"/home/dev/.local/bin/agentclip-engine --project {ROOT} --service chatgpt",
+    ]
+
+
+def test_the_retry_uses_the_home_the_connect_sequence_captured(tmp_path: Path) -> None:
+    """Step 5 ("Capture home and environment") already asked the target; the
+    fallback path is joined onto THAT, not onto this operator's home or a `~`
+    the bare exec channel has no shell to expand."""
+    FakeSSHClient.scripts = [missing(), missing()]
+    host = make_host(tmp_path)
+    remote = replace(connected(host, tmp_path), home=Path("/srv/accounts/dev"))
+    with pytest.raises(EngineLinkError):
+        cli.make_remote_link_factory(remote)
+    assert FakeSSHClient.instances[0].commands[1] == (
+        f"/srv/accounts/dev/.local/bin/agentclip-engine --project {ROOT}"
+    )

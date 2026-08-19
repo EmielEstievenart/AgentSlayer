@@ -1008,13 +1008,29 @@ the thing this section predicted:
   `webview/guilib.py` at import time, and `edgechromium`/`mshtml` are chosen
   below it off the EdgeUpdate registry keys — so the build box's own WebView2
   state must not decide what a user's machine can render, and both are named.
+  **The list is per-`sys.platform`**, because that same argument applies one
+  level up: `guilib.initialize()` picks winforms on Windows, gtk-then-qt on
+  Linux (flipped by `KDE_FULL_SESSION` or `PYWEBVIEW_GUI`, both read at *run*
+  time, so both are named) and cocoa on Darwin. A spec hardcoding the Windows
+  answer produced a Linux binary whose `--gui` reported that neither toolkit was
+  installed — a lie about the user's machine. What the Linux branch cannot fix
+  is that gtk and qt bind to *system* libraries which are not dependencies of
+  the `gui` extra; naming them guarantees that whatever the build box has gets
+  collected instead of skipped, and the per-distro question stays open
+  (`docs/design/remote-executor.md` §5).
 - **`--gui-smoke` is what keeps this honest** (`cli.py`, hidden, beside
   `--pick-region`). It imports pywebview, READS all three assets back through
   `importlib.resources`, runs `webview2_missing()` and prints
   `gui-smoke: ok renderer=<edgechromium|missing|n/a>`. A build box without the
   WebView2 runtime still exits 0 — the check is on the FREEZE, not the machine —
   and `scripts/build-exe.ps1` runs it against the exe beside `--version` and
-  `--list-matchers`.
+  `--list-matchers`. `scripts/build-exe.sh` runs the same three on Linux/macOS;
+  no display is needed there either, because `_gui_smoke` imports `webview`
+  (whose `__init__` does not call `guilib.initialize()`, so no toolkit loads)
+  and short-circuits the renderer to `n/a` off `platform.system()`. A failure
+  that is nonetheless display- or toolkit-shaped is treated as the environment
+  surprising the check rather than as a broken freeze: loud warning, build
+  continues, GUI shell marked unverified.
 
 Cost: **+49 KB** (77.5 MB), because pywebview and the .NET runtime were already
 being collected — `cli.py`'s `--gui` branch imports the shell inside a function

@@ -74,6 +74,22 @@ The build is driven by `packaging/agentclip.spec`; a onefile exe unpacks to `%TE
 
 > If `agentclip --gui` says the gui extra is not installed, you are running a *different* `agentclip` — most likely a stale `uv tool install`. Run `where.exe agentclip`; the build script prints the same warning when it spots one, and `uv tool uninstall agentclip` clears it.
 
+### Standalone executables (Linux / macOS)
+
+```bash
+scripts/build-exe.sh              # both binaries
+scripts/build-exe.sh --engine-only
+```
+
+Same idea, **two** artifacts, because a POSIX box is usually the machine being *driven onto* rather than the one driving:
+
+- `dist/agentclip` — the full app, exactly as above.
+- `dist/agentclip-engine` (~21 MB) — the engine half alone, the binary an SSH target runs (`docs/design/remote-executor.md` §2.6). It carries the MCP SDK and nothing shell- or driver-shaped: no textual, no pywebview, no OpenCV. Copy it onto a target's `PATH` and remote sessions work there without a Python install.
+
+`--engine-only` builds just that second one and skips the `cv`/`gui` extras, whose Linux wheels want system libraries a headless target need not have. Both binaries are smoke-tested before install (`--version`, plus `--list-matchers` and `--gui-smoke` for the full app), then copied to `$AGENTCLIP_INSTALL_DIR` or `~/.local/bin`. Other flags mirror the PowerShell script: `--clean`, `--no-install`, `--install-dir <path>`.
+
+A frozen binary is architecture- and glibc-specific, so build it on (or for) the machine family it will run on.
+
 ## Configuration
 
 TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (Windows: `%APPDATA%\agentclip\config.toml`) → `<project>/.agentclip.toml` → CLI flags. See `docs/design/architecture.md` for the full default config, service presets (paste-size budgets per chat service), and the command allowlist format.

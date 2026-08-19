@@ -23,6 +23,7 @@ and an exe missing pywebview starts, runs, and answers ``--gui`` with an
 """
 
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
@@ -89,6 +90,58 @@ gui_datas = [
     if os.path.isfile(os.path.join(GUI_ASSETS, name))
 ]
 
+# pywebview's backend, named per PLATFORM (see the long note in hiddenimports
+# below for why any of this has to be named at all). webview/guilib.py's
+# `initialize()` picks the backend off `platform.system()` and imports it by
+# name, so the module the frozen app needs is decided by the OS the build ran
+# on - and a spec that hardcodes one OS's answer produces a Linux binary whose
+# --gui fails with "You must have either QT or GTK with Python extensions
+# installed", which is a lie about the user's machine.
+#
+# The choice below deliberately mirrors guilib.py rather than the build box:
+# where guilib tries two backends in order, BOTH are named, for the same reason
+# the Windows branch names both edgechromium and mshtml - the pick belongs to
+# the machine the exe lands on, not to the one it was frozen on.
+if sys.platform == "win32":
+    # winforms is guilib's only Windows candidate (short of PYWEBVIEW_GUI=qt),
+    # and it chooses between the two renderers below by reading the EdgeUpdate
+    # registry keys AT IMPORT.
+    webview_platforms = [
+        "webview.platforms.winforms",
+        "webview.platforms.edgechromium",
+        "webview.platforms.mshtml",
+    ]
+    # pythonnet's tree, which is what winforms runs on. `clr` is named
+    # separately because it is a two-line shim module rather than a package and
+    # it is what pulls pythonnet in.
+    webview_runtime = ["clr", "pythonnet", "clr_loader"]
+elif sys.platform == "darwin":
+    # guilib tries cocoa then qt on Darwin. Only cocoa is named: it is PyObjC,
+    # which ships with the platform's Python and costs nothing to reach, while
+    # a Qt binding is a heavyweight the mac path has never been asked for. If a
+    # macOS build ever needs it, add "webview.platforms.qt" here - the failure
+    # it fixes is the same "must have PyObjC or Qt" line as Linux's.
+    webview_platforms = ["webview.platforms.cocoa"]
+    webview_runtime = []
+else:
+    # Linux (and OpenBSD): guilib tries gtk then qt, in that order, unless
+    # KDE_FULL_SESSION or PYWEBVIEW_GUI=qt flips it. Both are named because
+    # BOTH of those inputs are read from the user's environment at run time -
+    # a binary frozen with only gtk would ignore a KDE user's session and then
+    # report that neither toolkit is installed.
+    #
+    # Naming them is again REACHABILITY only, and here it buys less than on
+    # Windows: both backends bind to SYSTEM libraries through PyGObject / a Qt
+    # binding, neither of which is a dependency of the `gui` extra, so on a
+    # build box without them PyInstaller simply records a missing module and
+    # the exe's --gui still needs those packages present on the target. That is
+    # the per-distro system-dependency question docs/design/remote-executor.md
+    # section 5 still lists as open; what this branch guarantees is that
+    # whatever the build box HAS gets collected instead of silently skipped in
+    # favour of a Windows-only list.
+    webview_platforms = ["webview.platforms.gtk", "webview.platforms.qt"]
+    webview_runtime = []
+
 hiddenimports = (
     textual_hidden
     + pygments_hidden
@@ -120,14 +173,20 @@ hiddenimports = (
     # module imports `webview` inside its functions, so nothing static reaches
     # any of this. And pywebview is itself dynamic below that line -
     # webview/guilib.py picks a backend per platform at import time, so
-    # ``webview.platforms.winforms`` (which is the Windows one, and which then
-    # chooses between edgechromium and mshtml by reading the EdgeUpdate
-    # registry keys AT IMPORT) is reachable only by name. Both renderers are
-    # named because that choice belongs to the USER'S machine, not to the build
-    # box: an exe frozen here, where WebView2 is present, must still land on a
-    # Windows install where it is not - and gui/shell.py's webview2_missing()
-    # check reads winforms' verdict, so it has to be able to import that module
+    # ``webview.platforms.winforms`` (the Windows one, which then chooses
+    # between edgechromium and mshtml by reading the EdgeUpdate registry keys
+    # AT IMPORT) is reachable only by name. Both renderers are named because
+    # that choice belongs to the USER'S machine, not to the build box: an exe
+    # frozen here, where WebView2 is present, must still land on a Windows
+    # install where it is not - and gui/shell.py's webview2_missing() check
+    # reads winforms' verdict, so it has to be able to import that module
     # either way.
+    #
+    # Which backend, and therefore which of those names, is decided ABOVE by
+    # sys.platform - see the webview_platforms/webview_runtime block, which
+    # extends the same argument to guilib.py's Linux and Darwin branches.
+    # `webview` itself is unconditional: the package is the same everywhere and
+    # it is what cli.py's --gui path reaches for.
     #
     # Collection below that needs no help: pywebview and pythonnet each ship a
     # PyInstaller hook through the `pyinstaller40` entry point (webview/
@@ -136,17 +195,10 @@ hiddenimports = (
     # hook-clr_loader. Between them the WebView2 interop DLLs (webview/lib/),
     # webview/js/, Python.Runtime.dll and clr_loader's ffi DLLs all ride along
     # once the modules are REACHABLE - which is, once more, the only part a
-    # lazy import makes fragile. `clr` is named anyway because it is a two-line
-    # shim module rather than a package and it is what pulls pythonnet in.
-    + [
-        "webview",
-        "webview.platforms.winforms",
-        "webview.platforms.edgechromium",
-        "webview.platforms.mshtml",
-        "clr",
-        "pythonnet",
-        "clr_loader",
-    ]
+    # lazy import makes fragile.
+    + ["webview"]
+    + webview_platforms
+    + webview_runtime
 )
 
 # The dev group shares the same .venv. None of this is reachable from our

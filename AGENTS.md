@@ -12,6 +12,8 @@ Always deploy the exe onto PATH when building. Use the build script — never ru
 
 This syncs the build environment (including the `cv` extra, which the exe bundles), builds from `packaging/agentclip.spec`, smoke-tests the frozen exe, verifies the OpenCV matcher backend actually loads inside it, and copies it into the PATH folder (`$env:AGENTCLIP_INSTALL_DIR` if set, otherwise `$HOME\Documents\PATH`). Whenever a change should be usable from the terminal — or the user asks for a build — finish by running this script so the installed `agentclip.exe` is up to date. Only skip the install step (`-NoInstall`) if the user explicitly asks for a build without deploying.
 
+On Linux/macOS the equivalent is `scripts/build-exe.sh`, which builds **two** binaries: `agentclip` and `agentclip-engine` (the engine half an SSH target runs, from `packaging/agentclip-engine.spec`). `--engine-only` builds just the engine and skips the `cv`/`gui` extras. Same flags otherwise: `--clean`, `--no-install`, `--install-dir DIR`.
+
 ## Workflow
 
 Commit after every change — each coherent edit gets its own commit; don't batch unrelated changes into one.

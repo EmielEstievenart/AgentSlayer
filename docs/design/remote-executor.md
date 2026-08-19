@@ -958,11 +958,26 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
   than only naming the command. Offline or locked-down targets, where the user
   cannot install anything, may be the case the standalone binary below is really
   for.
-- **A standalone single-file binary for the engine half** — a later packaging
-  increment: one artifact copied to the target, no Python required over there,
-  per-arch builds to produce. Optionally, the cheaper version of the same wish: a
-  slim install path (an extra, or a split package) so a target does not drag the
-  GUI/TUI dependencies it never imports (§2.6).
+- **A standalone single-file binary for the engine half** — **partly built.**
+  `packaging/agentclip-engine.spec` freezes `agentclip.engine.link.__main__`
+  into a onefile `agentclip-engine`, and `scripts/build-exe.sh` builds it on
+  Linux/macOS (`--engine-only` skips the full app and its `cv`/`gui` extras, for
+  a target that will never open a window). The binary carries the `mcp` SDK —
+  §2.7 puts the servers on the target, so an engine that cannot speak MCP has
+  given up its reason for being there — and *excludes* textual, pillow,
+  pywebview, opencv, tkinter and paramiko, which is §2.6's "the unused weight is
+  disk" complaint answered: **21 MB against the full app's 78**. The excludes are
+  `tests/test_layering.py`'s import-direction rule expressed to PyInstaller, so a
+  stray shell/driver import shows up as a fat artifact rather than as a target
+  that needs GTK to start a session. `agentclip-engine --version` is the smoke
+  test (argparse answers it before the `--project` required-check), and it is
+  also what a human on a target uses to chase the handshake's version refusal.
+  **Still open:** per-distro/per-arch builds — a frozen binary is glibc- and
+  arch-specific, so the build has to happen on (or for) each target family, and
+  nothing produces those in CI. Placing the artifact on the target is still the
+  user's job; nothing is pushed at connect time (§2.6 unchanged). Optionally,
+  still, the cheaper version of the same wish: a slim *install* path (an extra,
+  or a split package) for targets that do have Python.
 - **Backup guarantee across the coarser boundary**: capture-before-overwrite
   must be re-verified once the engine (not Host primitives) does file
   mutation on the target — a naive design could batch/reorder and lose it.

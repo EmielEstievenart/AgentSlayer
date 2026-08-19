@@ -57,6 +57,9 @@ class FakeChatView:
         self.events: list[tuple[str, str]] = []  # (kind, text) per transcript add
         self.notifications: list[tuple[str, str]] = []  # (message, severity)
         self.alerts: list[tuple[str, str]] = []
+        # How often the audible "your move" was asked for. Counted rather than
+        # sounded: the real one is a thread and a beep.
+        self.attention_alerts = 0
         self.copied: list[str] = []  # every copy_outbound payload, in order
         self.parked: list[str] = []  # `c` stage one: clipboard only, no delivery
         self.redelivered: list[str] = []  # `c` stage two: the double tap's re-send
@@ -199,6 +202,9 @@ class FakeChatView:
 
     def alert(self, message: str, severity: Severity = "information") -> None:
         self.alerts.append((message, severity))
+
+    def alert_attention(self) -> None:
+        self.attention_alerts += 1
 
     # -- clipboard / transport ------------------------------------------------
 

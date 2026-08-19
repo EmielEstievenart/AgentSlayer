@@ -227,3 +227,31 @@ async def test_stats_rows_mention_sub_agent_runs_only_when_there_were_some(
 
     controller._stats = SessionStats(service="claude", subagents=2)
     assert ("sub-agent runs", "2") in controller._stats_rows()
+
+
+async def test_a_protocol_error_asks_for_the_user_out_loud_too(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """The one re-sync the automation loop never hears about: nothing ran, no
+    LoopState moved, and yet the turn only goes on once the user has gone back
+    to the browser and re-copied. So the audible "your move" is asked for here
+    rather than left to ``set_loop_state``; whether it makes a sound is the
+    live service's business, not this controller's."""
+    await start_session(controller, view)
+
+    controller.submit_clipboard(f"===CLIP:NACK reason=truncated chat={MASTER_CHAT}===")
+    await settle(view)
+
+    assert any("press c to re-copy" in text for text in view.errors())
+    assert view.attention_alerts == 1
+
+
+async def test_an_ordinary_reply_never_asks_for_the_user_out_loud(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    await start_session(controller, view)
+
+    controller.submit_clipboard(read_file_reply("README.md", chat=MASTER_CHAT))
+    await settle(view)
+
+    assert view.attention_alerts == 0

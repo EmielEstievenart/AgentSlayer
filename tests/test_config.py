@@ -1511,3 +1511,102 @@ def test_save_then_load_round_trips_multi_line_extra_instructions(
     cfg2 = load_config(project, global_config_path=global_path)
     assert cfg2.services["claude"].extra_instructions == text
     assert not cfg2.warnings
+
+
+# -- snap_back + the attention alert (the debug switch and the beep) ------------
+
+
+def test_the_snap_back_and_alert_defaults_are_the_old_behaviour() -> None:
+    """All three arrived together and all three ship as "what the tool already
+    did": the foreground comes back after an auto-send, and nothing makes a
+    sound."""
+    for key, preset in default_services().items():
+        assert preset.snap_back is True, key
+        assert preset.alert_sound is False, key
+        assert preset.alert_repeat_seconds == 0, key
+    fresh = ServicePreset("k", "K", 1_000, 5_000)
+    assert fresh.snap_back is True
+    assert fresh.alert_sound is False
+    assert fresh.alert_repeat_seconds == 0
+
+
+def test_load_config_reads_snap_back_off(project: Path, global_path: Path) -> None:
+    global_path.write_text("[services.claude]\nsnap_back = false\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].snap_back is False
+    assert not cfg.warnings
+
+
+def test_load_config_reads_the_alert_settings(project: Path, global_path: Path) -> None:
+    global_path.write_text(
+        "[services.claude]\nalert_sound = true\nalert_repeat_seconds = 45\n",
+        encoding="utf-8",
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].alert_sound is True
+    assert cfg.services["claude"].alert_repeat_seconds == 45
+    assert not cfg.warnings
+
+
+@pytest.mark.parametrize("field", ["snap_back", "alert_sound"])
+def test_load_config_rejects_a_non_bool_alert_switch(
+    project: Path, global_path: Path, field: str
+) -> None:
+    global_path.write_text(f'[services.claude]\n{field} = "yes"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    default = getattr(ServicePreset("k", "K", 1_000, 5_000), field)
+    assert getattr(cfg.services["claude"], field) is default
+    assert any(field in w for w in cfg.warnings)
+
+
+@pytest.mark.parametrize("value", ["-5", "7200"])
+def test_load_config_rejects_an_out_of_range_alert_repeat(
+    project: Path, global_path: Path, value: str
+) -> None:
+    """Negative is nonsense and an hour-plus is indistinguishable from off, so
+    both fall back to "say it once" with a warning rather than silently
+    scheduling something the user will never hear."""
+    global_path.write_text(
+        f"[services.claude]\nalert_repeat_seconds = {value}\n", encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].alert_repeat_seconds == 0
+    assert any("alert_repeat_seconds" in w for w in cfg.warnings)
+
+
+def test_save_then_load_round_trips_snap_back_and_the_alert(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(
+        services["claude"], snap_back=False, alert_sound=True, alert_repeat_seconds=30
+    )
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"]["snap_back"] is False
+    assert raw["services"]["claude"]["alert_sound"] is True
+    assert raw["services"]["claude"]["alert_repeat_seconds"] == 30
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings
+
+
+def test_save_services_writes_the_newest_fields_only_when_they_differ(
+    project: Path, global_path: Path
+) -> None:
+    """Newest of all, same rule as every knob before them: a file whose user
+    never met the switch must not grow a line about it."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], max_paste_chars=30_000)
+    services["my-llm"] = ServicePreset("my-llm", "My LLM", 8_000, 300_000)
+
+    save_services(services, global_path)
+    written = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]
+    for key in ("claude", "my-llm"):
+        assert "snap_back" not in written[key]
+        assert "alert_sound" not in written[key]
+        assert "alert_repeat_seconds" not in written[key]

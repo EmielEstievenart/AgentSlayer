@@ -338,6 +338,7 @@ _NEW_CHAT_SETTLE_S = 0.4
 # window the OS focus, focus is granted ASYNCHRONOUSLY, and a Ctrl+V that
 # overtakes the activation is delivered to whatever held focus a moment ago.
 PASTE_SETTLE_DELAY = _delivery.PASTE_SETTLE_DELAY
+_FOCUS_CLICK_GAP_S = _delivery.FOCUS_CLICK_GAP_S
 _SUBMIT_SETTLE_S = _delivery.SUBMIT_SETTLE_S
 _STREAM_CHUNK_SETTLE_S = _delivery.STREAM_CHUNK_SETTLE_S
 # ...and so are the activation wait in front of that first beat and the beat
@@ -548,6 +549,9 @@ class _MainScreenOps(ScreenOps):
 
     def activation_poll(self) -> float:
         return _ACTIVATION_POLL_S
+
+    def focus_click_gap(self) -> float:
+        return _FOCUS_CLICK_GAP_S
 
     def paste_settle(self) -> float:
         return PASTE_SETTLE_DELAY
@@ -1312,6 +1316,9 @@ class MainScreen(Screen[None]):
         """
         self._automation.stop_input()
         self._stop_detector_worker()
+        # ...and the third thread, for the same reason: an alarm still repeating
+        # into a closed app is a beep with nobody left to answer it.
+        self._automation.stop_alert()
 
     def _remember_own_window(self) -> None:
         """Record the foreground window at a moment the user is provably
@@ -2019,6 +2026,15 @@ class MainScreen(Screen[None]):
             self.app.bell()
         if self._config.notify.toast:
             self.notify(message, severity=severity)
+
+    def alert_attention(self) -> None:
+        """Sound the "your move" uh-oh once, if this service asked for one.
+
+        Straight through to the automation controller: the alarm, the preset it
+        is gated on and the thread it sounds on all live down there, and this
+        method exists only because the session controller cannot reach past the
+        view port to say "the user has to go back to the browser now"."""
+        self._automation.sound_attention_once()
 
     # == ChatView: clipboard / transport ======================================
 

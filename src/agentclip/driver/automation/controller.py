@@ -130,6 +130,7 @@ from agentclip.config import (
     SCROLL_PAGE_DOWN,
     ServicePreset,
 )
+from agentclip.driver.automation.alerts import AttentionAlarm
 from agentclip.driver.automation.delivery import (
     AUTO_SEND_FLASH_TEXT,
     ENTER_FLASH_TEXT,
@@ -182,7 +183,7 @@ from agentclip.driver.automation.harness_log import (
     state_text,
 )
 from agentclip.driver.automation.host import AutomationHost, NullHost
-from agentclip.driver.automation.loop_state import LoopState
+from agentclip.driver.automation.loop_state import ATTENTION_STATES, LoopState
 from agentclip.driver.automation.ops import ElementClick, ScreenOps
 from agentclip.driver.automation.view import AutomationView
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
@@ -296,6 +297,7 @@ class AutomationController:
         send_arm_min_diff: float = SEND_ARM_MIN_DIFF,
         send_gate_timeout_ticks: int = SEND_GATE_TIMEOUT_TICKS,
         send_gate_seen_timeout_ticks: int = SEND_GATE_SEEN_TIMEOUT_TICKS,
+        alarm: AttentionAlarm | None = None,
     ) -> None:
         self._view = view
         # The other half of the seam: what the OS-acting sequences still have to
@@ -497,6 +499,11 @@ class AutomationController:
         # read only from the event loop (every delivery is a coroutine a shell
         # scheduled), so unlike the tick bookkeeping it needs no lock.
         self._pending_insert: str | None = None
+        # The audible half of "your move" (``ServicePreset.alert_sound``). Owned
+        # here because ``set_loop_state`` is the one door every attention state
+        # comes through, and passable in so a suite can hear the alarm without
+        # the machine making a sound.
+        self._alarm = alarm if alarm is not None else AttentionAlarm()
 
     # == the ARMED switch =====================================================
 
@@ -848,6 +855,46 @@ class AutomationController:
             self._loop_state = state
             self.log_harness(KIND_STATE, state_text(before.name, state.name, reason))
             self._view.paint_loop_state(state)
+        # Outside the lock on purpose. The alarm reads the live preset (the
+        # host's, which is a shell's) and starts a thread, and neither belongs
+        # inside the lock a detector tick is waiting on - the transition itself
+        # is already committed and the sound is a consequence of it, not part of
+        # it.
+        self._sound_attention(state)
+
+    def _sound_attention(self, state: LoopState) -> None:
+        """Start or stop the "your move" alarm for the state just entered.
+
+        The single hook, and deliberately at the ONE door every state change
+        comes through: there are nine sites that hand the loop back to the user
+        and a beep copy-pasted into each of them is nine places to forget to
+        stop it. Arm on the states that need a human (``ATTENTION_STATES``),
+        disarm on everything else - including an attention state on a service
+        whose alert is off, which is what makes turning the setting off mid-nag
+        stop the noise at the next transition rather than never.
+        """
+        preset = self._live_preset()
+        if state in ATTENTION_STATES and preset.alert_sound:
+            self._alarm.arm(repeat_seconds=preset.alert_repeat_seconds)
+        else:
+            self._alarm.disarm()
+
+    def sound_attention_once(self) -> None:
+        """One uh-oh for a re-sync the LOOP never hears about.
+
+        A protocol error is the case: the reply arrived, the loop moved on, and
+        yet the user has to go back to the browser and re-copy. There is no
+        attention state to arm against and nothing to disarm it afterwards, so
+        it is a single chime - still gated on the live service's ``alert_sound``,
+        because the setting means "tell me out loud when I am needed" and this
+        is one of those moments.
+        """
+        if self._live_preset().alert_sound:
+            self._alarm.chime()
+
+    def stop_alert(self) -> None:
+        """Silence the alarm for good (shutdown). Safe when nothing is sounding."""
+        self._alarm.disarm()
 
     def log_harness(self, kind: str, text: str) -> None:
         """Append one decision to the harness log (`/log`).
@@ -2588,7 +2635,13 @@ class AutomationController:
         # asking for a keystroke in another window is how the banner ends up
         # lying about what a press will do. Covers the streamed delivery too:
         # its auto-submit is this same tap, on this same flag.
-        if auto_sent:
+        #
+        # ...unless the service says not to (``ServicePreset.snap_back``). That
+        # switch is a debugging aid and reads as one: with the foreground left
+        # in the browser the user can see for themselves where the click landed
+        # and whether the chat box was ever selected, which is a question this
+        # window cannot answer once it has taken the focus back.
+        if auto_sent and self._live_preset().snap_back:
             await self.snap_back_after_click()
         return pasted
 
@@ -2597,11 +2650,33 @@ class AutomationController:
         calibrated) so the browser has focus and the paste lands without
         alt-tab. Returns True only when a target was known AND the click landed
         - the signal ``deliver`` uses to decide whether it is safe to send
-        Ctrl+V."""
+        Ctrl+V.
+
+        TWO clicks, ``delivery.FOCUS_CLICK_GAP_S`` apart. The first one is
+        spent waking the browser: a window that is not in the foreground takes
+        the click as its activation and the page never sees it routed to the
+        input field, which leaves the window focused, the caret nowhere, and
+        the Ctrl+V below going into nothing the user can see. The second lands
+        on a window that is already awake. Safe HERE and nowhere else - the box
+        is empty at this point in the sequence, so there is no word for a
+        double click to select - which is why it lives in this method rather
+        than in ``focus_click``, whose other callers aim at a transcript full
+        of text.
+
+        The verdict is the FIRST click's: it is the one that proves the OS
+        accepts input for that target at all, and a second click refused after
+        the first landed would only mean the burst was throttled, not that the
+        box is unfocused. So the reinforcement is best effort.
+        """
         region = await self.chatbox_region()
         if region is None:
             return False
-        return await self.focus_click(region)
+        clicked = await self.focus_click(region)
+        if not clicked:
+            return False
+        await asyncio.sleep(self._ops.focus_click_gap())
+        await self.focus_click(region)
+        return True
 
     async def _stream_outbound(self, text: str) -> bool:
         """Walk ``text`` into the focused chat box a chunk at a time (opt-in per

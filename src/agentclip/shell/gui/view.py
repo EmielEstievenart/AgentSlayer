@@ -902,6 +902,7 @@ class GuiView:
             self._mcp_manager.set_status_hook(None)
         self._automation.stop_input()
         self._stop_detector_worker()
+        self._automation.stop_alert()
 
     # == what the page asks for (js_api, already on the loop) ==================
 
@@ -1542,6 +1543,11 @@ class GuiView:
         only the toast half is switchable here."""
         if self._config.notify.toast:
             self.notify(message, severity=severity)
+
+    def alert_attention(self) -> None:
+        """The audible "your move", the same way the TUI gets it: the alarm is
+        the automation controller's, so this shell inherits it for free."""
+        self._automation.sound_attention_once()
 
     # == ChatView: clipboard / transport =======================================
 

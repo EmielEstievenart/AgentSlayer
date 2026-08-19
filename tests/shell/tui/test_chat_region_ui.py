@@ -31,7 +31,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
 
-from .conftest import send_composer
+from .conftest import focus_clicks, send_composer
 
 REGION = ScreenRegion(1050, 340, 812, 540)
 
@@ -214,11 +214,11 @@ async def test_outbound_copy_clicks_the_region_and_it_survives_new(
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
         assert fake.read_text() is not None  # the bootstrap really was copied
-        assert clicks == [REGION]
+        assert clicks == focus_clicks(REGION)
 
         # A follow-up is another outbound copy - another click.
         await _send(app, pilot, "Also say goodbye.")
-        await _wait_for(pilot, lambda: len(clicks) == 2, "follow-up copy clicked")
+        await _wait_for(pilot, lambda: len(clicks) == 4, "follow-up copy clicked")
         await _wait_for(pilot, lambda: not main.busy, "follow-up flow settled")
 
         # /new tears the session down, but the calibration outlives it.
@@ -231,4 +231,4 @@ async def test_outbound_copy_clicks_the_region_and_it_survives_new(
         await _send(app, pilot, "Fresh session task.")
         await _wait_for(pilot, lambda: main.session_active, "second session armed")
         await _wait_for(pilot, lambda: not main.busy, "second session flow settled")
-        assert clicks == [REGION, REGION, REGION]
+        assert clicks == focus_clicks(REGION, REGION, REGION)

@@ -498,6 +498,8 @@ The TUI wraps the engine: clipboard watcher thread → `post_message(ClipboardCa
 3. Project: `<root>/.agentclip.toml`
 4. CLI flags (`--service`, `--project`)
 
+**In a remote session** the project layer is read from the target through the Host seam (and so are the permission ruleset and the MCP blocks), while the global `config.toml` is the operator's. **No table is exempt from the merge** — `[approval]` (mode, yolo, allowlist, deny tokens) was pinned to this PC by the `/config` wave and no longer is: policy belongs to the machine the engine runs on (docs/design/remote-executor.md §2.5, superseding remote-ssh.md's "the host owns the gate"). What stays local is the gate's *UI*, not its rules.
+
 **Allowlist matching: glob (`fnmatch.fnmatchcase`) against the full command string.** Rejected regex: users will write allowlists by hand; glob is auditable at a glance and can't catastrophically backtrack. Safety backstop: if a command contains any *deny token* (`;`, `&&`, `||`, `|`, backtick, `$(`, `>`, `<`, newline), it **always requires approval** even when a glob matches — this prevents `pytest tests; rm -rf ~` from riding the `pytest *` pattern.
 
 ### Permission rules: AgentClip's `permissions.json`

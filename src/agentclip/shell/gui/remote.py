@@ -57,7 +57,16 @@ MISSING_ROOT = "this target has no saved root - give the project directory on th
 # is the footgun (docs/design/remote-ssh.md, "the target owns its policy").
 NO_RULESET = "No permission ruleset found on {target}; falling back to the allowlist gate"
 RULESET_FROM = "Permissions and MCP servers for this session come from {source}"
-APPROVAL_LOCAL = "[approval] (mode, yolo, command rules) stays on this PC"
+# [approval] used to be pinned to this PC. It is not any more: the engine owns
+# policy wholesale, so the mode, yolo and the command rules merge this PC's
+# config.toml with the TARGET's .agentclip.toml - the same merge every other
+# table gets (docs/design/remote-executor.md section 2.5). The banner says so
+# for the same reason it names the ruleset's machine: a policy fact the user
+# cannot see is a footgun whichever way it points.
+APPROVAL_POLICY = (
+    "[approval] (mode, yolo, command rules) merges this PC's config.toml "
+    "with the target's .agentclip.toml"
+)
 STDIO_REFUSED = "not started - stdio MCP servers are not supported in a remote session: {names}"
 
 
@@ -168,7 +177,7 @@ def policy_lines(config: Config, target_label: str) -> list[str]:
         lines.append(RULESET_FROM.format(source=config.permission_source))
     else:
         lines.append(NO_RULESET.format(target=target_label))
-    lines.append(APPROVAL_LOCAL)
+    lines.append(APPROVAL_POLICY)
     stdio = [
         str(getattr(server, "name", ""))
         for server in config.mcp_servers.servers
@@ -374,7 +383,7 @@ def _suggest_name(spec: str) -> str:
 
 
 __all__ = [
-    "APPROVAL_LOCAL",
+    "APPROVAL_POLICY",
     "MISSING_ROOT",
     "MISSING_TARGET",
     "NO_RULESET",

@@ -1,7 +1,9 @@
 """The [remote] table, the --ssh/--remote-root flags, and which machine each
-piece of a remote session's config comes from (docs/design/remote-ssh.md 4, and
-its revision "the target owns its policy": the target owns the rules, this PC
-owns the gate)."""
+piece of a remote session's config comes from (docs/design/remote-ssh.md 4 and
+its revision "the target owns its policy", as amended by
+docs/design/remote-executor.md section 2.5: the engine owns policy wholesale,
+so the target's config answers for [approval] too - only the global config.toml
+is read from this PC)."""
 
 from __future__ import annotations
 
@@ -239,12 +241,21 @@ def test_a_target_with_no_ruleset_stays_in_legacy_mode(global_path: Path) -> Non
     assert cfg.warnings == ()
 
 
-# -- [approval]: the gate stays on the machine with the human ------------------
+# -- [approval]: the engine owns policy wholesale ------------------------------
+#
+# This is the section the remote-executor wave inverted. The /config wave read
+# [approval] from THIS PC's config.toml alone whenever a host was given, and
+# warned about a remote project that tried to set it - remote-ssh.md's "the
+# target owns the rules, the host owns the gate" split. That split is superseded
+# by docs/design/remote-executor.md section 2.5: policy is the ENGINE's, and the
+# engine's machine is the target, so [approval] merges like every other table
+# and the warning is gone with the branch that raised it.
 
 
-def test_the_remote_projects_approval_table_is_ignored(global_path: Path) -> None:
-    """The target owns the rules; the host owns the gate. A remote file must not
-    arm the operator's session into yolo."""
+def test_the_remote_projects_approval_table_takes_effect(global_path: Path) -> None:
+    """The engine owns policy wholesale (remote-executor.md section 2.5): the
+    target's project file sets the mode and yolo for the session it describes,
+    and nothing about [approval] is special-cased any more."""
     global_path.write_text('[approval]\nmode = "plan"\n', encoding="utf-8")
     host = FakeHost("/srv/app")
     host.add_file(
@@ -253,21 +264,35 @@ def test_the_remote_projects_approval_table_is_ignored(global_path: Path) -> Non
     )
 
     cfg = _remote(global_path, host)
-    assert cfg.approval.yolo is False
-    assert cfg.approval.mode == "plan"  # this PC's config.toml, not the target's
-    assert cfg.general.service == "claude"  # every other table still merges
-    assert any("[approval] in the remote project" in w for w in cfg.warnings)
+    assert cfg.approval.yolo is True
+    assert cfg.approval.mode == "unattended"  # the TARGET's project file wins
+    assert cfg.general.service == "claude"
+    assert cfg.warnings == ()  # no pinning, so nothing to warn about
 
 
-def test_a_remote_project_without_an_approval_table_is_not_warned_about(
-    global_path: Path,
-) -> None:
+def test_the_remote_projects_command_rules_take_effect(global_path: Path) -> None:
+    """The whole table, not just the two live-state keys: the legacy allowlist
+    and the deny-token backstop come off the target too."""
+    global_path.write_text(
+        '[approval]\ncommand_allowlist = ["ls*"]\ncommand_deny_tokens = [";"]\n',
+        encoding="utf-8",
+    )
     host = FakeHost("/srv/app")
-    host.add_file("/srv/app/.agentclip.toml", '[general]\nservice = "claude"\n')
-    assert _remote(global_path, host).warnings == ()
+    host.add_file(
+        "/srv/app/.agentclip.toml",
+        '[approval]\ncommand_allowlist = ["pytest*"]\n',
+    )
+
+    cfg = _remote(global_path, host)
+    # Lists REPLACE, never concatenate - the project tightens rather than adds.
+    assert cfg.approval.command_allowlist == ("pytest*",)
+    # A key the project did not mention still merges down from this PC's file.
+    assert cfg.approval.command_deny_tokens == (";",)
 
 
-def test_the_hosts_approval_table_still_arms_a_remote_session(global_path: Path) -> None:
+def test_the_global_approval_table_still_arms_a_remote_session(global_path: Path) -> None:
+    """A target with no [approval] of its own: this PC's config.toml is the only
+    layer left, exactly as it is for every other table."""
     global_path.write_text(
         '[approval]\nyolo = true\ncommand_allowlist = ["ls*"]\n', encoding="utf-8"
     )
@@ -276,11 +301,24 @@ def test_the_hosts_approval_table_still_arms_a_remote_session(global_path: Path)
     assert cfg.approval.command_allowlist == ("ls*",)
 
 
+def test_a_remote_project_setting_approval_is_not_warned_about(
+    global_path: Path,
+) -> None:
+    """The pinning warning is gone with the branch: an [approval] table on the
+    target is ordinary config now, and a warnings list is for problems."""
+    host = FakeHost("/srv/app")
+    host.add_file(
+        "/srv/app/.agentclip.toml", '[approval]\nmode = "plan"\n[general]\nservice = "claude"\n'
+    )
+    cfg = _remote(global_path, host)
+    assert cfg.warnings == ()
+    assert cfg.approval.mode == "plan"
+
+
 def test_a_local_project_still_supplies_its_own_approval_table(
     project: Path, global_path: Path
 ) -> None:
-    """Nothing changes without a host: the gate and the project are on the same
-    machine, so there is no second machine to protect it from."""
+    """The local case, unchanged throughout: one machine, one merge."""
     (project / ".agentclip.toml").write_text(
         '[approval]\nyolo = true\nmode = "unattended"\n', encoding="utf-8"
     )

@@ -34,7 +34,7 @@ from agentclip.executor.hosts.connect import (
 )
 from agentclip.shell.gui.bridge import Bridge
 from agentclip.shell.gui.remote import (
-    APPROVAL_LOCAL,
+    APPROVAL_POLICY,
     MISSING_ROOT,
     MISSING_TARGET,
     ConnectDialog,
@@ -556,7 +556,7 @@ async def test_a_connect_points_the_session_at_the_remote_root(
     assert harness.flush().last("sidebar")["remote"] == "dev@box"
 
 
-async def test_the_policy_banner_names_the_machine_and_what_stayed_here(
+async def test_the_policy_banner_names_the_machine_and_where_policy_comes_from(
     harness: RemoteHarness, dial: Any
 ) -> None:
     """Brief §3.9: a user with a carefully tuned permissions.json on THIS PC sees
@@ -567,7 +567,7 @@ async def test_the_policy_banner_names_the_machine_and_what_stayed_here(
     await run_connect(harness)
     lines = last_connect(harness)["policy"]
     assert any("No permission ruleset found on dev@box" in line for line in lines)
-    assert APPROVAL_LOCAL in lines
+    assert APPROVAL_POLICY in lines
 
 
 async def test_the_project_block_keeps_saying_it_after_the_dialog_closes(

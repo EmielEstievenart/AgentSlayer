@@ -315,12 +315,14 @@ happy-path notice, only for wiring it to the dialog:
   banner instead reads "No permission ruleset found on `<target>`; falling
   back to the allowlist gate" — makes the absence a stated fact, not a silent
   default.
-- The banner also names anything relegated to the host by "what stays on the
-  host PC" (remote-ssh.md line ~257-260): "`[approval]` (mode, yolo, command
-  rules) stays on this PC" — one line, so a user who *did* set `[approval]` in
-  the remote project's `.agentclip.toml` and sees it ignored (per the warning
-  at `config.py:896-901`) has an explanation surfaced in the GUI rather than
-  buried in a warnings list they have to go find.
+- The banner also names where the gate's own policy comes from — one line, so a
+  user who set `[approval]` in either file knows which one is answering. **As
+  built, and revised (2026-08-19):** the line used to read "`[approval]` (mode,
+  yolo, command rules) stays on this PC", matching the pinning `config.py` then
+  enforced; that pinning is gone (docs/design/remote-executor.md §2.5 — the
+  engine owns policy wholesale), so the line now reads "`[approval]` (mode, yolo,
+  command rules) merges this PC's config.toml with the target's `.agentclip.toml`"
+  (`shell/gui/remote.py:APPROVAL_POLICY`).
 - Any refused stdio MCP server (remote-ssh.md "MCP stdio servers are not
   supported in a remote session") is listed by name in this same
   post-connect summary — today it only reaches the TUI's MCP status pane

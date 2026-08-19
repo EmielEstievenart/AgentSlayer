@@ -319,12 +319,22 @@ def test_a_bad_remote_config_is_a_warning_not_a_failed_step(
     local: Path, host: ScriptedHost
 ) -> None:
     """load_config never raises; its complaints ride on Config.warnings, so the
-    CONFIG step always ticks green and the notices go beside it."""
-    host.add_file(f"{REMOTE_ROOT}/.agentclip.toml", "[approval]\nyolo = true\n")
+    CONFIG step always ticks green and the notices go beside it.
+
+    The sample used to be a remote `[approval]` table, which earned a warning of
+    its own back when it was ignored. It is not ignored any more - the engine
+    owns policy wholesale (docs/design/remote-executor.md section 2.5) - so the
+    warning here is an unreadable VALUE, and the same table's readable key is
+    asserted to have taken effect through the real connect sequence.
+    """
+    host.add_file(
+        f"{REMOTE_ROOT}/.agentclip.toml", '[approval]\nmode = "wobble"\nyolo = true\n'
+    )
     result, seen = run(local, host)
     assert not isinstance(result, ConnectError)
     assert beats(seen)[-1] == (STEP_CONFIG, "ok")
-    assert any("[approval]" in w for w in result.config.warnings)
+    assert any("unknown approval mode" in w for w in result.config.warnings)
+    assert result.config.approval.yolo is True  # the TARGET's table, honoured
 
 
 def test_the_step_notes_are_the_sentences_the_terminal_prints(

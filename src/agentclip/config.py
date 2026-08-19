@@ -19,9 +19,14 @@ permission ruleset, which is that machine's
 outranks the global one. The target owns the rules because every file a rule can
 save is over there (docs/design/remote-ssh.md, "the target owns its policy").
 
-``[approval]`` goes the other way: it is the gate, and the gate belongs to the
-machine with the human answering it, so in a remote session it comes from this
-PC's config.toml alone and the remote layer's table is ignored with a warning.
+``[approval]`` is no exception, and used to be one: it merges like every other
+table, so a remote project's ``.agentclip.toml`` sets the mode, yolo, the
+allowlist and the deny tokens for the session it describes. The gate's UI is
+still the operator's - the human answering the question sits here - but the
+POLICY belongs to the machine the engine runs on, which in a remote session is
+the target (docs/design/remote-executor.md section 2.5). The pinned-to-this-PC
+branch that the ``/config`` wave added belonged to remote-ssh.md's superseded
+"host owns the gate" split and is gone.
 
 The mcp block of the same permissions.json travels with the permission block:
 both layers are read off that machine, and so are the ``{file:...}`` secrets and
@@ -931,22 +936,10 @@ def load_config(
 
     general_t = merged.get("general", {})
     clipboard_t = merged.get("clipboard", {})
-    # The one table a remote project does not get a say in: [approval] is the
-    # gate, and the gate belongs to the machine with the human answering it -
-    # `mode` is cycled with shift+tab and `yolo` is a chat command, so the file
-    # only supplies a starting value for live session state the operator drives
-    # (docs/design/remote-ssh.md, "the target owns its policy"). Selected here
-    # rather than filtered out of the merge, so every other table still merges
-    # exactly as it always did.
+    # [approval] merges like every other table, including in a remote session:
+    # the engine owns policy wholesale, and the engine's machine is the target
+    # (docs/design/remote-executor.md section 2.5).
     approval_t = merged.get("approval", {})
-    if host is not None:
-        approval_t = global_layer.get("approval", {})
-        if "approval" in project_layer:
-            warnings.append(
-                "config: [approval] in the remote project's .agentclip.toml is ignored; "
-                "the approval gate is read from this PC's config.toml, because this is "
-                "the machine that answers its questions"
-            )
     limits_t = merged.get("limits", {})
     notify_t = merged.get("notify", {})
     gui_t = merged.get("gui", {})

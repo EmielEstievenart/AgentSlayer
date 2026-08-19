@@ -100,8 +100,9 @@ local.
   integration tests.
 - **Phase 3 — done:** policy moves to the target. The permission ruleset and both
   MCP layers are read off the target through the Host, `{file:}`/`{env:}` resolve
-  over there, stdio MCP servers are refused and reported, and `[approval]` is
-  pinned to this PC. See the revision section below.
+  over there, and stdio MCP servers are refused and reported. `[approval]` was
+  pinned to this PC by this phase and is **no longer** (remote-executor.md §2.5
+  took the last table with it). See the revision section below.
 
 ## As built (phase 2)
 
@@ -179,11 +180,24 @@ ask.
 
 ## Revision: the target owns its policy
 
-Status: **implemented** (2026-08-13). Supersedes decision 6. The permission
-ruleset, `[approval]`, both MCP layers, `{file:}`/`{env:}` resolution and the
-stdio refusal are all as described below; the one thing built differently is
-noted where it is described (the refused stdio server reaches the status pane
-through the mount paint, so it gets a row and the statusbar count but no toast).
+Status: **implemented** (2026-08-13), and **partly superseded in turn**
+(2026-08-19). Supersedes decision 6. The permission ruleset, both MCP layers,
+`{file:}`/`{env:}` resolution and the stdio refusal are all as described below;
+the one thing built differently is noted where it is described (the refused stdio
+server reaches the status pane through the mount paint, so it gets a row and the
+statusbar count but no toast).
+
+> **`[approval]` is no longer pinned to this PC.** The "What stays on the host
+> PC" subsection below said all of `[approval]` — `mode`, `yolo`,
+> `command_allowlist`, `command_deny_tokens` — is read from the operator's
+> `config.toml` alone in a remote session, and `config.py` had a branch enforcing
+> exactly that. **Superseded by docs/design/remote-executor.md §2.5**, which
+> decided that the engine owns policy wholesale: policy belongs to the config of
+> the machine the work happens on, so `[approval]` merges like every other table
+> and the branch (with its warning) is deleted. The paragraphs below are kept for
+> the record, marked where they no longer describe the code. The half that
+> survives is the *gate* — the human answering it still sits here, and the shell
+> renders the mode the engine reports.
 
 Decision 6 got the rule backwards. "The user's policy must not weaken because of
 remote config" reads well until you notice which machine the policy is protecting:
@@ -192,7 +206,10 @@ describes paths that do not exist over there, so in practice it either matched
 nothing or matched by accident. The machine whose files are at risk is the machine
 that should say what may happen to them.
 
-**New rule of thumb: the target owns the rules, the host owns the gate.** What may
+**New rule of thumb: the target owns the rules, the host owns the gate.**
+(Half-superseded: remote-executor.md §2.5 moved the *gate's policy* to the target
+too. What is left of the split is that the gate's **UI** — the human, the
+keypress, shift+tab — stays here.) What may
 be done to the project — the ruleset, the skills, the MCP servers — is described on
 the target, because that is where the files are. How a question about it gets
 answered — the permission mode, yolo, the legacy allowlist, the deny tokens — lives
@@ -266,6 +283,12 @@ Global `config.toml`, CLI flags, `~/.ssh/*`, service appearance profiles, and th
 `.agentclip` session/transcript/backup tree — all as built in phase 2.
 
 **All of `[approval]` — `mode`, `yolo`, `command_allowlist`, `command_deny_tokens`.**
+— **SUPERSEDED (2026-08-19) by docs/design/remote-executor.md §2.5.** Kept for the
+record; the code no longer reads this way. `[approval]` merges like every other
+table again, so a remote project's `.agentclip.toml` sets it for the session it
+describes, and `config.py`'s pinning branch and its warning are gone. What follows
+is the original text.
+
 This is a change from today: the remote `.agentclip.toml` currently merges over the
 host's, so a remote layer can set them. In a remote session, `[approval]` is now read
 from the host's `config.toml` only, and the remote layer's `[approval]` table is
@@ -286,6 +309,10 @@ consulted in legacy mode, so a remote layer setting `yolo = true` would have rel
 the brake anyway. Splitting the table would have bought a guarantee that did not
 hold.
 
+*(End of the superseded `[approval]` text. The reasoning above still explains why
+the four keys travel TOGETHER — they are one mechanism — which is exactly why
+remote-executor.md §2.5 moved all four at once rather than picking some.)*
+
 ### Consequences to handle when implementing
 
 - `McpManager` currently spawns servers on this PC and defaults `cwd` to
@@ -300,9 +327,12 @@ hold.
 - The permission-source string shown in the TUI must name the machine, not just the
   path — `dev-box:~/.config/agentclip/permissions.json` — or two identical-looking
   paths become indistinguishable in a screenshot.
-- `[approval]` needs its layers separated: it is read from the merged config dict
+- ~~`[approval]` needs its layers separated: it is read from the merged config dict
   today, so honouring only the host layer means keeping that table out of the merge
-  (or re-reading it from the host layer alone) rather than filtering after the fact.
+  (or re-reading it from the host layer alone) rather than filtering after the
+  fact.~~ **Undone (2026-08-19):** the separation was built exactly as described
+  and then removed — `[approval]` is read from the merged dict again
+  (remote-executor.md §2.5).
 - Tests: `FakeHost` gains the ruleset/MCP fixtures; the remote `printenv` belongs
   behind the existing `AGENTCLIP_SSH_TESTS=1` gate.
 - `ApprovalConfig.yolo`'s comment (`config.py:345`) says yolo bypasses the deny

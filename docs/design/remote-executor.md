@@ -14,6 +14,13 @@
 > classification and the opt-in remote factory) shipped in full, so those parts
 > describe code rather than intent. Everything else here is still plan.
 >
+> **Increment 4 (the parity pass) is in progress.** Its policy slice has landed:
+> §2.5 is decided and built — `config.py`'s pinned-to-this-PC `[approval]` branch
+> is deleted, so the engine reads the whole of `[approval]` from its own
+> machine's config layers — and the stores (§2.4) and skills discovery were
+> verified engine-side without a code change. Both sections carry an "as built"
+> note. Still owed by this increment: the target-side `McpManager`.
+>
 > **The default `--ssh` mode is still the per-call `SshHost` path.** Increment 3
 > built the remote-engine transport and left it *additive*: `cli.make_remote_link_factory`
 > is reachable and tested, and nothing calls it yet. The flip waits on increment
@@ -158,6 +165,27 @@ transcript mirror. This supersedes `remote-ssh.md`'s "backups capture remote
 bytes locally": backups of the target's files now live next to those files.
 Cost accepted: transcripts/backups are unreachable while the target is.
 
+**As built (increment 4, verified not changed).** Increment 2's factory move
+already made this true *mechanically*, and that is worth stating because it means
+no store code had to learn about remoteness. `engine/link/factory.py` is the one
+place a session's `SessionStore` and `BackupStore` are constructed, and both are
+built from what the process it runs in can see: `SessionStore(project_root,
+data_root=data_root)` and `BackupStore(session.session_dir, host=session_host)`.
+In the `agentclip-engine` server process `__main__.py` passes `host=None` (so
+`session_host` is a `LocalHost`) and `--data-root` is absent in production
+(`engine_command` deliberately does not send one, §2.12), so the tree lands in
+`<project>/.agentclip/` **on the target** and backups are captured by the target's
+own filesystem reads. Nothing mirrors home.
+
+The **legacy per-call `SshHost` path** — still the default until §2.8's deletion —
+keeps phase 2's answer: `cli` passes
+`data_root=default_remote_state_dir(target, root)`, a
+`<user_data_dir>/agentclip/remote/<target>-<root>-<hash>/` tree on the OPERATOR's
+PC, and the `BackupStore` reads remote bytes over the Host to store them there.
+Both are correct for the mode they belong to — the store follows the engine, and
+in that mode the engine is here — so the flip of the default is also the moment a
+remote session's transcripts stop being local.
+
 ### 2.5 Policy: the engine owns it wholesale
 
 User's formulation: **"the shell should just show the mode the engine is
@@ -178,6 +206,43 @@ that landed with the `/config` wave). The Shell:
 This supersedes `remote-ssh.md`'s "target owns the rules, host owns the gate"
 *config* split: the gate **UI** stays local, but all policy data and verdict
 computation are engine-side.
+
+**Skills are engine-side too, and that closes the question §5 left open.** Skills
+load from the machine the ENGINE runs on — the target's `.claude`/`.opencode`/
+`.agents` folders, project-local and under the target user's home, in a remote
+session. Same reason as the ruleset: a SKILL.md describes what to do with files
+that are over there, and it is read by a tool call that runs over there. This is
+already what the code does (`engine/link/factory.py` calls `discover_skills` with
+the session's `host`/`home`, which in the server process are `LocalHost` and the
+target's own `Path.home()`), so the decision records behaviour rather than asking
+for a change.
+
+**As built (increment 4): the pinned-local `[approval]` branch is deleted.**
+`config.py:load_config` had one special case left over from the `/config` wave —
+when `host is not None`, `[approval]` was read from THIS PC's global config.toml
+alone and a remote project's `[approval]` table was dropped with a warning. That
+branch and its warning are gone: `approval_t = merged.get("approval", {})`, the
+same one line every other table gets, with no `host` test anywhere near it. So
+the mode, YOLO, the legacy allowlist and the deny tokens now come from the
+engine's machine like everything else — global config.toml merged with the
+project's `.agentclip.toml`, read through whatever `Host` the load was given.
+
+Two modes, one rule, and it is worth being explicit about the second:
+
+- In the **remote-server** world this section is written for, the engine's
+  machine IS the target and the merge is entirely local to it — the operator's
+  config.toml is not even reachable from over there (`engine_command` sends no
+  `--global-config`, §2.12).
+- On the **legacy per-call `SshHost` path**, still the default, the engine runs
+  here and the merge is this PC's config.toml plus the TARGET's project file read
+  through the Host. So a remote project can now set `yolo`/`mode`/the command
+  rules for the session it describes. That is the decided §2.5 semantics — policy
+  belongs to the config of the machine the work happens on — and the pinning it
+  replaces was the answer to `remote-ssh.md`'s superseded model, not to this one.
+
+The GUI's post-connect policy banner says so rather than claiming otherwise
+(`shell/gui/remote.py:APPROVAL_POLICY`), for the same reason it names the
+ruleset's machine: an invisible policy fact is a footgun whichever way it points.
 
 ### 2.6 Deployment: a pre-installed engine on the target's PATH
 
@@ -643,8 +708,13 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
    two pure functions, and `cli.make_remote_link_factory` — see §2.12. The
    default `--ssh` mode is deliberately **not** flipped: the factory is additive
    and nothing calls it, because parity (below) has not been shown.
-4. **MCP + store on target, parity pass.** Target-side McpManager, stores,
-   policy loading; the `/config`-wave permissions.json paths on the target.
+4. **MCP + store on target, parity pass.** — **in progress.** Target-side
+   McpManager, stores, policy loading; the `/config`-wave permissions.json paths
+   on the target. Done so far: policy loading, by deleting the one branch that
+   still pinned `[approval]` to the operator's PC (§2.5 "as built"), plus the
+   verification that stores (§2.4) and skills already live with the engine and
+   needed no change. Remaining: the target-side `McpManager`, which lands in
+   `engine/link/__main__.py`'s assembly where `mcp_manager=None` is passed today.
 5. **Delete SshHost per-call mode** once parity is verified; amend
    `remote-ssh.md`.
 
@@ -677,15 +747,15 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
 - **Backup guarantee across the coarser boundary**: capture-before-overwrite
   must be re-verified once the engine (not Host primitives) does file
   mutation on the target — a naive design could batch/reorder and lose it.
+  Increment 4 settled *where* the backups land (§2.4) and nothing else about
+  this: the ordering guarantee still has to be re-argued when a tool call
+  becomes one wire message instead of a sequence of Host primitives.
 - **Session listing/cleanup on target**: stores now accumulate on the target;
   who prunes them, and does the Shell get a way to browse/pull a past remote
   transcript?
 - **Delegate/sub-agent sessions in remote mode**: sub-agent chats are still
   local browser chats — confirm the delegate flow's pause/resume shape needs
   nothing extra over the wire beyond what ask_user needs.
-- **Skills discovery in remote mode**: skills load from Claude/OpenCode
-  folders — target's folders, local ones, or both? (Consistent choice would be
-  target's, per §2.5, but undecided.)
 - **`remote-ssh.md` amendments**: enumerate exactly which sections are
   superseded (MCP-stays-local, backups-local, rules/gate split) when this doc
   graduates to binding.

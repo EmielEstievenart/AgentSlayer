@@ -40,7 +40,7 @@ from agentclip.shell.app.engine_launch import (
     fallback_engine_command,
     is_missing_engine,
 )
-from agentclip.shell.app.link import Link, LocalLink, McpStatusLine
+from agentclip.shell.app.link import Link, LocalLink, McpStatusLine, SkillReport
 from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLinkClient
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.graphics import probe_terminal
@@ -79,10 +79,19 @@ class LinkFactory:
         # The link gets the same status source the shells do, so
         # ``await link.mcp_statuses()`` answers in local mode exactly as it does
         # over the wire - one seam, two modes, no branch in the caller.
-        return LocalLink(self._builder(request), mcp_statuses=self.statuses)
+        return LocalLink(self._builder(request), mcp_statuses=self.statuses, skills=self.skills)
 
     def statuses(self) -> tuple[McpServerStatus, ...]:
         return self._builder.mcp_statuses()
+
+    def skills(self) -> SkillReport:
+        """What the builder discovered beside the project, for `/skills`.
+
+        A read of memory, not of disk: discovery ran once when the builder was
+        made. Handed to the link as well as to the shells so the seam answers
+        ``await link.skills()`` in local mode exactly as it does over the wire.
+        """
+        return self._builder.skills()
 
     def set_status_hook(self, cb: Callable[[McpServerStatus], None] | None) -> None:
         self._builder.set_mcp_status_hook(cb)
@@ -191,6 +200,18 @@ class RemoteEngine:
         round trip is the caller's to spend, and it is spent off the event loop.
         """
         return self.client.build_mcp_statuses
+
+    def skills(self) -> SkillReport:
+        """The target's skills, over the wire. **One round trip, on purpose.**
+
+        The opposite call to :meth:`statuses`, and the difference is who asks.
+        That one is called on every status paint, so it must never wait on the
+        network; this one is called when a human types `/skills` before a session
+        exists - once, on an idle app, with no turn to hold up. A round trip is
+        the caller's to spend there, and spending it is what makes the answer the
+        TARGET's rather than this PC's.
+        """
+        return self.client.skills()
 
     def set_status_hook(self, cb: Callable[[McpStatusLine], None] | None) -> None:
         """Accepted and dropped: v1 has **no MCP push over the wire** (§2.9).
@@ -508,6 +529,10 @@ class GuiRuntime:
     config: Config
     engine_factory: Callable[[EngineRequest | str], Link]
     mcp_manager: RemoteEngine | LinkFactory | None
+    # Where a session-less `/skills` reads after this connect. Never None, unlike
+    # the MCP slot: every machine has skill folders worth naming, even when it
+    # has nothing in them.
+    skills: Callable[[], SkillReport]
     host: Host
     target: str
 
@@ -800,6 +825,7 @@ def main(argv: list[str] | None = None) -> int:
                 # settle home (§2.7), so gating it on a non-empty reading would
                 # drop the source before it could ever answer.
                 mcp_manager=engine,
+                skills=engine.skills,
                 host=remote.host,
                 target=remote.host.target,
             )
@@ -811,6 +837,9 @@ def main(argv: list[str] | None = None) -> int:
                 on_config_change=adopt_config,
                 engine_factory=gui_factory,
                 mcp_manager=_mcp_source(gui_factory),
+                # Ungated, where the MCP source is not: a project with no skills
+                # still has six folders `/skills` should be able to name.
+                skills=gui_factory.skills,
                 host=launch.host,
                 remote=RemoteConnect(
                     local_root=Path(args.project).resolve(),
@@ -888,6 +917,7 @@ def main(argv: list[str] | None = None) -> int:
         # first session build carries the target's settle home, so gating it on
         # a non-empty reading would drop it before it could ever answer (§2.7).
         tui_mcp = remote_engine
+        tui_skills = remote_engine.skills
         stop_engine = remote_engine.close
     else:
         local_factory = make_engine_factory(
@@ -901,6 +931,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         tui_factory = local_factory
         tui_mcp = _mcp_source(local_factory)
+        # Ungated, where the MCP source is not: a project with no skills still
+        # has six folders `/skills` should be able to name.
+        tui_skills = local_factory.skills
         stop_engine = local_factory.close
     app = AgentClipApp(
         config=config,
@@ -908,6 +941,7 @@ def main(argv: list[str] | None = None) -> int:
         engine_factory=tui_factory,
         project_root=launch.project_root,
         mcp_manager=tui_mcp,
+        skills=tui_skills,
     )
     live_app[0] = app
     try:

@@ -82,6 +82,7 @@ from agentclip.engine.link.factory import EngineRequest
 from agentclip.engine.link.wire import (
     BUILD_SESSION,
     MCP_STATUSES,
+    SKILLS,
     EngineLinkError,
     SessionInfo,
     WireError,
@@ -90,7 +91,7 @@ from agentclip.engine.link.wire import (
 from agentclip.engine.states import Decision
 from agentclip.engine.store.backups import UndoReport
 from agentclip.protocol.types import Outbound, ResultStatus
-from agentclip.shell.app.link import Link, McpStatusLine
+from agentclip.shell.app.link import Link, McpStatusLine, SkillReport
 
 # The two ``EngineLinkError`` kinds this side raises on its own account. The
 # wire's four kinds (``bad_request``, ``internal``, and the two that rebuild as
@@ -294,6 +295,19 @@ class RemoteLinkClient:
         """
         statuses = self.roundtrip(None, MCP_STATUSES, wire.encode_params(MCP_STATUSES))
         return tuple(statuses)
+
+    # -- the connection's skills library ---------------------------------------
+
+    def skills(self) -> SkillReport:
+        """The target's skills, right now - the other link-scoped roundtrip.
+
+        Sync and session-free like :meth:`mcp_statuses`, and answered off the
+        builder on the far side, so it is callable before any session exists.
+        """
+        report = self.roundtrip(None, SKILLS, wire.encode_params(SKILLS))
+        if not isinstance(report, wire.SkillReport):  # pragma: no cover - the codec guarantees it
+            raise EngineLinkError(LINK_PROTOCOL, f"skills answered with {type(report).__name__}")
+        return report
 
     # -- one call --------------------------------------------------------------
 
@@ -560,6 +574,14 @@ class RemoteLink:
         """
         async with self._lock:
             return await asyncio.to_thread(self._client.mcp_statuses)
+
+    # -- the target's skills library -------------------------------------------
+
+    async def skills(self) -> SkillReport:
+        """One link-scoped roundtrip, off the event loop, under the link's lock
+        - :meth:`mcp_statuses` in every respect but the method name."""
+        async with self._lock:
+            return await asyncio.to_thread(self._client.skills)
 
     # -- out-of-band -----------------------------------------------------------
 

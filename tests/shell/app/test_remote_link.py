@@ -395,6 +395,29 @@ async def test_the_mcp_settle_rides_build_session_and_the_pull_round_trips(
     assert (await asyncio.wait_for(link.status(), DEADLINE)).phase.name == "AWAITING_REPLY"
 
 
+async def test_the_skills_pull_round_trips_across_the_link(server: _Server) -> None:
+    """`/skills` on a remote session, end to end: the second link-scoped call.
+
+    The target here has no skills (a tmp project, and HOME points somewhere that
+    does not exist), so the rows are empty and the FOLDERS are what is under
+    test - they are the far side's paths, worked out over there, and they are the
+    whole of what a Shell can say when a listing comes back empty.
+    """
+    # Before any session exists, which is what "link-scoped" buys.
+    before = await asyncio.to_thread(server.client.skills)
+    assert before.skills == ()
+    assert len(before.searched) == 6  # the six folders Claude Code and OpenCode scan
+
+    link = server.session()
+    through_the_seam = await asyncio.wait_for(link.skills(), DEADLINE)
+    assert through_the_seam == before
+
+    # A session call still works afterwards: the link-scoped call left the
+    # connection exactly where it found it.
+    await asyncio.wait_for(link.start_task("Write the note file."), DEADLINE)
+    assert (await asyncio.wait_for(link.status(), DEADLINE)).phase.name == "AWAITING_REPLY"
+
+
 # == one reader on the connection, on scripted streams =========================
 #
 # The client-level lock cannot be shown against a real server, because a real

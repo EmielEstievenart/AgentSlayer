@@ -82,6 +82,7 @@ class FakeRuntime:
     config: Config
     engine_factory: Any
     mcp_manager: Any
+    skills: Any
     host: Any
     target: str
 
@@ -179,11 +180,15 @@ def harness(
     def build(remote: ConnectedRemote) -> FakeRuntime:
         if launch_error[0] is not None:
             raise launch_error[0]
+        factory = make_engine_factory(lambda: remote.config, remote.project_root)
         runtime = FakeRuntime(
             project_root=remote.project_root,
             config=remote.config,
-            engine_factory=make_engine_factory(lambda: remote.config, remote.project_root),
+            engine_factory=factory,
             mcp_manager=remote_mcp[0],
+            # The target's skills come off the same factory, which is what
+            # ``cli.build_runtime`` does with the RemoteEngine's.
+            skills=factory.skills,
             host=remote.host,
             target=remote.host.target,
         )

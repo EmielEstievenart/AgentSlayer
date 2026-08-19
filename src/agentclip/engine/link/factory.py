@@ -38,7 +38,13 @@ from agentclip.executor.mcp.types import McpServerStatus
 from agentclip.executor.tools.mcp_tools import make_mcp_specs
 from agentclip.executor.tools.registry import ToolRegistry, default_registry
 from agentclip.executor.tools.sandbox import Workspace
-from agentclip.executor.tools.skills import Skill, discover_skills
+from agentclip.executor.tools.skills import (
+    Skill,
+    SkillReport,
+    discover_skills,
+    skill_report,
+    skill_search_roots,
+)
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.names import generate_chat_name
 from agentclip.protocol.spec import render_spec
@@ -186,6 +192,7 @@ class EngineBuilder:
         "_os_name",
         "_data_root",
         "_skills",
+        "_skill_report",
         "_mcp_remote_target",
         "_mcp_enabled",
         "_mcp_lock",
@@ -226,6 +233,11 @@ class EngineBuilder:
         self._os_name = os_name or platform.system() or "unknown OS"
         self._data_root = data_root
         self._skills = discover_skills(project_root, home=home, host=self._host)
+        # The same discovery, body-free and with the folders it scanned, for the
+        # Shell above (:meth:`skills`). Built here rather than on demand because
+        # both halves of it are already settled: discovery happens once per
+        # builder, and the roots are a pure function of the arguments.
+        self._skill_report = skill_report(self._skills, skill_search_roots(project_root, home))
         self._mcp_remote_target = mcp_remote_target
         self._mcp_enabled = mcp_enabled
         self._mcp_lock = threading.Lock()
@@ -286,6 +298,20 @@ class EngineBuilder:
             host=self._host,
             build_warnings=build_warnings,
         )
+
+    # -- what this builder found beside the project ---------------------------
+
+    def skills(self) -> SkillReport:
+        """Every skill this builder loaded, and the folders it looked in.
+
+        The Shell's whole read of the skills library - `/skills` - and it is the
+        BUILDER's to answer for the same reason ``mcp_statuses`` is: discovery
+        ran on the machine the engine runs on, through this builder's host, so in
+        a remote session these are the target's folders and not the operator's.
+        Bodies are left out on purpose; the model fetches those one at a time
+        through the ``skill`` tool.
+        """
+        return self._skill_report
 
     # -- the MCP runtime this builder owns ------------------------------------
 

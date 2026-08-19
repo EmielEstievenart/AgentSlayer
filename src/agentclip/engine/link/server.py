@@ -64,6 +64,7 @@ from agentclip.engine.link.wire import (
     BUILD_SESSION,
     MCP_STATUSES,
     SESSION_METHODS,
+    SKILLS,
     CallFrame,
     SessionInfo,
     WireError,
@@ -83,23 +84,26 @@ from agentclip.engine.link.wire import (
     result_frame,
 )
 from agentclip.executor.mcp.types import McpServerStatus
+from agentclip.executor.tools.skills import SkillReport
 
 
 class EngineBuilder(Protocol):
     """What ``serve`` needs of the object it builds engines from.
 
     A Protocol rather than the ``Callable`` alias this used to be, because the
-    builder is no longer only a function: the MCP runtime is owned engine-side
-    (docs/design/remote-executor.md section 2.7), so the server has to be able to
-    ASK it what that runtime looks like - both to answer the link-scoped
-    ``mcp_statuses`` call and to put the settle in ``build_session``'s answer.
-    :class:`agentclip.engine.link.factory.EngineBuilder` satisfies it as it
-    stands; nothing else in ``src`` builds engines for a link.
+    builder is no longer only a function: the MCP runtime and the skills library
+    are both owned engine-side (docs/design/remote-executor.md section 2.7), so
+    the server has to be able to ASK it what each of them looks like - to answer
+    the two link-scoped calls, and to put the MCP settle in ``build_session``'s
+    answer. :class:`agentclip.engine.link.factory.EngineBuilder` satisfies it as
+    it stands; nothing else in ``src`` builds engines for a link.
     """
 
     def __call__(self, request: EngineRequest | str, /) -> Engine: ...
 
     def mcp_statuses(self) -> tuple[McpServerStatus, ...]: ...
+
+    def skills(self) -> SkillReport: ...
 
 EXIT_OK = 0
 EXIT_PROTOCOL = 1
@@ -323,6 +327,9 @@ class _Server:
         if call.method == MCP_STATUSES:
             self._spawn(self._run_mcp_statuses, call)
             return
+        if call.method == SKILLS:
+            self._spawn(self._run_skills, call)
+            return
         if call.method not in _DISPATCHABLE:
             # read_call already refused a method the wire does not define; this
             # is the whitelist that stands between a string off the wire and
@@ -452,6 +459,26 @@ class _Server:
             self._out.send(error_frame_for(call.id, exc))
             return
         self._out.send(result_frame(call.id, encode_result(MCP_STATUSES, statuses)))
+
+    def _run_skills(self, call: CallFrame) -> None:
+        """The other link-scoped read: which skills THIS MACHINE loaded.
+
+        Session-free for ``mcp_statuses``'s reason - one builder does one
+        discovery - and on a worker thread for consistency with it, though this
+        one only reads what the builder settled at construction.
+        """
+        try:
+            decode_params(SKILLS, call.params)
+        except WireError as exc:
+            self._out.send(error_frame(call.id, "bad_request", str(exc)))
+            return
+        try:
+            report = self._builder.skills()
+        except Exception as exc:  # noqa: BLE001 - a listing is not a crash
+            _log(self._log, f"skills failed: {type(exc).__name__}: {exc}")
+            self._out.send(error_frame_for(call.id, exc))
+            return
+        self._out.send(result_frame(call.id, encode_result(SKILLS, report)))
 
     def _emit_progress(self, sid: str, progress: CallProgress) -> None:
         self._out.send(progress_frame(sid, progress))

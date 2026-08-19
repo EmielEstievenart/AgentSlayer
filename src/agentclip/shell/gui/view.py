@@ -94,7 +94,7 @@ from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
 from agentclip.shell.app.commands import COMMANDS
-from agentclip.shell.app.link import Link
+from agentclip.shell.app.link import Link, NoSkills, SkillReport
 from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.gui.bridge import Bridge
@@ -649,6 +649,7 @@ class GuiView:
         profile_root: Path | None = None,
         global_config_path: Path | None = None,
         mcp_manager: McpStatusSource | None = None,
+        skills: Callable[[], SkillReport] | None = None,
         host: Any = None,
         remote: RemoteConnect | None = None,
         schedule: Callable[[Coroutine[Any, Any, Any]], None] | None = None,
@@ -676,6 +677,11 @@ class GuiView:
         self._on_config_change = on_config_change if on_config_change is not None else _no_config
         self._profiles: dict[str, ServiceProfile] = {}
         self._mcp_manager = mcp_manager
+        # Where `/skills` reads before a session exists. A cell rather than a
+        # constructor-time binding for ``_mcp_manager``'s reason: a connect
+        # swaps the machine the library belongs to, and ``_skill_rows`` re-reads
+        # this so no source outlives the box it was about.
+        self._skills = skills
         self._mcp_announced: set[tuple[str, str]] = set()
         # How a coroutine reaches the GUI's loop. Injected because the loop is
         # the RUNNER's (gui/runner.py) and this object must be constructible -
@@ -825,6 +831,9 @@ class GuiView:
             # Not ``mcp_manager.statuses``: an in-app connect replaces the
             # manager, so the source has to be one that re-reads it (_mcp_rows).
             mcp_statuses=self._mcp_rows,
+            # Same trick, same reason: `/skills` before a session must name the
+            # folders of whichever machine the NEXT session is built on.
+            skills=self._skill_rows,
         )
 
     # == lifecycle =============================================================
@@ -2447,6 +2456,7 @@ class GuiView:
         self._remote_target = runtime.target
         self._dialled = connected.target
         self._mcp_manager = runtime.mcp_manager
+        self._skills = runtime.skills
         self._mcp_announced.clear()
         self._profiles.clear()
         # cli.py's engine factory reads a cell it owns, and the one this runtime
@@ -2475,6 +2485,7 @@ class GuiView:
             runtime.engine_factory,
             runtime.project_root,
             mcp_statuses=self._mcp_rows,
+            skills=self._skill_rows,
         )
         self._automation.log_harness(
             KIND_SESSION, f"connected to {runtime.target}: this session's tools run over there"
@@ -3726,6 +3737,16 @@ class GuiView:
         """
         manager = self._mcp_manager
         return manager.statuses() if manager is not None else ()
+
+    def _skill_rows(self) -> SkillReport:
+        """The skills source ``/skills`` reads BEFORE a session exists.
+
+        ``_mcp_rows``' twin, re-reading :attr:`_skills` for the same reason: a
+        connect swaps it for the target's, and a callable that closed over the
+        launch-time one would name folders on the machine this window just left.
+        """
+        source = self._skills
+        return source() if source is not None else NoSkills()
 
     def _push_mcp(self) -> None:
         """The sidebar's MCP block: one row per configured server, in config

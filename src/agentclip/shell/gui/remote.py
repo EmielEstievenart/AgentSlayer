@@ -32,7 +32,7 @@ from agentclip.executor.hosts.connect import (
     StepEvent,
     describe_target,
 )
-from agentclip.shell.app.link import Link
+from agentclip.shell.app.link import Link, SkillReport
 
 # The four states of the whole surface. ``done`` is a screen rather than a
 # closed dialog because that is where the policy banner and the save offer live
@@ -104,6 +104,8 @@ class RemoteRuntime(Protocol):
     def engine_factory(self) -> Callable[[EngineRequest], Link]: ...
     @property
     def mcp_manager(self) -> Any: ...
+    @property
+    def skills(self) -> Callable[[], SkillReport]: ...
     @property
     def host(self) -> Any: ...
     @property

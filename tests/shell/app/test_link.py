@@ -148,6 +148,36 @@ async def test_mcp_statuses_is_empty_when_the_link_was_given_no_source(make_engi
     assert await LocalLink(make_engine()).mcp_statuses() == ()
 
 
+async def test_skills_reads_the_source_it_was_built_with(make_engine) -> None:
+    """The skills library is the BUILDER's too - discovered once, on the machine
+    the engine runs on - so the link is handed a callable rather than reaching
+    for a discovery it must not import."""
+
+    @dataclass(frozen=True)
+    class Row:  # duck-typed SkillLine, exactly as the app layer types it
+        name: str
+        description: str
+        folder: str
+        model_invocable: bool = True
+
+    @dataclass(frozen=True)
+    class Report:  # duck-typed SkillReport
+        skills: tuple[Row, ...] = ()
+        searched: tuple[str, ...] = ()
+
+    report = Report((Row("tdd", "test-first", "/proj/.claude/skills/tdd"),), ("/proj/.claude/skills",))
+    link = LocalLink(make_engine(), skills=lambda: report)
+    assert await link.skills() is report
+
+
+async def test_skills_is_empty_when_the_link_was_given_no_source(make_engine) -> None:
+    """A link with no source still answers a shape, so `/skills` needs no branch
+    of its own: nothing found, and nowhere searched."""
+    report = await LocalLink(make_engine()).skills()
+    assert report.skills == ()
+    assert report.searched == ()
+
+
 async def test_the_hooks_are_wired_straight_through(make_engine) -> None:
     """Sync registration, and the engine keeps its own hook contract behind it
     (worker-thread callbacks, a raising hook dropped) - the link only points

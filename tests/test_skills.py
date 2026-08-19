@@ -19,6 +19,7 @@ from agentclip.executor.tools.skills import (
     Skill,
     discover_skills,
     make_skill_spec,
+    skill_report,
     skill_search_roots,
 )
 from agentclip.protocol.composer import Composer
@@ -390,6 +391,32 @@ def test_registry_lists_only_invocable_skills() -> None:
     catalog = reg.render_catalog()
     assert "- on:" in catalog
     assert "- off:" not in catalog
+
+
+# -- the body-free view a Shell reads (`/skills`) ------------------------------
+
+
+def test_skill_report_names_the_folder_and_drops_the_body() -> None:
+    """What crosses the link is a listing, not a library: the folder a skill was
+    loaded FROM is the whole question `/skills` answers, and the bodies are what
+    the skill tool fetches one at a time."""
+    report = skill_report(
+        [_skill("greet", "a long body " * 500), _skill("manual", "b", invocable=False)],
+        [Path("x") / ".claude" / "skills"],
+    )
+    greet, manual = report.skills
+    assert (greet.name, greet.description) == ("greet", "d")
+    assert greet.folder == str(Path("x") / ".claude" / "skills" / "greet")
+    assert greet.model_invocable and not manual.model_invocable
+    assert not hasattr(greet, "body")  # there is nowhere for a body to ride
+    assert report.searched == (str(Path("x") / ".claude" / "skills"),)
+
+
+def test_skill_report_of_nothing_still_names_where_it_looked(tmp_path: Path) -> None:
+    """The empty case, which is the one the folders exist for."""
+    report = skill_report(discover_skills(tmp_path, home=tmp_path / "home"), skill_search_roots(tmp_path, tmp_path / "home"))
+    assert report.skills == ()
+    assert len(report.searched) == 6
 
 
 # -- engine round-trip --------------------------------------------------------

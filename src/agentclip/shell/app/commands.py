@@ -91,6 +91,10 @@ COMMANDS: tuple[ChatCommand, ...] = (
         summary="list the MCP servers: state, tools, and what went wrong",
     ),
     ChatCommand(
+        name="skills",
+        summary="list the loaded skills and the folder each came from",
+    ),
+    ChatCommand(
         name="armed",
         arg="[on|off]",
         summary="toggle whether the tool may touch the screen at all (same as F5)",

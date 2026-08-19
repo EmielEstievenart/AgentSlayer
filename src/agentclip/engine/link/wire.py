@@ -49,12 +49,13 @@ message the user finally reads names two installs rather than two integers.
 ``{"type":"call","id":<int>,"method":"<str>","params":{...}}``
     A request. ``id`` is client-chosen, strictly increasing, and echoed by
     exactly one ``result`` or ``error``. Session-scoped methods (the 13 `Link`
-    methods) also carry ``"session":"<sid>"``; the two LINK-SCOPED ones do not.
+    methods) also carry ``"session":"<sid>"``; the LINK-SCOPED ones do not.
     ``build_session`` is link-scoped because it is what MINTS a session id;
-    ``mcp_statuses`` is link-scoped because MCP is process-wide - one builder
-    owns one manager however many sessions it goes on to build
-    (docs/design/mcp.md section 3), so the answer belongs to the CONNECTION and
-    would mean the same thing whichever session was named on it.
+    ``mcp_statuses`` and ``skills`` are link-scoped because both are
+    process-wide - one builder owns one manager and one skill discovery however
+    many sessions it goes on to build (docs/design/mcp.md section 3), so the
+    answer belongs to the CONNECTION and would mean the same thing whichever
+    session was named on it.
 ``{"type":"result","id":<int>,"value":<encoded value>}``
     The successful answer. ``value`` is whatever :func:`encode_result` makes of
     that method's return, and is ``null`` for the methods that return None.
@@ -139,6 +140,7 @@ from agentclip.engine.link.factory import EngineRequest, Role
 from agentclip.engine.states import Decision, EngineStateError, Phase
 from agentclip.engine.store.backups import UndoReport
 from agentclip.executor.mcp.types import McpServerState, McpServerStatus
+from agentclip.executor.tools.skills import SkillLine, SkillReport
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.types import (
     EomInfo,
@@ -256,18 +258,19 @@ SESSION_METHODS: tuple[str, ...] = (
 
 BUILD_SESSION = "build_session"
 MCP_STATUSES = "mcp_statuses"
+SKILLS = "skills"
 
 # The calls that belong to the CONNECTION rather than to any one session, and
-# therefore travel without a ``session`` on the frame. There are two, and they
+# therefore travel without a ``session`` on the frame. There are three, and they
 # are link-scoped for two different reasons:
 #
 # * ``build_session`` has no session yet - it is what mints one;
-# * ``mcp_statuses`` has no session ever. The MCP runtime is owned by the
-#   BUILDER, one manager per process however many sessions it goes on to build
-#   (docs/design/mcp.md section 3, remote-executor.md section 2.7), so every
-#   session of one link would answer this identically. Naming a session on it
-#   would invent a per-session fact that does not exist.
-LINK_METHODS: tuple[str, ...] = (BUILD_SESSION, MCP_STATUSES)
+# * ``mcp_statuses`` and ``skills`` have no session ever. Both are owned by the
+#   BUILDER - one manager and one discovery per process, however many sessions it
+#   goes on to build (docs/design/mcp.md section 3, remote-executor.md section
+#   2.7) - so every session of one link would answer them identically. Naming a
+#   session on one would invent a per-session fact that does not exist.
+LINK_METHODS: tuple[str, ...] = (BUILD_SESSION, MCP_STATUSES, SKILLS)
 
 METHODS: tuple[str, ...] = (*LINK_METHODS, *SESSION_METHODS)
 
@@ -806,6 +809,50 @@ def decode_mcp_statuses(value: Any, what: str = "mcp_statuses") -> tuple[McpServ
     )
 
 
+# -- the skills the engine's machine discovered --------------------------------
+#
+# Skills describe the PROJECT, so they are discovered where the engine runs and
+# read across the link the same way the MCP rows are (docs/design/remote-executor.md
+# section 2.7). The body never travels: `/skills` names what is loaded and the
+# folder it came from, and a library's bodies are what the `skill` TOOL fetches,
+# one at a time, on the far side.
+
+
+def encode_skill_line(value: SkillLine) -> dict[str, Any]:
+    return {
+        "name": value.name,
+        "description": value.description,
+        "folder": value.folder,
+        "model_invocable": value.model_invocable,
+    }
+
+
+def decode_skill_line(value: Any, what: str = "skill") -> SkillLine:
+    data = _mapping(value, what)
+    return SkillLine(
+        name=_str_at(data, "name", what),
+        description=_str_at(data, "description", what),
+        folder=_str_at(data, "folder", what),
+        model_invocable=_bool_at(data, "model_invocable", what),
+    )
+
+
+def encode_skill_report(value: Any) -> Any:
+    return {
+        "skills": [encode_skill_line(row) for row in value.skills],
+        "searched": list(value.searched),
+    }
+
+
+def decode_skill_report(value: Any, what: str = "skills") -> SkillReport:
+    data = _mapping(value, what)
+    rows = _as_list(_field(data, "skills", what), f"{what}.skills")
+    return SkillReport(
+        skills=tuple(decode_skill_line(row, f"{what}.skills[{i}]") for i, row in enumerate(rows)),
+        searched=_strs_at(data, "searched", what),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SessionInfo:
     """What ``build_session`` answers with: an id plus the immutable facts.
@@ -1070,6 +1117,10 @@ _PARAMS: dict[str, tuple[_Param, ...]] = {
     # Link-scoped and parameterless: the connection's MCP runtime has nothing to
     # be asked ABOUT - it is one manager, and the answer is every row of it.
     MCP_STATUSES: (),
+    # Link-scoped and parameterless for the same reason: one builder does one
+    # discovery, and the answer is every folder it looked in and every skill it
+    # found there.
+    SKILLS: (),
     "start_task": (_Param("task", *_STR),),
     "follow_up": (_Param("text", *_STR),),
     "ingest": (_Param("text", *_STR),),
@@ -1097,6 +1148,7 @@ _PARAMS: dict[str, tuple[_Param, ...]] = {
 _RESULTS: dict[str, _Value] = {
     BUILD_SESSION: _Value(encode_session_info, decode_session_info),
     MCP_STATUSES: _Value(encode_mcp_statuses, decode_mcp_statuses),
+    SKILLS: _Value(encode_skill_report, decode_skill_report),
     "start_task": _Value(encode_outbound, decode_outbound),
     "follow_up": _Value(encode_outbound, decode_outbound),
     "ingest": _Value(encode_ingest_result, decode_ingest_result),

@@ -40,6 +40,7 @@ from agentclip.engine.link.factory import make_engine_builder
 from agentclip.engine.link.server import EngineBuilder, serve
 from agentclip.engine.states import Decision
 from agentclip.executor.mcp.types import McpServerStatus
+from agentclip.executor.tools.skills import SkillLine, SkillReport
 
 # The chat name every engine this file builds is pinned to, so the canned
 # replies below can hard-code it on their EOM line (as the root conftest does).
@@ -404,9 +405,11 @@ class _StubBuilder:
         self,
         build: Callable[[Any], Any] | None = None,
         statuses: tuple[McpServerStatus, ...] = (),
+        skills: SkillReport | None = None,
     ) -> None:
         self._build = build
         self._statuses = statuses
+        self._skills = skills if skills is not None else SkillReport()
         self.status_reads = 0
 
     def __call__(self, request: Any) -> Any:
@@ -417,6 +420,9 @@ class _StubBuilder:
     def mcp_statuses(self) -> tuple[McpServerStatus, ...]:
         self.status_reads += 1
         return self._statuses
+
+    def skills(self) -> SkillReport:
+        return self._skills
 
 
 _ROWS: tuple[McpServerStatus, ...] = (
@@ -444,6 +450,21 @@ def test_mcp_statuses_answers_the_builders_rows_with_no_session_named() -> None:
 def test_a_builder_with_no_mcp_answers_an_empty_tuple(link: _Link) -> None:
     link.hello()
     assert link.ask("mcp_statuses") == ()
+
+
+def test_skills_answers_the_builders_discovery_with_no_session_named() -> None:
+    """The other link-scoped pull: one builder discovers once, so the answer
+    belongs to the connection and a Shell may ask before any session exists."""
+    report = SkillReport(
+        skills=(SkillLine("tdd", "test-first", "/srv/app/.claude/skills/tdd"),),
+        searched=("/srv/app/.claude/skills",),
+    )
+    conn = _Link(_StubBuilder(skills=report))
+    try:
+        conn.hello()
+        assert conn.ask("skills") == report
+    finally:
+        assert conn.shutdown() == 0
 
 
 def test_build_session_carries_the_settle_the_builder_already_has(builder: Any) -> None:

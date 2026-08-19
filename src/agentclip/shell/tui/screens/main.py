@@ -260,7 +260,7 @@ from agentclip.engine.link.factory import EngineRequest
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
-from agentclip.shell.app.link import Link, McpStatusLine
+from agentclip.shell.app.link import Link, McpStatusLine, SkillReport
 from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.tui.messages import (
@@ -696,6 +696,7 @@ class MainScreen(Screen[None]):
         profile_root: Path,
         *,
         mcp_manager: McpStatusSource | None = None,
+        skills: Callable[[], SkillReport] | None = None,
     ) -> None:
         super().__init__()
         self._config = config
@@ -706,6 +707,10 @@ class MainScreen(Screen[None]):
         # statusbar segment, no hook). Handed down from AgentClipApp; this
         # screen only READS statuses and listens, the lifecycle stays cli.py's.
         self._mcp_manager = mcp_manager
+        # Where `/skills` reads before a session exists (the live link answers
+        # once one is up). Passed straight to the controller below and kept
+        # nowhere else: this screen paints nothing off it.
+        self._skills = skills
         # Which (server, state) pairs have already been announced - the
         # once-per-server-per-state memory behind the failed/needs_auth
         # transcript notes and the connected toast, so reconnect churn cannot
@@ -859,6 +864,9 @@ class MainScreen(Screen[None]):
             # MCP-agnostic (layering), so /mcp takes a supplier of duck-typed
             # status rows and None means "say MCP is not configured".
             mcp_statuses=mcp_manager.statuses if mcp_manager is not None else None,
+            # The same arrangement for `/skills`, and the same layering: a
+            # supplier of duck-typed rows, so this screen never names a Skill.
+            skills=skills,
         )
 
     # -- window tabs -> slots --------------------------------------------------

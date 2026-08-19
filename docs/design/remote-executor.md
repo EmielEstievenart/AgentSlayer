@@ -479,7 +479,7 @@ three immutable facts the `Link` Protocol exposes synchronously (`chat_name`,
 a handshake would.
 
 **Link-scoped vs session-scoped, and why `mcp_statuses` is the former.**
-`wire.LINK_METHODS` is `(build_session, mcp_statuses)` and `is_link_method` is
+`wire.LINK_METHODS` is `(build_session, mcp_statuses, skills)` and `is_link_method` is
 what the server's dispatch routes on: a link-scoped call is served by the
 **builder**, never by `getattr` on a hosted engine. `mcp_statuses` is there
 because the MCP runtime is owned by the builder — one manager per process,
@@ -489,6 +489,16 @@ it would invent a per-session fact that does not exist. Its result is a list of
 `McpServerStatus` (all four fields; `state` strict-decoded against the seven-name
 lifecycle, so a state this side has never heard of is a `WireError` rather than a
 status line nobody can act on).
+
+`skills` is there for the same reason, one machine-shaped fact further: the
+builder discovers the skills library once, through its own Host, so in a remote
+session the folders scanned are the target's (remote-ssh.md decision 6). Its
+result is a `SkillReport` — one body-free `SkillLine` per skill (name,
+description, the folder its `SKILL.md` sits in, and whether the model may call
+it) plus the roots that were searched, because "no skills found" is only
+actionable beside the folders it looked in. The **bodies never cross**: `/skills`
+is a listing, and the full instructions are what the `skill` tool loads one at a
+time, on the far side.
 
 **The settle rides `build_session`.** `SessionInfo` carries a fourth field,
 `mcp_statuses` — the runtime's rows as they stood when the session was built. It

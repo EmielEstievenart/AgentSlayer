@@ -38,6 +38,7 @@ from agentclip.engine.states import Decision, EngineStateError, Phase
 from agentclip.engine.store.backups import UndoReport
 from agentclip.executor.mcp.types import McpServerState, McpServerStatus
 from agentclip.executor.permissions import PermissionMode
+from agentclip.executor.tools.skills import SkillLine, SkillReport
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.types import EomInfo, Outbound, ParsedReply, ParseIssue, ToolCall
 from agentclip.shell.app.link import Link
@@ -269,7 +270,7 @@ def test_mcp_statuses_is_a_link_scoped_method_of_its_own() -> None:
     (one builder, one manager), so the call belongs to the CONNECTION."""
     assert wire.MCP_STATUSES in wire.METHODS
     assert wire.MCP_STATUSES not in wire.SESSION_METHODS
-    assert set(wire.LINK_METHODS) == {wire.BUILD_SESSION, wire.MCP_STATUSES}
+    assert set(wire.LINK_METHODS) == {wire.BUILD_SESSION, wire.MCP_STATUSES, wire.SKILLS}
     assert wire.is_link_method(wire.MCP_STATUSES)
     assert not wire.is_session_method(wire.MCP_STATUSES)
     # ...so its frame carries no session, and one that did is refused.
@@ -278,6 +279,46 @@ def test_mcp_statuses_is_a_link_scoped_method_of_its_own() -> None:
     assert wire.read_call(frame).session is None
     with pytest.raises(wire.WireError):
         wire.call_frame(2, wire.MCP_STATUSES, {}, session="s-1")
+
+
+def test_skills_is_a_link_scoped_method_of_its_own() -> None:
+    """``mcp_statuses``' sibling, and link-scoped for the same reason: one
+    builder does one skill discovery, however many sessions it goes on to
+    build."""
+    assert wire.SKILLS in wire.METHODS
+    assert wire.SKILLS not in wire.SESSION_METHODS
+    assert wire.is_link_method(wire.SKILLS)
+    frame = wire.call_frame(1, wire.SKILLS, wire.encode_params(wire.SKILLS))
+    assert "session" not in frame
+    with pytest.raises(wire.WireError):
+        wire.call_frame(2, wire.SKILLS, {}, session="s-1")
+
+
+def test_a_skill_report_round_trips_with_its_searched_folders() -> None:
+    """The rows AND the folders that were scanned: on a remote session both
+    describe the target, and the empty listing is made of the second half."""
+    report = SkillReport(
+        skills=(
+            SkillLine("tdd", "test-first development", "/srv/app/.claude/skills/tdd"),
+            SkillLine("release", "", "/home/dev/.agents/skills/release", model_invocable=False),
+        ),
+        searched=("/srv/app/.claude/skills", "/home/dev/.agents/skills"),
+    )
+    back = wire.decode_skill_report(json.loads(json.dumps(wire.encode_skill_report(report))))
+    assert back == report
+    assert back.skills[1].model_invocable is False
+
+
+def test_a_skill_report_with_nothing_found_still_names_where_it_looked() -> None:
+    """The everyday case for a project with no skills, and the one where the
+    folders are the whole answer."""
+    report = SkillReport(searched=("/srv/app/.claude/skills",))
+    payload = wire.encode_skill_report(report)
+    assert payload["skills"] == []
+    assert wire.decode_skill_report(payload) == report
+    del payload["searched"]
+    with pytest.raises(wire.WireError):
+        wire.decode_skill_report(payload)
 
 
 def test_session_info_carries_the_mcp_settle() -> None:
@@ -339,7 +380,7 @@ def test_the_method_table_is_exactly_the_links_async_surface() -> None:
         for name, member in vars(Link).items()
         if not name.startswith("_") and inspect.iscoroutinefunction(member)
     }
-    assert async_methods == set(wire.SESSION_METHODS) | {wire.MCP_STATUSES}
+    assert async_methods == set(wire.SESSION_METHODS) | {wire.MCP_STATUSES, wire.SKILLS}
     assert wire.BUILD_SESSION not in async_methods
     assert set(wire.METHODS) == set(wire._PARAMS) == set(wire._RESULTS)
 
@@ -347,6 +388,7 @@ def test_the_method_table_is_exactly_the_links_async_surface() -> None:
 _PARAM_CASES: dict[str, dict[str, object]] = {
     "build_session": {"service": "claude", "role": "subagent", "task_chars": 40},
     "mcp_statuses": {},
+    "skills": {},
     "start_task": {"task": "port the parser"},
     "follow_up": {"text": "and add tests"},
     "ingest": {"text": "===CLIP:EOM turn=1==="},
@@ -406,6 +448,10 @@ _RESULT_CASES: dict[str, object] = {
     "mcp_statuses": (
         McpServerStatus(name="github", state="connected", tool_count=17),
         McpServerStatus(name="db", state="needs_auth", detail="401 from the server"),
+    ),
+    "skills": SkillReport(
+        skills=(SkillLine("tdd", "test-first", "/srv/app/.claude/skills/tdd"),),
+        searched=("/srv/app/.claude/skills",),
     ),
     "start_task": _outbound(),
     "follow_up": _outbound(),

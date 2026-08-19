@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Literal, Protocol, TypeVar
 
 from agentclip.engine.approval import PermissionMode
@@ -87,6 +88,50 @@ class McpStatusLine(Protocol):
     def detail(self) -> str: ...
     @property
     def tool_count(self) -> int: ...
+
+
+class SkillLine(Protocol):
+    """One loaded skill's row, as a Shell reads it: no body, ever.
+
+    Structural for :class:`McpStatusLine`'s reason - the real rows are
+    ``agentclip.executor.tools.skills.SkillLine`` and this layer may not import
+    the executor - and body-free because a listing is a listing: `/skills` says
+    what is loaded and where it came from, and the full instructions are what the
+    model pulls through the ``skill`` tool on the engine's side.
+    """
+
+    @property
+    def name(self) -> str: ...
+    @property
+    def description(self) -> str: ...
+    @property
+    def folder(self) -> str: ...
+    @property
+    def model_invocable(self) -> bool: ...
+
+
+class SkillReport(Protocol):
+    """A skills read: the rows, and the folders they were looked for in.
+
+    The roots are part of the answer rather than something the Shell derives,
+    because the listing that needs them most is the EMPTY one - and the folders
+    that were scanned belong to the machine the engine runs on, which in a
+    remote session is not this one.
+    """
+
+    @property
+    def skills(self) -> tuple[SkillLine, ...]: ...
+    @property
+    def searched(self) -> tuple[str, ...]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class NoSkills:
+    """The report a link with no skill source hands back: found nothing, looked
+    nowhere. A value rather than ``None`` so every caller renders one shape."""
+
+    skills: tuple[SkillLine, ...] = ()
+    searched: tuple[str, ...] = ()
 
 
 class Link(Protocol):
@@ -158,6 +203,18 @@ class Link(Protocol):
         """
         ...
 
+    async def skills(self) -> SkillReport:
+        """The skills the engine's machine loaded, and where it looked.
+
+        On the link for :meth:`mcp_statuses`'s reason: skills are discovered
+        where the ENGINE runs (docs/design/remote-executor.md section 2.7,
+        remote-ssh.md decision 6), so a remote session's `/skills` must list the
+        target's folders and not the operator's. Link-scoped rather than
+        session-scoped because one builder discovers once, however many sessions
+        it goes on to build.
+        """
+        ...
+
     # -- out-of-band, from the event loop, mid-call ---------------------------
 
     def request_cancel(self) -> None:
@@ -192,6 +249,7 @@ class LocalLink:
         engine: Engine,
         *,
         mcp_statuses: Callable[[], tuple[McpStatusLine, ...]] | None = None,
+        skills: Callable[[], SkillReport] | None = None,
     ) -> None:
         self.engine = engine
         # Where this link reads the MCP runtime, or None when the caller has no
@@ -200,6 +258,10 @@ class LocalLink:
         # `statuses`, which is the builder's - so the same object that BUILT
         # this engine is the one that answers for the servers beside it.
         self._mcp_statuses = mcp_statuses
+        # And where it reads the skills library, from the same builder and for
+        # the same reason: the object that BUILT this engine is the one that
+        # discovered the skills beside it.
+        self._skills = skills
         # One in flight per link. Per-link rather than per-controller because
         # the link IS the resource being serialized; the controller only ever
         # calls the session that is currently live, so this is exactly the
@@ -284,6 +346,17 @@ class LocalLink:
         if self._mcp_statuses is None:
             return ()
         return await asyncio.to_thread(self._mcp_statuses)
+
+    # -- the machine's skills library ------------------------------------------
+
+    async def skills(self) -> SkillReport:
+        """The builder's discovery, straight through - it is already in memory.
+
+        Off the lock for ``mcp_statuses``' reason (nothing a turn does can change
+        it) and off the event loop for none at all: the call is a tuple read, so
+        the thread hop would buy a context switch and no safety.
+        """
+        return NoSkills() if self._skills is None else self._skills()
 
     # -- out-of-band -----------------------------------------------------------
 

@@ -24,7 +24,7 @@ from agentclip.config import (
 )
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
-from agentclip.shell.app.link import Link
+from agentclip.shell.app.link import Link, SkillReport
 from agentclip.shell.tui.screens.confirm import ConfirmScreen
 from agentclip.shell.tui.screens.help import HelpScreen
 from agentclip.shell.tui.screens.main import MainScreen, McpStatusSource
@@ -252,7 +252,7 @@ class AgentClipApp(App[None]):
         /* The whole registry plus its border - a bare `/` offers everything, and
            a cap below that would hide the last command rather than shorten the
            list. Grows with app.commands.COMMANDS (a test pins the two). */
-        max-height: 13;
+        max-height: 15;
         background: $surface;
         color: $text;
         border: round $accent;
@@ -711,6 +711,7 @@ class AgentClipApp(App[None]):
         global_config_path: Path | None = None,
         profile_root: Path | None = None,
         mcp_manager: McpStatusSource | None = None,
+        skills: Callable[[], SkillReport] | None = None,
     ) -> None:
         super().__init__()
         self.app_config = config
@@ -726,6 +727,11 @@ class AgentClipApp(App[None]):
         # segment off statuses() and bridges set_status_hook onto Textual's loop
         # (docs/design/mcp.md section 6).
         self.mcp_manager = mcp_manager
+        # Where `/skills` reads its listing before a session exists: the same
+        # factory's discovery, as a supplier of body-free rows. Unlike the MCP
+        # source it is never gated on "is any configured" - a project with no
+        # skills still has six folders worth naming (shell/app/controller.py).
+        self.skills = skills
         # Where the service editor and the settings screen persist edits.
         # Defaults to the real global config.toml; tests override it to a tmp
         # path so they never touch the user's actual config.
@@ -765,6 +771,7 @@ class AgentClipApp(App[None]):
             self.project_root,
             self.profile_root,
             mcp_manager=self.mcp_manager,
+            skills=self.skills,
         )
         self.push_screen(self.main_screen)
         for warning in self.app_config.warnings:

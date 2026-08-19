@@ -82,7 +82,7 @@ from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.parser import peek_chat_name
 from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus, ToolCall
 from agentclip.shell.app.commands import command_list, help_text, lookup
-from agentclip.shell.app.link import Link, McpStatusLine
+from agentclip.shell.app.link import Link, McpStatusLine, NoSkills, SkillLine, SkillReport
 from agentclip.shell.app.types import SessionRef, SessionStats
 from agentclip.shell.app.view import ChatView, RunCall, SessionView, Severity
 
@@ -326,6 +326,16 @@ def _mcp_server_line(status: McpStatusLine) -> str:
     return "  " + " · ".join(parts)
 
 
+def _skill_line(skill: SkillLine) -> str:
+    """One transcript row per skill: what it is called, what it is for, and the
+    folder it was loaded from - plus a mark on the ones the model cannot reach
+    (``disable-model-invocation``), which is the whole reason they are listed
+    here rather than only in the bootstrap."""
+    described = f"{skill.name} - {skill.description}" if skill.description else skill.name
+    hidden = "  [hidden from the model]" if not skill.model_invocable else ""
+    return f"  - {described}  ({skill.folder}){hidden}"
+
+
 class _SubagentAborted(Exception):
     """The user ended a sub-agent run with /abort.
 
@@ -394,6 +404,7 @@ class SessionController:
         *,
         view: ChatView,
         mcp_statuses: Callable[[], Sequence[McpStatusLine]] | None = None,
+        skills: Callable[[], SkillReport] | None = None,
     ) -> None:
         self._config = config
         self._engine_factory = engine_factory
@@ -408,6 +419,12 @@ class SessionController:
         # the servers are on; ``rebind`` refreshes this one when the next
         # session's machine changes.
         self._mcp_statuses = mcp_statuses
+        # The same arrangement for `/skills`, one machine-shaped fact further:
+        # skills are discovered where the engine runs, so a live session answers
+        # off the LINK (_cmd_skills) and this is only what a session-less app
+        # reads. ``None`` means the caller has no library to report, which the
+        # command renders as "no skills found".
+        self._skills = skills
 
         self._link: Link | None = None
         self._chat_name: str | None = None  # this session's agreed chat name
@@ -491,6 +508,7 @@ class SessionController:
         project_root: Path,
         *,
         mcp_statuses: Callable[[], Sequence[McpStatusLine]] | None = None,
+        skills: Callable[[], SkillReport] | None = None,
     ) -> bool:
         """Point the NEXT session at a different machine. Returns whether it took.
 
@@ -519,6 +537,11 @@ class SessionController:
         pointed at a target while still reading THIS PC's source would answer
         a pre-session ``/mcp`` for the wrong machine. Once a session is live
         ``/mcp`` reads the link instead and the question does not arise.
+
+        ``skills`` is the fifth and follows that word for word: the library is
+        discovered where the engine runs, so a pre-session ``/skills`` read out
+        of the old machine's source would name folders that are not on the
+        target. ``None`` keeps the current one for the same reason.
         """
         if self._session_active:
             return False
@@ -527,6 +550,8 @@ class SessionController:
         self._project_root = project_root
         if mcp_statuses is not None:
             self._mcp_statuses = mcp_statuses
+        if skills is not None:
+            self._skills = skills
         return True
 
     def update_config(self, config: Config) -> None:
@@ -681,6 +706,7 @@ class SessionController:
             "identify": lambda _arg: self._cmd_identify(),
             "log": lambda _arg: self._cmd_log(),
             "mcp": lambda _arg: self._cmd_mcp(),
+            "skills": lambda _arg: self._cmd_skills(),
             "armed": self._cmd_armed,
             "theme": self._cmd_theme,
             "config": self._cmd_config,
@@ -1150,6 +1176,51 @@ class SessionController:
             return
         listing = "\n".join(_mcp_server_line(status) for status in statuses)
         self._view.spawn(self._view.add_note(f"MCP servers:\n{listing}"))
+
+    def _cmd_skills(self) -> None:
+        """`/skills`: list the loaded skills and the folder each came from.
+
+        `/mcp`'s twin, down to the two sources and which of them wins. Skills are
+        discovered where the ENGINE runs (docs/design/remote-ssh.md decision 6),
+        so a live link is the only thing that knows which machine's folders were
+        scanned and a remote session's listing is the target's; without a session
+        there is no link to ask and the constructor's callable answers
+        synchronously, as `/mcp`'s does.
+
+        No session gate, for `/log`'s reason: "why is my skill not being used?"
+        is asked before a run as readily as during one - and the answer is
+        routinely that the folder it lives in was never one of the six.
+        """
+        link = self._link
+        if link is not None:
+            self._view.spawn(self._skill_listing(link))
+            return
+        source = self._skills
+        self._show_skill_listing(source() if source is not None else NoSkills())
+
+    async def _skill_listing(self, link: Link) -> None:
+        """`/skills` through the live link: one await, then the same listing.
+        Spawned rather than run as a flow - it changes nothing about the session
+        (``_mcp_listing``'s reasoning, and its round trip)."""
+        self._show_skill_listing(await link.skills())
+
+    def _show_skill_listing(self, report: SkillReport) -> None:
+        """Render one read into a transcript note. The one renderer both sources
+        share, and the empty case is a note too rather than a toast: "no skills
+        found" is only useful beside the folders that were searched, and that is
+        several lines of paths nobody can read out of a toast."""
+        if not report.skills:
+            searched = "\n".join(f"  {root}" for root in report.searched)
+            self._view.spawn(
+                self._view.add_note(
+                    f"No skills found. Searched:\n{searched}"
+                    if searched
+                    else "No skills found (no skill folders were searched)."
+                )
+            )
+            return
+        listing = "\n".join(_skill_line(skill) for skill in report.skills)
+        self._view.spawn(self._view.add_note(f"Skills:\n{listing}"))
 
     def _cmd_identify(self) -> None:
         """Show the user what the tool believes it can see in the chat window.

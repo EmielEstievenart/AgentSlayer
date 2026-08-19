@@ -27,7 +27,7 @@ from agentclip import __version__
 from agentclip.config import Config
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
-from agentclip.shell.app.link import Link
+from agentclip.shell.app.link import Link, SkillReport
 from agentclip.shell.gui.remote import RemoteConnect
 from agentclip.shell.gui.runner import GuiRunner
 from agentclip.shell.gui.view import McpStatusSource
@@ -143,6 +143,7 @@ def run_gui(
     provider: ClipboardProvider,
     engine_factory: Callable[[EngineRequest], Link],
     mcp_manager: McpStatusSource | None = None,
+    skills: Callable[[], SkillReport] | None = None,
     on_config_change: Callable[[Config], None] | None = None,
     host: Any = None,
     remote: RemoteConnect | None = None,
@@ -205,6 +206,7 @@ def run_gui(
         engine_factory=engine_factory,
         project_root=launch.project_root,
         mcp_manager=mcp_manager,
+        skills=skills,
         host=host,
         remote=remote,
         on_config_change=on_config_change,

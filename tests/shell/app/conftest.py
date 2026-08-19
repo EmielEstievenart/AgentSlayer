@@ -387,7 +387,10 @@ class FakeChatView:
 
 
 def make_factory(
-    root: Path, *, mcp_statuses: Callable[[], tuple[Any, ...]] | None = None
+    root: Path,
+    *,
+    mcp_statuses: Callable[[], tuple[Any, ...]] | None = None,
+    skills: Callable[[], Any] | None = None,
 ) -> Callable[[EngineRequest | str], Link]:
     """The real engine factory, with the chat names pinned per role.
 
@@ -401,6 +404,9 @@ def make_factory(
     MCP, so a test that wants rows has to say so; the link is rebuilt around the
     engine the factory just made, which is the one part of the wrapping that is
     the caller's to choose (``LocalLink`` exposes its engine for exactly this).
+
+    ``skills`` is the same arrangement for the skills library, which is
+    discovered on the same machine and read across the same seam.
     """
     base = make_engine_factory(
         lambda: load_config(root, global_config_path=root / "no-such-global.toml"), root
@@ -413,9 +419,9 @@ def make_factory(
             name = MASTER_CHAT if req.role == "master" else next(subs)
             req = replace(req, chat_name=name)
         link = base(req)
-        if mcp_statuses is None:
+        if mcp_statuses is None and skills is None:
             return link
-        return LocalLink(link.engine, mcp_statuses=mcp_statuses)
+        return LocalLink(link.engine, mcp_statuses=mcp_statuses, skills=skills)
 
     return build
 

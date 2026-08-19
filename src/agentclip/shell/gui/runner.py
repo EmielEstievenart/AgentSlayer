@@ -55,7 +55,7 @@ from typing import Any
 from agentclip.config import Config
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
-from agentclip.shell.app.link import Link
+from agentclip.shell.app.link import Link, SkillReport
 from agentclip.shell.gui.bridge import Bridge, EmitFn, JsApi
 from agentclip.shell.gui.remote import RemoteConnect
 from agentclip.shell.gui.view import GuiView, McpStatusSource
@@ -80,6 +80,7 @@ class GuiRunner:
         profile_root: Path | None = None,
         global_config_path: Path | None = None,
         mcp_manager: McpStatusSource | None = None,
+        skills: Callable[[], SkillReport] | None = None,
         host: Any = None,
         remote: RemoteConnect | None = None,
         on_close: Callable[[], None] | None = None,
@@ -107,6 +108,7 @@ class GuiRunner:
             profile_root=profile_root,
             global_config_path=global_config_path,
             mcp_manager=mcp_manager,
+            skills=skills,
             host=host,
             remote=remote,
             schedule=self.schedule,

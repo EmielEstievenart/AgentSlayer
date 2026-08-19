@@ -49,6 +49,7 @@ def test_the_registry_is_the_documented_commands() -> None:
         "identify",
         "log",
         "mcp",
+        "skills",
         "armed",
         "mode",
         "theme",
@@ -109,8 +110,8 @@ def test_unknown_command_hint_lists_every_command() -> None:
         assert command.slash in hint
     # An English list, not a dump.
     assert hint == (
-        "/help, /new, /abort, /identify, /log, /mcp, /armed, /mode, /theme, /config, "
-        "/unattended, or /yolo"
+        "/help, /new, /abort, /identify, /log, /mcp, /skills, /armed, /mode, /theme, "
+        "/config, /unattended, or /yolo"
     )
 
 
@@ -267,6 +268,122 @@ async def test_rebind_points_the_pre_session_mcp_source_at_the_new_machine(
     controller.submit_message("/mcp")
     await settle(view)
     assert "on-the-box" in next(text for text in view.notes() if text.startswith("MCP servers:"))
+
+
+@dataclass(frozen=True)
+class SkillRow:
+    """Duck-typed ``SkillLine``: the app layer never imports agentclip.executor.tools,
+    so a row is whatever answers to these four names (``shell/app/link.py``)."""
+
+    name: str
+    description: str = ""
+    folder: str = ""
+    model_invocable: bool = True
+
+
+@dataclass(frozen=True)
+class SkillsFound:
+    """Duck-typed ``SkillReport`` - the rows, and where they were looked for."""
+
+    skills: tuple[SkillRow, ...] = ()
+    searched: tuple[str, ...] = ()
+
+
+async def test_skills_lists_every_skill_with_its_description_and_folder(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """`/skills` answers the question the bootstrap's one-line listing cannot:
+    WHICH copy of a skill is loaded, and out of which of the six folders.
+
+    The fallback path in full - no session, so the constructor's callable is the
+    whole answer and it is read synchronously (`/mcp`'s arrangement).
+    """
+    report = SkillsFound(
+        skills=(
+            SkillRow("tdd", "test-first development", "/proj/.claude/skills/tdd"),
+            SkillRow("release", "cut a release", "/home/dev/.agents/skills/release", False),
+        ),
+        searched=("/proj/.claude/skills",),
+    )
+    controller = SessionController(
+        app_config, make_factory(project), project, view=view, skills=lambda: report
+    )
+    view.controller = controller
+
+    controller.submit_message("/skills")
+    await settle(view)
+
+    note = next(text for text in view.notes() if text.startswith("Skills:"))
+    assert "tdd - test-first development  (/proj/.claude/skills/tdd)" in note
+    # The ones the model may not call are listed too, and marked: a skill that
+    # sets disable-model-invocation is loaded and simply unreachable, which is
+    # exactly what somebody typing /skills is trying to find out.
+    assert "release - cut a release  (/home/dev/.agents/skills/release)  [hidden from the model]" in (
+        note
+    )
+    assert "[hidden from the model]" not in note.splitlines()[1]  # ...and only on that one
+
+
+async def test_skills_with_nothing_found_names_the_folders_it_searched(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """The empty listing is the useful one: "no skills" is only actionable
+    beside the folders that were scanned, so those are the answer."""
+    controller = SessionController(
+        app_config,
+        make_factory(project),
+        project,
+        view=view,
+        skills=lambda: SkillsFound(searched=("/proj/.claude/skills", "/home/dev/.claude/skills")),
+    )
+    view.controller = controller
+
+    controller.submit_message("/skills")
+    await settle(view)
+
+    note = next(text for text in view.notes() if text.startswith("No skills found"))
+    assert "/proj/.claude/skills" in note
+    assert "/home/dev/.claude/skills" in note
+
+
+async def test_skills_reads_the_live_link_rather_than_the_constructor_source(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """With a session live, `/skills` asks the LINK.
+
+    Skills are discovered where the engine runs (docs/design/remote-ssh.md
+    decision 6), so a remote session's listing must name the target's folders.
+    The two sources are scripted to disagree, which is the only way to tell which
+    one answered.
+    """
+    on_the_box = SkillsFound(skills=(SkillRow("deploy", "ship it", "/srv/app/.claude/skills/deploy"),))
+    this_pc = SkillsFound(skills=(SkillRow("stale-local", "", "C:/dev/.claude/skills/x"),))
+    controller = SessionController(
+        app_config,
+        make_factory(project, skills=lambda: on_the_box),
+        project,
+        view=view,
+        skills=lambda: this_pc,
+    )
+    view.controller = controller
+    await start_session(controller, view)
+
+    controller.submit_message("/skills")
+    await settle(view)
+
+    note = next(text for text in view.notes() if text.startswith("Skills:"))
+    assert "deploy - ship it  (/srv/app/.claude/skills/deploy)" in note
+    assert "stale-local" not in note
+
+
+async def test_skills_without_a_source_says_nothing_was_found_or_searched(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """The fixture controller is built without a skills source. It must still
+    answer - and needs no session to do it."""
+    controller.submit_message("/skills")
+    await settle(view)
+    assert any(text.startswith("No skills found") for text in view.notes())
 
 
 def test_armed_dispatches_to_the_view_with_no_session_of_any_kind(

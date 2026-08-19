@@ -59,6 +59,46 @@ class Skill:
     model_invocable: bool = True  # False when frontmatter sets disable-model-invocation
 
 
+@dataclass(frozen=True, slots=True)
+class SkillLine:
+    """One discovered skill as everything ABOVE the executor reads it.
+
+    A :class:`Skill` minus its ``body``, and that absence is the point: a
+    listing says what is loaded and where it came from, while the bodies of a
+    real skills library are the megabytes nobody asked to send across a link.
+    """
+
+    name: str
+    description: str
+    folder: str  # the directory holding SKILL.md - text, because it may be a remote path
+    model_invocable: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class SkillReport:
+    """A discovery as `/skills` renders it: what was found, and where it looked.
+
+    The roots travel WITH the rows because the listing that most needs them is
+    the empty one - "no skills found" is only actionable beside the folders that
+    were scanned - and in a remote session those folders are the TARGET's, which
+    nothing above the engine could work out for itself.
+    """
+
+    skills: tuple[SkillLine, ...] = ()
+    searched: tuple[str, ...] = ()
+
+
+def skill_report(skills: Sequence[Skill], roots: Sequence[Path]) -> SkillReport:
+    """The body-free view of one discovery, for anything above the executor."""
+    return SkillReport(
+        skills=tuple(
+            SkillLine(skill.name, skill.description, str(skill.source.parent), skill.model_invocable)
+            for skill in skills
+        ),
+        searched=tuple(str(root) for root in roots),
+    )
+
+
 def skill_search_roots(project_root: Path, home: Path | None = None) -> tuple[Path, ...]:
     """The skill folders to scan, highest precedence first. Project-local roots
     beat the user's global roots, matching OpenCode's precedence."""

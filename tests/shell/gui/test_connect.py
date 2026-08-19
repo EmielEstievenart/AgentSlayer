@@ -162,13 +162,17 @@ def harness(
     holder: dict[str, RemoteHarness] = {}
     config = load_config(project, global_config_path=global_config)
     built: list[FakeRuntime] = []
+    # What the TARGET's MCP runtime is, for the one test that cares. A cell
+    # rather than a constructor argument because `cli.main` builds this per
+    # connect: it is the box's runtime, so it cannot exist before the dial.
+    remote_mcp: list[Any] = [None]
 
     def build(remote: ConnectedRemote) -> FakeRuntime:
         runtime = FakeRuntime(
             project_root=remote.project_root,
             config=remote.config,
             engine_factory=make_engine_factory(lambda: remote.config, remote.project_root),
-            mcp_manager=None,
+            mcp_manager=remote_mcp[0],
             host=remote.host,
             target=remote.host.target,
         )
@@ -194,6 +198,7 @@ def harness(
     )
     holder["h"] = RemoteHarness(view, bridge, recorder)
     holder["h"].built = built  # type: ignore[attr-defined]
+    holder["h"].remote_mcp = remote_mcp  # type: ignore[attr-defined]
     return holder["h"]
 
 
@@ -554,6 +559,61 @@ async def test_a_connect_points_the_session_at_the_remote_root(
     assert harness.view._remote_target == "dev@box"
     assert harness.view._controller._project_root == remote_root
     assert harness.flush().last("sidebar")["remote"] == "dev@box"
+
+
+class FakeMcpSource:
+    """The ``McpStatusSource`` shape and nothing else - the target's runtime."""
+
+    def __init__(self, *rows: Any) -> None:
+        self._rows = rows
+        self.hooked = 0
+
+    def statuses(self) -> tuple[Any, ...]:
+        return self._rows
+
+    def set_status_hook(self, cb: Any) -> None:
+        self.hooked += 1
+
+
+@dataclass(frozen=True)
+class McpRow:
+    """Duck-typed status row: four names, no ``executor.mcp`` import anywhere in
+    the GUI's graph (tests/test_layering.py)."""
+
+    name: str
+    state: str
+    detail: str = ""
+    tool_count: int = 0
+
+
+async def test_a_connect_points_mcp_at_the_targets_runtime(
+    harness: RemoteHarness, dial: Any
+) -> None:
+    """MCP servers spawn where the engine runs (remote-executor.md §2.7), so a
+    connect has to move the MCP source with the root and the config.
+
+    Pinned end to end through `/mcp` before any session exists - the one path
+    that used to answer out of the machine the window had just left, because
+    ``rebind`` took three ingredients and MCP was the fourth.
+    """
+    harness.remote_mcp[0] = FakeMcpSource(  # type: ignore[attr-defined]
+        McpRow("on-the-box", "connected", tool_count=9)
+    )
+    harness.view.open_connect()
+    harness.view.connect_fields("box", REMOTE_ROOT)
+    await run_connect(harness)
+
+    # The sidebar's block repainted off the target's rows the moment it landed...
+    assert harness.flush().last("mcp")["rows"][0]["name"] == "on-the-box"
+
+    harness.view.controller.submit_message("/mcp")
+    await settle(5)
+    notes = [
+        event["text"]
+        for event in harness.flush().of_type("transcript")
+        if str(event.get("text", "")).startswith("MCP servers:")
+    ]
+    assert notes and "on-the-box · connected · 9 tools" in notes[-1]
 
 
 async def test_the_policy_banner_names_the_machine_and_where_policy_comes_from(

@@ -333,6 +333,36 @@ which now imports it), so nothing in `shell/app` names `McpServerStatus` — the
 real rows arrive as values, out of the builder in local mode and out of wire's
 codec in remote mode.
 
+**And the Shell's surfaces read it that way.** `/mcp` prefers the **live link**:
+with a session up it is `await link.mcp_statuses()`, and only with no session
+does it fall back to the `mcp_statuses` callable the controller was constructed
+with (synchronously, which is what keeps the command a straight line before any
+loop is running). The reason is this section's premise — the servers are on the
+machine the engine runs on, so the link is the only thing that knows which
+machine that is, and a remote session that listed this PC's servers would be
+lying about its own tools. The fallback had a matching staleness of its own:
+`SessionController.rebind` took the three things a session is built from and MCP
+was a fourth, so a GUI that reconnected went on answering a *pre-session* `/mcp`
+out of the machine it had just left. `rebind` now takes an optional
+`mcp_statuses` (`None` = keep what is current), and the GUI's source is a method
+that re-reads its `_mcp_manager` rather than a callable bound to the launch-time
+one.
+
+**The cadence in each mode.** Local mode is unchanged and instant: the builder's
+status hook fires from the MCP manager's loop thread and both shells repaint on
+it. Remote mode has **no push** (§2.9) — so `cli.RemoteEngine` is the status
+source over there, duck-typed to exactly what `LinkFactory` gives the shells:
+`statuses()` hands back the settle the client cached from the last
+`build_session` (**never** a wire call — it is read on the UI thread on every
+status paint, and a round trip there would freeze the window while painting a
+number), `set_status_hook()` is accepted and dropped, and `close()` closes the
+channel. What makes that cache enough is that it is refreshed on every session
+build, and both shells now repaint their MCP block on the session-start edge
+they were already detecting for the harness log — so the target's settle lands
+on screen at the start of the session it belongs to. A server that comes up
+later goes unnoticed until the next build or the next `/mcp`, which is §5's open
+point and not a surprise.
+
 What did **not** move is the legacy per-call `SshHost` path: it is still the
 default `--ssh` mode, its config still comes off the target while the process
 spawning servers is this PC, so `cli` passes `mcp_remote_target=<host name>`
@@ -593,6 +623,11 @@ which is when a Shell first wants to paint the block — and `RemoteLink`
 `await`s it through `asyncio.to_thread` behind the link's own lock. The settle
 that came home on `build_session` is kept as `build_mcp_statuses` on both the
 client and the link it minted, so the first paint costs no round trip at all.
+That cache is also what `cli.RemoteEngine.statuses()` serves the shells' status
+panes (§2.7): it is refreshed on every `build_session`, and serving it is the
+only way a sidebar paint can be free of the network. The `await` version is for
+callers who asked for a fresh reading and are prepared to wait for one — `/mcp`
+is the whole of that list.
 
 **Events reach the link they belong to.** `progress`/`output` frames met on the
 way to an answer are dispatched **by session id** through the client's registry,
@@ -810,9 +845,14 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
    verification that stores (§2.4) and skills already live with the engine and
    needed no change; and MCP, by moving construction out of `cli.py`'s two sites
    into the engine half's `EngineBuilder`, which is what makes
-   `engine/link/__main__.py` need no MCP argument at all (§2.7 "as built").
-   Remaining: the parity verdict itself — exercising the remote engine against
-   what the per-call path does, then flipping the default `--ssh` mode.
+   `engine/link/__main__.py` need no MCP argument at all (§2.7 "as built"); and
+   the Shell's side of the same, so the surfaces a user actually reads work in
+   remote mode — `/mcp` through the live link, `rebind` carrying the MCP source
+   with the other three ingredients, `cli.RemoteEngine` as the status source the
+   sidebars consume, and a repaint on the session-start edge (§2.7 "the cadence
+   in each mode"). Remaining: the parity verdict itself — exercising the remote
+   engine against what the per-call path does, then flipping the default `--ssh`
+   mode.
 5. **Delete SshHost per-call mode** once parity is verified; amend
    `remote-ssh.md`.
 
@@ -823,9 +863,13 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
   budget for the RunPanel's ~5/sec peek cadence over a real SSH connection — a
   cadence that is free in-process and unmeasured on the wire.
 - **A real MCP push over the wire**: v1's cadence is a pull (§2.9) — the settle
-  rides `build_session` and the Shell re-asks with `mcp_statuses`. A server that
-  connects (or fails) *after* the build therefore goes unnoticed until something
-  asks again. Turning the builder's `set_mcp_status_hook` into an event frame
+  rides `build_session`, the shells repaint from it at the session-start edge,
+  and `/mcp` re-asks through the link (§2.7 "the cadence in each mode"). A server
+  that connects (or fails) *after* the build therefore goes unnoticed until the
+  next build or the next `/mcp`, and `RemoteEngine.set_status_hook` is a
+  documented no-op in the meantime — the shells register one either way, so a
+  push that arrived later would have a listener waiting for it. Turning the
+  builder's `set_mcp_status_hook` into an event frame
   needs a place on the client for an unsolicited frame to land while no call is
   outstanding — a background reader thread (with the queue and shutdown protocol
   §2.11 deliberately avoided) or a poll timer in the Shell. Which one, and

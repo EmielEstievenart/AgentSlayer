@@ -41,7 +41,7 @@ from agentclip.engine.engine import Decision, PendingAction
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app.controller import SessionController
-from agentclip.shell.app.link import Link
+from agentclip.shell.app.link import Link, LocalLink
 from agentclip.shell.app.types import SessionRef, SessionSpec
 from agentclip.shell.app.view import RunCall, SessionView, Severity
 
@@ -371,12 +371,21 @@ class FakeChatView:
 # -- wiring -------------------------------------------------------------------
 
 
-def make_factory(root: Path) -> Callable[[EngineRequest | str], Link]:
+def make_factory(
+    root: Path, *, mcp_statuses: Callable[[], tuple[Any, ...]] | None = None
+) -> Callable[[EngineRequest | str], Link]:
     """The real engine factory, with the chat names pinned per role.
 
     Real, because the delegation wiring the controller does - role, catalog
     gating, parent chat name - only means anything if a real Engine is built
     from it; pinned, because the canned replies have to name a chat.
+
+    ``mcp_statuses`` scripts what the LINK answers for the machine its engine
+    runs on - what ``cli.LinkFactory`` supplies in production, and what a
+    ``RemoteLink`` would fetch off the target. Nothing in this project configures
+    MCP, so a test that wants rows has to say so; the link is rebuilt around the
+    engine the factory just made, which is the one part of the wrapping that is
+    the caller's to choose (``LocalLink`` exposes its engine for exactly this).
     """
     base = make_engine_factory(
         lambda: load_config(root, global_config_path=root / "no-such-global.toml"), root
@@ -388,7 +397,10 @@ def make_factory(root: Path) -> Callable[[EngineRequest | str], Link]:
         if req.chat_name is None:
             name = MASTER_CHAT if req.role == "master" else next(subs)
             req = replace(req, chat_name=name)
-        return base(req)
+        link = base(req)
+        if mcp_statuses is None:
+            return link
+        return LocalLink(link.engine, mcp_statuses=mcp_statuses)
 
     return build
 

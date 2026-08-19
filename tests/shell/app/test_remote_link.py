@@ -43,7 +43,7 @@ from typing import Any
 
 import pytest
 
-from agentclip import __version__
+from agentclip import __version__, cli
 from agentclip.config import Config, load_config
 from agentclip.engine.engine import CallProgress
 from agentclip.engine.link import wire
@@ -495,6 +495,64 @@ def test_a_link_scoped_call_cannot_interleave_with_a_session_call() -> None:
     link_call.join(DEADLINE)
     assert link_answer == [rows]
     assert not failures, failures
+
+
+def test_the_remote_engine_is_the_shells_mcp_status_source() -> None:
+    """``cli.RemoteEngine`` answers the three names both sidebars consume.
+
+    The remote half of what ``cli.LinkFactory`` is locally (§2.7): one object per
+    mode, ``statuses()`` / ``set_status_hook()`` / ``close()``, so neither shell
+    branches on where the engine is. What is pinned here is the two rules that
+    make it safe to hand to a UI thread - the rows come from the ``build_session``
+    settle the client cached (§2.11) and NOTHING is written to the wire to
+    produce them, and the hook is accepted and dropped because v1 has no MCP push
+    (§2.9). A round trip inside ``statuses()`` would freeze the window on every
+    status paint for as long as the target took to answer.
+
+    The streams are the hand-driven pair above rather than a real server, because
+    the point is exactly which frames were written: a scripted ``build_session``
+    answer carries rows that no local runtime could have produced.
+    """
+    gated = _Gated()
+    client = RemoteLinkClient(gated, gated)
+    channel = _DeadChannel()
+    engine = cli.RemoteEngine(client=client, channel=channel, target="dev@box")  # type: ignore[arg-type]
+
+    # Before any session: the honest empty, and still no wire traffic.
+    assert engine.statuses() == ()
+    assert gated.written == []
+
+    rows = (McpServerStatus(name="github", state="connected", tool_count=17),)
+    info = wire.SessionInfo(session="s1", chat_name=CHAT, role="master", mcp_statuses=rows)
+    gated.answer(wire.result_frame(1, wire.encode_result("build_session", info)))
+    link = client.build_session(EngineRequest(service="claude"))
+
+    assert link.build_mcp_statuses == rows
+    assert engine.statuses() == rows
+    # ...and reading them twice more still costs the connection nothing: one
+    # frame was written, and it was the session build.
+    assert engine.statuses() == rows
+    assert gated.methods() == ["build_session"]
+
+    # The hook is part of the shape and does nothing at all - registering one, or
+    # clearing it, must never raise and must never reach the wire.
+    assert engine.set_status_hook(lambda status: None) is None
+    engine.set_status_hook(None)
+    assert gated.methods() == ["build_session"]
+
+    engine.close()  # the channel is what a remote engine's life is tied to (§2.3)
+    assert channel.closed is True
+
+
+class _DeadChannel:
+    """``LinkChannel``, as far as :class:`cli.RemoteEngine` is concerned: a thing
+    that can be closed. The streams it would own are the ``_Gated`` pair here."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 def test_a_cancel_is_written_while_a_call_holds_the_connection() -> None:

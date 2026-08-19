@@ -1847,6 +1847,14 @@ class MainScreen(Screen[None]):
                 KIND_SESSION,
                 "session started" if view.session_active else "session ended",
             )
+            if view.session_active:
+                # The one moment the MCP rows can have moved with no hook to say
+                # so: in remote mode the settle rides ``build_session`` and there
+                # is no push over the wire (docs/design/remote-executor.md
+                # section 2.9), so a session start is when the target's runtime
+                # first has anything to report. Local mode repaints an unchanged
+                # block for the price of one ``statuses()`` read.
+                self._paint_mcp()
         if not view.session_active or (
             self._loop_state is LoopState.INTERPRETING
             and (view.awaiting_answer or not (view.busy or view.pending_approval))

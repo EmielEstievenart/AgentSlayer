@@ -384,10 +384,14 @@ class SessionController:
         self._engine_factory = engine_factory
         self._project_root = project_root
         self._view = view
-        # Where /mcp reads its listing, or None when the app runs without an
-        # MCP manager. A supplier of duck-typed rows rather than the manager
-        # itself, so this layer stays clear of agentclip.executor.mcp (see
-        # link.McpStatusLine); the shells pass cli.LinkFactory.statuses, bound.
+        # Where /mcp reads its listing BEFORE a session exists, or None when the
+        # app runs without an MCP manager. A supplier of duck-typed rows rather
+        # than the manager itself, so this layer stays clear of
+        # agentclip.executor.mcp (see link.McpStatusLine); the shells pass
+        # cli.LinkFactory.statuses, bound. Once a session is live the LINK
+        # answers instead (_cmd_mcp), because that is what knows which machine
+        # the servers are on; ``rebind`` refreshes this one when the next
+        # session's machine changes.
         self._mcp_statuses = mcp_statuses
 
         self._link: Link | None = None
@@ -466,6 +470,8 @@ class SessionController:
         config: Config,
         engine_factory: Callable[[EngineRequest], Link],
         project_root: Path,
+        *,
+        mcp_statuses: Callable[[], Sequence[McpStatusLine]] | None = None,
     ) -> bool:
         """Point the NEXT session at a different machine. Returns whether it took.
 
@@ -485,12 +491,23 @@ class SessionController:
         than as a silent swap under a running turn. A controller parked on
         ``prompt_new_session`` needs nothing else: the flow reads these three
         attributes when it builds, which has not happened yet.
+
+        ``mcp_statuses`` is the fourth ingredient, and it is optional because it
+        is the only one a caller may have nothing new to say about (``None``
+        keeps the current source). It exists because a rebind that left it alone
+        was a real staleness: the MCP runtime belongs to the machine the ENGINE
+        runs on (docs/design/remote-executor.md section 2.7), so a controller
+        pointed at a target while still reading THIS PC's source would answer
+        a pre-session ``/mcp`` for the wrong machine. Once a session is live
+        ``/mcp`` reads the link instead and the question does not arise.
         """
         if self._session_active:
             return False
         self._config = config
         self._engine_factory = engine_factory
         self._project_root = project_root
+        if mcp_statuses is not None:
+            self._mcp_statuses = mcp_statuses
         return True
 
     def update_config(self, config: Config) -> None:
@@ -1017,9 +1034,40 @@ class SessionController:
         because a failed server's detail is a sentence worth keeping; the
         sidebar's block shows the same facts clipped to a 30-cell column and
         this is where the whole line can be read.
+
+        WHERE the rows come from depends on whether a session is live, and the
+        LIVE LINK WINS. MCP servers spawn where the engine runs
+        (docs/design/remote-executor.md section 2.7), so once a link exists it is
+        the only thing that knows which machine that is - a remote session's
+        ``/mcp`` must list the target's servers, not this PC's, and the seam
+        answers that identically in both modes (``await link.mcp_statuses()``).
+        Without a session there is no link to ask, so the constructor's callable
+        answers exactly as it always has - synchronously, which is what keeps
+        the command a straight line before any loop is running. That fallback
+        is also the one that could go stale across a GUI reconnect; ``rebind``
+        refreshes it.
         """
+        link = self._link
+        if link is not None:
+            self._view.spawn(self._mcp_listing(link))
+            return
         source = self._mcp_statuses
-        statuses = source() if source is not None else ()
+        self._show_mcp_listing(source() if source is not None else ())
+
+    async def _mcp_listing(self, link: Link) -> None:
+        """`/mcp` through the live link: one await, then the same listing.
+
+        Spawned rather than run as a flow: it changes nothing about the session,
+        so it must not sit in the queue turns take or be counted as one. The
+        await can be a round trip on a remote link (and will queue behind a turn
+        that is executing, because that is the ``Link`` contract) - which is
+        precisely why the sync fallback above is not made to go through here.
+        """
+        self._show_mcp_listing(await link.mcp_statuses())
+
+    def _show_mcp_listing(self, statuses: Sequence[McpStatusLine]) -> None:
+        """Render whichever rows were read into one transcript note (or a toast
+        when there are none). The one renderer both sources share."""
         if not statuses:
             self._view.notify(
                 "MCP is not configured - add servers to the mcp block of "

@@ -35,7 +35,7 @@ from agentclip.executor.hosts.connect import (
 from agentclip.executor.hosts.local import LocalHost
 from agentclip.executor.mcp.types import McpServerStatus
 from agentclip.shell.app.engine_launch import classify_launch_failure, engine_command
-from agentclip.shell.app.link import Link, LocalLink
+from agentclip.shell.app.link import Link, LocalLink, McpStatusLine
 from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLinkClient
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.graphics import probe_terminal
@@ -155,11 +155,51 @@ class RemoteEngine:
     the thing to close at the end is this, not any individual link - and closing
     the channel is precisely how the remote engine is stopped, since it dies with
     the channel by design (§2.3).
+
+    It is also the remote mode's **MCP status source**, which is why it grew two
+    methods that have nothing to do with channels: the shells are handed one
+    object that answers ``statuses()`` / ``set_status_hook()`` / ``close()``
+    (the ``McpStatusSource`` shape both sidebars consume), and in local mode
+    that object is :class:`LinkFactory`. Same three names, same duck type, no
+    branch in either shell - and no ``executor.mcp`` import in one, because the
+    rows travel as values (§2.7).
     """
 
     client: RemoteLinkClient
     channel: LinkChannel
     target: str
+
+    def statuses(self) -> tuple[McpStatusLine, ...]:
+        """The target's MCP rows as of the last session build. **No wire call.**
+
+        This is called on the UI thread, on every status paint, by both shells -
+        so it must never block on the network. A pane that waited on an SSH
+        round trip would freeze the window for as long as the target took to
+        answer, and it would do it while painting a number. So it hands back the
+        settle the client cached from the most recent ``build_session``
+        (``build_mcp_statuses``, §2.11) - refreshed on every build, and ``()``
+        until the first session exists, which is the honest answer for a
+        connection that has never asked the far side anything about MCP.
+
+        A Shell that wants a FRESH reading takes one through the link
+        (``await link.mcp_statuses()``, which is what ``/mcp`` does): there the
+        round trip is the caller's to spend, and it is spent off the event loop.
+        """
+        return self.client.build_mcp_statuses
+
+    def set_status_hook(self, cb: Callable[[McpStatusLine], None] | None) -> None:
+        """Accepted and dropped: v1 has **no MCP push over the wire** (§2.9).
+
+        The local builder's hook fires from the MCP manager's loop thread the
+        instant a server settles, and both shells register one at mount. There
+        is no frame for that to ride on remotely, and inventing one needs
+        somewhere for an unsolicited frame to land while no call is outstanding
+        - a background reader thread or a poll timer, which §5 keeps open on
+        purpose. Refusing the call instead of ignoring it would buy nothing and
+        cost the shells a branch; what the remote cadence IS, in the meantime,
+        is the ``build_session`` settle plus whatever a Shell pulls, so a server
+        that comes up late shows up at the next session build.
+        """
 
     def close(self) -> None:
         self.channel.close()

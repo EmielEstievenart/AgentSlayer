@@ -138,6 +138,17 @@ def test_log_dispatches_to_the_view_with_no_session_of_any_kind(
     assert view.harness_log_toggles == 2
 
 
+@dataclass(frozen=True)
+class McpRow:
+    """Duck-typed ``McpStatusLine``: the app layer never imports agentclip.executor.mcp,
+    so a row is whatever answers to these four names (``shell/app/link.py``)."""
+
+    name: str
+    state: str
+    detail: str = ""
+    tool_count: int = 0
+
+
 def test_mcp_without_a_source_says_mcp_is_not_configured(
     controller: SessionController, view: FakeChatView
 ) -> None:
@@ -155,19 +166,16 @@ async def test_mcp_lists_every_server_with_state_tools_and_detail(
     """`/mcp` renders the supplier's rows into one transcript note - state
     always, tool count when connected, the detail line whenever there is one -
     and needs no session (`/log`'s rule: "where are my server's tools?" is
-    asked before a session as readily as during one)."""
+    asked before a session as readily as during one).
 
-    @dataclass(frozen=True)
-    class Row:  # duck-typed McpStatusLine - the app layer never imports agentclip.executor.mcp
-        name: str
-        state: str
-        detail: str = ""
-        tool_count: int = 0
-
+    This is also the FALLBACK path in full: with no session there is no link to
+    ask, so the constructor's callable is the whole answer and it is read
+    synchronously.
+    """
     rows = (
-        Row("github", "connected", tool_count=12),
-        Row("linear", "needs_auth", detail="server rejected the request (401/403)"),
-        Row("scratch", "disabled"),
+        McpRow("github", "connected", tool_count=12),
+        McpRow("linear", "needs_auth", detail="server rejected the request (401/403)"),
+        McpRow("scratch", "disabled"),
     )
     controller = SessionController(
         app_config, make_factory(project), project, view=view, mcp_statuses=lambda: rows
@@ -182,6 +190,76 @@ async def test_mcp_lists_every_server_with_state_tools_and_detail(
     assert "linear · needs_auth · server rejected the request (401/403)" in note
     assert "scratch · disabled" in note
     assert "disabled ·" not in note  # no tool count, no detail: the state says it all
+
+
+async def test_mcp_reads_the_live_link_rather_than_the_constructor_source(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """With a session live, `/mcp` asks the LINK - the only thing that knows
+    which machine the servers are on.
+
+    MCP servers spawn where the engine runs (docs/design/remote-executor.md
+    §2.7), so a remote session's listing must be the target's. The two sources
+    are scripted to disagree, which is the only way to tell which one answered:
+    the constructor's is this PC's, the link's is the machine the session was
+    built on.
+    """
+    on_the_box = (McpRow("github", "connected", tool_count=12),)
+    this_pc = (McpRow("stale-local", "connected", tool_count=1),)
+    controller = SessionController(
+        app_config,
+        make_factory(project, mcp_statuses=lambda: on_the_box),
+        project,
+        view=view,
+        mcp_statuses=lambda: this_pc,
+    )
+    view.controller = controller
+    await start_session(controller, view)
+
+    controller.submit_message("/mcp")
+    await settle(view)
+
+    note = next(text for text in view.notes() if text.startswith("MCP servers:"))
+    assert "github · connected · 12 tools" in note
+    assert "stale-local" not in note
+
+
+async def test_rebind_points_the_pre_session_mcp_source_at_the_new_machine(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """A reconnect changes which machine the NEXT session's servers are on.
+
+    ``rebind`` takes the four things a session is built from, and MCP is one of
+    them: without it, a GUI that had connected to a box went on answering a
+    pre-session `/mcp` out of the previous target's source. Passing nothing
+    keeps whatever is current - the local callers have nothing new to say.
+    """
+    controller = SessionController(
+        app_config,
+        make_factory(project),
+        project,
+        view=view,
+        mcp_statuses=lambda: (McpRow("this-pc", "connected", tool_count=3),),
+    )
+    view.controller = controller
+
+    assert controller.rebind(
+        app_config,
+        make_factory(project),
+        project,
+        mcp_statuses=lambda: (McpRow("on-the-box", "connected", tool_count=9),),
+    )
+    controller.submit_message("/mcp")
+    await settle(view)
+    note = next(text for text in view.notes() if text.startswith("MCP servers:"))
+    assert "on-the-box · connected · 9 tools" in note
+    assert "this-pc" not in note
+
+    view.events.clear()
+    assert controller.rebind(app_config, make_factory(project), project)
+    controller.submit_message("/mcp")
+    await settle(view)
+    assert "on-the-box" in next(text for text in view.notes() if text.startswith("MCP servers:"))
 
 
 def test_armed_dispatches_to_the_view_with_no_session_of_any_kind(

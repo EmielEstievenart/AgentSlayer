@@ -824,7 +824,9 @@ class GuiView:
             engine_factory,
             project_root,
             view=self,
-            mcp_statuses=mcp_manager.statuses if mcp_manager is not None else None,
+            # Not ``mcp_manager.statuses``: an in-app connect replaces the
+            # manager, so the source has to be one that re-reads it (_mcp_rows).
+            mcp_statuses=self._mcp_rows,
         )
 
     # == lifecycle =============================================================
@@ -1364,6 +1366,14 @@ class GuiView:
             self._automation.log_harness(
                 KIND_SESSION, "session started" if view.session_active else "session ended"
             )
+            if view.session_active:
+                # The one moment the MCP rows can have moved with no hook to say
+                # so: in remote mode the settle rides ``build_session`` and there
+                # is no push over the wire (docs/design/remote-executor.md
+                # section 2.9), so a session start is when the target's runtime
+                # first has anything to report. Local mode repaints an unchanged
+                # block for the price of one ``statuses()`` read.
+                self._push_mcp()
         # The two ways the loop settles home, read exactly as MainScreen reads
         # them: no session at all, or the turn finished interpreting and the
         # floor is back with the user (an open gate is still interpreting).
@@ -2413,8 +2423,18 @@ class GuiView:
             self._controller.request_new_session()
             for _ in range(3):
                 await asyncio.sleep(0)
+        # All four ingredients together, MCP included: the runtime a connect
+        # hands back carries the TARGET's MCP as well as its config and root,
+        # and the source is stated here rather than assumed because this is the
+        # one call that says which machine the next session is built from. It is
+        # the same re-reading callable the constructor passed (``_mcp_rows``
+        # reads ``_mcp_manager``, assigned above), so no source outlives the
+        # machine it was about.
         self._controller.rebind(
-            runtime.config, runtime.engine_factory, runtime.project_root
+            runtime.config,
+            runtime.engine_factory,
+            runtime.project_root,
+            mcp_statuses=self._mcp_rows,
         )
         self._automation.log_harness(
             KIND_SESSION, f"connected to {runtime.target}: this session's tools run over there"
@@ -3628,6 +3648,20 @@ class GuiView:
         connected = sum(1 for s in statuses if getattr(s, "state", "") == "connected")
         enabled = sum(1 for s in statuses if getattr(s, "state", "") != "disabled")
         return connected, enabled
+
+    def _mcp_rows(self) -> Sequence[Any]:
+        """The MCP source ``/mcp`` reads BEFORE a session exists.
+
+        A method that re-reads :attr:`_mcp_manager` rather than the bound
+        ``manager.statuses`` the block above uses, because a connect SWAPS the
+        manager for the target's runtime (``_adopt_remote``): a callable that
+        closed over the launch-time one would keep answering for the machine
+        this window just left. ``()`` when there is no manager at all - which
+        the controller renders as "MCP is not configured", the same answer it
+        gives for a source that returns nothing.
+        """
+        manager = self._mcp_manager
+        return manager.statuses() if manager is not None else ()
 
     def _push_mcp(self) -> None:
         """The sidebar's MCP block: one row per configured server, in config

@@ -28,6 +28,7 @@ from agentclip.driver.screen.profile_store import (
     known_keys,
     load_profile,
     profile_dir,
+    save_click_point,
     save_template,
 )
 
@@ -492,3 +493,149 @@ def test_known_keys_lists_readable_profiles_sorted(tmp_path: Path) -> None:
 
 def test_known_keys_of_a_missing_root_is_empty(tmp_path: Path) -> None:
     assert known_keys(tmp_path / "never-created") == ()
+
+
+# -- click points: where inside a matched appearance the click goes ---------------
+
+
+def manifest_of(directory: Path) -> dict:
+    return json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))
+
+
+def test_a_click_point_round_trips_through_the_manifest(tmp_path: Path) -> None:
+    save_template(tmp_path, "chatgpt", TemplateKind.CHATBOX_ONGOING, patch())
+    save_click_point(tmp_path, "chatgpt", TemplateKind.CHATBOX_ONGOING, 20, 80)
+
+    document = manifest_of(tmp_path / "chatgpt")
+    assert document["version"] == FORMAT_VERSION
+    assert document["click_points"] == {"chatbox-ongoing": [20, 80]}
+    profile = load_profile(tmp_path, "chatgpt")
+    assert profile.click_point(TemplateKind.CHATBOX_ONGOING) == (20, 80)
+
+
+def test_an_appearance_nobody_aimed_is_clicked_in_the_middle(tmp_path: Path) -> None:
+    """Absent and 50/50 are the same thing, so a manifest written before click
+    points existed describes seven centre-clicked appearances."""
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch())
+
+    assert "click_points" not in manifest_of(tmp_path / "chatgpt")
+    assert load_profile(tmp_path, "chatgpt").click_point(TemplateKind.COPY) == (50, 50)
+
+
+def test_a_click_point_may_be_aimed_before_anything_is_captured(tmp_path: Path) -> None:
+    """The point is a fact about where in a control the click belongs, which a
+    user can know before they have drawn the box around it."""
+    save_click_point(tmp_path, "chatgpt", TemplateKind.NEW_CHAT, 5, 95)
+
+    profile = load_profile(tmp_path, "chatgpt")
+    assert profile.captured == ()
+    assert profile.click_point(TemplateKind.NEW_CHAT) == (5, 95)
+
+
+def test_capturing_and_clearing_other_kinds_leaves_a_click_point_alone(
+    tmp_path: Path,
+) -> None:
+    save_click_point(tmp_path, "chatgpt", TemplateKind.COPY, 30, 40)
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch())
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
+    drop_template(tmp_path, "chatgpt", TemplateKind.BUSY)
+
+    assert load_profile(tmp_path, "chatgpt").click_point(TemplateKind.COPY) == (30, 40)
+
+
+def test_clearing_a_kind_puts_its_click_point_back_in_the_middle(tmp_path: Path) -> None:
+    """The point described where inside THOSE pixels to click; the next capture
+    is a different rectangle of a possibly redesigned control."""
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch())
+    save_click_point(tmp_path, "chatgpt", TemplateKind.COPY, 10, 90)
+
+    drop_template(tmp_path, "chatgpt", TemplateKind.COPY)
+
+    assert manifest_of(tmp_path / "chatgpt").get("click_points", {}) == {}
+    assert load_profile(tmp_path, "chatgpt").click_point(TemplateKind.COPY) == (50, 50)
+
+
+def test_the_last_variant_dropped_takes_the_click_point_with_it(tmp_path: Path) -> None:
+    """Clearing variants one at a time ends where clearing the kind outright
+    does - but the point survives while any picture of it does."""
+    save_template(tmp_path, "chatgpt", TemplateKind.SEND_READY, patch())
+    save_template(tmp_path, "chatgpt", TemplateKind.SEND_READY, patch(shade=40))
+    save_click_point(tmp_path, "chatgpt", TemplateKind.SEND_READY, 25, 25)
+
+    drop_variant(tmp_path, "chatgpt", TemplateKind.SEND_READY, 0)
+    assert load_profile(tmp_path, "chatgpt").click_point(TemplateKind.SEND_READY) == (25, 25)
+
+    drop_variant(tmp_path, "chatgpt", TemplateKind.SEND_READY, 0)
+    assert load_profile(tmp_path, "chatgpt").click_point(TemplateKind.SEND_READY) == (50, 50)
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [
+        ((-10, 400), (0, 100)),  # a hand-edited manifest, clamped rather than dropped
+        ((0, 100), (0, 100)),
+        ((100, 0), (100, 0)),
+    ],
+)
+def test_click_points_are_clamped_to_the_picture(
+    tmp_path: Path, written: tuple[int, int], expected: tuple[int, int]
+) -> None:
+    save_click_point(tmp_path, "chatgpt", TemplateKind.IDLE, *written)
+
+    assert load_profile(tmp_path, "chatgpt").click_point(TemplateKind.IDLE) == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "50",  # a string where a pair belongs
+        [50],  # one number
+        [50, 60, 70],
+        [True, False],  # a JSON bool is not a percentage, however much it == 1
+        {"x": 50, "y": 60},
+        None,
+    ],
+)
+def test_a_click_point_that_is_not_a_pair_of_numbers_reads_as_the_middle(
+    tmp_path: Path, value: object
+) -> None:
+    """A manifest is a file anything can write, and the safe reading of
+    nonsense is the behaviour the app has always had."""
+    save_template(tmp_path, "chatgpt", TemplateKind.COPY, patch())
+    directory = tmp_path / "chatgpt"
+    document = manifest_of(directory)
+    document["click_points"] = {"copy": value}
+    (directory / MANIFEST_NAME).write_text(json.dumps(document), encoding="utf-8")
+
+    assert load_profile(tmp_path, "chatgpt").click_point(TemplateKind.COPY) == (50, 50)
+
+
+def test_a_click_point_survives_the_next_capture(tmp_path: Path) -> None:
+    """Every write rewrites the whole manifest, so the table that is not being
+    edited has to ride along."""
+    save_click_point(tmp_path, "chatgpt", TemplateKind.CHATBOX_INITIAL, 15, 55)
+    save_template(tmp_path, "chatgpt", TemplateKind.CHATBOX_INITIAL, patch())
+
+    assert load_profile(tmp_path, "chatgpt").click_point(TemplateKind.CHATBOX_INITIAL) == (
+        15,
+        55,
+    )
+
+
+def test_aiming_a_profile_from_another_version_is_refused(tmp_path: Path) -> None:
+    save_template(tmp_path, "chatgpt", TemplateKind.BUSY, patch())
+    directory = tmp_path / "chatgpt"
+    rewrite_version(directory, FORMAT_VERSION + 1)
+    before = snapshot(directory)
+
+    with pytest.raises(ProfileStoreError):
+        save_click_point(tmp_path, "chatgpt", TemplateKind.BUSY, 10, 10)
+
+    assert snapshot(directory) == before
+
+
+def test_an_invalid_service_key_can_never_be_aimed(tmp_path: Path) -> None:
+    for key in BAD_KEYS:
+        with pytest.raises(ProfileStoreError):
+            save_click_point(tmp_path, key, TemplateKind.BUSY, 10, 10)
+    assert list(tmp_path.iterdir()) == []

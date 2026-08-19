@@ -51,7 +51,7 @@ from agentclip.config import load_config
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import TemplateKind
-from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.template import RegionMatch, Template
 from agentclip.shell.tui.app import AgentClipApp
@@ -65,9 +65,12 @@ NEWCHAT_BOX = ScreenRegion(120, 90, 180, 36)
 # Where the button "is" inside the chat region, and the absolute rect that
 # implies - the click has to land on the second one, never the first.
 FOUND = RegionMatch(x=40, y=24, diff=0.02)
-CLICK_TARGET = ScreenRegion(
+MATCH_RECT = ScreenRegion(
     CHAT_REGION.left + FOUND.x, CHAT_REGION.top + FOUND.y, NEWCHAT_BOX.width, NEWCHAT_BOX.height
 )
+# ...reduced to the ONE pixel of that rectangle the service aims at - its
+# middle, until somebody moves the click point (tui.md 3.4d).
+CLICK_TARGET = click_point_region(MATCH_RECT, 50, 50)
 # The same button seen a couple of pixels over - one element, two matches.
 JITTERED = RegionMatch(x=FOUND.x + 3, y=FOUND.y + 2, diff=0.04)
 # A SECOND browser window of the same service inside the drawn region: far

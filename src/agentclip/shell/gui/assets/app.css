@@ -1699,6 +1699,28 @@ button:not(:disabled) {
   font-size: 11px;
 }
 
+/* Where inside the matched picture the click goes, x then y, as percentages.
+   Side by side and narrow: the pair has to read as ONE setting about the row it
+   sits in, and the × between them is what says the two numbers are coordinates
+   rather than two independent knobs. */
+.svc-click {
+  display: flex;
+  flex: none;
+  gap: 3px;
+  align-items: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.svc-click input {
+  width: 3.4em;
+  padding: 2px 4px;
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: right;
+}
+
 .svc-kind-actions {
   display: flex;
   flex: none;

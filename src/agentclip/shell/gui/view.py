@@ -2733,6 +2733,14 @@ class GuiView:
         editor.show_next(kind)
         self._push_editor()
 
+    def svc_click_point(self, kind_name: str, x: int, y: int) -> None:
+        """Where inside that appearance its click lands, written immediately."""
+        editor, kind = self._editor, kind_of(kind_name)
+        if editor is None or kind is None:
+            return
+        editor.set_click_point(kind, x, y)
+        self._push_editor()
+
     def svc_clear(self, kind_name: str) -> None:
         """The variant on show, gone from disk. No confirm, by design."""
         editor, kind = self._editor, kind_of(kind_name)

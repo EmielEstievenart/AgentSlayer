@@ -45,6 +45,7 @@ from agentclip.shell.tui.messages import ClipboardCaptured
 from agentclip.shell.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 
 from ...conftest import write_permissions
+from .conftest import aimed_at
 
 MASTER_CHAT = "amber-falcon"
 SUB_CHAT = "jade-otter"
@@ -308,13 +309,13 @@ async def test_a_delegation_runs_end_to_end(
         # The new-chat click came BEFORE the first byte was ever written out.
         clicks = [region for kind, region in trace if kind == "click"]
         writes = [text for kind, text in trace if kind == "write"]
-        assert clicks[0] == SUB_NEWCHAT
+        assert clicks[0] == aimed_at(SUB_NEWCHAT)
         assert len(writes) == 1
         assert "You are a sub-agent." in writes[0]
         assert f"chat={SUB_CHAT}" in writes[0]
-        assert trace.index(("click", SUB_NEWCHAT)) < trace.index(("write", writes[0]))
+        assert trace.index(("click", aimed_at(SUB_NEWCHAT))) < trace.index(("write", writes[0]))
         # ...and the paste went into the SUB-AGENT's chat box, not the master's.
-        assert SUB_BOX in clicks
+        assert SUB_BOX in clicks  # the drawn window, not a matched box: its own centre
         assert MASTER_BOX not in clicks
 
         # -- the sub-agent delivers ------------------------------------------

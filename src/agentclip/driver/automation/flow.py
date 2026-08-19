@@ -67,8 +67,8 @@ ABOVE_CHATBOX_PX = 10
 # Hover pause before clicking a calibrated element, for the same reason the copy
 # click settles: web UIs paint their buttons on hover.
 ELEMENT_CLICK_SETTLE_S = 0.05
-# Small offsets from the matched rect, still inside a ~24 px icon, and how hard
-# the verification looks for a clipboard that changed.
+# Small offsets from the pixel the click was aimed at, still inside a ~24 px
+# icon, and how hard the verification looks for a clipboard that changed.
 COPY_CLICK_OFFSETS = ((0, 0), (-3, -3), (3, 3))
 COPY_VERIFY_READS = 6
 COPY_VERIFY_INTERVAL_S = 0.2

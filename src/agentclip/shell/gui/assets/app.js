@@ -1547,6 +1547,19 @@
     return made;
   }
 
+  function svcClickBox(id, title) {
+    var box = document.createElement("input");
+    box.type = "number";
+    box.min = "0";
+    box.max = "100";
+    box.step = "1";
+    box.id = id;
+    // The whole explanation of the pair lives here: the boxes are three
+    // characters wide and the row has no room for a label beside them.
+    box.title = title || "";
+    return box;
+  }
+
   function svcBuild(event) {
     svcSignals = {};
     el.svcSignalsBox.innerHTML = "";
@@ -1620,6 +1633,30 @@
       text.appendChild(name);
       text.appendChild(status);
 
+      // The two click-point boxes. They send on "change" rather than on every
+      // keystroke - "5" on its way to "50" is not a click point anybody asked
+      // for - and the model clamps whatever arrives, so a box is never a way
+      // to aim outside the picture.
+      var click = document.createElement("div");
+      click.className = "svc-click";
+      var clickX = svcClickBox("svc-click-x-" + kind.kind, (event.click_labels || {}).x);
+      var times = document.createElement("span");
+      times.textContent = "×";
+      var clickY = svcClickBox("svc-click-y-" + kind.kind, (event.click_labels || {}).y);
+      click.appendChild(clickX);
+      click.appendChild(times);
+      click.appendChild(clickY);
+      var sendClick = function () {
+        var x = parseInt(clickX.value, 10);
+        var y = parseInt(clickY.value, 10);
+        // A box left empty (or mid-edit) is not a point: the next state push
+        // repaints it from the model, which is where the last saved one is.
+        if (isNaN(x) || isNaN(y)) return;
+        api("svc_click_point", kind.kind, x, y);
+      };
+      clickX.addEventListener("change", sendClick);
+      clickY.addEventListener("change", sendClick);
+
       var actions = document.createElement("div");
       actions.className = "svc-kind-actions";
       var capture = document.createElement("button");
@@ -1639,6 +1676,7 @@
 
       item.appendChild(stack);
       item.appendChild(text);
+      item.appendChild(click);
       item.appendChild(actions);
       el.svcKinds.appendChild(item);
       svcKinds[kind.kind] = {
@@ -1647,7 +1685,9 @@
         capture: capture,
         clear: clear,
         prev: prev,
-        next: next
+        next: next,
+        clickX: clickX,
+        clickY: clickY
       };
     });
     svcBuilt = true;
@@ -1884,6 +1924,14 @@
       var single = Number(kind.count || 0) < 2;
       node.prev.disabled = single;
       node.next.disabled = single;
+      // Never while the caret is in the box: the model clamps, so a box that
+      // repainted itself mid-edit would rewrite the number under the typing
+      // hand. Leaving on "change" is what commits it, and the push that
+      // follows lands on a box nobody is holding.
+      if (document.activeElement !== node.clickX) node.clickX.value = String(kind.click_x);
+      if (document.activeElement !== node.clickY) node.clickY.value = String(kind.click_y);
+      node.clickX.disabled = off;
+      node.clickY.disabled = off;
     });
     el.svcTemplates.textContent = event.templates || "";
     el.svcForget.hidden = !event.show_forget;

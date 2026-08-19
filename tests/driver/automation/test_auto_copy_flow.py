@@ -33,10 +33,11 @@ import agentclip.driver.automation.ops as ops_mod
 from agentclip.config import ServicePreset
 from agentclip.driver.automation.controller import AutomationController
 from agentclip.driver.automation.loop_state import LoopState
+from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
-from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.template import RegionMatch, Template
 
@@ -47,7 +48,10 @@ ICON = (24, 24)
 # Where the stubbed search "finds" the icon: region-local, so the click target
 # is CHAT_REGION's origin plus this.
 MATCH = RegionMatch(x=120, y=300, diff=0.03)
-CLICK_TARGET = ScreenRegion(CHAT_REGION.left + MATCH.x, CHAT_REGION.top + MATCH.y, *ICON)
+MATCH_RECT = ScreenRegion(CHAT_REGION.left + MATCH.x, CHAT_REGION.top + MATCH.y, *ICON)
+# What is actually clicked: ONE pixel of that rectangle, the middle of it while
+# the service has not moved its click point (screen.profile).
+CLICK_TARGET = click_point_region(MATCH_RECT, 50, 50)
 OUR_WINDOW = 4242
 
 
@@ -426,3 +430,63 @@ async def test_the_bracket_runs_the_body_the_shell_handed_in(
     # polling resumes from a clean post-flow baseline.
     assert flow.stale_arm_streak == 0
     assert flow.stale_diff is None
+
+
+# -- where inside an appearance the click lands -----------------------------------
+
+
+async def test_the_copy_click_goes_where_the_service_aims_it(
+    flow: AutomationController, host: FakeHost, machine: _Machine
+) -> None:
+    """Some services draw a copy control that is wider than the bit of it that
+    copies. The point is a percentage of the matched picture, so it survives the
+    icon turning up anywhere on screen."""
+    machine.looks = [(MATCH, None)]
+    host.profile.set_click_point(TemplateKind.COPY, 0, 100)
+
+    await flow.auto_copy_flow()
+
+    assert host.copy_clicks == [ScreenRegion(MATCH_RECT.left, MATCH_RECT.top + 23, 1, 1)]
+
+
+async def test_the_chat_box_click_goes_where_the_service_aims_it(
+    flow: AutomationController, host: FakeHost, machine: _Machine
+) -> None:
+    """A chat box that is clickable end to end is the whole reason for this: the
+    focus click before the snap lands on the point, not on the middle."""
+    box = ScreenRegion(1100, 800, 601, 41)
+    host.on_screen[TemplateKind.CHATBOX_ONGOING] = [box]
+    host.profile.set_click_point(TemplateKind.CHATBOX_ONGOING, 10, 50)
+
+    await flow.auto_copy_flow()
+
+    assert [region for region, _settle in machine.clicks] == [ScreenRegion(1160, 820, 1, 1)]
+
+
+async def test_the_whole_window_fallback_is_still_clicked_in_its_middle(
+    flow: AutomationController, host: FakeHost, machine: _Machine
+) -> None:
+    """No chat box found means the target is the region the USER drew, which is
+    not the picture any click point describes - aiming a tenth into it would
+    land in the transcript."""
+    host.profile.set_click_point(TemplateKind.CHATBOX_ONGOING, 10, 50)
+
+    await flow.auto_copy_flow()
+
+    assert [region for region, _settle in machine.clicks] == [CHAT_REGION]
+
+
+async def test_a_clicked_element_is_aimed_by_its_own_click_point(
+    flow: AutomationController, host: FakeHost, machine: _Machine
+) -> None:
+    """``click_profile_element`` is the one programmatic click on an appearance
+    in the app (the new-chat button today), and it aims the same way."""
+    button = ScreenRegion(300, 90, 121, 41)
+    host.profile.put(TemplateKind.NEW_CHAT, _image(24, 24))
+    host.profile.set_click_point(TemplateKind.NEW_CHAT, 100, 0)
+    host.on_screen[TemplateKind.NEW_CHAT] = [button]
+
+    assert await flow.click_profile_element(AgentSlot.MASTER, TemplateKind.NEW_CHAT) is (
+        ElementClick.CLICKED
+    )
+    assert [region for region, _settle in machine.clicks] == [ScreenRegion(420, 90, 1, 1)]

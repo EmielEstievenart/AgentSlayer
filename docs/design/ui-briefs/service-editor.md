@@ -513,6 +513,12 @@ value outside its own configured 0-64 range, which is exactly the range
   has no shown-variant notion (§7).*
 - **The two variant arrows**: page-side only. They move which variant the
   row shows (wrapping) and touch neither disk nor `profiles_changed`.
+- **The two click-point boxes** (x% × y%, 0-100, default 50/50): where
+  inside the matched picture that kind's click lands (tui.md §3.4d). Written
+  to the profile store **immediately**, like a capture, and clamped rather
+  than refused — a number box can hold "999" for as long as it takes to type
+  "99". Disabled in "+ add new" mode with the rest of the controls, and
+  reset to 50/50 when the kind's last picture is cleared.
 
 ### 5.6 "Forget appearance"
 

@@ -87,6 +87,8 @@ class ScriptedOps(ScreenOps):
         # Every input event in the order it went out - the whole assertion for
         # "what actually happened to the machine".
         self.events: list[str] = []
+        # Every rectangle a click was aimed at, in order.
+        self.clicked: list[ScreenRegion] = []
         self.click_lands = True
         self.paste_lands = True
         self.enter_lands = True
@@ -108,6 +110,10 @@ class ScriptedOps(ScreenOps):
 
     def click(self, region: ScreenRegion, *, settle_s: float | None = None) -> bool:
         self.events.append("click")
+        # Beside the event trace rather than in it: almost every assertion in
+        # this file is about the ORDER things happened in, and only the
+        # chat-box aiming cares where the pointer went.
+        self.clicked.append(region)
         return self.click_lands
 
     def foreground_window(self) -> int | None:
@@ -596,6 +602,34 @@ async def test_the_click_that_focuses_the_chat_box_is_a_double_click(
     await delivery.copy_outbound(PAYLOAD)
 
     assert ops.events[:2] == FOCUS
+
+
+async def test_both_focus_clicks_land_where_the_service_aims_them(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+) -> None:
+    """A chat box that is clickable end to end takes its click where the
+    service says (screen.profile's click points) - and the reinforcing second
+    click has to land in the same place, or it would undo the first."""
+    box = ScreenRegion(1100, 800, 601, 41)
+    host.on_screen[TemplateKind.CHATBOX_ONGOING] = [box]
+    host.profile.set_click_point(TemplateKind.CHATBOX_ONGOING, 25, 0)
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    aimed = ScreenRegion(1250, 800, 1, 1)
+    assert ops.clicked == [aimed, aimed]
+
+
+async def test_the_whole_window_fallback_keeps_its_centre_click(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+) -> None:
+    """With no chat box on screen the target is the region the USER drew, which
+    no per-picture click point describes."""
+    host.profile.set_click_point(TemplateKind.CHATBOX_ONGOING, 25, 0)
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.clicked == [CHAT_REGION, CHAT_REGION]
 
 
 async def test_a_refused_first_click_is_never_followed_by_a_second(

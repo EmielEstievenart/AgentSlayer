@@ -96,6 +96,29 @@ _MAX_DIFFS = {
 }
 
 
+# Where a click aimed at an appearance lands, as a percentage of the captured
+# image's width and height. The centre by default, which is where every click
+# went before the point was adjustable at all.
+DEFAULT_CLICK_PERCENT = 50
+
+
+def clamp_percent(value: object) -> int:
+    """``value`` as a percentage 0-100, or the default for anything that isn't.
+
+    Total, because both ends need it to be: the UI hands over whatever is in a
+    text box, and the manifest is a file anything can write. Booleans are
+    refused explicitly - ``True == 1`` in Python, and a JSON ``true`` is not a
+    click point.
+    """
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return DEFAULT_CLICK_PERCENT
+    try:
+        number = int(value)
+    except ValueError:
+        return DEFAULT_CLICK_PERCENT
+    return max(0, min(100, number))
+
+
 class TemplateKind(StrEnum):
     """The seven appearances a service profile can hold."""
 
@@ -142,6 +165,10 @@ class ServiceProfile:
 
     key: str
     templates: dict[TemplateKind, list[Template]] = field(default_factory=dict)
+    # Where inside a matched appearance its click lands, per kind, as x%/y% of
+    # the image. Absent means the centre, so a profile that has never been
+    # adjusted carries no entries at all.
+    click_points: dict[TemplateKind, tuple[int, int]] = field(default_factory=dict)
 
     def has(self, kind: TemplateKind) -> bool:
         return bool(self.templates.get(kind))
@@ -165,12 +192,40 @@ class ServiceProfile:
         template = Template.build(image)
         self.templates.setdefault(kind, []).append(template)
 
+    def click_point(self, kind: TemplateKind) -> tuple[int, int]:
+        """Where a click on ``kind`` aims, as x%/y% of the matched image.
+
+        The centre for a kind nobody has adjusted, which is where every click
+        landed before this was a setting - so an absent entry and a 50/50 one
+        mean the same thing, and the manifest only ever lists the differences.
+        """
+        return self.click_points.get(kind, (DEFAULT_CLICK_PERCENT, DEFAULT_CLICK_PERCENT))
+
+    def set_click_point(self, kind: TemplateKind, x: object, y: object) -> tuple[int, int]:
+        """Aim ``kind``'s click at x%/y%, clamped to 0-100, and say where it went.
+
+        Clamped rather than refused: this is fed by a text box and by a file on
+        disk, and neither has anywhere to put a complaint - a 120 the user
+        typed means the right-hand edge.
+        """
+        point = (clamp_percent(x), clamp_percent(y))
+        self.click_points[kind] = point
+        return point
+
     def drop(self, kind: TemplateKind) -> None:
-        """Forget every image of ``kind``. Dropping what isn't there is legal."""
+        """Forget every image of ``kind``, and where its click was aimed.
+
+        The point too, because it is a fact about pictures that are now gone: a
+        chat box recaptured after a redesign is a different rectangle, and
+        inheriting the old "click 20% down" would aim the first click of the
+        new profile at nothing anybody chose.
+        """
         self.templates.pop(kind, None)
+        self.click_points.pop(kind, None)
 
     def clear(self) -> None:
         self.templates.clear()
+        self.click_points.clear()
 
     @property
     def captured(self) -> tuple[TemplateKind, ...]:

@@ -156,3 +156,45 @@ def test_a_refused_capture_leaves_an_existing_stack_alone() -> None:
     with pytest.raises(ValueError):
         profile.put(TemplateKind.BUSY, RegionImage(4, 4, bytes(4 * 4 * 4)))
     assert len(profile.variants(TemplateKind.BUSY)) == 1
+
+
+def test_an_unaimed_appearance_is_clicked_in_its_middle() -> None:
+    """The behaviour every click had before the point was adjustable - so an
+    absent entry and 50/50 have to be the same answer."""
+    profile = ServiceProfile("chatgpt")
+    for kind in TemplateKind:
+        assert profile.click_point(kind) == (50, 50)
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ((0, 100), (0, 100)),
+        ((-5, 105), (0, 100)),  # clamped to the picture, never refused
+        (("10", "90"), (10, 90)),  # what a text box hands over
+        (("", None), (50, 50)),  # ...and what a half-typed one does
+    ],
+)
+def test_a_click_point_is_clamped_rather_than_refused(
+    given: tuple[object, object], expected: tuple[int, int]
+) -> None:
+    profile = ServiceProfile("chatgpt")
+    assert profile.set_click_point(TemplateKind.COPY, *given) == expected
+    assert profile.click_point(TemplateKind.COPY) == expected
+
+
+def test_dropping_a_kind_forgets_where_it_was_clicked() -> None:
+    """The point described where inside those pictures to click, so it goes
+    with them - and the kinds beside it keep theirs."""
+    profile = ServiceProfile("chatgpt")
+    profile.put(TemplateKind.COPY, patch())
+    profile.set_click_point(TemplateKind.COPY, 20, 30)
+    profile.set_click_point(TemplateKind.BUSY, 40, 60)
+
+    profile.drop(TemplateKind.COPY)
+
+    assert profile.click_point(TemplateKind.COPY) == (50, 50)
+    assert profile.click_point(TemplateKind.BUSY) == (40, 60)
+
+    profile.clear()
+    assert profile.click_point(TemplateKind.BUSY) == (50, 50)

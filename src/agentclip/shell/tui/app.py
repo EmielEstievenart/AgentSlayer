@@ -497,7 +497,7 @@ class AgentClipApp(App[None]):
     }
 
     #service-editor-box {
-        width: 112;
+        width: 116;
         /* The tallest column plus the footer is ~33 rows, so the shared 85%
            cap clipped the bottom off a 45-row terminal. 95% also keeps the
            whole box on screen down to ~35 rows, which is what lets the
@@ -577,16 +577,16 @@ class AgentClipApp(App[None]):
     }
     /* APPEARANCE. Sized so that every text in it renders whole: 12 preview
        cells, a gutter, 21 for the longest kind name and the widest status a
-       capture produces, and 9 for the stacked action buttons. Fixed, because
-       those texts are fixed - the form column is what gives. And neither a
-       scrollbar nor a height cap, on purpose: sixel escapes bypass the
-       compositor (tui.graphics), so a preview half scrolled out of a
-       container keeps painting over whatever Textual thinks is there - the
-       smeared bands across the terminal that the old scrolling column left.
-       The rows are capped (SIXEL_PREVIEW_MAX_ROWS) so the whole column
-       always fits the modal instead. */
+       capture produces, 5 for the stacked click-point boxes, and 9 for the
+       stacked action buttons. Fixed, because those texts are fixed - the form
+       column is what gives. And neither a scrollbar nor a height cap, on
+       purpose: sixel escapes bypass the compositor (tui.graphics), so a
+       preview half scrolled out of a container keeps painting over whatever
+       Textual thinks is there - the smeared bands across the terminal that the
+       old scrolling column left. The rows are capped (SIXEL_PREVIEW_MAX_ROWS)
+       so the whole column always fits the modal instead. */
     #svc-appearance-col {
-        width: 44;
+        width: 50;
         margin-left: 2;
     }
     /* The half-block budget; overridden inline to preview_rows on a sixel
@@ -618,6 +618,23 @@ class AgentClipApp(App[None]):
     }
     .svc-kind-text .side-status {
         color: $text-muted;
+    }
+    /* The two click-point boxes, x over y, one per appearance row - the same
+       two rows the name/status pair beside them takes, so the row never grows
+       (seven rows that each grew one cell push the footer off a 45-row
+       terminal). Five cells is "100" plus the caret; the column heading says
+       which is which, because a box this small has no room for a label. */
+    .svc-kind-click {
+        width: 5;
+        height: auto;
+        margin-left: 1;
+    }
+    .svc-kind-click Input {
+        background: $boost;
+        min-width: 0;
+        width: 100%;
+        height: 1;
+        padding: 0;
     }
     .svc-kind-actions {
         width: 9;

@@ -47,14 +47,17 @@ from agentclip.driver.screen.template import RegionMatch
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
 
-from .conftest import send_composer
+from .conftest import aimed_at, send_composer
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 COPY_ICON = ScreenRegion(1830, 612, 24, 24)
 # Where the flow "finds" the icon: chat-region-local, so the click lands at
 # CHAT_REGION's origin plus this.
 MATCH = RegionMatch(x=120, y=300, diff=0.03)
-CLICK_TARGET = ScreenRegion(CHAT_REGION.left + MATCH.x, CHAT_REGION.top + MATCH.y, 24, 24)
+MATCH_RECT = ScreenRegion(CHAT_REGION.left + MATCH.x, CHAT_REGION.top + MATCH.y, 24, 24)
+# ...reduced to the ONE pixel of it the service aims at: the middle of the
+# picture, until somebody moves that kind's click point (tui.md 3.4d).
+CLICK_TARGET = aimed_at(MATCH_RECT)
 
 SIZE = (110, 100)
 
@@ -413,8 +416,8 @@ async def test_the_lowest_match_across_every_captured_image_wins(
         await _wait_for(
             pilot, lambda: "clicked (diff 0.07)" in _copy_label(app), "copy button clicked"
         )
-        assert clicks[-1] == ScreenRegion(
-            CHAT_REGION.left + lower.x, CHAT_REGION.top + lower.y, 30, 18
+        assert clicks[-1] == aimed_at(
+            ScreenRegion(CHAT_REGION.left + lower.x, CHAT_REGION.top + lower.y, 30, 18)
         )
         # ...and the readout says how many pictures of it are being searched for.
         assert "24×24 +1 · " in _copy_label(app)

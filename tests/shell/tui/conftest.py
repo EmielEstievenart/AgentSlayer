@@ -47,6 +47,7 @@ from textual.pilot import Pilot
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.profile_store import save_template
+from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens import main as main_mod
@@ -83,6 +84,20 @@ def template_image(width: int = 64, height: int = 64) -> RegionImage:
     """
     size = width * height * 4
     return RegionImage(width, height, (bytes(range(256)) * (size // 256 + 1))[:size])
+
+
+def focus_clicks(*targets: ScreenRegion) -> list[ScreenRegion]:
+    """The click trace ONE delivery per target leaves behind.
+
+    The click that focuses the chat box before a paste is a DOUBLE click
+    (``driver.automation.delivery.FOCUS_CLICK_GAP_S``): the first wakes the
+    browser window, the second lands in the box that window can now route to.
+    So every suite here that asserts *where* a delivery aimed sees each target
+    twice, and says so through this helper rather than by doubling every
+    literal - the interesting part of those assertions is the target, not the
+    arithmetic.
+    """
+    return [target for target in targets for _ in range(2)]
 
 
 @pytest.fixture
@@ -161,6 +176,11 @@ def _no_real_activation_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     the sleep between two asks goes.
     """
     monkeypatch.setattr(main_mod, "_ACTIVATION_POLL_S", 0.0)
+    # Same argument for the gap between the two halves of the focus click: it is
+    # a real beat every delivery in this directory pays, and no suite here is
+    # about how long it is - only that the second click happens (which is what
+    # ``focus_clicks`` below counts).
+    monkeypatch.setattr(main_mod, "_FOCUS_CLICK_GAP_S", 0.0)
 
 
 @pytest.fixture(autouse=True)

@@ -143,6 +143,14 @@ class ChatView(Protocol):
     ) -> None: ...
     def alert(self, message: str, severity: Severity = "information") -> None: ...
 
+    # The AUDIBLE half of "your move", for the one re-sync the automation loop
+    # never sees: a protocol error leaves the loop believing the turn moved on
+    # while the user has to go back to the browser and re-copy. Everything else
+    # that needs a human is a LoopState, and the automation controller sounds
+    # those itself. Silent unless the live service asked for the alert - the
+    # view knows which service that is, this controller does not.
+    def alert_attention(self) -> None: ...
+
     # -- clipboard / transport ------------------------------------------------
     # ``copy_outbound`` is the whole DELIVERY of a payload, not a clipboard
     # write: the view parks the text, clicks the chat box, pastes it and - for a

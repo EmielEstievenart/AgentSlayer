@@ -199,7 +199,7 @@ async def test_two_presses_deliver_through_the_ordinary_send_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The escalation is ``copy_outbound`` itself, so it produces exactly what a
-    normal send produces: the focus click, the settle, the Ctrl+V."""
+    normal send produces: the focus double click, the settle, the Ctrl+V."""
     events = _os_events(monkeypatch)
     app, fake = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
@@ -209,7 +209,7 @@ async def test_two_presses_deliver_through_the_ordinary_send_path(
         main.action_recopy()
         await _wait_for(pilot, lambda: fake.read_text() == PAYLOAD, "the first press to copy")
         main.action_recopy()
-        await _wait_for(pilot, lambda: events == ["click", "paste"], "the re-delivery")
+        await _wait_for(pilot, lambda: events == ["click", "click", "paste"], "the re-delivery")
 
         # ...and the payload is still the whole payload on the clipboard, which
         # is what the synthetic Ctrl+V pastes.
@@ -234,7 +234,7 @@ async def test_the_re_delivery_obeys_the_service_auto_submit(
         await _wait_for(pilot, lambda: fake.read_text() == PAYLOAD, "the first press to copy")
         main.action_recopy()
         await _wait_for(
-            pilot, lambda: events == ["click", "paste", "enter"], "the re-delivery + auto-submit"
+            pilot, lambda: events == ["click", "click", "paste", "enter"], "the re-delivery + auto-submit"
         )
 
 
@@ -289,7 +289,7 @@ async def test_a_new_outbound_disarms_a_half_finished_gesture(
         await main._controller._copy_outbound(
             Outbound(kind="results", chunks=("a newer payload",), total_chars=15, turn=2)
         )
-        await _wait_for(pilot, lambda: events == ["click", "paste"], "the new payload's delivery")
+        await _wait_for(pilot, lambda: events == ["click", "click", "paste"], "the new payload's delivery")
         events.clear()
 
         main.action_recopy()

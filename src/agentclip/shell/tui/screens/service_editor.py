@@ -199,6 +199,25 @@ STREAM_DELIVERY_LABEL = "paste the payload in chunks"
 # The other delivery tick: tap Enter right after the auto-paste instead of
 # waiting for the user's. Same 28-cell label budget as the tick above.
 AUTO_SUBMIT_LABEL = "press Enter after auto-paste"
+# The two ticks that live in the FORM column rather than beside the delivery
+# ones, for a reason that is about the box and not about the settings: the
+# left column is the tallest of the three and already sets the modal's height
+# on a 45-row terminal (app.py, #service-editor-box), so two more rows there
+# push the footer's buttons out of the box. The form column has the slack, and
+# the seconds field one of them needs was going to live here anyway.
+#
+# Both are worded for THIS column's width, which is narrower than the left
+# one's: about 22 cells after the checkbox glyph.
+#
+# The debugging tick: does the foreground come back here once the payload has
+# been auto-sent? Untick it and the browser keeps focus, which is the only way
+# to SEE whether the chat box was really selected.
+SNAP_BACK_LABEL = "focus back after send"
+# The audible half of "your move": a two-tone uh-oh when the loop stops being
+# able to move without the user. Named for the sound, so the seconds box under
+# it reads as belonging to the same thing.
+ALERT_SOUND_LABEL = "beep when it stalls"
+AFTER_DELIVERY_TITLE = "AFTER DELIVERY"
 # A ticked busy/idle entry whose appearance was never captured runs nothing at
 # all (config.py's checklist and the profile are ANDed). Silent dead weight is
 # exactly the failure that shows up as an auto-copy that never fires, so it is
@@ -576,6 +595,13 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                     yield Input(id="svc-total", placeholder="e.g. 500000", compact=True)
                     yield Static(Text("Stale (seconds unchanged)"), classes="side-title")
                     yield Input(id="svc-stable", placeholder="e.g. 2.0", compact=True)
+                    yield Static(Text(AFTER_DELIVERY_TITLE), classes="side-title")
+                    yield Checkbox(SNAP_BACK_LABEL, id="svc-snap-back", compact=True)
+                    yield Checkbox(ALERT_SOUND_LABEL, id="svc-alert-sound", compact=True)
+                    # The label carries what zero means, because "0 seconds"
+                    # otherwise reads as "continuously".
+                    yield Static(Text("Alert repeat (seconds, 0 = once)"), classes="side-title")
+                    yield Input(id="svc-alert-repeat", placeholder="e.g. 30", compact=True)
                     # A little box rather than a line: a sentence of guidance
                     # does not fit in one row of this (flexible, often narrow)
                     # column, and a one-line Input scrolls its own text out of
@@ -736,6 +762,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         max_input = self.query_one("#svc-max", Input)
         total_input = self.query_one("#svc-total", Input)
         stable_input = self.query_one("#svc-stable", Input)
+        repeat_input = self.query_one("#svc-alert-repeat", Input)
         extra_input = self.query_one("#svc-extra-instructions", TextArea)
         preset: ServicePreset | None = None
         if key is None:
@@ -748,6 +775,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             # universal default, and "add a service" should stay a four-field
             # job for users who never touch the stale detector.
             stable_input.value = str(DEFAULT_STABLE_SECONDS)
+            repeat_input.value = str(_NEW_PRESET_DEFAULTS.alert_repeat_seconds)
             # ``.text`` is the TextArea's whole-document accessor, the way
             # ``.value`` is the Input's; assigning it also rewinds the cursor,
             # which is what keeps a switch of service from leaving the caret
@@ -761,6 +789,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             max_input.value = str(preset.max_paste_chars)
             total_input.value = str(preset.total_context_chars)
             stable_input.value = str(preset.stable_seconds)
+            repeat_input.value = str(preset.alert_repeat_seconds)
             extra_input.text = preset.extra_instructions
         self._pending_new = None
         # For "+ Add new", the boxes show what pressing "Add service" is
@@ -778,6 +807,8 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         self.query_one("#svc-require-fenced", Checkbox).value = shown.require_fenced_reply
         self.query_one("#svc-stream-delivery", Checkbox).value = shown.delivery == DELIVERY_STREAM
         self.query_one("#svc-auto-submit", Checkbox).value = shown.auto_submit
+        self.query_one("#svc-snap-back", Checkbox).value = shown.snap_back
+        self.query_one("#svc-alert-sound", Checkbox).value = shown.alert_sound
         # The SCROLL radio follows the selection the same way the MATCHING one
         # below does - press the right one, the set unpresses the rest.
         self.query_one(f"#{scroll_radio_id(shown.scroll_action)}", RadioButton).value = True
@@ -891,6 +922,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         max_text = self.query_one("#svc-max", Input).value.strip()
         total_text = self.query_one("#svc-total", Input).value.strip()
         stable_text = self.query_one("#svc-stable", Input).value.strip()
+        repeat_text = self.query_one("#svc-alert-repeat", Input).value.strip()
         # Stripped as before - the box may now hold newlines, and a trailing
         # one from a stray Enter is not guidance the model needs shipped.
         extra_text = self.query_one("#svc-extra-instructions", TextArea).text.strip()
@@ -943,6 +975,23 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                 if not (0.5 <= stable_val <= 60.0):
                     error = "stale seconds must be between 0.5 and 60"
 
+        repeat_val: int | None = None
+        if error is None:
+            # Blank means zero rather than an error: an empty box reads as "no
+            # repeat", and refusing to save the whole service over a field the
+            # user cleared would be absurd.
+            if not repeat_text:
+                repeat_val = 0
+            else:
+                try:
+                    repeat_val = int(repeat_text)
+                except ValueError:
+                    error = "alert repeat must be a whole number of seconds"
+                else:
+                    # Same bounds config.py enforces on load.
+                    if not (0 <= repeat_val <= 3_600):
+                        error = "alert repeat must be between 0 and 3600 seconds"
+
         self.query_one("#svc-error", Static).update(error or "")
         self._current_error = error
 
@@ -954,7 +1003,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
 
         assert (
             key is not None and max_val is not None and total_val is not None
-            and stable_val is not None
+            and stable_val is not None and repeat_val is not None
         )
         if is_new:
             self._pending_new = ServicePreset(
@@ -964,6 +1013,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                 total_context_chars=total_val,
                 stable_seconds=stable_val,
                 extra_instructions=extra_text,
+                alert_repeat_seconds=repeat_val,
             )
             self.query_one("#svc-add-btn", Button).disabled = False
         else:
@@ -975,6 +1025,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                 total_context_chars=total_val,
                 stable_seconds=stable_val,
                 extra_instructions=extra_text,
+                alert_repeat_seconds=repeat_val,
             )
 
     # -- the detection checklist -------------------------------------------------
@@ -1011,6 +1062,8 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             capture_prose=self.query_one("#svc-capture-prose", Checkbox).value,
             require_fenced_reply=self.query_one("#svc-require-fenced", Checkbox).value,
             auto_submit=self.query_one("#svc-auto-submit", Checkbox).value,
+            snap_back=self.query_one("#svc-snap-back", Checkbox).value,
+            alert_sound=self.query_one("#svc-alert-sound", Checkbox).value,
         )
         self._paint_signal_warning(self._profile(key))
 

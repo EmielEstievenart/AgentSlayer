@@ -1698,6 +1698,10 @@ class SessionController:
                 f"protocol error: {result.detail} - press c to re-copy the last outbound"
             )
             self._view.alert("protocol error - see transcript", severity="error")
+            # The one re-sync the automation loop never hears about: nothing ran,
+            # no LoopState moved, and the turn only goes on once the user has
+            # gone back to the browser themselves.
+            self._view.alert_attention()
             return
         if isinstance(result, AutoReply):
             # The engine answered the model itself (a broken paste nothing could

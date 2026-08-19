@@ -154,8 +154,11 @@ async def test_the_paste_waits_for_the_focus_click_to_settle(
         await main.copy_outbound("the payload")
         await pilot.pause()
 
-        assert [name for name, _ in events] == ["click", "paste"]
-        gap = events[1][1] - events[0][1]
+        # Two clicks, because the focus click is a double one (the first wakes
+        # the window, the second lands in the box) - and the beat this test is
+        # about is the one after the LAST of them.
+        assert [name for name, _ in events] == ["click", "click", "paste"]
+        gap = events[2][1] - events[1][1]
         assert gap >= _TEST_SETTLE_S * 0.8, f"paste came {gap:.3f}s after the click"
 
 
@@ -197,10 +200,9 @@ async def test_the_settle_covers_a_streamed_delivery_too(
         await main.copy_outbound("a payload long enough to be several chunks")
         await pilot.pause()
 
-        assert events[0][0] == "click"
-        assert events[1][0] == "paste"
-        assert len(events) > 2  # it really did stream
-        assert events[1][1] - events[0][1] >= _TEST_SETTLE_S * 0.8
+        assert [name for name, _ in events[:3]] == ["click", "click", "paste"]
+        assert len(events) > 3  # it really did stream
+        assert events[2][1] - events[1][1] >= _TEST_SETTLE_S * 0.8
 
 
 def test_the_shipped_settle_is_long_enough_to_be_worth_having() -> None:

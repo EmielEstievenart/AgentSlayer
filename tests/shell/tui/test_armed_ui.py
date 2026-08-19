@@ -46,7 +46,7 @@ from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
 from agentclip.shell.tui.widgets.sidebar import PASTE_FLASH_TEXT
 
-from .conftest import send_composer
+from .conftest import focus_clicks, send_composer
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 ICON = (24, 24)
@@ -379,7 +379,7 @@ async def test_the_same_outbound_armed_does_click_and_paste(
 
         await main.copy_outbound("PAYLOAD-FOR-THE-USER")
 
-        assert calls.clicks == [CHAT_REGION]  # the chat box, else the drawn region
+        assert calls.clicks == focus_clicks(CHAT_REGION)  # the chat box, else the drawn region
         assert calls.pastes == [1]
         assert main._loop_state is LoopState.WAIT_SEND
 

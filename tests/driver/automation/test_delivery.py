@@ -30,6 +30,7 @@ from typing import Any
 import pytest
 
 from agentclip.config import DELIVERY_STREAM, ServicePreset
+from agentclip.driver.automation.alerts import AttentionAlarm
 from agentclip.driver.automation.controller import AutomationController
 from agentclip.driver.automation.delivery import (
     AUTO_SEND_FLASH_TEXT,
@@ -57,6 +58,14 @@ CHUNK = 12
 # brought forward.
 OUR_WINDOW = 4242
 BROWSER_WINDOW = 1717
+# The pre-paste focus click is a DOUBLE click (``delivery.FOCUS_CLICK_GAP_S``):
+# one click to wake the browser window, one to land in the box it is now able to
+# route to. So every trace a delivery leaves opens with two of them, and the
+# assertions below say so once rather than sixteen times.
+FOCUS = ["click", "click"]
+# ...except when the OS refuses the first: the second is never asked for, and
+# nothing is pasted into a window that may not be the browser's.
+FOCUS_REFUSED = ["click"]
 
 
 def _image(width: int, height: int) -> RegionImage:
@@ -131,6 +140,9 @@ class ScriptedOps(ScreenOps):
     def activation_poll(self) -> float:
         return 0.0
 
+    def focus_click_gap(self) -> float:
+        return 0.0
+
     def paste_settle(self) -> float:
         return 0.0
 
@@ -191,6 +203,30 @@ class FakeHost:
         self.parked_off_clipboard.append(text)
 
 
+class RecordingAlarm(AttentionAlarm):
+    """Every arm, chime and disarm in order, and not one sound.
+
+    A subclass rather than a stub for the same reason ``ScriptedOps`` is one:
+    the controller takes an ``AttentionAlarm``, so a test that hands in one of
+    these is testing the arrangement the app runs - minus the thread and the
+    tone generator, which are what ``tests/driver/automation/test_alerts.py``
+    is for.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(lambda: None)
+        self.calls: list[str] = []
+
+    def arm(self, *, repeat_seconds: float = 0.0) -> None:
+        self.calls.append(f"arm:{repeat_seconds}")
+
+    def chime(self) -> None:
+        self.calls.append("chime")
+
+    def disarm(self) -> None:
+        self.calls.append("disarm")
+
+
 def _preset(**overrides: Any) -> ServicePreset:
     base = ServicePreset(
         key="fake", label="Fake", max_paste_chars=10_000, total_context_chars=100_000
@@ -216,14 +252,26 @@ def clipboard(ops: ScriptedOps) -> FakeClipboard:
 
 
 @pytest.fixture
+def alarm() -> RecordingAlarm:
+    return RecordingAlarm()
+
+
+@pytest.fixture
 def delivery(
-    view: FakeAutomationView, host: FakeHost, ops: ScriptedOps, clipboard: FakeClipboard
+    view: FakeAutomationView,
+    host: FakeHost,
+    ops: ScriptedOps,
+    clipboard: FakeClipboard,
+    alarm: RecordingAlarm,
 ) -> AutomationController:
     """A controller with a drawn chat window and a real (fake) clipboard - the
     state an outbound payload is delivered out of. No chat box appearance is
     captured, so the focus click lands on the drawn window itself, which is the
-    delivery's documented fallback."""
-    automation = AutomationController(view=view, host=host, ops=ops, clipboard=clipboard)
+    delivery's documented fallback. The alarm is a recording one throughout, so
+    nothing in this file can make the machine beep."""
+    automation = AutomationController(
+        view=view, host=host, ops=ops, clipboard=clipboard, alarm=alarm
+    )
     automation.set_calibration(AgentSlot.MASTER, CHAT_REGION)
     return automation
 
@@ -253,7 +301,7 @@ async def test_a_payload_is_parked_then_clicked_then_pasted(
     await delivery.copy_outbound(PAYLOAD)
 
     assert clipboard.written == [PAYLOAD]
-    assert ops.events == ["click", "paste"]
+    assert ops.events == [*FOCUS, "paste"]
     assert ops.pasted == [PAYLOAD]
     assert delivery.loop_state is LoopState.WAIT_SEND
     assert _flash(view) == (ENTER_FLASH_TEXT, False)
@@ -289,7 +337,7 @@ async def test_a_click_that_never_landed_pastes_nothing(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == ["click"]
+    assert ops.events == FOCUS_REFUSED
     assert delivery.loop_state is LoopState.MANUAL_INSERT
     assert _flash(view) == (PASTE_FLASH_TEXT, True)
 
@@ -355,7 +403,7 @@ async def test_the_paste_waits_until_the_foreground_is_no_longer_ours(
     await delivery.copy_outbound(PAYLOAD)
 
     assert ops.foreground_reads == 3  # asked until the answer changed, then stopped
-    assert ops.events == ["click", "paste"]
+    assert ops.events == [*FOCUS, "paste"]
     assert delivery.loop_state is LoopState.WAIT_SEND
 
 
@@ -372,7 +420,7 @@ async def test_a_foreground_that_never_moves_pastes_anyway_once_the_budget_runs_
     await delivery.copy_outbound(PAYLOAD)
 
     assert ops.foreground_reads == 3  # the whole budget, and not one ask more
-    assert ops.events == ["click", "paste"]
+    assert ops.events == [*FOCUS, "paste"]
     assert delivery.loop_state is LoopState.WAIT_SEND
 
 
@@ -385,7 +433,7 @@ async def test_with_no_window_of_our_own_the_wait_is_skipped_rather_than_spent(
     await delivery.copy_outbound(PAYLOAD)
 
     assert ops.foreground_reads == 0
-    assert ops.events == ["click", "paste"]
+    assert ops.events == [*FOCUS, "paste"]
 
 
 async def test_a_click_that_never_landed_never_waits_for_an_activation(
@@ -398,7 +446,7 @@ async def test_a_click_that_never_landed_never_waits_for_an_activation(
     await delivery.copy_outbound(PAYLOAD)
 
     assert ops.foreground_reads == 0
-    assert ops.events == ["click"]
+    assert ops.events == FOCUS_REFUSED
 
 
 # -- the opt-in Enter tap --------------------------------------------------------
@@ -411,7 +459,7 @@ async def test_auto_submit_taps_enter_after_a_paste_that_landed(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == ["click", "paste", "enter"]
+    assert ops.events == [*FOCUS, "paste", "enter"]
     # Still WAIT_SEND: the tap is an attempt, and only the send gate's own
     # evidence says the send actually landed.
     assert delivery.loop_state is LoopState.WAIT_SEND
@@ -437,7 +485,7 @@ async def test_no_tap_when_the_paste_never_landed(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == ["click", "paste"]
+    assert ops.events == [*FOCUS, "paste"]
 
 
 async def test_a_refused_tap_falls_back_to_asking_for_enter(
@@ -472,8 +520,23 @@ async def test_an_auto_sent_delivery_hands_the_foreground_back(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == ["click", "paste", "enter", "focus"]
+    assert ops.events == [*FOCUS, "paste", "enter", "focus"]
     assert ops.focused == [OUR_WINDOW]
+
+
+async def test_a_service_can_refuse_to_take_the_foreground_back(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+) -> None:
+    """``ServicePreset.snap_back`` off is the debugging aid: everything else
+    about the delivery is unchanged, and the browser simply keeps the focus so
+    the user can see for themselves where the click landed."""
+    host.preset = _preset(auto_submit=True, snap_back=False)
+    delivery.set_own_window(OUR_WINDOW)
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events == [*FOCUS, "paste", "enter"]
+    assert ops.focused == []
 
 
 async def test_a_streamed_delivery_that_auto_sent_hands_it_back_too(
@@ -518,6 +581,121 @@ async def test_a_paste_that_never_landed_leaves_the_browser_focused(
     assert _flash(view) == (PASTE_FLASH_TEXT, True)
     assert "focus" not in ops.events
     assert ops.focused == []
+
+
+# -- the audible "your move" -----------------------------------------------------
+
+
+async def test_the_click_that_focuses_the_chat_box_is_a_double_click(
+    delivery: AutomationController, ops: ScriptedOps
+) -> None:
+    """One click is spent waking the browser window; a page still activating
+    never routes it to the input field, and the Ctrl+V lands nowhere the user
+    can see. Safe here and only here - the box is empty, so there is no word
+    for a double click to select."""
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events[:2] == FOCUS
+
+
+async def test_a_refused_first_click_is_never_followed_by_a_second(
+    delivery: AutomationController, ops: ScriptedOps
+) -> None:
+    """A click the OS would not take is the one signal that the target is not
+    clickable at all, so the sequence stops rather than hammering it."""
+    ops.click_lands = False
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events == FOCUS_REFUSED
+
+
+async def test_a_stalled_loop_sounds_the_alarm_when_the_service_asked_for_one(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, alarm: RecordingAlarm
+) -> None:
+    """MANUAL_INSERT is the loop saying "the Ctrl+V is yours" to a user who may
+    not be looking. The hook is on the state, not on this delivery - which is
+    what keeps the other eight roads into an attention state from each needing
+    their own beep."""
+    host.preset = _preset(alert_sound=True)
+    ops.paste_lands = False
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert delivery.loop_state is LoopState.MANUAL_INSERT
+    assert alarm.calls[-1] == "arm:0"
+
+
+async def test_the_repeat_interval_rides_the_preset(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, alarm: RecordingAlarm
+) -> None:
+    host.preset = _preset(alert_sound=True, alert_repeat_seconds=30)
+    ops.paste_lands = False
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert alarm.calls[-1] == "arm:30"
+
+
+async def test_a_service_without_the_alert_never_makes_a_sound(
+    delivery: AutomationController, ops: ScriptedOps, alarm: RecordingAlarm
+) -> None:
+    """Off is the default and off means silent - including in the very state
+    the alarm exists for."""
+    ops.paste_lands = False
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert delivery.loop_state is LoopState.MANUAL_INSERT
+    assert not any(call.startswith("arm") for call in alarm.calls)
+
+
+async def test_leaving_the_attention_state_silences_the_alarm(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, alarm: RecordingAlarm
+) -> None:
+    """The user pasted it themselves and the send gate saw it: nothing is
+    waiting on them any more, so neither is the noise."""
+    host.preset = _preset(alert_sound=True, alert_repeat_seconds=5)
+    ops.paste_lands = False
+    await delivery.copy_outbound(PAYLOAD)
+
+    delivery.set_loop_state(LoopState.WAIT_SEND, "the user pasted it themselves")
+
+    assert alarm.calls[-1] == "disarm"
+
+
+async def test_a_re_sync_with_no_loop_state_behind_it_chimes_once(
+    delivery: AutomationController, host: FakeHost, alarm: RecordingAlarm
+) -> None:
+    """The protocol-error path: nothing ran, no state moved, and the turn only
+    goes on once the user has gone back to the browser to re-copy."""
+    host.preset = _preset(alert_sound=True)
+
+    delivery.sound_attention_once()
+
+    assert alarm.calls == ["chime"]
+
+
+async def test_a_re_sync_is_silent_for_a_service_without_the_alert(
+    delivery: AutomationController, alarm: RecordingAlarm
+) -> None:
+    delivery.sound_attention_once()
+
+    assert alarm.calls == []
+
+
+async def test_shutdown_silences_a_repeating_alarm(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, alarm: RecordingAlarm
+) -> None:
+    """An alarm still repeating into a closed app is a beep with nobody left to
+    answer it."""
+    host.preset = _preset(alert_sound=True, alert_repeat_seconds=5)
+    ops.paste_lands = False
+    await delivery.copy_outbound(PAYLOAD)
+
+    delivery.stop_alert()
+
+    assert alarm.calls[-1] == "disarm"
 
 
 # -- burst or stream -------------------------------------------------------------
@@ -571,7 +749,7 @@ async def test_a_short_payload_in_stream_mode_is_a_single_burst(
 
     await delivery.copy_outbound("short")
 
-    assert ops.events == ["click", "paste"]
+    assert ops.events == [*FOCUS, "paste"]
     assert clipboard.written == ["short", "short"]
 
 
@@ -582,7 +760,7 @@ async def test_a_paste_service_sends_one_burst_however_long_the_payload(
     for streaming, behaves exactly as it did before streaming existed."""
     await delivery.copy_outbound(PAYLOAD * 4)
 
-    assert ops.events == ["click", "paste"]
+    assert ops.events == [*FOCUS, "paste"]
     assert clipboard.written == [PAYLOAD * 4]
 
 
@@ -600,7 +778,7 @@ async def test_a_failed_chunk_stops_the_stream_and_restores_the_whole_payload(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == ["click", "paste"]  # stopped, rather than ploughing on
+    assert ops.events == [*FOCUS, "paste"]  # stopped, rather than ploughing on
     assert clipboard.written[-1] == PAYLOAD
     assert clipboard.read_text() == PAYLOAD
     assert delivery.loop_state is LoopState.MANUAL_INSERT
@@ -637,7 +815,7 @@ async def test_a_stream_service_falls_back_to_one_burst_with_no_clipboard(
 
     await automation.copy_outbound(PAYLOAD)
 
-    assert ops.events == ["click", "paste"]
+    assert ops.events == [*FOCUS, "paste"]
     assert host.parked_off_clipboard == [PAYLOAD]
 
 
@@ -650,7 +828,7 @@ async def test_clipboard_ok_is_the_callers_answer_not_a_re_reading(
 
     await delivery.deliver(PAYLOAD, clipboard_ok=False)
 
-    assert ops.events == ["click", "paste"]  # one burst, though a stream was asked for
+    assert ops.events == [*FOCUS, "paste"]  # one burst, though a stream was asked for
 
 
 # -- retrying, and re-delivering -------------------------------------------------
@@ -669,7 +847,7 @@ async def test_the_retry_re_runs_the_whole_insert_against_the_pending_payload(
 
     await delivery.retry_insert()
 
-    assert ops.events == ["click", "paste", "click", "paste"]
+    assert ops.events == [*FOCUS, "paste", *FOCUS, "paste"]
     assert ops.pasted == [PAYLOAD, PAYLOAD]
     assert delivery.loop_state is LoopState.WAIT_SEND
 
@@ -686,7 +864,7 @@ async def test_the_retry_re_runs_the_auto_submit_too(
 
     await delivery.retry_insert()
 
-    assert ops.events[-3:] == ["click", "paste", "enter"]
+    assert ops.events[-4:] == [*FOCUS, "paste", "enter"]
 
 
 async def test_the_retry_does_nothing_before_anything_has_been_copied(

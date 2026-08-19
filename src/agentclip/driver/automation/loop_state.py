@@ -33,6 +33,15 @@ class LoopState(Enum):
     INTERPRETING = auto()  # the reply is on the clipboard; parsing and acting on it
 
 
+# The two states the loop cannot leave by itself: both mean "the next move is a
+# human's" - the payload nobody pasted, the reply nobody copied. Named here
+# rather than at the one place that reads them because it is a fact about the
+# enum, and anything that has to nag the user (today: the audible alert) is
+# asking exactly this question.
+ATTENTION_STATES: frozenset[LoopState] = frozenset(
+    {LoopState.MANUAL_INSERT, LoopState.MANUAL_COPY}
+)
+
 LOOP_TRANSITIONS: dict[LoopState, frozenset[LoopState]] = {
     # A chat message became an outbound payload (``copy_outbound``).
     LoopState.IDLE: frozenset({LoopState.AUTO_INSERT}),

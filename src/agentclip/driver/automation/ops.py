@@ -31,6 +31,7 @@ from enum import Enum
 from agentclip.driver.automation.delivery import (
     ACTIVATION_ATTEMPTS,
     ACTIVATION_POLL_S,
+    FOCUS_CLICK_GAP_S,
     PASTE_SETTLE_DELAY,
     SNAP_BACK_SETTLE_S,
     STREAM_CHUNK_SETTLE_S,
@@ -194,6 +195,10 @@ class ScreenOps:
     def activation_poll(self) -> float:
         """The beat between two of those askings."""
         return ACTIVATION_POLL_S
+
+    def focus_click_gap(self) -> float:
+        """The beat between the two clicks of the pre-paste focus double click."""
+        return FOCUS_CLICK_GAP_S
 
     def paste_settle(self) -> float:
         """How long the focused chat box is given to take a caret before the

@@ -47,7 +47,7 @@ from agentclip.driver.screen.template import RegionMatch, Template
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
 
-from .conftest import send_composer
+from .conftest import focus_clicks, send_composer
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 INITIAL_BOX = ScreenRegion(1300, 520, 400, 90)
@@ -299,7 +299,7 @@ async def test_the_ongoing_box_found_in_the_region_wins(
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
         assert fake.read_text() is not None  # the bootstrap really was copied
-        assert clicks == [ONGOING_BOX]
+        assert clicks == focus_clicks(ONGOING_BOX)
 
 
 async def test_the_initial_box_wins_when_only_it_is_on_screen(
@@ -321,7 +321,7 @@ async def test_the_initial_box_wins_when_only_it_is_on_screen(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == [INITIAL_BOX]
+        assert clicks == focus_clicks(INITIAL_BOX)
 
 
 async def test_neither_on_screen_falls_back_to_the_chat_window(
@@ -344,7 +344,7 @@ async def test_neither_on_screen_falls_back_to_the_chat_window(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == [CHAT_REGION]
+        assert clicks == focus_clicks(CHAT_REGION)
 
 
 async def test_a_second_image_of_one_layout_is_ored_in_not_counted_twice(
@@ -419,7 +419,7 @@ async def test_two_boxes_of_one_layout_fall_back_to_the_drawn_window(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == [CHAT_REGION]
+        assert clicks == focus_clicks(CHAT_REGION)
 
 
 async def test_the_chat_region_alone_is_enough_to_click(
@@ -440,7 +440,7 @@ async def test_the_chat_region_alone_is_enough_to_click(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == [CHAT_REGION]
+        assert clicks == focus_clicks(CHAT_REGION)
 
 
 async def test_a_failed_capture_of_the_region_still_clicks_the_window(
@@ -467,7 +467,7 @@ async def test_a_failed_capture_of_the_region_still_clicks_the_window(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == [CHAT_REGION]
+        assert clicks == focus_clicks(CHAT_REGION)
 
 
 async def test_nothing_drawn_means_no_click(
@@ -513,7 +513,7 @@ async def test_new_preserves_the_region_and_the_appearances(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == [ONGOING_BOX]
+        assert clicks == focus_clicks(ONGOING_BOX)
 
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
@@ -524,6 +524,6 @@ async def test_new_preserves_the_region_and_the_appearances(
 
         # The survivors mean the next bootstrap clicks the same box again.
         await _send(app, pilot, "Fresh session task.")
-        await _wait_for(pilot, lambda: len(clicks) == 2, "second bootstrap clicked")
+        await _wait_for(pilot, lambda: len(clicks) == 4, "second bootstrap clicked")
         await _wait_for(pilot, lambda: not main.busy, "second session flow settled")
-        assert clicks == [ONGOING_BOX, ONGOING_BOX]
+        assert clicks == focus_clicks(ONGOING_BOX, ONGOING_BOX)

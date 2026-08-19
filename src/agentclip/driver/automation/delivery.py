@@ -44,6 +44,17 @@ from __future__ import annotations
 # budget running out is not a failure, it just means we stop waiting and paste.
 ACTIVATION_ATTEMPTS = 10
 ACTIVATION_POLL_S = 0.1
+# Beat between the two clicks of the pre-paste focus click.
+#
+# The click that focuses the chat box is a DOUBLE click, because one was not
+# reliably enough: the first click is what brings the browser window forward,
+# and a page that is still activating can swallow it as the "wake up" click
+# without ever routing it to the input field - which leaves the window focused,
+# the caret nowhere, and the paste going into the void. The second click
+# arrives at a window that is already awake, so it lands where it was aimed.
+# Safe precisely here and nowhere else: the box is EMPTY at this point in the
+# sequence, so a double click has no word to select.
+FOCUS_CLICK_GAP_S = 0.12
 # Beat between the browser holding the foreground and the synthetic Ctrl+V.
 #
 # Still needed after the poll above, and this is the whole reason it did not
@@ -51,11 +62,11 @@ ACTIVATION_POLL_S = 0.1
 # browser the foreground; the PAGE has still to route the click through to the
 # chat box and put a caret in it, and that is renderer work no window handle
 # reports on. Raised from 200ms to 300ms because inserts were still going
-# missing at 200 - the poll now absorbs the activation half of the wait, so this
-# beat is spent only on the in-page half and can afford the margin. Both
-# together are under half a second, next to a click the user is not watching.
-# Tests shrink it.
-PASTE_SETTLE_DELAY = 0.3
+# missing at 200, and to 600ms when the double click above went in: the two
+# together are what the failing case needed, and a page that reflows its
+# composer after taking focus can spend most of a second doing it. Tests shrink
+# it.
+PASTE_SETTLE_DELAY = 0.6
 # Beat between an OS click inside the browser and snapping the foreground back
 # to our own window (``AutomationController.snap_back_after_click``) - long
 # enough that the browser has registered the click before the focus moves off

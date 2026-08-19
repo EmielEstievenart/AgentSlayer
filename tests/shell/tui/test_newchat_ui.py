@@ -58,7 +58,7 @@ from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.messages import ClipboardCaptured
 from agentclip.shell.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 
-from .conftest import send_composer
+from .conftest import focus_clicks, send_composer
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 NEWCHAT_BOX = ScreenRegion(120, 90, 180, 36)
@@ -619,7 +619,7 @@ async def test_new_opens_the_fresh_chat_at_command_time(
 
         # ...and the session that follows pastes straight into that fresh chat.
         await main.copy_outbound("the payload")
-        assert clicks == [CHAT_REGION]  # the chat box only, never a second one
+        assert clicks == focus_clicks(CHAT_REGION)  # the chat box only, never a second one
 
 
 async def test_the_launch_paste_opens_no_new_chat(
@@ -649,7 +649,7 @@ async def test_the_launch_paste_opens_no_new_chat(
         await _start_session(app, pilot, main)
         # The bootstrap was pasted into the chat that was already there.
         assert CLICK_TARGET not in clicks
-        assert clicks == [CHAT_REGION]
+        assert clicks == focus_clicks(CHAT_REGION)
 
 
 async def test_new_with_the_button_gone_still_starts_the_fresh_session(
@@ -770,7 +770,7 @@ async def test_the_button_on_an_idle_session_resets_the_tool_side_too(
         # and opens nothing.
         clicks.clear()
         await main.copy_outbound("the payload")
-        assert clicks == [CHAT_REGION]  # the chat box, and nothing else
+        assert clicks == focus_clicks(CHAT_REGION)  # the chat box, and nothing else
 
 
 async def test_the_button_mid_turn_aborts_the_turn_and_starts_over(

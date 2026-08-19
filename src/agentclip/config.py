@@ -273,6 +273,25 @@ class ServicePreset:
     # the smallest presets (protocol.md section 2, "Budget headroom"), and a
     # paragraph pasted in here is a session that never arms.
     extra_instructions: str = ""
+    # After an auto-SENT payload, does the foreground come back to AgentClip?
+    # On by default, which is what it has always done: the message is in the
+    # box and already sent, so the next thing worth looking at is this window's
+    # rail. Turning it OFF is a debugging aid and nothing else - the browser
+    # keeps focus, so the user can see for themselves whether the chat box was
+    # ever really selected and where the caret ended up. It gates only the snap
+    # after a delivery; the auto-copy harvest's own snap back is a different
+    # moment and stays.
+    snap_back: bool = True
+    # Play a two-tone "uh-oh" when the loop stops being able to move on its own
+    # and needs the user: the paste that never landed (MANUAL_INSERT) and the
+    # reply that has to be copied by hand (MANUAL_COPY). Off by default -
+    # AgentClip is watched, not listened to, and a tool that beeps at somebody
+    # who is already looking at it is noise.
+    alert_sound: bool = False
+    # 0 = one uh-oh per attention state. N > 0 = keep saying it every N seconds
+    # for as long as the loop is still waiting, for a user who has walked away
+    # from a browser that has been sitting on the same half-finished turn.
+    alert_repeat_seconds: int = 0
 
 
 def default_services() -> dict[str, ServicePreset]:
@@ -1095,6 +1114,21 @@ def load_config(
                 ctx,
                 warnings,
             ),
+            snap_back=_take_bool(table, "snap_back", base.snap_back if base else True, ctx, warnings),
+            alert_sound=_take_bool(
+                table, "alert_sound", base.alert_sound if base else False, ctx, warnings
+            ),
+            alert_repeat_seconds=_take_int(
+                table,
+                "alert_repeat_seconds",
+                base.alert_repeat_seconds if base else 0,
+                # 0 is "say it once"; the ceiling is an hour, past which a
+                # repeat is indistinguishable from the setting being off.
+                0,
+                3_600,
+                ctx,
+                warnings,
+            ),
         )
         if preset.max_paste_chars > preset.total_context_chars:
             warnings.append(
@@ -1326,6 +1360,15 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
         # appears only for a user who actually wrote some.
         if preset.extra_instructions != (base.extra_instructions if base else ""):
             services_table[key]["extra_instructions"] = preset.extra_instructions
+        # The debug snap-back switch and the attention alert, same rule again:
+        # a user who never turned either one off (or on) gets a file that does
+        # not mention them.
+        if preset.snap_back != (base.snap_back if base else True):
+            services_table[key]["snap_back"] = preset.snap_back
+        if preset.alert_sound != (base.alert_sound if base else False):
+            services_table[key]["alert_sound"] = preset.alert_sound
+        if preset.alert_repeat_seconds != (base.alert_repeat_seconds if base else 0):
+            services_table[key]["alert_repeat_seconds"] = preset.alert_repeat_seconds
 
     data = dict(data)
     if services_table:

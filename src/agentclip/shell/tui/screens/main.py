@@ -1433,6 +1433,17 @@ class MainScreen(Screen[None]):
         with suppress(NoMatches):
             await self.transcript.add_outbound(outbound, label)
 
+    # The reply brackets go to the focused panel like every other add: the mark
+    # lives on the panel itself, so a window that was not written into has
+    # nothing to reveal and answers the reveal by doing nothing.
+    async def begin_reply(self) -> None:
+        with suppress(NoMatches):
+            self.transcript.begin_reply()
+
+    async def reveal_reply(self) -> None:
+        with suppress(NoMatches):
+            self.transcript.reveal_reply()
+
     async def clear_transcript(self) -> None:
         # Only the session-reset path (/new, the summary's "new session") clears
         # the transcript, so this doubles as the session teardown hook. The

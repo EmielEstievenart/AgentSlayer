@@ -1062,6 +1062,15 @@ class GuiView:
             payload=payload,
         )
 
+    # The reply brackets, and they carry no content at all: the page remembers
+    # which node the reply started at and scrolls there when it ends, so nothing
+    # is recorded (the export is a list of EVENTS, and this is not one).
+    async def begin_reply(self) -> None:
+        self._send_transcript(kind="reply_start")
+
+    async def reveal_reply(self) -> None:
+        self._send_transcript(kind="reply_reveal")
+
     async def clear_transcript(self) -> None:
         """The ``/new`` teardown, and the automation half of it in full.
 

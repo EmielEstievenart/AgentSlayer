@@ -7,6 +7,10 @@ while parked, follow-up noise (notes, calls) must not move the view, but a new
 conversational beat (user/assistant message) re-applies the fit rule, and
 returning to the bottom resumes pinning.
 
+And the rule the per-event one cannot express (``begin_reply``/``reveal_reply``):
+one ingested reply is several events, and it is revealed from its FIRST one
+however many of them fit.
+
 The panel is exercised in a bare single-widget app: scroll geometry is the
 whole point here, so the harness gives the panel the full screen instead of
 the real MainScreen chrome.
@@ -20,10 +24,30 @@ from collections.abc import Callable
 from textual.app import App, ComposeResult
 from textual.pilot import Pilot
 
+from agentclip.protocol.types import ToolCall
 from agentclip.shell.tui.widgets.transcript import TranscriptPanel
 
 TALL_TEXT = "\n\n".join(f"paragraph {i}" for i in range(60))  # ~120 rows rendered
 SHORT_TEXT = "just one line"
+
+
+def _call(index: int) -> ToolCall:
+    path = f"src/mod{index}.py"
+    return ToolCall(
+        id=index,
+        tool="read_file",
+        params={"path": path},
+        raw=f"CALL read_file\npath: {path}\nEND",
+    )
+
+
+async def _ingest_reply(panel: TranscriptPanel, prose: str, calls: int) -> None:
+    """One reply as the controller writes it: bracketed prose plus tool calls."""
+    panel.begin_reply()
+    await panel.add_prose(prose)
+    for index in range(calls):
+        await panel.add_call(_call(index))
+    panel.reveal_reply()
 
 
 class _PanelApp(App[None]):
@@ -123,6 +147,52 @@ async def test_scrolling_back_to_the_bottom_resumes_pinning() -> None:
             lambda: panel._reading is False and _at_bottom(panel),
             "pinning resumed at the bottom",
         )
+
+
+async def test_an_ingested_reply_of_small_events_is_revealed_from_its_first_line() -> None:
+    """The bug the brackets exist for: prose plus a dozen tool calls, none of
+    them taller than the view, used to leave the panel pinned at the LAST call
+    with the model's opening sentence scrolled off the top."""
+    app = _PanelApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        panel = _panel(app)
+        for i in range(30):  # a conversation already scrolled past the top
+            await panel.add_note(f"note {i}")
+        await _wait_for(pilot, lambda: _at_bottom(panel), "pinned before the reply")
+
+        await _ingest_reply(panel, SHORT_TEXT, calls=15)
+
+        await _wait_for(pilot, lambda: _parked_at(panel, 30), "revealed at the reply's first event")
+        assert not _at_bottom(panel)
+
+
+async def test_a_revealed_reply_holds_its_position_under_follow_up_noise() -> None:
+    app = _PanelApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        panel = _panel(app)
+        for i in range(30):
+            await panel.add_note(f"note {i}")
+        await _ingest_reply(panel, SHORT_TEXT, calls=15)
+        await _wait_for(pilot, lambda: _parked_at(panel, 30), "revealed at the reply's first event")
+        revealed_y = panel.scroll_y
+
+        await panel.add_note("→ results copied (900 chars)")
+        await pilot.pause(0.3)
+        assert panel.scroll_y == revealed_y
+
+
+async def test_a_tall_reply_is_revealed_where_its_own_park_left_it() -> None:
+    """The single-event park and the reveal must not fight: both put the
+    reply's first line at the first row, so the view lands there once."""
+    app = _PanelApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        panel = _panel(app)
+        for i in range(30):
+            await panel.add_note(f"note {i}")
+
+        await _ingest_reply(panel, TALL_TEXT, calls=3)
+
+        await _wait_for(pilot, lambda: _parked_at(panel, 30), "revealed at the reply's first event")
 
 
 async def test_clear_resets_the_reading_park() -> None:

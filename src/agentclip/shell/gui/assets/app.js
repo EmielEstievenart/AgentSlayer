@@ -338,6 +338,12 @@
     var empty = box.querySelector(".empty");
     if (empty) empty.parentNode.removeChild(empty);
     box.appendChild(node);
+    // The first node of an ingested reply claims the mark `reply_start` armed;
+    // `reveal_reply` scrolls back to it once the whole reply has landed.
+    if (target.awaitingReplyStart) {
+      target.replyStart = node;
+      target.awaitingReplyStart = false;
+    }
     // Prune from the top at MAX_EVENTS, the TUI's rule and its number. Per
     // window, because the cap is about how much DOM one scroll carries and each
     // panel is its own scroll; the exported log (`l`) is the archive and is
@@ -366,6 +372,26 @@
     if (target.parked && !beat) return;
     target.parked = false;
     if (target.stick) box.scrollTop = box.scrollHeight;
+  }
+
+  // One ingested reply is prose plus a node per tool call, and the fit-or-park
+  // rule above judges each of them alone - so a reply of small nodes ends
+  // pinned at its LAST line with its opening scrolled off the top. The Python
+  // side brackets the reply (ChatView.begin_reply/reveal_reply) and this is the
+  // other half: the same park a tall node gets, applied to the reply as a whole.
+  function revealReply(win) {
+    var target = panel(win);
+    var node = target.replyStart;
+    target.replyStart = null;
+    target.awaitingReplyStart = false;
+    var box = target.node;
+    // A hidden panel has no layout to measure (offsetTop is 0), exactly as in
+    // `append`: leave it pinned and let the first paint after it is shown do
+    // the honest thing. A pruned node is likewise nothing to scroll to.
+    if (!node || box.hidden || node.parentNode !== box) return;
+    box.scrollTop = node.offsetTop;
+    target.parked = true;
+    target.stick = false;
   }
 
   function block(className, html) {
@@ -415,6 +441,17 @@
     // right panel while the user reads another one - the specific bug class the
     // TUI's docstrings call out ("looks exactly like data loss").
     var win = event.window || MASTER_WINDOW;
+    // The reply brackets carry no content: they arm the mark and cash it in.
+    if (event.kind === "reply_start") {
+      var opening = panel(win);
+      opening.replyStart = null;
+      opening.awaitingReplyStart = true;
+      return;
+    }
+    if (event.kind === "reply_reveal") {
+      revealReply(win);
+      return;
+    }
     if (event.kind === "user" || event.kind === "prose") {
       var label = event.label || (event.kind === "user" ? "you" : "assistant");
       append(
@@ -1967,6 +2004,8 @@
           target.node.innerHTML = '<p class="empty">' + escapeHtml(target.empty) + "</p>";
           target.parked = false;
           target.stick = true;
+          target.replyStart = null;
+          target.awaitingReplyStart = false;
         });
         return;
       case "focus_session":

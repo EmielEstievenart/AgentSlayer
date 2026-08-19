@@ -347,6 +347,14 @@ typed text is always the literal answer (`controller.py:541-551`).
   silent no-op in Textual 8" (`transcript.py:11-12`); a GUI implementation
   should just use CSS `overflow-anchor`/scroll-to-bottom equivalents and
   replicate the fit-vs-park branch, not this specific Textual pitfall.
+- **One ingested reply is revealed from its first line, however many events it
+  takes.** Fit-or-park decides per event and a reply is prose plus a widget per
+  tool call, so a reply of small events ended pinned at its LAST line with its
+  opening scrolled away. The controller brackets the reply instead —
+  `ChatView.begin_reply` before the first add and `reveal_reply` after the last,
+  from the ingest path only (`controller.py:_run_turn_body`) — and the view
+  parks at the reply's first event: `transcript.py:_park_at` in the TUI, the
+  `reply_start`/`reply_reveal` transcript events and `revealReply` in the GUI.
 - **Collapsible toggling: `x` always affects the *most recent* collapsible**,
   independent of focus — a deliberate shortcut for "what did that command
   print" without focus navigation — tui.md §4 (line 867),

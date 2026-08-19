@@ -1239,6 +1239,87 @@ def test_every_editor_id_the_page_writes_into_exists_in_the_markup() -> None:
     assert 'case "editor":' in js and 'api("svc_open")' in js
 
 
+# == the click point: which pixel of an appearance gets the click =============
+
+
+def test_every_row_starts_in_the_middle_of_its_picture(editor: ServiceEditor) -> None:
+    """50/50 is where every click landed before the point was adjustable, so it
+    is what an untouched profile has to report."""
+    for row in editor.state()["kinds"]:
+        assert (row["click_x"], row["click_y"]) == (50, 50)
+    labels = editor.state()["click_labels"]
+    assert "%" in labels["x"] and "%" in labels["y"]
+
+
+def test_a_click_point_is_written_to_the_store_immediately(
+    config: Config, profiles: Path, toasts: Toasts
+) -> None:
+    """A capture-side setting, so it takes the capture side's commit model: the
+    folder is the working copy and there is nothing to hand back on close."""
+    save_template(profiles, "chatgpt", TemplateKind.CHATBOX_ONGOING, searchable())
+    editor = ServiceEditor(config, profiles, "chatgpt", notify=toasts, opencv=True)
+
+    editor.set_click_point(TemplateKind.CHATBOX_ONGOING, 20, 80)
+
+    assert load_profile(profiles, "chatgpt").click_point(TemplateKind.CHATBOX_ONGOING) == (20, 80)
+    row = row_of(editor, TemplateKind.CHATBOX_ONGOING)
+    assert (row["click_x"], row["click_y"]) == (20, 80)
+    assert editor.profiles_changed
+    assert not editor.dirty  # the PRESET table did not move
+
+
+def test_a_click_point_is_clamped_rather_than_refused(editor: ServiceEditor) -> None:
+    """The page sends whatever is in a number box, an empty one included."""
+    editor.set_click_point(TemplateKind.COPY, "120", "")
+
+    row = row_of(editor, TemplateKind.COPY)
+    assert (row["click_x"], row["click_y"]) == (100, 50)
+
+
+def test_the_add_new_row_has_nothing_to_aim(config: Config, profiles: Path) -> None:
+    """No key means no folder to file a click point under - the same disabled
+    set the toggles are in (brief §3.5)."""
+    editor = ServiceEditor(config, profiles, NEW_SENTINEL, opencv=True)
+    editor.select(NEW_SENTINEL)
+
+    editor.set_click_point(TemplateKind.COPY, 10, 10)
+
+    assert editor.state()["controls_disabled"] is True
+    assert not editor.profiles_changed
+    assert row_of(editor, TemplateKind.COPY)["click_x"] == 50
+
+
+def test_clearing_the_last_picture_recentres_the_click_point(
+    config: Config, profiles: Path
+) -> None:
+    save_template(profiles, "chatgpt", TemplateKind.COPY, searchable())
+    editor = ServiceEditor(config, profiles, "chatgpt", opencv=True)
+    editor.set_click_point(TemplateKind.COPY, 10, 90)
+
+    editor.clear(TemplateKind.COPY)
+
+    assert row_of(editor, TemplateKind.COPY)["click_x"] == 50
+    assert load_profile(profiles, "chatgpt").click_point(TemplateKind.COPY) == (50, 50)
+
+
+def test_the_click_point_rides_the_bridge_as_a_kind_and_two_numbers(
+    harness: Harness, profiles: Path
+) -> None:
+    """The page's half: one call per change, kind-named like every other row
+    press, and answered by the same editor event."""
+    harness.view.open_service_editor()
+    api = JsApi(harness.view)
+
+    api.svc_click_point(str(TemplateKind.NEW_CHAT), 30, 70)
+
+    row = next(
+        row
+        for row in harness.flush().last("editor")["kinds"]
+        if row["kind"] == str(TemplateKind.NEW_CHAT)
+    )
+    assert (row["click_x"], row["click_y"]) == (30, 70)
+
+
 @pytest.mark.asyncio
 async def test_the_forget_confirm_rides_the_view_s_own_modal(harness: Harness) -> None:
     """The dialog is the shell's ``confirm`` - one modal implementation, not

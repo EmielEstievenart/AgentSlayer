@@ -43,6 +43,8 @@ from agentclip.driver.screen.template import RegionMatch, Template
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
 
+from .conftest import aimed_at
+
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 COPY_ICON = ScreenRegion(1830, 612, 24, 24)
 # Where the flow parks the pointer before it snaps the transcript, on every run
@@ -234,8 +236,13 @@ async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
         assert _scan(moves) == hover_scan_points(CHAT_REGION)[:3], (
             "scanned exactly up to the first appearance"
         )
-        expected = ScreenRegion(
-            CHAT_REGION.left + match.x, CHAT_REGION.top + match.y, COPY_ICON.width, COPY_ICON.height
+        expected = aimed_at(
+            ScreenRegion(
+                CHAT_REGION.left + match.x,
+                CHAT_REGION.top + match.y,
+                COPY_ICON.width,
+                COPY_ICON.height,
+            )
         )
         assert clicks[-1] == expected  # region-local offset translated back to the screen
 
@@ -262,7 +269,9 @@ async def test_a_static_hit_never_starts_a_scan(
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "clicked (diff 0.01)" in _copy_label(app), "copy clicked")
         assert _scan(moves) == []
-        assert clicks[-1].top == CHAT_REGION.top + 7
+        # The icon's middle, which is where a click on an appearance goes
+        # until that kind's click point is moved (tui.md 3.4d).
+        assert clicks[-1].top == CHAT_REGION.top + 7 + COPY_ICON.height // 2
 
 
 async def test_an_exhausted_scan_reports_not_found_and_never_clicks_the_icon(

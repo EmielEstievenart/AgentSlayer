@@ -36,6 +36,8 @@ from agentclip.driver.screen.slot import AgentSlot
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 
+from .conftest import aimed_at
+
 MASTER_BOX = ScreenRegion(10, 400, 300, 40)
 MASTER_NEWCHAT = ScreenRegion(10, 60, 80, 24)
 SUB_BOX = ScreenRegion(900, 400, 300, 40)
@@ -275,7 +277,7 @@ async def test_start_browser_chat_clicks_the_slot_and_retargets_the_automation(
         assert await main.start_browser_chat(AgentSlot.SUBAGENT) is True
 
         assert probed == [SUB_NEWCHAT]  # verified before clicking
-        assert clicks == [SUB_NEWCHAT]
+        assert clicks == [aimed_at(SUB_NEWCHAT)]
         assert main._live is AgentSlot.SUBAGENT
         assert main._calibrating is AgentSlot.MASTER  # the sidebar stays where it was
         # The poller followed the live slot onto the sub-agent's window.
@@ -386,7 +388,7 @@ async def test_a_click_the_os_refused_changes_nothing(
         clicks.clear()
 
         assert await main.start_browser_chat(AgentSlot.SUBAGENT) is False
-        assert clicks == [SUB_NEWCHAT]  # attempted, but the OS swallowed it
+        assert clicks == [aimed_at(SUB_NEWCHAT)]  # attempted, but the OS swallowed it
         assert main._live is AgentSlot.MASTER
 
 

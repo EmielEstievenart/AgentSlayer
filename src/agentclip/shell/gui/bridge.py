@@ -500,6 +500,7 @@ class JsCalls(Protocol):
     def svc_prev(self, kind: str) -> None: ...
     def svc_next(self, kind: str) -> None: ...
     def svc_clear(self, kind: str) -> None: ...
+    def svc_click_point(self, kind: str, x: int, y: int) -> None: ...
     def svc_forget(self) -> None: ...
     def svc_close(self) -> None: ...
 
@@ -760,6 +761,13 @@ class JsApi:
         confirm - it is one Capture press away from being back. The rest of the
         stack stays: "Forget appearance" is the whole-service door."""
         self._safely(lambda: self._calls.svc_clear(kind))
+
+    def svc_click_point(self, kind: str = "", x: int = 50, y: int = 50) -> None:
+        """One appearance's click point, as x%/y% of the picture that matches
+        it. Written straight to the profile store like a capture, and clamped
+        there - a number box can hold "999" for as long as it takes to type
+        "99"."""
+        self._safely(lambda: self._calls.svc_click_point(kind, int(x), int(y)))
 
     def svc_forget(self) -> None:
         """The whole service's captured appearances, behind a confirm."""

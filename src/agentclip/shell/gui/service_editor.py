@@ -70,12 +70,18 @@ from agentclip.driver.screen.capture import CaptureError, RegionImage, capture_r
 from agentclip.driver.screen.matchers import opencv_available
 from agentclip.driver.screen.picker import ScreenPickError, pick_region
 from agentclip.driver.screen.png import PngError, encode_png
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import (
+    DEFAULT_CLICK_PERCENT,
+    ServiceProfile,
+    TemplateKind,
+    clamp_percent,
+)
 from agentclip.driver.screen.profile_store import (
     ProfileStoreError,
     delete_profile,
     drop_variant,
     load_profile,
+    save_click_point,
     save_template,
 )
 
@@ -122,6 +128,12 @@ SIGNAL_TEMPLATE: dict[str, TemplateKind] = {
     "idle": TemplateKind.IDLE,
 }
 SIGNAL_UNCAPTURED = "ticked but not captured — it will be skipped"
+
+# The two click-point boxes on every appearance row. Titles rather than visible
+# labels - the boxes are three characters wide - so the sentence has room to say
+# what the number means and what 50 does.
+CLICK_X_LABEL = "click point: % across the captured image (50 = the middle)"
+CLICK_Y_LABEL = "click point: % down the captured image (50 = the middle)"
 
 HOVER_SCAN_LABEL = "hover-scan for copy icon"
 CAPTURE_PROSE_LABEL = "ingest replies with no CLIP"
@@ -497,9 +509,16 @@ class ServiceEditor:
                     "can_clear": not is_new
                     and self._profile is not None
                     and self._profile.has(kind),
+                    # Where inside the matched picture this kind is clicked, as
+                    # percentages: 50/50 - the middle - for every kind nobody
+                    # has moved, which is where all seven were clicked before
+                    # the point was adjustable at all.
+                    "click_x": self._click_point(kind)[0],
+                    "click_y": self._click_point(kind)[1],
                 }
                 for kind in TemplateKind
             ],
+            "click_labels": {"x": CLICK_X_LABEL, "y": CLICK_Y_LABEL},
             "capturing": self._capturing,
             "hint": FOOTER_HINT,
         }
@@ -759,6 +778,44 @@ class ServiceEditor:
         if key is None or key not in self._services:
             return  # the warning is re-derived from ``_shown_preset`` either way
         self._services[key] = replace(self._services[key], matcher=matcher)
+
+    def _click_point(self, kind: TemplateKind) -> tuple[int, int]:
+        """Where ``kind``'s click lands, or the centre with no profile loaded."""
+        if self._profile is None:
+            return (DEFAULT_CLICK_PERCENT, DEFAULT_CLICK_PERCENT)
+        return self._profile.click_point(kind)
+
+    def set_click_point(self, kind: TemplateKind, x: object, y: object) -> None:
+        """Aim one appearance's click at x%/y% of the picture that matches it.
+
+        A CAPTURE-side setting, so it takes the capture side's commit model
+        (module docstring): the profile folder is the working copy, this writes
+        the manifest immediately, and :attr:`profiles_changed` is how the caller
+        hears about it - there is nothing to hand back on close.
+
+        Clamped rather than refused (``clamp_percent``): the page sends whatever
+        is in a number box, an empty one included, and the boxes are repainted
+        from the model on the next reload - so the worst a stray keystroke can
+        do is aim at an edge, visibly.
+        """
+        key = self._selected_key
+        self._reload = False
+        if key is None or self._capturing:
+            return
+        point = (clamp_percent(x), clamp_percent(y))
+        if self._profile is not None and self._profile.click_point(kind) == point:
+            return  # the page echoing back what it was painted with
+        try:
+            save_click_point(self._profile_root, key, kind, *point)
+        except ProfileStoreError as exc:
+            self._notify(f"could not save the {kind.label} click point: {exc}", "error")
+            return
+        # Straight into the loaded profile rather than through a reload: the
+        # only thing that moved is two numbers, and re-reading the folder would
+        # re-encode seven thumbnails per keystroke.
+        if self._profile is not None:
+            self._profile.set_click_point(kind, *point)
+        self._profiles_changed = True
 
     def set_tolerance(self, value: int) -> None:
         """Per-channel pixel slack, 0-64. No validation gate, by construction:
@@ -1024,6 +1081,8 @@ __all__: Sequence[str] = [
     "AUTO_SUBMIT_LABEL",
     "CAPTURE_BUSY",
     "CAPTURE_PROSE_LABEL",
+    "CLICK_X_LABEL",
+    "CLICK_Y_LABEL",
     "CLOSE_BUSY",
     "DISCARD_BODY",
     "DISCARD_TITLE",

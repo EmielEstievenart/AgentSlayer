@@ -431,6 +431,9 @@ class GuiRunner:
     def svc_clear(self, kind: str) -> None:
         self.schedule_call(self.view.svc_clear, kind)
 
+    def svc_click_point(self, kind: str, x: int, y: int) -> None:
+        self.schedule_call(self.view.svc_click_point, kind, x, y)
+
     def svc_forget(self) -> None:
         self.schedule_call(self.view.svc_forget)
 

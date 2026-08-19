@@ -196,7 +196,7 @@ from agentclip.driver.screen.hover import hover_scan_points
 from agentclip.driver.screen.matchers import select_matcher
 from agentclip.driver.screen.presence import PresenceTracker
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
-from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot, SlotCalibration, new_slots
 from agentclip.driver.screen.stale import StaleProbe, StaleTracker
 from agentclip.driver.screen.template import CandidateSource, RegionMatch, Template, match_rect
@@ -2078,6 +2078,36 @@ class AutomationController:
     async def chatbox_region(self) -> ScreenRegion | None:
         """Which chat input box to poke right now, or None if none is known.
 
+        The RECTANGLE, which is what a caller that has to reason about the box
+        - ``flow.above_chatbox`` measures the padding over its top edge - needs.
+        Where inside it a click goes is :meth:`chatbox_target`'s question."""
+        found = await self._chatbox_match()
+        return None if found is None else found[0]
+
+    async def chatbox_target(self) -> tuple[ScreenRegion, ScreenRegion] | None:
+        """The chat box's rectangle AND the one pixel in it to click, or None.
+
+        Both, because the two callers need both: the point is where the caret
+        goes, and the rectangle is what a keyboard scroll measures its
+        "just above the box" from (``flow.above_chatbox``).
+
+        The point is the service's own (``ServiceProfile.click_point``) only
+        when a capture actually matched. The whole-drawn-window fallback below
+        keeps its centre: a per-image click point describes where inside THAT
+        PICTURE to click, and a window the user drew around their whole chat is
+        not that picture - aiming 10% into it would land in the transcript.
+        """
+        found = await self._chatbox_match()
+        if found is None:
+            return None
+        box, kind = found
+        if kind is None:
+            return box, box
+        return box, click_point_region(box, *self._live_profile().click_point(kind))
+
+    async def _chatbox_match(self) -> tuple[ScreenRegion, TemplateKind | None] | None:
+        """The chat box and WHICH appearance found it - None for the fallback.
+
         A fresh chat centres its input box and an ongoing one docks it at the
         bottom, so both appearances are hunted in ONE capture of the live chat
         region - the two layouts are mutually exclusive, so whichever is found
@@ -2105,11 +2135,11 @@ class AutomationController:
         try:
             scene: RegionImage | None = await asyncio.to_thread(self._ops.capture, region)
         except CaptureError:
-            return region
+            return region, None
         for kind in (TemplateKind.CHATBOX_ONGOING, TemplateKind.CHATBOX_INITIAL):
             found = await self._host.find_all(kind, scene=scene)
             if len(found) == 1:
-                return found[0]
+                return found[0], kind
             if len(found) > 1:
                 self._view.notify(
                     f"found {len(found)} things that look like the {kind.label} in the chat "
@@ -2117,8 +2147,8 @@ class AutomationController:
                     "only this chat",
                     severity="warning",
                 )
-                return region
-        return region
+                return region, None
+        return region, None
 
     async def click_profile_element(
         self, slot: AgentSlot, kind: TemplateKind, *, settle_s: float = ELEMENT_CLICK_SETTLE_S
@@ -2147,14 +2177,19 @@ class AutomationController:
         if not self._os_armed:
             return ElementClick.DISARMED
         cal = self.calibration(slot)
-        if cal.chat_region is None or not self._host.profile_for(slot).has(kind):
+        profile = self._host.profile_for(slot)
+        if cal.chat_region is None or not profile.has(kind):
             return ElementClick.NOT_CALIBRATED
         found = await self._host.find_all(kind, slot)
         if not found:
             return ElementClick.MISMATCH
         if len(found) > 1:
             return ElementClick.AMBIGUOUS
-        clicked = await asyncio.to_thread(self._ops.click, found[0], settle_s=settle_s)
+        # Where inside the matched rectangle, per the service's own click point:
+        # the middle of a control is only the right pixel until a service draws
+        # one whose middle is a label and whose left third is the button.
+        target = click_point_region(found[0], *profile.click_point(kind))
+        clicked = await asyncio.to_thread(self._ops.click, target, settle_s=settle_s)
         return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
 
     # -- what the live window is, for the sequences that read it ---------------
@@ -2285,8 +2320,12 @@ class AutomationController:
             await asyncio.to_thread(self._ops.scroll, region, SNAP_WHEEL_DETENTS)
 
     async def verified_copy_click(self, target: ScreenRegion) -> bool:
-        """Click the matched copy-button rect, retrying at slightly offset
+        """Click where the copy button was found, retrying at slightly offset
         points (still inside the icon) until the clipboard actually changes.
+
+        ``target`` is already the ONE pixel the caller aimed at (the middle of
+        the matched rectangle unless the service moved its click point), so the
+        offsets below walk around the point the user chose.
 
         Sometimes the click lands on the right spot but nothing is copied (a
         hover-rendered button that hadn't quite settled). Each attempt polls
@@ -2668,14 +2707,15 @@ class AutomationController:
         the first landed would only mean the burst was throttled, not that the
         box is unfocused. So the reinforcement is best effort.
         """
-        region = await self.chatbox_region()
-        if region is None:
+        found = await self.chatbox_target()
+        if found is None:
             return False
-        clicked = await self.focus_click(region)
+        _box, target = found
+        clicked = await self.focus_click(target)
         if not clicked:
             return False
         await asyncio.sleep(self._ops.focus_click_gap())
-        await self.focus_click(region)
+        await self.focus_click(target)
         return True
 
     async def _stream_outbound(self, text: str) -> bool:
@@ -2845,11 +2885,14 @@ class AutomationController:
         # exactly as it was before this step existed, which is worth trying
         # anyway.
         scroll_action = self._live_preset().scroll_action
-        box = await self.chatbox_region()  # the live chat box, else the chat region
-        if box is not None:
-            target = box
+        chatbox = await self.chatbox_target()  # the live chat box, else the chat region
+        if chatbox is not None:
+            box, target = chatbox
             if scroll_action in (SCROLL_PAGE_DOWN, SCROLL_END):
-                target = above_chatbox(box, region) or box
+                # Measured off the RECTANGLE, not off the click point: the
+                # padding this aims at is over the box's top edge, wherever
+                # inside the box a caret-seeking click would have gone.
+                target = above_chatbox(box, region) or target
             await self.focus_click(target)
         await asyncio.sleep(0.15)
         await asyncio.to_thread(self._ops.move_cursor, *region.center)
@@ -2940,7 +2983,15 @@ class AutomationController:
             return
 
         template, match = found
-        target = match_rect(region, template, match)
+        # The rectangle the match translates back to, reduced to the one pixel
+        # this service aims its copy click at (the centre unless the user moved
+        # it). Reduced HERE rather than inside the click, so the small retry
+        # offsets walk around the point the user chose rather than around a
+        # centre they rejected.
+        target = click_point_region(
+            match_rect(region, template, match),
+            *self._live_profile().click_point(TemplateKind.COPY),
+        )
         clicked = await self._host.verified_copy_click(target)
         if clicked:
             self._view.notify(f"copy button clicked (diff {match.diff:.2f})")

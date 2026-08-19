@@ -30,6 +30,14 @@ mkstemp/os.replace dance), so a crash mid-save can leave an unreferenced file -
 harmless, ignored on load, and its name reusable by the next save - but never a
 manifest naming a file that isn't there.
 
+One OPTIONAL top-level key rides alongside the templates table and needed no
+format bump precisely because it is optional: ``click_points`` maps a kind to
+``[x, y]`` percentages of the matched image, and a kind that is missing from it
+is clicked in the middle - which is where every click went before the point was
+adjustable. An older build reading a manifest that has it ignores it (loading
+skips unknown keys); this one reading a manifest without it sees seven
+centre-clicked appearances, which is the truth.
+
 Format 2 is what a kind holding a STACK of images (screen.profile) looks like
 on disk: the manifest's ``templates`` table maps a kind to a LIST of entries
 rather than to one. Format 1 - one entry per kind - is still read, as a
@@ -50,7 +58,7 @@ from pathlib import Path
 
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.png import PngError, decode_png, encode_png
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import ServiceProfile, TemplateKind, clamp_percent
 
 FORMAT_VERSION = 2
 # Every manifest shape this build understands well enough to read AND to
@@ -117,6 +125,28 @@ def _entries(document: dict, version: int) -> dict[str, list[dict]] | None:
     return {name: entries for name, entries in stacks.items() if entries}
 
 
+def _click_points(document: dict) -> dict[str, list[int]]:
+    """The manifest's OPTIONAL click-point table: ``{"<kind>": [x, y]}``.
+
+    Optional in both directions, which is why it needed no format bump: a
+    manifest without it describes seven appearances clicked in the middle, and
+    an entry that is not a pair of numbers is dropped so it reads as one too.
+    Out-of-range numbers are clamped instead of dropped - a hand-edited 120 is
+    a legible "as far right as it goes", not corruption.
+    """
+    raw = document.get("click_points")
+    if not isinstance(raw, dict):
+        return {}
+    points: dict[str, list[int]] = {}
+    for name, value in raw.items():
+        if not isinstance(value, list) or len(value) != 2:
+            continue
+        if any(isinstance(part, bool) or not isinstance(part, int | float) for part in value):
+            continue
+        points[name] = [clamp_percent(value[0]), clamp_percent(value[1])]
+    return points
+
+
 def _read_manifest(directory: Path) -> dict[str, list[dict]] | None:
     """The manifest's ``templates`` table, or None if it is unusable."""
     document = _read_document(directory)
@@ -128,8 +158,8 @@ def _read_manifest(directory: Path) -> dict[str, list[dict]] | None:
     return _entries(document, version)
 
 
-def _templates_to_rewrite(directory: Path) -> dict[str, list[dict]]:
-    """The table a write is about to replace - refusing to replace the wrong one.
+def _tables_to_rewrite(directory: Path) -> tuple[dict[str, list[dict]], dict[str, list[int]]]:
+    """The two tables a write is about to replace - refusing the wrong manifest.
 
     Reading is total (an unreadable manifest just means "nothing captured"), but
     writing over one is not. A manifest that announces a version this build does
@@ -139,19 +169,20 @@ def _templates_to_rewrite(directory: Path) -> dict[str, list[dict]]:
 
     A format we DO know is fair game whether or not it is the one we write: a
     v1 table normalises into a v2 one without losing anything, so the first
-    save into an old profile quietly migrates it.
+    save into an old profile quietly migrates it. The click points ride along
+    so that saving a capture cannot forget where that kind is clicked.
     """
     document = _read_document(directory)
     if document is None:
-        return {}
+        return {}, {}
     version = _known_version(document)
     if version is None:
         if "version" in document:
             raise ProfileStoreError(
                 f"{directory / MANIFEST_NAME} was written by another version of AgentClip"
             )
-        return {}  # no version at all: not a manifest, just a file in the way
-    return _entries(document, version) or {}
+        return {}, {}  # no version at all: not a manifest, just a file in the way
+    return _entries(document, version) or {}, _click_points(document)
 
 
 def _write_atomically(target: Path, data: bytes) -> None:
@@ -171,8 +202,21 @@ def _write_atomically(target: Path, data: bytes) -> None:
         raise
 
 
-def _write_manifest(directory: Path, key: str, templates: dict[str, list[dict]]) -> None:
-    document = {"version": FORMAT_VERSION, "service": key, "templates": templates}
+def _write_manifest(
+    directory: Path,
+    key: str,
+    templates: dict[str, list[dict]],
+    click_points: dict[str, list[int]] | None = None,
+) -> None:
+    document: dict[str, object] = {
+        "version": FORMAT_VERSION,
+        "service": key,
+        "templates": templates,
+    }
+    # Written only when there is one, so a profile nobody has re-aimed keeps
+    # exactly the manifest it has always had.
+    if click_points:
+        document["click_points"] = click_points
     _write_atomically(
         directory / MANIFEST_NAME,
         json.dumps(document, indent=2, sort_keys=True).encode("utf-8") + b"\n",
@@ -219,6 +263,17 @@ def _safe_name(filename: object) -> str | None:
     return filename
 
 
+def _kind_or_none(name: object) -> TemplateKind | None:
+    """A manifest key as an appearance, or None for one this version has never
+    heard of."""
+    if not isinstance(name, str):
+        return None
+    try:
+        return TemplateKind(name)
+    except ValueError:
+        return None
+
+
 def load_profile(root: Path, key: str) -> ServiceProfile:
     """``key``'s profile, or an empty one. Never raises - see the module docstring."""
     profile = ServiceProfile(key)
@@ -226,14 +281,24 @@ def load_profile(root: Path, key: str) -> ServiceProfile:
         directory = profile_dir(root, key)
     except ProfileStoreError:
         return profile
-    templates = _read_manifest(directory)
-    if not templates:
+    document = _read_document(directory)
+    if document is None:
         return profile
+    version = _known_version(document)
+    if version is None:
+        return profile  # a future (or garbage) format: nothing here is trustworthy
 
-    for name, entries in templates.items():
-        try:
-            kind = TemplateKind(name)
-        except ValueError:
+    # Before the images, and read even when there are none: a click point can
+    # be aimed at a kind the user has not captured yet, and the row that shows
+    # it must survive a restart either way.
+    for name, (x, y) in _click_points(document).items():
+        kind = _kind_or_none(name)
+        if kind is not None:
+            profile.set_click_point(kind, x, y)
+
+    for name, entries in (_entries(document, version) or {}).items():
+        kind = _kind_or_none(name)
+        if kind is None:
             continue  # an appearance this version doesn't know about
         for entry in entries:
             filename = _safe_name(entry.get("file"))
@@ -264,7 +329,7 @@ def save_template(root: Path, key: str, kind: TemplateKind, image: RegionImage) 
         raise ProfileStoreError(f"cannot store the {kind.label}: {exc}") from exc
     try:
         directory.mkdir(parents=True, exist_ok=True)
-        templates = _templates_to_rewrite(directory)
+        templates, points = _tables_to_rewrite(directory)
         entries = templates.get(kind.value, [])
         filename = _next_png_name(kind, {entry.get("file") for entry in entries})
         _write_atomically(directory / filename, data)
@@ -277,7 +342,30 @@ def save_template(root: Path, key: str, kind: TemplateKind, image: RegionImage) 
                 "captured_at": datetime.now(UTC).replace(microsecond=0).isoformat(),
             },
         ]
-        _write_manifest(directory, key, templates)
+        _write_manifest(directory, key, templates, points)
+    except OSError as exc:
+        raise ProfileStoreError(f"could not write the profile for {key!r}: {exc}") from exc
+
+
+def save_click_point(root: Path, key: str, kind: TemplateKind, x: int, y: int) -> None:
+    """Aim ``kind``'s click at x%/y% of whatever image matches, and persist it.
+
+    A manifest rewrite and nothing else, which is why it is legal for a kind
+    with no captures yet: the point is a fact about where inside that control a
+    click belongs, and a user who knows their chat box wants to be clicked near
+    its left edge should not have to capture it first to say so. Clearing the
+    kind (:func:`drop_template`, and the last :func:`drop_variant`) takes the
+    point with it - see there.
+
+    Immediate, like a capture and unlike the preset form: the profile folder IS
+    the working copy for everything about an appearance.
+    """
+    directory = profile_dir(root, key)
+    try:
+        directory.mkdir(parents=True, exist_ok=True)
+        templates, points = _tables_to_rewrite(directory)
+        points[kind.value] = [clamp_percent(x), clamp_percent(y)]
+        _write_manifest(directory, key, templates, points)
     except OSError as exc:
         raise ProfileStoreError(f"could not write the profile for {key!r}: {exc}") from exc
 
@@ -291,13 +379,18 @@ def drop_template(root: Path, key: str, kind: TemplateKind) -> None:
     Every image, because that is the question the editor's per-kind "Clear"
     asks: half a stack is a kind that still matches, which is indistinguishable
     from the clear having done nothing.
+
+    The kind's click point goes with them, back to the middle: it described
+    where inside THOSE pictures to click, and the next capture is a different
+    rectangle of a possibly redesigned control.
     """
     directory = profile_dir(root, key)
-    templates = _templates_to_rewrite(directory)
+    templates, points = _tables_to_rewrite(directory)
     entries = templates.pop(kind.value, [])
-    if entries:
+    aimed = points.pop(kind.value, None) is not None
+    if entries or aimed:
         try:
-            _write_manifest(directory, key, templates)
+            _write_manifest(directory, key, templates, points)
         except OSError as exc:
             raise ProfileStoreError(f"could not update the profile for {key!r}: {exc}") from exc
     for entry in entries:
@@ -326,7 +419,7 @@ def drop_variant(root: Path, key: str, kind: TemplateKind, index: int) -> None:
     could add is a complaint about a picture that was already not there.
     """
     directory = profile_dir(root, key)
-    templates = _templates_to_rewrite(directory)
+    templates, points = _tables_to_rewrite(directory)
     entries = templates.get(kind.value, [])
     if not 0 <= index < len(entries):
         return
@@ -334,9 +427,12 @@ def drop_variant(root: Path, key: str, kind: TemplateKind, index: int) -> None:
     if entries:
         templates[kind.value] = entries
     else:
+        # The last picture of the kind: the click point described where inside
+        # it to click, so it goes with it (:func:`drop_template`).
         templates.pop(kind.value, None)
+        points.pop(kind.value, None)
     try:
-        _write_manifest(directory, key, templates)
+        _write_manifest(directory, key, templates, points)
     except OSError as exc:
         raise ProfileStoreError(f"could not update the profile for {key!r}: {exc}") from exc
     filename = _safe_name(entry.get("file"))

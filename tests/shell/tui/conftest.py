@@ -47,7 +47,7 @@ from textual.pilot import Pilot
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.profile_store import save_template
-from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens import main as main_mod
@@ -84,6 +84,18 @@ def template_image(width: int = 64, height: int = 64) -> RegionImage:
     """
     size = width * height * 4
     return RegionImage(width, height, (bytes(range(256)) * (size // 256 + 1))[:size])
+
+
+def aimed_at(box: ScreenRegion) -> ScreenRegion:
+    """Where a click on a MATCHED appearance lands: one pixel of the rectangle.
+
+    The service's own click point (tui.md 3.4d) decides which - the middle of
+    the picture until somebody moves it, which is what every suite here is set
+    up with. The whole-drawn-window fallback is NOT this: it is the region the
+    user drew rather than a picture of a control, so it keeps its plain centre
+    click and is still written as the rectangle itself.
+    """
+    return click_point_region(box, 50, 50)
 
 
 def focus_clicks(*targets: ScreenRegion) -> list[ScreenRegion]:

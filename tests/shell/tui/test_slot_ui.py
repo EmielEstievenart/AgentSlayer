@@ -49,7 +49,7 @@ from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.shell.tui.widgets.sidebar import SLOT_NOTE_MASTER, SLOT_NOTE_READY
 
-from .conftest import send_composer
+from .conftest import aimed_at, send_composer
 
 MASTER_REGION = ScreenRegion(10, 20, 300, 400)
 SUB_REGION = ScreenRegion(900, 20, 300, 400)
@@ -665,5 +665,5 @@ async def test_the_new_browser_chat_button_targets_the_selected_window(
         await _calibrate(app, pilot, picker, "#set-region-btn", SUB_REGION)
 
         await _press(app, pilot, "#newchat-btn")
-        await _wait_for(pilot, lambda: clicks == [SUB_REGION], "the sub-agent's button clicked")
+        await _wait_for(pilot, lambda: clicks == [aimed_at(SUB_REGION)], "the sub-agent's button clicked")
         assert main._live is AgentSlot.MASTER

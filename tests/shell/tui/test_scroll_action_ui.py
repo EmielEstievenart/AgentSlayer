@@ -57,6 +57,8 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.template import RegionMatch, Template
 from agentclip.shell.tui.app import AgentClipApp
 
+from .conftest import aimed_at
+
 SERVICE = "chatgpt-attach"
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 # The docked input box, inside the drawn window: where a paste has to be
@@ -346,7 +348,7 @@ async def test_the_wheel_flick_still_clicks_the_chat_box_itself(
     async with app.run_test(size=(110, 55)) as pilot:
         await _run_flow(app, pilot)
 
-    assert clicks == [ONGOING_BOX]
+    assert clicks == [aimed_at(ONGOING_BOX)]
 
 
 async def test_with_no_chat_box_calibrated_the_snap_clicks_the_drawn_window(
@@ -473,7 +475,7 @@ async def test_a_missed_hunt_snaps_again_instead_of_giving_up(
     # ...and the choreography in front of the snap happened once, for the first
     # round only: nothing between rounds moves the pointer or the focus, and
     # re-clicking a transcript risks selecting text or following a link.
-    assert clicks == [ONGOING_BOX]
+    assert clicks == [aimed_at(ONGOING_BOX)]
     assert snap.moves == [CHAT_REGION.center]
     assert snap.order == ["move", "scroll", "scroll"]
 
@@ -496,7 +498,7 @@ async def test_the_focus_click_and_the_park_are_not_repeated_per_round(
     async with app.run_test(size=(110, 55)) as pilot:
         await _run_flow(app, pilot)
 
-    assert clicks == [ONGOING_BOX]
+    assert clicks == [aimed_at(ONGOING_BOX)]
     assert snap.moves == [CHAT_REGION.center]
     assert len(snap.scrolls) == ROUNDS
     assert snap.order == ["move"] + ["scroll"] * ROUNDS

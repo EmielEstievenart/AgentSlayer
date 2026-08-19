@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 from textual.pilot import Pilot
-from textual.widgets import Button, Static
+from textual.widgets import Button, Input, Static
 
 import agentclip.shell.tui.screens.service_editor as editor_mod
 from agentclip.cli import make_engine_factory
@@ -43,6 +43,8 @@ from agentclip.shell.tui.screens.service_editor import (
     ServiceEditorScreen,
     capture_button_id,
     clear_button_id,
+    click_x_input_id,
+    click_y_input_id,
     template_status_id,
 )
 
@@ -776,3 +778,100 @@ async def test_the_capture_lands_under_the_service_the_editor_has_selected(
         # The chat's own service is untouched, and the summary still says so.
         assert not main._active_profile().captured
         assert "0/7 captured" in _label(main, "#side-profile-note")
+
+
+# -- the click point: which pixel of an appearance gets the click ------------------
+
+
+async def test_every_appearance_row_offers_a_click_point_starting_in_the_middle(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Seven rows, two boxes each, and 50/50 everywhere until somebody moves
+    one - which is exactly where every click landed before this existed."""
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        editor = await _ready(app, pilot)
+
+        for kind in TemplateKind:
+            assert editor.query_one(f"#{click_x_input_id(kind)}", Input).value == "50"
+            assert editor.query_one(f"#{click_y_input_id(kind)}", Input).value == "50"
+
+
+async def test_a_typed_click_point_is_saved_at_once_and_survives_a_reselection(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """Persisted like a capture rather than like the form: the profile folder
+    IS the working copy for anything about an appearance."""
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        editor = await _ready(app, pilot)
+        key = editor._selected_key
+        assert key is not None
+        box = editor.query_one(f"#{click_x_input_id(TemplateKind.CHATBOX_ONGOING)}", Input)
+
+        box.value = "20"
+        await _wait_for(
+            pilot,
+            lambda: load_profile(profile_root, key).click_point(TemplateKind.CHATBOX_ONGOING)
+            == (20, 50),
+            "the click point written to disk",
+        )
+
+        # Re-reading the service repaints the boxes from the folder, not from
+        # anything the screen was still holding.
+        editor._load_service(key)
+        await pilot.pause()
+        assert box.value == "20"
+
+
+async def test_a_click_point_outside_the_picture_is_put_back_on_the_way_out(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """0-100 or nothing. Rejected on BLUR rather than per keystroke: "1" on its
+    way to "15" is not a mistake worth undoing under the user's hands."""
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        editor = await _ready(app, pilot)
+        key = editor._selected_key
+        assert key is not None
+        y_box = editor.query_one(f"#{click_y_input_id(TemplateKind.COPY)}", Input)
+
+        y_box.focus()
+        await pilot.pause()
+        y_box.value = "900"
+        await pilot.pause()
+        editor.query_one(f"#{click_x_input_id(TemplateKind.COPY)}", Input).focus()
+        await pilot.pause()
+
+        assert y_box.value == "50"
+        assert load_profile(profile_root, key).click_point(TemplateKind.COPY) == (50, 50)
+
+
+async def test_clearing_an_appearance_recentres_its_click_point(
+    tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The point described where inside THAT picture to click, and the picture
+    has just been thrown away - so the row goes back to the middle too."""
+    _patch_picker(monkeypatch)
+    app = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=SIZE) as pilot:
+        editor = await _ready(app, pilot)
+        key = editor._selected_key
+        assert key is not None
+        await _capture(editor, pilot, profile_root, key, TemplateKind.COPY)
+        editor.query_one(f"#{click_x_input_id(TemplateKind.COPY)}", Input).value = "10"
+        await _wait_for(
+            pilot,
+            lambda: load_profile(profile_root, key).click_point(TemplateKind.COPY) == (10, 50),
+            "the click point written to disk",
+        )
+
+        await _press(editor, pilot, CLEAR_ID[TemplateKind.COPY])
+        await _wait_for(
+            pilot,
+            lambda: not load_profile(profile_root, key).has(TemplateKind.COPY),
+            "the copy button cleared",
+        )
+
+        assert load_profile(profile_root, key).click_point(TemplateKind.COPY) == (50, 50)
+        assert editor.query_one(f"#{click_x_input_id(TemplateKind.COPY)}", Input).value == "50"

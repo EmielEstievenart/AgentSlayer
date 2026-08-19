@@ -110,12 +110,17 @@ from agentclip.config import (
 from agentclip.driver.screen.capture import CaptureError, RegionImage, capture_region
 from agentclip.driver.screen.matchers import opencv_available
 from agentclip.driver.screen.picker import ScreenPickError, pick_region
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import (
+    DEFAULT_CLICK_PERCENT,
+    ServiceProfile,
+    TemplateKind,
+)
 from agentclip.driver.screen.profile_store import (
     ProfileStoreError,
     delete_profile,
     drop_template,
     load_profile,
+    save_click_point,
     save_template,
 )
 from agentclip.shell.tui.graphics import (
@@ -161,6 +166,18 @@ _CAPTURE_PREFIX = "svc-capture-"
 _CLEAR_PREFIX = "svc-clear-"
 _BUTTON_SUFFIX = "-btn"
 CLEAR_LABEL = "Clear"
+
+# The two click-point boxes on each appearance row, x over y. Same convention
+# as the buttons - the kind is parsed back out of the id - so one pair of
+# handlers serves all seven.
+CLICK_INPUT_CLASS = "svc-click-input"
+_CLICK_X_PREFIX = "svc-click-x-"
+_CLICK_Y_PREFIX = "svc-click-y-"
+# Said once, at the head of the column, because a five-cell box has no room for
+# a label of its own - and it is the only place the two numbers are explained.
+APPEARANCE_TITLE = "APPEARANCE · what it looks like · click x%/y%"
+CLICK_X_TOOLTIP = "click point: % across the captured image (50 = the middle)"
+CLICK_Y_TOOLTIP = "click point: % down the captured image (50 = the middle)"
 
 # The finish-signal checklist, in user words rather than detector names. The
 # TOML keys ("busy"/"idle"/"stale") describe how the detector works; these
@@ -300,6 +317,14 @@ def clear_button_id(kind: TemplateKind) -> str:
     return f"{_CLEAR_PREFIX}{kind}{_BUTTON_SUFFIX}"
 
 
+def click_x_input_id(kind: TemplateKind) -> str:
+    return f"{_CLICK_X_PREFIX}{kind}"
+
+
+def click_y_input_id(kind: TemplateKind) -> str:
+    return f"{_CLICK_Y_PREFIX}{kind}"
+
+
 # The picture at the head of each appearance's row. "40×40 · captured" says a
 # capture happened; it cannot say WHAT was captured, and a drag that caught the
 # background beside the stop button reads exactly the same. So the first image
@@ -377,6 +402,24 @@ def kind_from_button_id(button_id: str | None) -> TemplateKind | None:
 def kind_from_clear_button_id(button_id: str | None) -> TemplateKind | None:
     """The appearance a Clear press is about, or None if it is not one."""
     return _kind_from_id(button_id, _CLEAR_PREFIX)
+
+
+def kind_from_click_input_id(input_id: str | None) -> TemplateKind | None:
+    """Which appearance a click-point box belongs to, or None for any other id.
+
+    The screen's ``Input.Changed`` handler is a catch-all - the form column's
+    fields have no class of their own - so this is what tells the two
+    populations apart. Which of the two boxes it is does not matter to anybody:
+    the pair is read together, because a point is two numbers.
+    """
+    for prefix in (_CLICK_X_PREFIX, _CLICK_Y_PREFIX):
+        if input_id is None or not input_id.startswith(prefix):
+            continue
+        try:
+            return TemplateKind(input_id[len(prefix) :])
+        except ValueError:
+            return None
+    return None
 
 
 def template_status(profile: ServiceProfile | None, kind: TemplateKind) -> str:
@@ -509,6 +552,14 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         # blocking child overlay process it spawned, so a second capture press -
         # and a close - are refused while one is up.
         self._capturing = False
+        # The last click point actually persisted, per kind. It is what a box
+        # holding nonsense reverts TO when it loses focus, and the reason
+        # repainting the boxes does not write them straight back: Textual posts
+        # ``Input.Changed`` for our own writes too - queued, so no flag around
+        # the assignment could catch it - and this screen persists immediately,
+        # so selecting a service would rewrite seven manifests to say what they
+        # already said.
+        self._click_points: dict[TemplateKind, tuple[int, int]] = {}
         # Preselect the service behind the tab the user had open when they
         # pressed F2/"Edit services..." (``initial_key``, resolved by the
         # caller from the selected window tab) - falling back to the
@@ -623,7 +674,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                     )
                     yield Static("", id="svc-error")
                 with Vertical(id="svc-appearance-col"):
-                    yield Static(Text("APPEARANCE · what it looks like"), classes="side-title")
+                    yield Static(Text(APPEARANCE_TITLE), classes="side-title")
                     # One fixed-height row per kind: the picture, the kind's
                     # name over its status, and the two actions stacked at the
                     # right edge. The name carries the row, so the buttons can
@@ -642,6 +693,26 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                                     Text(TEMPLATE_UNSET),
                                     id=template_status_id(kind),
                                     classes="side-status",
+                                )
+                            # Where inside the matched picture the click goes,
+                            # x over y, as a percentage. Two rows, which is
+                            # exactly what the name/status pair beside them
+                            # takes - a row that grew a third would push the
+                            # footer off a 45-row terminal, seven times over.
+                            with Vertical(classes="svc-kind-click"):
+                                yield Input(
+                                    id=click_x_input_id(kind),
+                                    classes=CLICK_INPUT_CLASS,
+                                    max_length=3,
+                                    compact=True,
+                                    tooltip=CLICK_X_TOOLTIP,
+                                )
+                                yield Input(
+                                    id=click_y_input_id(kind),
+                                    classes=CLICK_INPUT_CLASS,
+                                    max_length=3,
+                                    compact=True,
+                                    tooltip=CLICK_Y_TOOLTIP,
                                 )
                             with Vertical(classes="svc-kind-actions"):
                                 yield Button(
@@ -850,9 +921,29 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             self.query_one(f"#{template_status_id(kind)}", Static).update(
                 Text(template_status(profile, kind))
             )
+            self._paint_click_point(profile, kind)
         self.query_one("#svc-templates", Static).update(Text(_templates_line(profile)))
         self._update_buttons(profile)
         self._paint_signal_warning(profile)
+
+    def _paint_click_point(self, profile: ServiceProfile | None, kind: TemplateKind) -> None:
+        """Fill one kind's two boxes from the profile on disk (50/50 unset).
+
+        The profile is the working copy for everything about an appearance, so
+        this is a straight read - there is no in-memory copy of a click point
+        that could disagree with what a search will use tonight.
+        """
+        point = (
+            (DEFAULT_CLICK_PERCENT, DEFAULT_CLICK_PERCENT)
+            if profile is None
+            else profile.click_point(kind)
+        )
+        self._click_points[kind] = point
+        self._write_click_boxes(kind, point)
+
+    def _write_click_boxes(self, kind: TemplateKind, point: tuple[int, int]) -> None:
+        self.query_one(f"#{click_x_input_id(kind)}", Input).value = str(point[0])
+        self.query_one(f"#{click_y_input_id(kind)}", Input).value = str(point[1])
 
     def _paint_signal_warning(self, profile: ServiceProfile | None) -> None:
         key = self._selected_key
@@ -888,6 +979,10 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             self.query_one(f"#{clear_button_id(kind)}", Button).disabled = is_new or not (
                 profile is not None and profile.has(kind)
             )
+        # Nothing to file a click point under either - and unlike the buttons,
+        # these would silently swallow the number the user typed.
+        for click_input in self.query(f".{CLICK_INPUT_CLASS}").results(Input):
+            click_input.disabled = is_new
         for box in self.query(Checkbox):
             box.disabled = is_new
         # Same rule for the SCROLL and MATCHING blocks: nothing to file a
@@ -901,7 +996,68 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
     @on(Input.Changed)
     def _on_field_changed(self, event: Input.Changed) -> None:
         event.stop()
+        aimed = kind_from_click_input_id(event.input.id)
+        if aimed is not None:
+            # Not part of the preset candidate at all: a click point is a fact
+            # about a captured picture, so it is written to the profile store
+            # the moment it is legal and never waits for the close.
+            self._save_click_point(aimed)
+            return
         self._revalidate()
+
+    @on(Input.Blurred)
+    def _on_field_blurred(self, event: Input.Blurred) -> None:
+        """Leaving a click-point box puts back what was actually saved.
+
+        The only place the two numbers can be REJECTED: while the caret is
+        still in the box, "1" on its way to "15" is not an error worth
+        undoing, and a box someone emptied should be allowed to stay empty
+        until they look away.
+        """
+        kind = kind_from_click_input_id(event.input.id)
+        if kind is None:
+            return
+        event.stop()
+        if self._read_click_point(kind) is None:
+            self._write_click_boxes(
+                kind,
+                self._click_points.get(
+                    kind, (DEFAULT_CLICK_PERCENT, DEFAULT_CLICK_PERCENT)
+                ),
+            )
+
+    def _read_click_point(self, kind: TemplateKind) -> tuple[int, int] | None:
+        """Both boxes as percentages, or None while either is not a 0-100 number."""
+        values: list[int] = []
+        for widget_id in (click_x_input_id(kind), click_y_input_id(kind)):
+            text = self.query_one(f"#{widget_id}", Input).value.strip()
+            try:
+                number = int(text)
+            except ValueError:
+                return None
+            if not 0 <= number <= 100:
+                return None
+            values.append(number)
+        return values[0], values[1]
+
+    def _save_click_point(self, kind: TemplateKind) -> None:
+        """Persist one kind's click point, if what is in the boxes is a point.
+
+        Silent about a half-typed number - the box is where the user can see
+        what they wrote - and silent about a value that has not moved, which is
+        what stops our own repaints from rewriting the manifest.
+        """
+        key = self._selected_key
+        point = self._read_click_point(kind)
+        if key is None or point is None or point == self._click_points.get(kind):
+            return
+        try:
+            save_click_point(self._profile_root, key, kind, *point)
+        except ProfileStoreError as exc:
+            self.notify(f"could not save the {kind.label} click point: {exc}", severity="error")
+            return
+        self._click_points[kind] = point
+        self._profiles_changed = True
 
     @on(TextArea.Changed, "#svc-extra-instructions")
     def _on_extra_instructions_changed(self, event: TextArea.Changed) -> None:

@@ -1,15 +1,17 @@
 """ApprovalPolicy: the gate every tool call passes before it runs.
 
-Two modes, chosen by whether a permission ruleset was loaded (config.py reads
-AgentClip's permissions.json, which has OpenCode's shape; see permissions.py):
-
-RULESET MODE (rules present). The rules decide, last match wins:
+ONE mechanism, always in force: the permission ruleset (config.py reads
+AgentClip's permissions.json, which has OpenCode's shape; an install with no such
+file runs on permissions.py's DEFAULT_CONFIG). The rules decide, last match wins:
 
     deny  -> "deny"           the call never runs and never gates - not even
                               under YOLO; a deny is the user's standing "no"
     allow -> "auto"           except a bash command carrying a deny token (see
                               below), which is downgraded to a gate
     ask   -> "needs_approval" unless YOLO, which answers every ask with "yes"
+
+A permission nothing matches is an implicit "ask", which is what makes the rules
+safe to be the only gate: the answer to "nobody decided about this" is to ask.
 
 Rules the user approves with "always allow" are appended to `session_rules`,
 which is evaluated LAST - so a remembered answer outranks the file, exactly as
@@ -24,50 +26,40 @@ has no shell parser, so instead a command containing any configured deny token
 auto-run: allow becomes ask. Deny still wins outright, and a user who wants
 chained commands to run unattended can still say yes once at the gate.
 
-LEGACY MODE (no ruleset). Unchanged: read-only tools are auto, edits gate until
-auto_accept_edits, commands are matched against the glob allowlist
-(fnmatch.fnmatchcase against the FULL command string - auditable at a glance,
-no regex backtracking) with the same deny-token backstop, and YOLO bypasses
-everything. One command-kind call never reaches the allowlist: `mcp`, whose
-resource is a composite tool id rather than a shell command line, always gates
-here (docs/design/mcp.md section 4) - the allowlist matches shell prefixes, and
-an MCP call carrying a decoy `command` param must not be able to buy itself an
-allowlist hit.
+THE PERMISSION MODE picks WHICH ruleset the rules above are read from. `build`
+and `plan` are OpenCode's two primary agents (permissions.py), each with its own
+effective ruleset built at load time; switching modes swaps the ruleset, it does
+not add a check on top of one. `plan`'s built-in overlay denies `edit`, `bash`,
+`mcp` and `task`, which is how "exploration only" is expressed - as rules, so a
+user who deliberately writes an `agent.plan` rule can overturn it, as in
+OpenCode.
 
-THE PERMISSION MODE (both of the above) is the session-scoped dial ABOVE all of
-it - "what is the user doing right now" rather than "what is this call" - and it
-can only ever REFUSE more, never allow more:
+A plan refusal reports "deny_plan" rather than "deny" when the same call would
+NOT have been denied under `build`, because the model is told a different thing
+by each ("the rules forbid this" vs "the user is only exploring") and the audit
+trail names a different source.
 
-    ask         everything above, exactly as written. The default.
-    plan        the user is exploring: every `edit`/`command` call is denied
-                before anything else looks at it (YOLO included - a mode says
-                what the user wants NOW, and it outranks a flag they set
-                earlier). Read-only tools are untouched, so an `ask` or `deny`
-                rule on a read still applies.
-    unattended  the user is away: a call that would have opened a gate is denied
-                instead, because there is nobody there to answer it. Allow rules
-                still run and deny rules still deny. YOLO, being the user's
-                explicit "approve everything for me", still answers asks - the
-                one thing it still does not answer is the deny-token backstop,
-                which therefore denies here rather than gating.
-
-Both refusals are distinct verdicts ("deny_plan"/"deny_unattended") rather than
-the rule-deny "deny", because the model is told a different thing by each and
-the audit trail names a different source.
+THE UNATTENDED TOGGLE (`ApprovalPolicy.unattended`) is orthogonal to all of it:
+the user is away, so a call that would have opened a gate is denied
+("deny_unattended") instead, because there is nobody there to answer it. Allow
+rules still run and deny rules still deny. YOLO, being the user's explicit
+"approve everything for me", still answers asks - the one thing it still does
+not answer is the deny-token backstop, which therefore denies here rather than
+gating.
 """
 
 from __future__ import annotations
 
-import fnmatch
-from collections.abc import Sequence
 from typing import Literal
 
 from agentclip.config import ApprovalConfig
 from agentclip.executor.permissions import (
     PERMISSION_MODES,
+    ModeRules,
     PermissionMode,
     PermissionRule,
     always_pattern,
+    default_mode_rules,
     evaluate,
     matching_rules,
     normalize_mode,
@@ -78,6 +70,11 @@ from agentclip.executor.tools.registry import ToolSpec
 from agentclip.protocol.types import ToolCall
 
 Verdict = Literal["auto", "needs_approval", "deny", "deny_plan", "deny_unattended"]
+
+# What "approve all edits" remembers. One rule, named once, because two places
+# mint it: a session that starts with [approval] auto_accept_edits, and the
+# Decision.APPROVE_ALL_EDITS button.
+EDITS_RULE = PermissionRule("edit", "*", "allow")
 
 # The three ways a call can be refused without ever reaching the user. Kept as a
 # set so a consumer asks "was this denied?" once instead of listing the variants.
@@ -90,8 +87,10 @@ DENY_VERDICTS: frozenset[str] = frozenset({"deny", "deny_plan", "deny_unattended
 # the thing they talk to.
 __all__ = [
     "DENY_VERDICTS",
+    "EDITS_RULE",
     "PERMISSION_MODES",
     "ApprovalPolicy",
+    "ModeRules",
     "PermissionMode",
     "Verdict",
     "normalize_mode",
@@ -99,48 +98,42 @@ __all__ = [
 
 
 class ApprovalPolicy:
-    """Per-session approval state. auto_accept_edits is flipped (and sticks)
-    when the user chooses Decision.APPROVE_ALL_EDITS; in legacy mode it never
-    affects run_command. yolo is the bigger hammer: it answers every question
-    with yes - in legacy mode that means EVERYTHING runs, in ruleset mode
-    everything except what a rule explicitly denies. The /yolo chat command
-    toggles it live. mode is the dial above both (see the module docstring); the
-    /mode command sets it, also live."""
+    """Per-session approval state. yolo answers every question with yes -
+    everything runs except what a rule explicitly denies - and the /yolo chat
+    command toggles it live. mode picks which ruleset is in force (see the module
+    docstring) and the /mode command sets it, also live; unattended is the third
+    live switch - it answers gates with "no" instead of asking.
 
-    def __init__(
-        self, config: ApprovalConfig, rules: Sequence[PermissionRule] = ()
-    ) -> None:
+    auto_accept_edits is not a fourth: it is a shorthand for one remembered rule
+    ("edit": "*": "allow"), seeded from config and set when the user chooses
+    Decision.APPROVE_ALL_EDITS, so the status bar has a flag to paint while the
+    rules stay the only thing deciding anything."""
+
+    def __init__(self, config: ApprovalConfig, rules: ModeRules | None = None) -> None:
         self.auto_accept_edits: bool = config.auto_accept_edits
         self.yolo: bool = config.yolo
-        # An unreadable value here means the session simply runs as "ask": a
-        # permission dial has to fail towards the mode that asks the human.
-        self.mode: PermissionMode = normalize_mode(config.mode) or "ask"
-        self._allowlist: tuple[str, ...] = config.command_allowlist
+        # An unreadable value here means the session simply runs as "build": the
+        # default builder, whose ruleset is exactly what the user wrote.
+        self.mode: PermissionMode = normalize_mode(config.mode) or "build"
+        # "Nobody is at the keyboard": a gate becomes a refusal rather than a
+        # question. A flag, not a mode, because it is true of the USER and stays
+        # true whichever ruleset they are running.
+        self.unattended: bool = config.unattended
         self._deny_tokens: tuple[str, ...] = config.command_deny_tokens
-        self._rules: tuple[PermissionRule, ...] = tuple(rules)
+        # No ruleset handed in means no permissions.json anywhere, which is not
+        # "no rules" - it is the shipped defaults, in full.
+        self._rules: ModeRules = rules if rules is not None else default_mode_rules()
         # "Always allow" answers, evaluated after the config so they outrank it.
+        # Per session rather than per mode: the user answered a question about a
+        # call, not about the ruleset they happened to be in.
         self.session_rules: list[PermissionRule] = []
+        if config.auto_accept_edits:
+            self.session_rules.append(EDITS_RULE)
 
     @property
-    def ruleset_mode(self) -> bool:
-        """True when a permission ruleset governs this session (it REPLACES the
-        allowlist rather than adding to it)."""
-        return bool(self._rules)
-
-    # -- legacy allowlist ------------------------------------------------------
-
-    def command_auto_allowed(self, command: str) -> str | None:
-        """Return the matched allowlist glob (for transcript display), or None.
-
-        Deny tokens override: a command containing any deny token returns None
-        no matter what the allowlist says.
-        """
-        if self.has_deny_token(command):
-            return None
-        for pattern in self._allowlist:
-            if fnmatch.fnmatchcase(command, pattern):
-                return pattern
-        return None
+    def rules(self) -> tuple[PermissionRule, ...]:
+        """The ruleset the ACTIVE mode evaluates against."""
+        return self._rules.for_mode(self.mode)
 
     def has_deny_token(self, command: str) -> bool:
         return any(token in command for token in self._deny_tokens)
@@ -153,7 +146,7 @@ class ApprovalPolicy:
     def rule_for(self, spec: ToolSpec, call: ToolCall) -> PermissionRule:
         """The rule this call resolves to (implicit "ask" when none matches)."""
         key, resource = self.target(spec, call)
-        return evaluate(key, resource, self._rules, self.session_rules)
+        return evaluate(key, resource, self.rules, self.session_rules)
 
     def always_rule(self, spec: ToolSpec, call: ToolCall) -> PermissionRule:
         """The rule an "always allow" answer to this call should remember."""
@@ -166,57 +159,35 @@ class ApprovalPolicy:
     def denied_rules_json(self, spec: ToolSpec, call: ToolCall) -> str:
         """The rules relevant to a denied call, as OpenCode reports them."""
         key, _ = self.target(spec, call)
-        return rules_json(matching_rules(key, self._rules, self.session_rules))
+        return rules_json(matching_rules(key, self.rules, self.session_rules))
 
     # -- the verdict -----------------------------------------------------------
 
     def verdict(self, spec: ToolSpec, call: ToolCall) -> Verdict:
-        if self.ruleset_mode:
-            return self._ruleset_verdict(spec, call)
-        if self._plan_denied(spec):
-            return "deny_plan"
-        if spec.approval_kind == "auto":
-            return "auto"
-        if self.yolo:
-            return "auto"  # YOLO: nothing gates - edits AND commands run unattended
-        if spec.approval_kind == "edit":
-            return "auto" if self.auto_accept_edits else self._gate()
-        # approval_kind == "command". Which command-kind calls the allowlist may
-        # judge is decided by the PERMISSION KEY, not by the approval kind: the
-        # allowlist matches shell command lines, so only a call whose key is
-        # "bash" has a resource it can meaningfully match. That keeps unknown
-        # command-kind tools on the bash path (their _KIND_KEYS fallback is
-        # "bash" - unchanged behaviour) while `mcp`, whose key is "mcp" and whose
-        # resource is a composite tool id, always gates. Reading the resource
-        # from target() rather than call.params also closes the decoy: an mcp
-        # call carrying `command: git status` would otherwise have matched the
-        # allowlist and auto-approved itself (docs/design/mcp.md section 4).
         key, resource = self.target(spec, call)
-        if key != "bash":
-            return self._gate()
-        return "auto" if self.command_auto_allowed(resource) is not None else self._gate()
-
-    def _ruleset_verdict(self, spec: ToolSpec, call: ToolCall) -> Verdict:
-        key, resource = self.target(spec, call)
-        action = evaluate(key, resource, self._rules, self.session_rules).action
+        action = evaluate(key, resource, self.rules, self.session_rules).action
         if action == "deny":
-            return "deny"  # the user's standing "no" outranks even the mode
-        if self._plan_denied(spec):
-            return "deny_plan"
+            # A deny is a deny either way; which SENTENCE the model is told
+            # depends on whether the mode is the reason (see _only_plan_denies).
+            return "deny_plan" if self._only_plan_denies(key, resource) else "deny"
         if action == "allow":
             if key == "bash" and self.has_deny_token(resource):
                 return self._gate()  # backstop: no shell parser here
             return "auto"
         return "auto" if self.yolo else self._gate()
 
-    def _plan_denied(self, spec: ToolSpec) -> bool:
-        """Plan mode's whole rule: nothing that CHANGES anything may run.
-
-        By approval kind rather than by permission key, so a tool the ruleset has
-        never heard of is still covered by what it does."""
-        return self.mode == "plan" and spec.approval_kind in ("edit", "command")
+    def _only_plan_denies(self, key: str, resource: str) -> bool:
+        """Whether plan mode is what refused this call - i.e. `build` would not
+        have. The two refusals read differently to the model ("the user is only
+        exploring, here is what still works" vs "a rule forbids this"), and only
+        the ruleset knows which it is: plan's overlay and a user's own deny rule
+        both arrive here as the same action."""
+        if self.mode != "plan":
+            return False
+        return evaluate(key, resource, self._rules.build, self.session_rules).action != "deny"
 
     def _gate(self) -> Verdict:
-        """What a call that would ask the user resolves to. Unattended has nobody
-        to ask, and a question nobody answers must not become a silent yes."""
-        return "deny_unattended" if self.mode == "unattended" else "needs_approval"
+        """What a call that would ask the user resolves to. An unattended session
+        has nobody to ask, and a question nobody answers must not become a silent
+        yes."""
+        return "deny_unattended" if self.unattended else "needs_approval"

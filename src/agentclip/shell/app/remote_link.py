@@ -541,6 +541,9 @@ class RemoteLink:
     async def set_permission_mode(self, mode: PermissionMode) -> PermissionMode:
         return await self._call("set_permission_mode", mode=mode)
 
+    async def set_unattended(self, enabled: bool) -> bool:
+        return await self._call("set_unattended", enabled=enabled)
+
     async def arm_extra_instructions(self) -> ArmResult:
         return await self._call("arm_extra_instructions")
 

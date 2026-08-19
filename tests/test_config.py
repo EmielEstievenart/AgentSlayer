@@ -40,7 +40,7 @@ from agentclip.config import (
     save_services,
     save_theme,
 )
-from agentclip.executor.permissions import default_rules, evaluate
+from agentclip.executor.permissions import default_mode_rules, default_rules, evaluate
 
 
 @pytest.fixture
@@ -1313,8 +1313,8 @@ def test_permission_rules_load_with_the_defaults_prepended(
     assert cfg.permission_source == str(rules)
     # Built-in defaults first, the user's rules after: later wins, so their
     # "*": "ask" catch-all overrides the shipped "*": "allow".
-    assert cfg.permission_rules[:2] == default_rules()[:2]
-    user = cfg.permission_rules[len(default_rules()) :]
+    assert cfg.permission_rules.build[:2] == default_rules()[:2]
+    user = cfg.permission_rules.build[len(default_rules()) :]
     assert [(r.permission, r.pattern, r.action) for r in user] == [
         ("*", "*", "ask"),
         ("read", "*", "allow"),
@@ -1322,9 +1322,9 @@ def test_permission_rules_load_with_the_defaults_prepended(
         ("bash", "git status*", "allow"),
         ("bash", "git -C*", "deny"),
     ]
-    assert evaluate("bash", "git status --short", cfg.permission_rules).action == "allow"
-    assert evaluate("bash", "git -C /x status", cfg.permission_rules).action == "deny"
-    assert evaluate("list", ".", cfg.permission_rules).action == "ask"
+    assert evaluate("bash", "git status --short", cfg.permission_rules.build).action == "allow"
+    assert evaluate("bash", "git -C /x status", cfg.permission_rules.build).action == "deny"
+    assert evaluate("list", ".", cfg.permission_rules.build).action == "ask"
 
 
 def test_the_projects_own_ruleset_layers_over_the_global_one(
@@ -1340,8 +1340,8 @@ def test_the_projects_own_ruleset_layers_over_the_global_one(
     local = _project_rules(project, '{"permission": {"bash": "deny"}}')
 
     cfg = load_config(project, global_config_path=global_path)
-    assert evaluate("bash", "ls", cfg.permission_rules).action == "deny"
-    assert evaluate("read", "a.txt", cfg.permission_rules).action == "allow"
+    assert evaluate("bash", "ls", cfg.permission_rules.build).action == "deny"
+    assert evaluate("read", "a.txt", cfg.permission_rules.build).action == "allow"
     assert cfg.permission_source == f"{rules}, {local}"
 
 
@@ -1352,18 +1352,19 @@ def test_a_project_ruleset_alone_is_enough_to_leave_legacy_mode(
     still counts, since both layers are the same one user's answer."""
     local = _project_rules(project, '{"permission": {"bash": "deny"}}')
     cfg = load_config(project, global_config_path=global_path)
-    assert evaluate("bash", "ls", cfg.permission_rules).action == "deny"
+    assert evaluate("bash", "ls", cfg.permission_rules.build).action == "deny"
     assert cfg.permission_source == str(local)
 
 
 def test_an_opencode_json_is_not_read_at_all(project: Path, global_path: Path) -> None:
     """The clean break: AgentClip reads ITS file and no other tool's. A project
-    with an opencode.json beside it and no permissions.json is legacy mode."""
+    with an opencode.json beside it and no permissions.json runs on the shipped
+    defaults, and nothing in that file reaches the ruleset."""
     (project / "opencode.json").write_text(
         '{"permission": {"bash": "deny"}}', encoding="utf-8"
     )
     cfg = load_config(project, global_config_path=global_path)
-    assert cfg.permission_rules == ()
+    assert cfg.permission_rules == default_mode_rules()
     assert cfg.permission_source == ""
     assert not cfg.warnings
 
@@ -1371,15 +1372,15 @@ def test_an_opencode_json_is_not_read_at_all(project: Path, global_path: Path) -
 def test_missing_permissions_file_is_not_a_problem(
     project: Path, global_path: Path, tmp_path: Path
 ) -> None:
-    """Most machines have no permissions.json; that is legacy mode, not an error."""
+    """Most machines have no permissions.json; that is the defaults, not an error."""
     _point_at(project, tmp_path / "nope.json")
     cfg = load_config(project, global_config_path=global_path)
-    assert cfg.permission_rules == ()
+    assert cfg.permission_rules == default_mode_rules()
     assert cfg.permission_source == ""
     assert not cfg.warnings
 
 
-def test_malformed_permissions_json_warns_and_stays_in_legacy_mode(
+def test_malformed_permissions_json_warns_and_falls_back_to_the_defaults(
     project: Path, global_path: Path, tmp_path: Path
 ) -> None:
     rules = tmp_path / "permissions.json"
@@ -1387,7 +1388,7 @@ def test_malformed_permissions_json_warns_and_stays_in_legacy_mode(
     _point_at(project, rules)
 
     cfg = load_config(project, global_config_path=global_path)
-    assert cfg.permission_rules == ()
+    assert cfg.permission_rules == default_mode_rules()
     assert any("not valid JSON" in w for w in cfg.warnings)
 
 
@@ -1400,7 +1401,7 @@ def test_unknown_action_warns_but_keeps_the_other_rules(
 
     cfg = load_config(project, global_config_path=global_path)
     assert any("perhaps" in w for w in cfg.warnings)
-    assert cfg.permission_rules[-1].permission == "read"
+    assert cfg.permission_rules.build[-1].permission == "read"
 
 
 def test_permission_can_be_switched_off(project: Path, global_path: Path, tmp_path: Path) -> None:
@@ -1410,7 +1411,93 @@ def test_permission_can_be_switched_off(project: Path, global_path: Path, tmp_pa
 
     cfg = load_config(project, global_config_path=global_path)
     assert cfg.permission.enabled is False
-    assert cfg.permission_rules == ()
+    assert cfg.permission_rules == default_mode_rules()
+
+
+AGENT_BLOCKS_JSON = """{
+  "permission": {"bash": "allow", "edit": "allow"},
+  "agent": {
+    "plan": {"permission": {"bash": {"git status*": "allow"}}},
+    "build": {"permission": {"bash": {"rm *": "deny"}}},
+    "explore": {"permission": {"read": "deny"}}
+  }
+}
+"""
+
+
+def test_agent_blocks_build_one_ruleset_per_mode(
+    project: Path, global_path: Path, tmp_path: Path
+) -> None:
+    """OpenCode's per-agent permissions, for the two agents AgentClip runs. Each
+    mode gets defaults -> its own overlay -> the shared block -> its agent block,
+    and an agent this tool has no equivalent of is ignored rather than guessed at."""
+    rules = tmp_path / "permissions.json"
+    rules.write_text(AGENT_BLOCKS_JSON, encoding="utf-8")
+    _point_at(project, rules)
+
+    cfg = load_config(project, global_config_path=global_path)
+    assert not cfg.warnings
+    by_mode = cfg.permission_rules
+    # build: the shared block, plus build's own rule after it.
+    assert evaluate("bash", "ls", by_mode.build).action == "allow"
+    assert evaluate("bash", "rm -rf /", by_mode.build).action == "deny"
+    # plan: the overlay denies bash and edit over the top of the shared block,
+    # and only plan's OWN block carves back out of it.
+    assert evaluate("bash", "git status", by_mode.plan).action == "allow"
+    assert evaluate("bash", "rm -rf /", by_mode.plan).action == "deny"
+    assert evaluate("edit", "a.py", by_mode.plan).action == "deny"
+    # ...while the mode a rule was NOT written for is untouched by it.
+    assert evaluate("bash", "git status", by_mode.build).action == "allow"
+    # The explore block named an OpenCode agent; nothing here reads it.
+    assert evaluate("read", "a.txt", by_mode.plan).action == "allow"
+    assert evaluate("read", "a.txt", by_mode.build).action == "allow"
+
+
+def test_the_plan_overlay_denies_what_changes_things_by_default(
+    project: Path, global_path: Path
+) -> None:
+    """A ruleset that says nothing about edits still cannot edit in plan mode:
+    the overlay is layered under the user's rules, so it decides where they are
+    silent."""
+    _project_rules(project, '{"permission": {"read": "allow"}}')
+    cfg = load_config(project, global_config_path=global_path)
+    for key in ("edit", "bash", "mcp", "task"):
+        assert evaluate(key, "anything", cfg.permission_rules.plan).action == "deny"
+        assert evaluate(key, "anything", cfg.permission_rules.build).action != "deny"
+    assert evaluate("read", "a.txt", cfg.permission_rules.plan).action == "allow"
+
+
+def test_a_plan_agent_block_alone_leaves_legacy_mode(
+    project: Path, global_path: Path
+) -> None:
+    """An agent block IS a user rule: a file with nothing but one still arms the
+    ruleset, or a config written entirely per-mode would silently do nothing."""
+    local = _project_rules(project, '{"agent": {"plan": {"permission": {"edit": "allow"}}}}')
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.permission_rules
+    assert cfg.permission_source == str(local)
+    assert evaluate("edit", "a.txt", cfg.permission_rules.plan).action == "allow"
+
+
+def test_agent_blocks_layer_global_then_project(
+    project: Path, global_path: Path, tmp_path: Path
+) -> None:
+    rules = tmp_path / "permissions.json"
+    rules.write_text('{"agent": {"plan": {"permission": {"bash": "allow"}}}}', encoding="utf-8")
+    _point_at(project, rules)
+    local = _project_rules(project, '{"agent": {"plan": {"permission": {"bash": "deny"}}}}')
+
+    cfg = load_config(project, global_config_path=global_path)
+    assert evaluate("bash", "ls", cfg.permission_rules.plan).action == "deny"
+    assert cfg.permission_source == f"{rules}, {local}"
+
+
+def test_a_bad_action_inside_an_agent_block_names_the_agent(
+    project: Path, global_path: Path
+) -> None:
+    _project_rules(project, '{"agent": {"plan": {"permission": {"bash": "perhaps"}}}}')
+    cfg = load_config(project, global_config_path=global_path)
+    assert any("agent.plan: permission: [bash] unknown action 'perhaps'" in w for w in cfg.warnings)
 
 
 def test_a_file_without_a_permission_block_yields_no_rules(
@@ -1421,7 +1508,7 @@ def test_a_file_without_a_permission_block_yields_no_rules(
     _point_at(project, rules)
 
     cfg = load_config(project, global_config_path=global_path)
-    assert cfg.permission_rules == ()
+    assert cfg.permission_rules == default_mode_rules()
     assert not cfg.warnings
 
 

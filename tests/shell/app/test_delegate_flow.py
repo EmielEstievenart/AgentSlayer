@@ -23,12 +23,15 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.shell.app.controller import SessionController
 from agentclip.shell.app.link import Link
 from agentclip.shell.app.types import SessionRef
 
+from ...conftest import write_permissions
 from .conftest import (
     MASTER_CHAT,
     SUB_CHATS,
@@ -65,6 +68,15 @@ async def _delegating_session(
 ) -> None:
     view.delegation = True
     await start_session(controller, view, subagent_service=subagent_service)
+
+
+@pytest.fixture(autouse=True)
+def _allow_delegating(project: Path) -> None:
+    """`delegate` answers to the `task` permission, which the shipped defaults
+    ask about. These tests are about the delegation MACHINERY, so the project
+    allows it outright - the one test that is about plan mode denying a
+    delegation says so itself."""
+    write_permissions(project, {"permission": {"task": "allow"}})
 
 
 def _record_engine_requests(controller: SessionController) -> list[EngineRequest]:
@@ -501,7 +513,7 @@ async def test_two_delegations_get_their_own_tabs_and_chats(
 
 
 def _command_reply(command: str, *, chat: str) -> str:
-    """A sub-agent asking to run something the allowlist does not cover."""
+    """A sub-agent asking to run something no allow rule covers."""
     return (
         "===CLIP:CALL id=1 tool=run_command===\n"
         f"command: {command}\n"
@@ -511,52 +523,47 @@ def _command_reply(command: str, *, chat: str) -> str:
     )
 
 
-async def test_a_sub_agent_started_in_plan_mode_may_not_edit(
+async def test_plan_mode_refuses_the_delegation_itself(
     controller: SessionController, view: FakeChatView, project: Path
 ) -> None:
-    """The gap this closes: `delegate` is never gated (AgentClip's own control
-    flow), so before the mode was inherited a model in plan mode could make
-    every change it liked simply by delegating them."""
+    """The gap this closes: a model in plan mode must not be able to make every
+    change it likes simply by delegating them. Plan's overlay denies the `task`
+    key, and it sits ABOVE this project's `task: allow`, so no sub-agent is even
+    started - there is no window in which one could edit."""
     await _delegating_session(controller, view)
     controller.set_permission_mode("plan")
     await wait_for(lambda: controller.permission_mode == "plan", "plan mode armed")
     before = (project / "src" / "utils.py").read_text(encoding="utf-8")
 
     controller.submit_clipboard(delegate_reply("Tidy src/utils.py."))
-    await _feed_sub(
-        controller,
-        edit_reply("src/utils.py", "return 1", "return 2", chat=SUB),
-        task_done_reply("could not change anything", result="blocked by plan mode", chat=SUB),
-    )
     await settle(view)
 
-    assert view.gates == []  # denied outright: a sub-agent gate would be a gate
+    assert view.gates == []  # a denial is not a gate: there is nothing to ask
+    assert view.opened == []  # ...and no sub-agent tab was ever opened
     assert (project / "src" / "utils.py").read_text(encoding="utf-8") == before
     assert any("plan mode is active" in copied for copied in view.copied)
-    # ...and the master still gets its delegate result, so the turn completes.
-    assert "blocked by plan mode" in view.copied[-1]
 
 
-async def test_a_sub_agent_started_in_unattended_mode_never_asks(
+async def test_a_sub_agent_started_unattended_never_asks(
     controller: SessionController, view: FakeChatView
 ) -> None:
-    """The other half of the promise: the user is away, so a call the allowlist
-    does not cover is refused rather than parked on a gate nobody will answer."""
+    """The other half of the promise: the user is away, so a call no allow rule
+    covers is refused rather than parked on a gate nobody will answer."""
     await _delegating_session(controller, view)
-    controller.set_permission_mode("unattended")
-    await wait_for(lambda: controller.permission_mode == "unattended", "unattended armed")
+    controller.set_unattended(True)
+    await wait_for(lambda: controller.unattended, "unattended armed")
 
     controller.submit_clipboard(delegate_reply("Find out what state the tree is in."))
     await _feed_sub(
         controller,
-        _command_reply("definitely-not-allowlisted --flag", chat=SUB),
+        _command_reply("definitely-not-covered-by-a-rule --flag", chat=SUB),
         task_done_reply("nothing ran", result="everything was auto-denied", chat=SUB),
     )
     await settle(view)
 
     assert view.gates == []
     assert any(
-        "auto-denied: the user is away (unattended mode)" in copied for copied in view.copied
+        "auto-denied: the user is away (unattended is on)" in copied for copied in view.copied
     )
     assert "everything was auto-denied" in view.copied[-1]
 
@@ -569,7 +576,7 @@ async def test_cycling_the_mode_during_a_delegation_hits_the_sub_agent_then_the_
     conversation running - and the master picks the change up on the way back
     (``_rearm_master_mode``). The dial itself is never rolled back by the swap."""
     await _delegating_session(controller, view)
-    assert controller.permission_mode == "ask"
+    assert controller.permission_mode == "build"
 
     controller.submit_clipboard(delegate_reply("Tidy src/utils.py."))
     await wait_for(lambda: controller._reply_future is not None, "the sub-run to park")
@@ -596,7 +603,36 @@ async def test_cycling_the_mode_during_a_delegation_hits_the_sub_agent_then_the_
     assert (project / "src" / "utils.py").read_text(encoding="utf-8") == before
     assert any("plan mode is active" in copied for copied in view.copied)
     # Back on the master: the dial survived the swap, and so did the engine
-    # behind it - a master left on `ask` would run the next turn's edits.
+    # behind it - a master left on `build` would run the next turn's edits.
     assert controller.permission_mode == "plan"
     assert controller._active is not None and controller._active.role == "master"
     assert controller._snap is not None and controller._snap.mode == "plan"
+
+
+async def test_the_unattended_switch_reaches_the_sub_agent_then_the_master(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    """The mode's twin, on the same rails: thrown mid-delegation it lands on the
+    running conversation, and the master is reconciled on the way back."""
+    await _delegating_session(controller, view)
+    assert controller.unattended is False
+
+    controller.submit_clipboard(delegate_reply("Survey src/."))
+    await wait_for(lambda: controller._reply_future is not None, "the sub-run to park")
+
+    controller.set_unattended(True)
+    await wait_for(
+        lambda: controller._snap is not None and controller._snap.unattended,
+        "unattended to reach the sub-agent's engine",
+    )
+
+    await _feed_sub(
+        controller,
+        _command_reply("definitely-not-covered-by-a-rule --flag", chat=SUB),
+        task_done_reply("nothing ran", result="all auto-denied", chat=SUB),
+    )
+    await settle(view)
+
+    assert view.gates == []
+    assert controller.unattended is True
+    assert controller._snap is not None and controller._snap.unattended is True

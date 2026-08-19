@@ -55,7 +55,7 @@ MISSING_ROOT = "this target has no saved root - give the project directory on th
 # stated rather than defaulted: a user with a carefully tuned permissions.json on
 # THIS PC sees none of it apply the moment they connect, and silence about that
 # is the footgun (docs/design/remote-ssh.md, "the target owns its policy").
-NO_RULESET = "No permission ruleset found on {target}; falling back to the allowlist gate"
+NO_RULESET = "No permissions.json on {target}; this session runs on the shipped defaults"
 RULESET_FROM = "Permissions and MCP servers for this session come from {source}"
 # [approval] used to be pinned to this PC, then briefly merged this PC's
 # config.toml with the target's .agentclip.toml. It is neither now: the engine

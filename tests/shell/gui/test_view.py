@@ -47,7 +47,8 @@ def snapshot(phase: Phase = Phase.AWAITING_REPLY, **kwargs: object) -> StatusSna
         "budget_chars": 12000,
         "auto_accept_edits": False,
         "yolo": False,
-        "mode": "ask",
+        "mode": "build",
+        "unattended": False,
         "session_dir": Path("."),
         "last_outbound_chars": 400,
     }
@@ -293,7 +294,7 @@ def test_the_state_event_carries_what_the_status_chrome_needs(harness: Harness) 
     assert event["turn"] == 3
     assert event["phase"] == "AWAITING_REPLY"
     assert event["yolo"] is True
-    assert event["permission_mode"] == "ask"
+    assert event["permission_mode"] == "build"
 
 
 # == the approval gate =========================================================
@@ -386,19 +387,8 @@ def test_a_command_gate_carries_the_line_and_the_models_stated_reason(
     assert event["preview_kind"] == "command"
     assert event["preview_head"] == "$ npm run build"
     assert event["reason"] == "reason: the build is stale"
-    assert event["note"] == "not on the allowlist - approve to run once in the project root"
+    assert event["note"] == "no rule allows this - approve to run it once"
     assert event["timeout"] == "120"
-
-
-def test_a_ruleset_command_gate_says_no_rule_allows_it_rather_than_no_allowlist(
-    harness: Harness,
-) -> None:
-    harness.view.show_gate(
-        gate_action("command", always_pattern="npm *", call=call("run_command", command="npm ci")),
-        "1/1",
-        "",
-    )
-    assert harness.flush().last("gate")["note"] == "no rule allows this - approve to run it once"
 
 
 def test_an_mcp_gate_shows_the_engines_preview_not_the_decoy_command(

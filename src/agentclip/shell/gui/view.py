@@ -561,11 +561,7 @@ def _preview_fields(action: PendingAction) -> dict[str, str]:
         fields["preview_kind"] = "command"
         fields["preview_head"] = f"$ {call.params.get('command') or action.preview}"
         fields["preview_body"] = ""
-        fields["note"] = (
-            "no rule allows this - approve to run it once"
-            if action.always_pattern is not None
-            else "not on the allowlist - approve to run once in the project root"
-        )
+        fields["note"] = "no rule allows this - approve to run it once"
         fields["timeout"] = call.params.get("timeout", "")
         return fields
     first, _, rest = action.preview.partition("\n")
@@ -979,9 +975,10 @@ class GuiView:
         """The gate's three answers, mapped onto the controller's one call.
 
         ``approve_always`` resolves the way the TUI's ``a`` does: the ruleset's
-        remembered pattern when the gate carries one, the legacy edits-only
-        auto-accept at an edit gate, and nothing at all otherwise - a button the
-        page should not have offered is refused rather than reinterpreted.
+        remembered pattern when the gate carries one, the edits-only auto-accept
+        at an edit gate that somehow carries none, and nothing at all otherwise -
+        a button the page should not have offered is refused rather than
+        reinterpreted.
         """
         if choice == "approve":
             self._controller.submit_decision(Decision.APPROVE, None)
@@ -1420,10 +1417,8 @@ class GuiView:
             preview=action.preview,
             auto_reason=action.auto_reason or "",
             always_pattern=action.always_pattern,
-            # The third answer is offered on exactly the TUI's terms: a ruleset
-            # pattern to remember, or an edit-kind gate in legacy mode. Never
-            # for a run_command gate without a pattern - commands stay
-            # allowlist-or-prompt (tui.md §2.4).
+            # The third answer is offered on exactly the TUI's terms: the
+            # pattern this gate would remember (tui.md §2.4).
             always_label=self._always_label(action),
             hint=self._gate_hint(action),
             # WHAT the preview is, decided here so the page can render it and
@@ -1860,7 +1855,7 @@ class GuiView:
     # key that cannot fire says why in a toast (docs/design/gui.md §3).
 
     def cycle_permission_mode(self) -> None:
-        """shift+tab: ask -> plan -> unattended -> ask.
+        """shift+tab: build -> plan -> build.
 
         Ungated, exactly as on the TUI screen: the moment a user reaches for
         this is the moment the app is busy doing the thing they want it to stop
@@ -2501,7 +2496,7 @@ class GuiView:
             lines.append(LINK_RECONNECTS.format(count=reconnects))
         lines.append(
             self._config.permission_source
-            or f"no ruleset on {self._remote_target} - allowlist gate"
+            or f"no permissions.json on {self._remote_target} - shipped defaults"
         )
         return lines
 
@@ -3481,7 +3476,7 @@ class GuiView:
         # one, the controller's mirror of the configured default is what
         # shift+tab would be changing.
         mode = snap.mode if snap else self._controller.permission_mode
-        mode_class = {"plan": "st-plan", "unattended": "st-unattended"}.get(mode, "st-dim")
+        mode_class = "st-plan" if mode == "plan" else "st-dim"
         # The edits slot follows the same rule, so a `/yolo` armed at the start
         # prompt is visible before the session it will govern exists.
         if snap.yolo if snap else self._controller.yolo:

@@ -97,7 +97,7 @@ COMMANDS: tuple[ChatCommand, ...] = (
     ),
     ChatCommand(
         name="mode",
-        arg="[plan|ask|unattended]",
+        arg="[plan|build]",
         summary="set the permission mode (bare /mode says which one you are in)",
     ),
     ChatCommand(

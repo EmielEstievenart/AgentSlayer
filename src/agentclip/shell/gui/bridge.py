@@ -566,7 +566,7 @@ class JsApi:
         self._safely(lambda: self._calls.set_os_armed(target))
 
     def mode(self) -> None:
-        """shift+tab: cycle ask -> plan -> unattended -> ask. Never gated -
+        """shift+tab: cycle build -> plan -> build. Never gated -
         it must work pre-session and mid-turn, which are the two moments the
         feature exists for."""
         self._safely(self._calls.cycle_permission_mode)

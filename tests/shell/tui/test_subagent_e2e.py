@@ -44,6 +44,8 @@ from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.messages import ClipboardCaptured
 from agentclip.shell.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 
+from ...conftest import write_permissions
+
 MASTER_CHAT = "amber-falcon"
 SUB_CHAT = "jade-otter"
 
@@ -165,6 +167,10 @@ def _make_app(tmp_path: Path, provider: FakeClipboard) -> AgentClipApp:
     project = tmp_path / "project"
     (project / "src").mkdir(parents=True)
     (project / "src" / "utils.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    # `delegate` answers to the `task` permission, which the shipped defaults ask
+    # about. This file is about the end-to-end delegation loop, not about the
+    # gate in front of it.
+    write_permissions(project, {"permission": {"task": "allow"}})
 
     def get_config():
         # A 24k preset: the bootstrap grows by the delegate catalog entry, and a

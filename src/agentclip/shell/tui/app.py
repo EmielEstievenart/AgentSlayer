@@ -190,6 +190,17 @@ class AgentClipApp(App[None]):
     #action-buttons Button {
         margin-right: 2;
     }
+    /* The middle answer names the exact pattern it would remember, so its label
+       is as long as the rule is - and three auto-width buttons in a row have no
+       way to give ground. On a narrow terminal that pushed REJECT off the end of
+       the panel and under the sidebar, where a click never reached it. This is
+       the one that yields: it takes what is left, and its label truncates rather
+       than the row overflowing (the hint line below still spells the pattern out
+       in full). */
+    #approve-edits-btn {
+        width: 1fr;
+        max-width: 30;
+    }
     #action-footer {
         height: auto;
         margin-top: 1;
@@ -431,14 +442,16 @@ class AgentClipApp(App[None]):
         background: red;
         text-style: bold;
     }
-    /* The permission-mode segment (§2.6a), leftmost cell. `ask` is the baseline
-       and wears .st-dim so it cannot become furniture; the two modes that CHANGE
-       what happens to a tool call are the ones that are meant to catch the eye.
-       Blue for `plan` (a mode that only ever refuses more - it is safe, not
+    /* The permission-mode segment (§2.6a), leftmost cell. `build` is the
+       baseline and wears .st-dim so it cannot become furniture; `plan`, the mode
+       that CHANGES what happens to a tool call, is the one meant to catch the
+       eye. Blue for it (a mode that only ever refuses more - it is safe, not
        alarming, so it borrows the accent the app already uses for borders), and
-       the warning colour for `unattended`, which is the "nobody is watching"
-       mode. Neither is red: red is spoken for by the two badges that mean
-       approvals are OFF (⚡ YOLO) and the OS switch is out (⛔ DISARMED). */
+       the warning colour for the unattended switch, which is the "nobody is
+       watching" state (its own badge lands in a later wave; the class is kept so
+       the palette decision is not made twice). Neither is red: red is spoken for
+       by the two badges that mean approvals are OFF (⚡ YOLO) and the OS switch
+       is out (⛔ DISARMED). */
     .st-plan {
         color: $accent;
         text-style: bold;

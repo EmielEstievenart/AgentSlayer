@@ -69,16 +69,16 @@ Sub-agents (only when the sub-agent window is calibrated, see the sidebar)
   ctrl+x cancels the calls running right now; /abort ends the whole run.
 
 Approval (the bordered box above the chat)
-  y  approve      n  reject (optional reason)      a  approve + auto-accept edits
-  ...or click the Approve / Reject buttons. (a / auto-accept never runs commands.)
+  y  approve      n  reject (optional reason)      a  always allow calls like it
+  ...or click the Approve / Reject buttons. The third answer remembers a rule for
+  the rest of the session; the button says exactly which one.
 
-Permission mode (bottom-left of the status bar, e.g. MODE:ask)
-  shift+tab cycles it: ask -> plan -> unattended -> ask (/mode names one directly).
-  ask         approvals as usual - you are asked about every edit and command.
-  plan        every edit and command is REFUSED, so the model can only read and
-              propose. Switch back to ask when you want the plan carried out.
-  unattended  anything that would have asked you is refused instead - for when
-              you walk away. Allowed things still run; nothing waits on you.
+Permission mode (bottom-left of the status bar, e.g. MODE:build)
+  shift+tab cycles it: build -> plan -> build (/mode names one directly).
+  build  the default builder - your permission rules decide, and anything they
+         do not cover asks you before it runs.
+  plan   edits, commands, MCP calls and delegations are REFUSED, so the model
+         can only read and propose. Switch back to build to carry the plan out.
   The key works while you are typing and while a turn is running.
 
 Session  (press Esc first if the chat box has focus - twice if you have typed)

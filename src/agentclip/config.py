@@ -3,7 +3,7 @@
 A leaf (platformdirs, tomli_w, and the two other leaves: permissions.py, shared
 with the approval policy, and the Host seam, which is how the project file is
 read). Precedence, later wins, per-key shallow merge per table — lists REPLACE,
-never concatenate (so a project can tighten the allowlist):
+never concatenate (so a project can tighten a list rather than extend it):
 
     built-in defaults
     -> <user_config_dir>/agentclip/config.toml
@@ -20,8 +20,8 @@ outranks the global one. The target owns the rules because every file a rule can
 save is over there (docs/design/remote-ssh.md, "the target owns its policy").
 
 ``[approval]`` is no exception, and used to be one: it merges like every other
-table, so a remote project's ``.agentclip.toml`` sets the mode, yolo, the
-allowlist and the deny tokens for the session it describes. The gate's UI is
+table, so a remote project's ``.agentclip.toml`` sets the mode, yolo and the deny
+tokens for the session it describes. The gate's UI is
 still the operator's - the human answering the question sits here - but the
 POLICY belongs to the machine the engine runs on, which in a remote session is
 the target (docs/design/remote-executor.md section 2.5). The pinned-to-this-PC
@@ -57,9 +57,12 @@ from agentclip.executor.hosts.base import Host
 from agentclip.executor.mcp.config import McpTarget, load_mcp_servers
 from agentclip.executor.mcp.types import McpConfig, McpServers
 from agentclip.executor.permissions import (
+    DEFAULT_CONFIG,
     PERMISSION_MODES,
+    ModeRules,
     PermissionRule,
-    default_rules,
+    build_mode_rules,
+    default_mode_rules,
     normalize_mode,
     rules_from_config,
 )
@@ -83,28 +86,6 @@ DEFAULT_EXCLUDES = (
     "build",
     ".idea",
     ".vscode",
-)
-
-DEFAULT_ALLOWLIST = (
-    "pytest*",
-    "python -m pytest*",
-    "python -m unittest*",
-    "uv run pytest*",
-    "ruff check*",
-    "ruff format --check*",
-    "mypy*",
-    "npm test*",
-    "npm run test*",
-    "npx tsc --noEmit*",
-    "cargo check*",
-    "cargo test*",
-    "go test*",
-    "go vet*",
-    "git status",
-    "git diff*",
-    "git log*",
-    "ls*",
-    "dir*",
 )
 
 DEFAULT_DENY_TOKENS = (";", "&&", "||", "|", "`", "$(", ">", "<", "\n")
@@ -370,25 +351,31 @@ class ClipboardConfig:
 @dataclass(frozen=True, slots=True)
 class ApprovalConfig:
     auto_accept_edits: bool = False
-    # YOLO mode: auto-approve EVERY tool call - edits AND commands - bypassing the
-    # allowlist and the deny tokens entirely. Off by default; the /yolo chat command
-    # toggles it live for the session. Setting it true here arms a session in YOLO.
+    # YOLO mode: answer every gate with yes - edits AND commands, deny tokens
+    # included. An explicit deny rule still refuses. Off by default; the /yolo
+    # chat command toggles it live. Setting it true here arms a session in YOLO.
     yolo: bool = False
-    # The permission mode a session STARTS in: "ask" (today's gates), "plan"
-    # (exploration only) or "unattended" (nothing gates; ungated calls are
-    # auto-denied). Typed str rather than PermissionMode: this is what a config
-    # FILE said, and load_config only warns about a value it cannot read - the
-    # narrowing to the alias happens once, in ApprovalPolicy. See approval.py.
-    mode: str = "ask"
-    command_allowlist: tuple[str, ...] = DEFAULT_ALLOWLIST
+    # The permission mode a session STARTS in: "build" (the default builder, the
+    # ruleset exactly as written) or "plan" (exploration only - the built-in
+    # overlay denies everything that could change something). Typed str rather
+    # than PermissionMode: this is what a config FILE said, and load_config only
+    # warns about a value it cannot read - the narrowing to the alias happens
+    # once, in ApprovalPolicy. See approval.py.
+    mode: str = "build"
+    # "I am not at my desk": every gate is auto-denied rather than asked. A flag
+    # beside yolo rather than a mode, because it says something about the USER
+    # and stays true whichever ruleset they are running. /unattended toggles it.
+    unattended: bool = False
     command_deny_tokens: tuple[str, ...] = DEFAULT_DENY_TOKENS
 
 
 @dataclass(frozen=True, slots=True)
 class PermissionConfig:
-    """Where the OpenCode-style permission ruleset comes from, and whether it is
-    consulted at all. Off (or a missing file) leaves the legacy allowlist gate
-    in charge - see engine/approval.py.
+    """Where the user's half of the permission ruleset comes from, and whether it
+    is read at all. Off (or a missing file) leaves the SHIPPED defaults in charge
+    - never nothing: the ruleset is the whole permission system, so there is no
+    state in which a call goes unjudged (permissions.py's DEFAULT_CONFIG,
+    engine/approval.py).
 
     The MODEL is OpenCode's (permissions.py ports it rule for rule); the FILE is
     AgentClip's own ``permissions.json``, which is why the override key names no
@@ -532,11 +519,14 @@ class Config:
     backup: BackupConfig = field(default_factory=BackupConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
-    # The effective ruleset (built-in defaults first, the user's permissions.json
-    # appended). EMPTY means "no ruleset": the legacy allowlist gate stays in
-    # charge, which is what every install without a permissions.json gets.
-    permission_rules: tuple[PermissionRule, ...] = ()
-    permission_source: str = ""  # the file the rules came from, "" when none did
+    # The effective ruleset PER MODE (shipped defaults, the mode's overlay, then
+    # the user's permissions.json). Never empty: an install without a
+    # permissions.json runs on the shipped defaults, which are also exactly what
+    # a config reset would write into one.
+    permission_rules: ModeRules = field(default_factory=default_mode_rules)
+    # The user file(s) the rules came from, "" when none did - i.e. "running on
+    # the shipped defaults", not "running on nothing".
+    permission_source: str = ""
     # The [mcp] table (is the subsystem on, and where permissions.json lives) and
     # what the loader read out of that file's `mcp` block. Empty servers is the
     # everyday case - no permissions.json, or [mcp] enabled=false - and means the
@@ -576,6 +566,19 @@ def default_permissions_config_path() -> Path:
     is AgentClip's file, in AgentClip's config home, and nothing falls back to
     another tool's (``/config`` writes the template)."""
     return Path(platformdirs.user_config_dir("agentclip")) / "permissions.json"
+
+
+def default_permissions_document() -> str:
+    """The JSON a fresh permissions.json is created with: the rules that were
+    ALREADY in force (permissions.py's DEFAULT_CONFIG, which the loader layers
+    underneath everything), plus the empty ``mcp`` block the loader also reads.
+
+    The defaults rather than ``{}`` because that is what makes the new file an
+    answer to "where do I put a rule?" - it opens on a working example of every
+    key there is - and because creating it must not change what the session does:
+    a document identical to the built-in defaults evaluates identically to them
+    (see :func:`~agentclip.executor.permissions.build_mode_rules`)."""
+    return json.dumps({**DEFAULT_CONFIG, "mcp": {}}, indent=2) + "\n"
 
 
 def project_permissions_path(project_root: Path) -> Path:
@@ -797,13 +800,18 @@ def _permissions_config_path(home: Path | None) -> Path:
     return home / ".config" / "agentclip" / "permissions.json"
 
 
-def _permission_block(path: Path, warnings: list[str], host: Host | None) -> object | None:
-    """The top-level ``permission`` block of one permissions.json, or None when
-    the file has nothing to say about permissions.
+def _permission_blocks(
+    path: Path, warnings: list[str], host: Host | None
+) -> tuple[object | None, dict[str, object]]:
+    """One permissions.json's permission blocks: ``(shared, per_mode)``.
 
-    Only that one key is read. OpenCode's ``agent``/``plugin`` blocks describe
-    OpenCode agents, which AgentClip has no equivalent of - guessing a mapping
-    would silently grant or refuse things the user never decided.
+    ``shared`` is the top-level ``permission`` key (None when the file has
+    nothing to say) and ``per_mode`` maps a permission MODE to its
+    ``agent.<mode>.permission`` block - OpenCode's per-agent permissions, read
+    for the two agents AgentClip has an equivalent of (`build` and `plan` are
+    its modes). Any other agent name is ignored: it names an OpenCode agent this
+    tool never runs, and guessing a mapping would grant or refuse things the
+    user never decided.
 
     Triage as :func:`_read_toml` models it: a missing file is normal (most
     machines have none) and silent, anything else unreadable warns once.
@@ -811,18 +819,25 @@ def _permission_block(path: Path, warnings: list[str], host: Host | None) -> obj
     try:
         raw = host.read_bytes(path) if host is not None else path.read_bytes()
     except FileNotFoundError:
-        return None
+        return None, {}
     except OSError as exc:
         warnings.append(f"config: could not read {path}: {exc}")
-        return None
+        return None, {}
     try:
         data = json.loads(raw.decode("utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         warnings.append(f"config: {path} is not valid JSON: {exc}")
-        return None
+        return None, {}
     if not isinstance(data, dict):
-        return None
-    return data.get("permission")
+        return None, {}
+    agent = data.get("agent")
+    per_mode: dict[str, object] = {}
+    if isinstance(agent, dict):
+        for mode in PERMISSION_MODES:
+            block = agent.get(mode)
+            if isinstance(block, dict) and "permission" in block:
+                per_mode[mode] = block["permission"]
+    return data.get("permission"), per_mode
 
 
 def _describe_path(path: Path, host: Host | None) -> str:
@@ -840,21 +855,25 @@ def _load_permission_rules(
     warnings: list[str],
     host: Host | None = None,
     home: Path | None = None,
-) -> tuple[tuple[PermissionRule, ...], str]:
-    """Read the effective permission ruleset off the machine the project is on:
-    built-in defaults, then that machine's global permissions.json, then the
-    project's own. Rules are ordered and the last match wins, so the project
-    layer outranks the global one - OpenCode's own precedence, and the same two
+) -> tuple[ModeRules, str]:
+    """Read the effective permission ruleset - one per MODE - off the machine the
+    project is on: that machine's global permissions.json, then the project's
+    own, each file contributing its shared ``permission`` block and its
+    ``agent.<mode>.permission`` block, with the built-in defaults and the mode's
+    overlay layered in by :func:`build_mode_rules`. Rules are ordered and the
+    last match wins, so the project layer outranks the global one and a per-mode
+    rule outranks a shared one - OpenCode's own precedence, and the same two
     layers :func:`load_mcp_servers` reads.
 
-    An empty result is not "no opinion", it is the signal for legacy allowlist
-    mode (engine/approval.py), so a target with no permissions.json anywhere gets
-    exactly what a local machine with none gets: ``((), "")`` - the defaults
-    alone are never returned, because on their own they would silently replace
-    the allowlist gate with a ruleset nobody wrote.
+    There is no empty result: a target with no permissions.json anywhere gets the
+    shipped defaults, which are what a local machine with none gets too. The
+    second half of the pair is the SOURCE string, which stays "" when no user
+    file contributed a rule - that is what the UI reports as "running on the
+    defaults", and it is a statement about provenance, not about whether rules
+    are in force.
     """
     if not settings.enabled:
-        return (), ""
+        return default_mode_rules(), ""
     paths = [
         _expand_home(settings.permissions_config, home)
         if settings.permissions_config
@@ -865,21 +884,26 @@ def _load_permission_rules(
     if project_permissions_path(project_root) != paths[0]:
         paths.append(project_permissions_path(project_root))
 
-    rules: list[PermissionRule] = []
+    shared: list[PermissionRule] = []
+    per_mode: dict[str, list[PermissionRule]] = {mode: [] for mode in PERMISSION_MODES}
     sources: list[str] = []
+    def take(raw: object, into: list[PermissionRule], at: str, where: str) -> bool:
+        """One block -> rules appended to ``into``; True when it said anything."""
+        layer, rule_warnings = rules_from_config(raw)
+        warnings.extend(f"config: {at}: {where}{w}" for w in rule_warnings)
+        into.extend(layer)
+        return bool(layer)
+
     for path in paths:
-        block = _permission_block(path, warnings, host)
-        if block is None:
-            continue
-        layer, rule_warnings = rules_from_config(block)
-        warnings.extend(f"config: {_describe_path(path, host)}: {w}" for w in rule_warnings)
-        if not layer:
-            continue
-        rules.extend(layer)
-        sources.append(_describe_path(path, host))
-    if not rules:
-        return (), ""
-    return default_rules() + tuple(rules), ", ".join(sources)
+        block, agent_blocks = _permission_blocks(path, warnings, host)
+        described = _describe_path(path, host)
+        found = block is not None and take(block, shared, described, "")
+        for mode in PERMISSION_MODES:
+            if mode in agent_blocks:
+                found = take(agent_blocks[mode], per_mode[mode], described, f"agent.{mode}: ") or found
+        if found:
+            sources.append(described)
+    return build_mode_rules(shared, per_mode), ", ".join(sources)
 
 
 def _mcp_target(
@@ -1109,13 +1133,15 @@ def load_config(
         warnings.append(f"config: unknown gui theme {gui_theme!r}; using {DEFAULT_GUI_THEME!r}")
         gui_theme = DEFAULT_GUI_THEME
 
-    # A misspelt permission mode must not silently arm a session that never asks:
-    # anything unreadable falls back to "ask" and says so.
-    mode = _take_str(approval_t, "mode", "ask", "approval", warnings)
+    # A misspelt permission mode must not silently arm a session under rules
+    # nobody chose: anything unreadable falls back to "build" and says so. There
+    # is no migration table - a word this does not know is a word this does not
+    # know, whether it is a typo or a mode that no longer exists.
+    mode = _take_str(approval_t, "mode", "build", "approval", warnings)
     if normalize_mode(mode) is None:
         modes = ", ".join(PERMISSION_MODES)
-        warnings.append(f"config: unknown approval mode {mode!r}; using 'ask' (one of: {modes})")
-        mode = "ask"
+        warnings.append(f"config: unknown approval mode {mode!r}; using 'build' (one of: {modes})")
+        mode = "build"
 
     permission = PermissionConfig(
         enabled=_take_bool(permission_t, "enabled", True, "permission", warnings),
@@ -1180,9 +1206,7 @@ def load_config(
             auto_accept_edits=_take_bool(approval_t, "auto_accept_edits", False, "approval", warnings),
             yolo=_take_bool(approval_t, "yolo", False, "approval", warnings),
             mode=mode,
-            command_allowlist=_take_str_list(
-                approval_t, "command_allowlist", DEFAULT_ALLOWLIST, "approval", warnings
-            ),
+            unattended=_take_bool(approval_t, "unattended", False, "approval", warnings),
             command_deny_tokens=_take_str_list(
                 approval_t, "command_deny_tokens", DEFAULT_DENY_TOKENS, "approval", warnings
             ),

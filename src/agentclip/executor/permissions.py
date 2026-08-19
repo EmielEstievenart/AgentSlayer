@@ -23,9 +23,21 @@ Two decisions carry the whole design and are ported verbatim:
   then carve exceptions below it, and what lets the session's own remembered
   rules (appended last) outrank the file.
 
-What is NOT ported: OpenCode's per-agent permission blocks (they name OpenCode
-agents, which have no AgentClip equivalent) and its tree-sitter shell parsing
-(see engine/approval.py's deny-token backstop, which stands in for it).
+OpenCode's PER-AGENT permission blocks are ported too, restricted to the two
+primary agents AgentClip has an equivalent of: `build` and `plan` are its
+permission MODES (see PermissionMode), and a mode's effective ruleset is built
+close to the way OpenCode builds an agent's - see :func:`build_mode_rules`,
+whose docstring gives the layer order and the one place it deliberately differs.
+Later still wins, so a rule written for `plan` can deliberately loosen what the
+overlay denies.
+
+This ruleset IS the permission system. There is no second gate behind it: an
+install with no permissions.json runs on :data:`DEFAULT_CONFIG`, which is also
+exactly what a config reset writes, so "the defaults" is a document a user can
+read rather than behaviour they have to infer.
+
+What is NOT ported: OpenCode's tree-sitter shell parsing (see
+engine/approval.py's deny-token backstop, which stands in for it).
 """
 
 from __future__ import annotations
@@ -35,7 +47,7 @@ import os
 import re
 import shlex
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -45,28 +57,35 @@ ACTIONS: frozenset[str] = frozenset({"allow", "ask", "deny"})
 
 # -- the session's permission mode --------------------------------------------
 
-# NOT one of OpenCode's concepts: the mode is AgentClip's own session-scoped dial
-# ABOVE the ruleset, and it lives here for this module's founding reason - it is
-# read where config lives and applied where the verdict is made, and a leaf both
+# OpenCode's PRIMARY AGENTS, under their own names: `build` executes, `plan`
+# explores. They live here for this module's founding reason - the mode is read
+# where config lives and applied where the verdict is made, and a leaf both
 # sides already import is the only place that can be true of.
 #
-#   ask         today's behaviour, in both modes. The default.
-#   plan        exploration only: every `edit`/`command` call is auto-denied.
-#               Read-only tools behave exactly as under "ask" (rules included) -
-#               plan never LOOSENS anything.
-#   unattended  the user is away: allow rules still run, deny rules still deny,
-#               and anything that would have opened a gate is auto-denied
-#               instead, because there is nobody there to answer it.
-PermissionMode = Literal["plan", "ask", "unattended"]
+#   build  the default builder. Whatever the ruleset says, nothing more.
+#   plan   exploration only: the built-in overlay below denies everything that
+#          could change something (see MODE_PERMISSIONS).
+#
+# A mode is no longer a dial ABOVE the rules: it IS a ruleset, built by layering
+# its overlay into the user's own (see ModeRules). "The user is away" is not a
+# mode at all any more - it is the `unattended` toggle on ApprovalPolicy, which
+# answers gates rather than changing what the rules say.
+PermissionMode = Literal["build", "plan"]
 
-# Cycle order (`/mode` with no argument, and the TUI's Shift+Tab): the harmless
-# one first, then the two that change what a turn may do.
-PERMISSION_MODES: tuple[PermissionMode, ...] = ("ask", "plan", "unattended")
+# Cycle order (`/mode` with no argument, and the TUI's Shift+Tab): the default
+# first, so a stray keypress lands back on the mode that works.
+PERMISSION_MODES: tuple[PermissionMode, ...] = ("build", "plan")
 
 
 def normalize_mode(value: object) -> PermissionMode | None:
     """``value`` as a permission mode, or None if it is not one. Case- and
-    space-insensitive, because it arrives from a config file and a chat box."""
+    space-insensitive, because it arrives from a config file and a chat box.
+
+    Nothing else is accepted - there is no migration table for the modes this
+    replaced. An unreadable value falls back to `build` where it is read
+    (config.py warns), which is the only sound answer: a mode is a ruleset, and
+    guessing which ruleset a stale word meant would silently run a session under
+    permissions nobody chose."""
     if not isinstance(value, str):
         return None
     wanted = value.strip().lower()
@@ -212,24 +231,167 @@ def rules_from_config(obj: object) -> tuple[tuple[PermissionRule, ...], tuple[st
     return tuple(rules), tuple(warnings)
 
 
-# OpenCode's engine defaults, trimmed to the keys AgentClip has. Loaded BEFORE
-# the user's rules so anything they write outranks these (last match wins).
-DEFAULT_PERMISSIONS: dict[str, object] = {
-    "*": "allow",
-    "read": {"*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow"},
-    # LAST on purpose (dict order is rule order, and the last match wins): without
-    # this rule the built-in "*": "allow" above would silently auto-approve EVERY
-    # MCP call in ruleset mode - the one outcome docs/design/mcp.md section 4 must
-    # make impossible, since an MCP tool can do anything. A user's own `mcp` rules
-    # load after the defaults, so they still override this (yolo may answer the
-    # ask; an explicit user deny still wins).
-    "mcp": "ask",
+# THE default permissions document - one object, two jobs. It is what governs an
+# install with no permissions.json anywhere, and it is what `/config` serialises
+# into a fresh one (config.default_permissions_document), so those two can never
+# drift: creating the file writes down exactly what was already in force, and a
+# user reading the file they just got is reading the rules they were running
+# under a moment earlier.
+#
+# There is deliberately NO "*" key. An unlisted permission falls through to
+# evaluate()'s implicit "ask", which is the answer a permission system must give
+# about something nobody has decided; a blanket allow at the bottom would silently
+# cover every tool added after this file was written.
+#
+# `mcp` asks rather than allows because an MCP tool can do anything
+# (docs/design/mcp.md section 4), and `task` asks because a delegation is a second
+# actor doing the same.
+DEFAULT_CONFIG: dict[str, object] = {
+    "permission": {
+        # The dotenv carve-out, in OpenCode's own shape: reading source is free,
+        # reading secrets is not.
+        "read": {"*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow"},
+        "list": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "skill": "allow",
+        # The MCP metadata listing, which reads the connect-time cache and
+        # touches no server (docs/design/mcp.md section 4). Its own key rather
+        # than `mcp`'s, so it stays cheap where `mcp` itself is locked down.
+        "mcp_schema": "allow",
+        "edit": "ask",
+        "task": "ask",
+        "mcp": "ask",
+        "bash": {
+            "*": "ask",
+            "git status *": "allow",
+            "git diff *": "allow",
+            "git log *": "allow",
+            "ls *": "allow",
+            "dir *": "allow",
+        },
+    },
+    # The default PER-MODE blocks, layered over the built-in overlay below. Plan's
+    # exists to buy back the two read-only git commands the overlay's blanket
+    # `bash: deny` would otherwise take away - which is also the worked example of
+    # how a user loosens plan mode deliberately.
+    "agent": {
+        "plan": {"permission": {"bash": {"git status *": "allow", "git diff *": "allow"}}},
+        "build": {"permission": {}},
+    },
 }
 
 
 def default_rules() -> tuple[PermissionRule, ...]:
-    rules, _ = rules_from_config(DEFAULT_PERMISSIONS)
+    """The shared `permission` block of :data:`DEFAULT_CONFIG`."""
+    rules, _ = rules_from_config(DEFAULT_CONFIG["permission"])
     return rules
+
+
+def default_agent_rules(mode: PermissionMode) -> tuple[PermissionRule, ...]:
+    """The default `agent.<mode>.permission` block of :data:`DEFAULT_CONFIG`."""
+    agents = DEFAULT_CONFIG["agent"]
+    assert isinstance(agents, dict)
+    block = agents.get(mode) or {}
+    rules, _ = rules_from_config(block.get("permission", {}))
+    return rules
+
+
+# The built-in overlay each mode adds on top of those shared defaults - OpenCode's
+# per-agent overlay, in AgentClip's vocabulary.
+#
+# `plan` denies everything that could CHANGE something, by permission key rather
+# than by tool: `edit` covers every write/delete (and any unknown edit-kind tool,
+# which permission_target maps onto that key), `bash` every command line, `mcp`
+# every MCP call - an MCP tool can do anything - and `task` delegation, because a
+# sub-agent is a second actor that would not be in plan mode's ruleset if this
+# key were missing. Reads, listings, globs, greps and skills are untouched, so
+# they behave exactly as they do in `build`.
+#
+# `build` adds nothing: it IS the ruleset the user wrote.
+MODE_PERMISSIONS: dict[PermissionMode, dict[str, object]] = {
+    "build": {},
+    "plan": {"edit": "deny", "bash": "deny", "mcp": "deny", "task": "deny"},
+}
+
+
+def mode_rules(mode: PermissionMode) -> tuple[PermissionRule, ...]:
+    rules, _ = rules_from_config(MODE_PERMISSIONS[mode])
+    return rules
+
+
+@dataclass(frozen=True, slots=True)
+class ModeRules:
+    """One effective ruleset per permission mode - what a session actually runs.
+
+    Never empty in practice: the built-in defaults and the mode overlay are
+    always layered underneath whatever the user wrote, because the ruleset IS the
+    permission system - there is no second gate behind it to fall back on.
+
+    One field per mode rather than a mapping: `build` is read on its own by the
+    deny_plan check (would this call have been denied anyway?), so the pair is
+    not interchangeable and the type should say so.
+    """
+
+    build: tuple[PermissionRule, ...] = ()
+    plan: tuple[PermissionRule, ...] = ()
+
+    def for_mode(self, mode: PermissionMode) -> tuple[PermissionRule, ...]:
+        return self.plan if mode == "plan" else self.build
+
+    def __bool__(self) -> bool:
+        return bool(self.build or self.plan)
+
+
+def build_mode_rules(
+    shared: Sequence[PermissionRule],
+    per_mode: Mapping[str, Sequence[PermissionRule]] | None = None,
+) -> ModeRules:
+    """Layer a config's rules into one ruleset per mode:
+
+        DEFAULT_CONFIG's `permission` block
+        -> the user's shared `permission` block
+        -> the mode's built-in overlay (MODE_PERMISSIONS)
+        -> DEFAULT_CONFIG's `agent.<mode>.permission` block
+        -> the user's `agent.<mode>.permission` block
+
+    Last match wins, so each layer may overturn the one before it. ``shared`` and
+    each ``per_mode`` entry are already in file order, global layer before
+    project layer.
+
+    Two properties fall out of that order, and both are the point:
+
+    * a config with no permissions.json anywhere evaluates IDENTICALLY to one
+      whose file was just created by `/config`. That file IS DEFAULT_CONFIG, so
+      its blocks arrive a second time immediately after the built-in copies of
+      themselves - and a layer repeated next to itself cannot change a
+      last-match-wins answer;
+    * the overlay outranks the block written for EVERY mode, and is outranked
+      only by the block written FOR that mode. OpenCode merges the agent overlay
+      before the user's shared block instead, which means a config saying
+      ``{"edit": "allow"}`` switches plan mode's denials back off by accident -
+      and would make DEFAULT_CONFIG's own `agent.plan` block dead weight. Here
+      loosening plan mode is still possible and still OpenCode-shaped; it just
+      has to be said under `agent.plan`, where it is unmistakably meant.
+    """
+
+    blocks = per_mode or {}
+
+    def layer(mode: PermissionMode) -> tuple[PermissionRule, ...]:
+        return (
+            default_rules()
+            + tuple(shared)
+            + mode_rules(mode)
+            + default_agent_rules(mode)
+            + tuple(blocks.get(mode, ()))
+        )
+
+    return ModeRules(build=layer("build"), plan=layer("plan"))
+
+
+def default_mode_rules() -> ModeRules:
+    """What governs a session with no permissions.json anywhere."""
+    return build_mode_rules(())
 
 
 # -- tools -> (permission key, resource) --------------------------------------
@@ -370,17 +532,23 @@ __all__ = [
     "ACTIONS",
     "ARITY",
     "Action",
-    "DEFAULT_PERMISSIONS",
+    "DEFAULT_CONFIG",
+    "MODE_PERMISSIONS",
     "PERMISSION_MODES",
+    "ModeRules",
     "PermissionMode",
     "PermissionRule",
     "TOOL_PERMISSIONS",
     "always_pattern",
+    "build_mode_rules",
     "case_insensitive",
+    "default_agent_rules",
+    "default_mode_rules",
     "default_rules",
     "evaluate",
     "expand",
     "matching_rules",
+    "mode_rules",
     "normalize_mode",
     "permission_target",
     "rules_from_config",

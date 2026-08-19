@@ -15,6 +15,7 @@ from pathlib import Path
 
 import agentclip.config
 from agentclip.config import Config, project_permissions_path
+from agentclip.executor.permissions import DEFAULT_CONFIG
 from agentclip.shell.app.commands import (
     COMMANDS,
     ChatCommand,
@@ -55,7 +56,7 @@ def test_the_registry_is_the_documented_commands() -> None:
         "yolo",
     ]
     assert lookup("yolo") is not None and lookup("yolo").arg == "[on|off]"  # type: ignore[union-attr]
-    assert lookup("mode") is not None and lookup("mode").arg == "[plan|ask|unattended]"  # type: ignore[union-attr]
+    assert lookup("mode") is not None and lookup("mode").arg == "[plan|build]"  # type: ignore[union-attr]
     assert all(command.summary for command in COMMANDS)
 
 
@@ -344,14 +345,14 @@ async def test_mode_reads_the_word_the_user_typed(
 ) -> None:
     await start_session(controller, view)
 
-    controller.submit_message("/mode UNATTENDED")
+    controller.submit_message("/mode PLAN")
     await settle(view)
 
-    assert controller.permission_mode == "unattended"
-    assert any("nothing will ask you" in note for note in view.notes())
+    assert controller.permission_mode == "plan"
+    assert any("exploration only" in note for note in view.notes())
 
 
-async def test_switching_to_unattended_under_yolo_says_which_one_wins(
+async def test_switching_unattended_on_under_yolo_says_which_one_wins(
     controller: SessionController, view: FakeChatView
 ) -> None:
     """The two settings pull opposite ways - YOLO still auto-APPROVES the calls
@@ -360,7 +361,7 @@ async def test_switching_to_unattended_under_yolo_says_which_one_wins(
     controller.submit_message("/yolo on")
     await settle(view)
 
-    controller.submit_message("/mode unattended")
+    controller.set_unattended(True)
     await settle(view)
 
     assert any("CAUTION: YOLO is ON" in note for note in view.notes())
@@ -369,7 +370,7 @@ async def test_switching_to_unattended_under_yolo_says_which_one_wins(
 async def test_bare_mode_reports_rather_than_cycles(
     controller: SessionController, view: FakeChatView
 ) -> None:
-    """Three states, so "the next one" is not a thing a user can aim at blind."""
+    """A named state is not a thing a user can aim at blind by cycling."""
     await start_session(controller, view)
     controller.submit_message("/mode plan")
     await settle(view)
@@ -383,19 +384,19 @@ async def test_bare_mode_reports_rather_than_cycles(
     assert any("permission mode: plan" in message for message in view.toasts())
 
 
-async def test_cycle_walks_ask_plan_unattended_and_back(
+async def test_cycle_walks_build_plan_and_back(
     controller: SessionController, view: FakeChatView
 ) -> None:
     """What the TUI's mode key calls. The order is the registry's, so the two
     front-ends cannot disagree about what "next" means."""
     await start_session(controller, view)
     seen = [controller.permission_mode]
-    for _ in range(3):
+    for _ in range(2):
         controller.cycle_permission_mode()
         await settle(view)
         seen.append(controller.permission_mode)
 
-    assert seen == ["ask", "plan", "unattended", "ask"]
+    assert seen == ["build", "plan", "build"]
 
 
 async def test_an_unparseable_mode_changes_nothing_and_says_so(
@@ -406,8 +407,8 @@ async def test_an_unparseable_mode_changes_nothing_and_says_so(
     controller.submit_message("/mode planning")
     await settle(view)
 
-    assert controller.permission_mode == "ask"
-    assert any("usage: /mode [ask|plan|unattended]" in message for message in view.toasts())
+    assert controller.permission_mode == "build"
+    assert any("usage: /mode [build|plan]" in message for message in view.toasts())
 
 
 # -- the mode before, between and across sessions --------------------------------
@@ -442,21 +443,21 @@ async def test_cycling_works_before_any_session_exists(
     """What shift+tab at the start prompt does. Not a no-op: the cycle is how a
     user arms plan mode for the session they are about to describe."""
     seen = [controller.permission_mode]
-    for _ in range(3):
+    for _ in range(2):
         controller.cycle_permission_mode()
         await settle(view)
         seen.append(controller.permission_mode)
 
-    assert seen == ["ask", "plan", "unattended", "ask"]
+    assert seen == ["build", "plan", "build"]
 
 
 async def test_mode_command_works_before_any_session_exists(
     controller: SessionController, view: FakeChatView
 ) -> None:
-    controller.submit_message("/mode unattended")
+    controller.submit_message("/mode plan")
     await settle(view)
 
-    assert controller.permission_mode == "unattended"
+    assert controller.permission_mode == "plan"
     assert not any("start a session" in message for message in view.toasts())
 
 
@@ -516,6 +517,59 @@ async def test_the_mode_survives_a_new_session(
 
     assert controller.permission_mode == "plan"
     assert controller._snap is not None and controller._snap.mode == "plan"
+
+
+# -- the unattended switch -------------------------------------------------------
+# The mode's twin, and scoped like it rather than like YOLO: "I have stepped
+# away" is a statement about the USER, so it can be thrown before a session
+# exists, it survives /new, and it reaches every engine the app builds.
+
+
+async def test_unattended_can_be_armed_before_any_session_exists(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    pushes = len(view.states)
+
+    controller.set_unattended(True)
+    await settle(view)
+
+    assert controller.unattended is True
+    assert controller._link is None
+    assert any("UNATTENDED ON" in note for note in view.notes())
+    assert len(view.states) > pushes
+
+
+async def test_unattended_reaches_the_engine_and_survives_a_new_session(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    await start_session(controller, view)
+    controller.set_unattended(True)
+    await wait_for(lambda: controller.unattended, "unattended armed")
+    await settle(view)
+    assert controller._snap is not None and controller._snap.unattended is True
+
+    view.specs.append(SessionSpec(task="A second task.", service="claude"))
+    assert controller.request_new_session() is True
+    await wait_for(lambda: view.cleared > 0, "the session was reset")
+    await settle(view)
+
+    assert controller.unattended is True
+    assert controller._snap is not None and controller._snap.unattended is True
+
+
+async def test_turning_unattended_off_says_the_gates_are_back(
+    controller: SessionController, view: FakeChatView
+) -> None:
+    await start_session(controller, view)
+    controller.set_unattended(True)
+    await wait_for(lambda: controller.unattended, "unattended armed")
+
+    controller.set_unattended(False)
+    await wait_for(lambda: not controller.unattended, "unattended cleared")
+    await settle(view)
+
+    assert any("UNATTENDED OFF" in note for note in view.notes())
+    assert controller._snap is not None and controller._snap.unattended is False
 
 
 # -- /yolo -----------------------------------------------------------------------
@@ -761,13 +815,14 @@ async def test_bare_config_reports_both_layers_without_creating_anything(
 async def test_config_local_creates_the_project_file_and_parks_its_path(
     controller: SessionController, view: FakeChatView, project: Path
 ) -> None:
-    """The template is the two blocks the loader reads, so the editor the user
-    opens next shows the shape of the answer rather than a blank page."""
+    """The template is the rules that were already in force plus the `mcp` block,
+    so the editor the user opens next shows a working example of every key rather
+    than a blank page - and creating the file changes nothing about the session."""
     controller.submit_message("/config local")
     await settle(view)
 
     path = project_permissions_path(project)
-    assert json.loads(path.read_text(encoding="utf-8")) == {"permission": {}, "mcp": {}}
+    assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": {}}
     assert path.read_text(encoding="utf-8").endswith("\n")
     assert view.parked == [str(path)]
     assert view.copied == []  # parked, never delivered: nothing is pasted anywhere
@@ -787,7 +842,7 @@ async def test_config_global_creates_the_file_beside_the_config_toml(
     controller.submit_message("/config global")
     await settle(view)
 
-    assert json.loads(path.read_text(encoding="utf-8")) == {"permission": {}, "mcp": {}}
+    assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": {}}
     assert view.parked == [str(path)]
 
 

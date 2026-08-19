@@ -94,7 +94,8 @@ def _status() -> StatusSnapshot:
         budget_chars=12_000,
         auto_accept_edits=True,
         yolo=False,
-        mode="ask",
+        mode="build",
+        unattended=True,
         session_dir=Path("/home/emiel/proj/.agentclip/sessions/2026-08-18T10-00-00"),
         last_outbound_chars=3_140,
         has_extra_instructions=True,
@@ -187,6 +188,7 @@ def test_every_phase_survives(phase: Phase) -> None:
         auto_accept_edits=False,
         yolo=False,
         mode="plan",
+        unattended=False,
         session_dir=Path("/tmp/x"),
         last_outbound_chars=0,
     )
@@ -203,6 +205,7 @@ def test_every_permission_mode_survives(mode: PermissionMode) -> None:
         auto_accept_edits=False,
         yolo=True,
         mode=mode,
+        unattended=False,
         session_dir=Path("C:/Users/x/proj"),
         last_outbound_chars=0,
     )
@@ -355,7 +358,8 @@ _PARAM_CASES: dict[str, dict[str, object]] = {
     "undo_last_turn": {"compose_notice": False},
     "status": {},
     "set_yolo": {"enabled": True},
-    "set_permission_mode": {"mode": "unattended"},
+    "set_permission_mode": {"mode": "plan"},
+    "set_unattended": {"enabled": True},
     "arm_extra_instructions": {},
 }
 
@@ -420,6 +424,7 @@ _RESULT_CASES: dict[str, object] = {
     "status": _status(),
     "set_yolo": True,
     "set_permission_mode": "plan",
+    "set_unattended": False,
     "arm_extra_instructions": "no-instructions",
 }
 

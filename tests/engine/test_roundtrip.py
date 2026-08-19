@@ -10,6 +10,8 @@ import pytest
 from agentclip.engine.engine import Done, Engine, NewTurn, Send
 from agentclip.engine.states import Decision, EngineStateError, Phase
 
+from ..conftest import write_permissions
+
 
 def _utils_py(project: Path) -> str:
     return (project / "src" / "utils.py").read_text(encoding="utf-8")
@@ -68,9 +70,7 @@ EOT
 
 
 def test_full_roundtrip(project: Path, make_engine) -> None:
-    (project / ".agentclip.toml").write_text(
-        '[approval]\ncommand_allowlist = ["python -c*"]\n', encoding="utf-8"
-    )
+    write_permissions(project, {"permission": {"bash": {"python -c*": "allow"}}})
     engine = make_engine()
     llm = ScriptedLLM(
         [
@@ -86,7 +86,8 @@ def test_full_roundtrip(project: Path, make_engine) -> None:
     assert isinstance(result, NewTurn)
     assert [c.tool for c in result.reply.calls] == ["read_file", "edit_file", "run_command"]
 
-    # Only the edit gates: read_file is auto, the command matched "python -c*".
+    # Only the edit gates: read_file is allowed by the shipped defaults, and the
+    # command by this project's own "python -c*" rule.
     pend = engine.pending()
     assert [p.call.id for p in pend] == [2]
     assert pend[0].kind == "edit"
@@ -153,7 +154,8 @@ def test_rejection_aborts_rest_of_turn(project: Path, engine: Engine) -> None:
     original = _utils_py(project)
     engine.start_task("t")
     assert isinstance(engine.ingest(REPLY_REJECTION_TURN), NewTurn)
-    assert [p.call.id for p in engine.pending()] == [1, 2]
+    # Two edits and a command: the shipped defaults ask about all three.
+    assert [p.call.id for p in engine.pending()] == [1, 2, 3]
 
     engine.decide(1, Decision.REJECT, note="wrong approach, keep the parser")
     assert engine.pending() == ()  # the other gated call was aborted with the turn

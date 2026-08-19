@@ -462,8 +462,8 @@ class _Server:
         answer: dict[str, Any]
         try:
             kwargs = decode_params(method, call.params)
-            # Safe because `method` came through _DISPATCHABLE: one of the 13
-            # names wire.SESSION_METHODS lists, never an arbitrary string.
+            # Safe because `method` came through _DISPATCHABLE: one of the names
+            # wire.SESSION_METHODS lists, never an arbitrary string.
             value = getattr(session.engine, method)(**kwargs)
             # By the time this line runs, every progress/output frame this call
             # produced has already been written AND flushed - the hooks fired

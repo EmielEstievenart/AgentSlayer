@@ -17,9 +17,12 @@ import pytest
 
 from agentclip.executor import permissions
 from agentclip.executor.permissions import (
+    DEFAULT_CONFIG,
     TOOL_PERMISSIONS,
     PermissionRule,
     always_pattern,
+    build_mode_rules,
+    default_mode_rules,
     default_rules,
     evaluate,
     expand,
@@ -209,7 +212,10 @@ def test_defaults_ask_about_dotenv_but_allow_its_example(case_sensitive: None) -
     assert evaluate("read", ".env.local", rules).action == "ask"
     assert evaluate("read", ".env.example", rules).action == "allow"
     assert evaluate("read", "src/utils.py", rules).action == "allow"
-    assert evaluate("bash", "rm -rf /", rules).action == "allow"  # a user config narrows this
+    # ...and nothing in the defaults hands out a shell: the read-only git and
+    # listing prefixes are the only bash allows there are.
+    assert evaluate("bash", "rm -rf /", rules).action == "ask"
+    assert evaluate("bash", "git status --short", rules).action == "allow"
 
 
 # -- tool mapping and the always pattern --------------------------------------
@@ -279,15 +285,16 @@ def test_mcp_schema_takes_the_unknown_tool_fallback_on_purpose() -> None:
 
 
 def test_the_defaults_ask_before_every_mcp_call(case_sensitive: None) -> None:
-    """The rule that must come LAST in DEFAULT_PERMISSIONS: without it the
-    built-in "*": "allow" above it would silently auto-approve every MCP call in
-    ruleset mode - the one outcome docs/design/mcp.md must make impossible."""
+    """An MCP tool can do anything, so no default may auto-approve one - the
+    outcome docs/design/mcp.md must make impossible. The cache-only metadata
+    listing is the one exception, and it has a key of its own."""
     rules = default_rules()
     assert evaluate("mcp", "anything_at_all", rules).action == "ask"
     assert evaluate("mcp", "github_create_issue", rules).action == "ask"
-    # ...while the blanket allow still stands for every other key.
-    assert evaluate("bash", "ls", rules).action == "allow"
-    assert evaluate("edit", "src/utils.py", rules).action == "allow"
+    assert evaluate("mcp_schema", "*", rules).action == "allow"
+    # Edits ask too: nothing that changes a file runs unasked out of the box.
+    assert evaluate("edit", "src/utils.py", rules).action == "ask"
+    assert evaluate("bash", "ls src", rules).action == "allow"
 
 
 def test_a_user_mcp_rule_still_outranks_the_default_ask(case_sensitive: None) -> None:
@@ -307,3 +314,79 @@ def test_always_pattern_for_mcp_is_the_exact_tool_id() -> None:
     # contrast: every other non-bash key remembers the key, and bash the arity.
     assert always_pattern("edit", "src/utils.py") == "*"
     assert always_pattern("bash", "git commit -m 'wip'") == "git commit *"
+
+
+# -- the shipped defaults and the per-mode layering ----------------------------
+
+
+def test_the_defaults_never_allow_anything_that_changes_something(
+    case_sensitive: None,
+) -> None:
+    """Out of the box, reading is free and changing is not: `build` still asks
+    about every edit, command, delegation and MCP call it has no rule for."""
+    rules = default_mode_rules().build
+    for key in ("edit", "task", "mcp"):
+        assert evaluate(key, "anything", rules).action == "ask"
+    assert evaluate("bash", "rm -rf /", rules).action == "ask"
+    for key in ("read", "list", "glob", "grep", "skill"):
+        assert evaluate(key, "src/a.py", rules).action == "allow"
+
+
+def test_plans_default_ruleset_denies_everything_that_changes_something(
+    case_sensitive: None,
+) -> None:
+    """The overlay, buying back only the two read-only git commands the default
+    `agent.plan` block names."""
+    rules = default_mode_rules().plan
+    for key in ("edit", "mcp", "task"):
+        assert evaluate(key, "anything", rules).action == "deny"
+    assert evaluate("bash", "git log --oneline", rules).action == "deny"
+    assert evaluate("bash", "git status --short", rules).action == "allow"
+    assert evaluate("bash", "git diff HEAD", rules).action == "allow"
+    assert evaluate("read", "src/a.py", rules).action == "allow"
+
+
+def test_a_reset_config_evaluates_exactly_like_no_config_at_all(
+    case_sensitive: None,
+) -> None:
+    """The promise DEFAULT_CONFIG makes by being ONE object: what `/config reset`
+    writes into a file is what was already in force, so a user who resets sees no
+    behaviour change - only a document they can now edit."""
+    written = json.loads(json.dumps(DEFAULT_CONFIG))  # as it would be serialised
+    shared, warnings = rules_from_config(written["permission"])
+    assert not warnings
+    per_mode = {
+        mode: rules_from_config(block["permission"])[0]
+        for mode, block in written["agent"].items()
+    }
+    as_reset = build_mode_rules(shared, per_mode)
+    as_shipped = default_mode_rules()
+
+    probes = [
+        (key, resource)
+        for key in ("read", "list", "glob", "grep", "skill", "edit", "task", "mcp", "bash")
+        for resource in ("src/a.py", ".env", "git status --short", "git log -1", "rm -rf /", "ls")
+    ]
+    for key, resource in probes:
+        for shipped, reset in ((as_shipped.build, as_reset.build), (as_shipped.plan, as_reset.plan)):
+            assert evaluate(key, resource, shipped).action == evaluate(key, resource, reset).action, (
+                key,
+                resource,
+            )
+
+
+def test_a_user_block_cannot_switch_plan_mode_off_by_accident(
+    case_sensitive: None,
+) -> None:
+    """A blanket allow written for every mode does NOT reopen plan mode: the
+    overlay is layered over the shared block. Saying it under `agent.plan` does,
+    which is the difference between an accident and a decision."""
+    shared, _ = rules_from_config({"edit": "allow", "bash": "allow"})
+    by_mode = build_mode_rules(shared)
+    assert evaluate("edit", "src/a.py", by_mode.build).action == "allow"
+    assert evaluate("edit", "src/a.py", by_mode.plan).action == "deny"
+
+    deliberate, _ = rules_from_config({"edit": {"docs/plan.md": "allow"}})
+    by_mode = build_mode_rules(shared, {"plan": deliberate})
+    assert evaluate("edit", "docs/plan.md", by_mode.plan).action == "allow"
+    assert evaluate("edit", "src/a.py", by_mode.plan).action == "deny"

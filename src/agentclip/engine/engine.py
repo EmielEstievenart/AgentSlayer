@@ -33,14 +33,18 @@ from pathlib import Path
 from typing import Literal
 
 from agentclip.config import Config
-from agentclip.engine.approval import DENY_VERDICTS, ApprovalPolicy, PermissionMode
+from agentclip.engine.approval import (
+    DENY_VERDICTS,
+    EDITS_RULE,
+    ApprovalPolicy,
+    PermissionMode,
+)
 from agentclip.engine.results import fit_results
 from agentclip.engine.states import Decision, EngineStateError, Phase, can_transition
 from agentclip.engine.store.backups import BackupStore, UndoReport
 from agentclip.engine.store.session import SessionStore
 from agentclip.executor.hosts.base import Host
 from agentclip.executor.hosts.local import LocalHost
-from agentclip.executor.permissions import PermissionRule
 from agentclip.executor.tools.registry import ToolContext, ToolRegistry, ToolSpec, error_result
 from agentclip.executor.tools.sandbox import Workspace
 from agentclip.protocol.composer import BudgetExceeded, Composer
@@ -105,11 +109,19 @@ _FLATTENED_QUOTE_CHARS = 160
 # everything a model needs even if this note never gets a payload to ride.
 _MODE_NOTES: dict[str, str] = {
     "plan": "permission mode is now plan: exploration only; edit/command calls will be denied.",
-    "unattended": (
-        "permission mode is now unattended: only calls covered by allow rules will run;"
-        " everything else is auto-denied."
+    "build": "permission mode is now build: normal approvals resumed.",
+}
+
+# The same channel, for the unattended toggle. It shares the single pending-note
+# slot with the mode notes: the latest thing the user did is the thing the model
+# needs to know, and two notes racing for one payload would only ever read as
+# one instruction contradicting another.
+_UNATTENDED_NOTES: dict[bool, str] = {
+    True: (
+        "the user has stepped away (unattended): only calls covered by allow rules will"
+        " run; everything that would have asked them is auto-denied."
     ),
-    "ask": "permission mode is now ask: normal approvals resumed.",
+    False: "the user is back (unattended off): normal approvals resumed.",
 }
 
 # The prefix the re-injected `extra_instructions` ride under. Named as a
@@ -133,10 +145,9 @@ class PendingAction:
     call: ToolCall
     kind: Literal["edit", "command", "auto"]
     preview: str  # unified diff / command line / "" for auto
-    auto_reason: str | None  # e.g. 'matched "pytest*"' or "read-only tool"
-    # Ruleset mode only: the resource pattern an "always allow" answer would
-    # remember (e.g. "git commit *"). None means legacy mode, where the gate's
-    # third button is the edits-only APPROVE_ALL_EDITS instead.
+    auto_reason: str | None  # e.g. 'allowed by rule bash["git status *"]'
+    # The resource pattern an "always allow" answer would remember (e.g.
+    # "git commit *") - what the gate's third button offers to write down.
     always_pattern: str | None = None
 
 
@@ -176,7 +187,8 @@ class StatusSnapshot:
     budget_chars: int
     auto_accept_edits: bool
     yolo: bool  # auto-approve everything (edits + commands) - bypasses every gate
-    mode: PermissionMode  # ask | plan (no changes) | unattended (nothing gates)
+    mode: PermissionMode  # build (the ruleset as written) | plan (no changes)
+    unattended: bool  # nobody is at the keyboard: every gate auto-denies
     session_dir: Path
     last_outbound_chars: int
     # Does this session's preset carry extra_instructions at all, and has the
@@ -713,30 +725,16 @@ class Engine:
         self._log_decision(call_id, "approved", "user", note)
         if decision not in (Decision.APPROVE_ALL_EDITS, Decision.APPROVE_ALWAYS):
             return
-        if not self._policy.ruleset_mode:
-            # Legacy: one sticky flag, edits only. APPROVE_ALWAYS lands here too
-            # (a UI in ruleset mode talking to a legacy session) and means the
-            # same thing.
-            self._policy.auto_accept_edits = True
-            for other in self._plan:
-                if (
-                    other.needs_decision
-                    and other.decision is None
-                    and not other.aborted
-                    and other.action.kind == "edit"  # never commands
-                ):
-                    other.decision = Decision.APPROVE
-                    self._log_decision(other.call.id, "approved", "auto_edits", None)
-            return
-        # Ruleset mode: remember a rule instead of flipping a flag, then let it
-        # cascade - every other still-pending call the new rule now allows is
-        # approved without asking again (a turn full of edits takes one answer).
+        # Remember a rule, then let it cascade - every other still-pending call
+        # the new rule now allows is approved without asking again (a turn full
+        # of edits takes one answer). APPROVE_ALL_EDITS is the same mechanism
+        # with the pattern fixed: "every edit", rather than "calls like this one".
         assert planned.spec is not None
-        self._policy.remember(
-            PermissionRule("edit", "*", "allow")
-            if decision is Decision.APPROVE_ALL_EDITS
-            else self._policy.always_rule(planned.spec, planned.call)
-        )
+        if decision is Decision.APPROVE_ALL_EDITS:
+            self._policy.auto_accept_edits = True  # so the status bar can say so
+            self._policy.remember(EDITS_RULE)
+        else:
+            self._policy.remember(self._policy.always_rule(planned.spec, planned.call))
         for other in self._plan:
             if (
                 other.needs_decision
@@ -867,6 +865,7 @@ class Engine:
             auto_accept_edits=self._policy.auto_accept_edits,
             yolo=self._policy.yolo,
             mode=self._policy.mode,
+            unattended=self._policy.unattended,
             session_dir=self._session.session_dir,
             last_outbound_chars=self._last_outbound_chars,
             has_extra_instructions=bool(self._config.preset().extra_instructions.strip()),
@@ -875,20 +874,35 @@ class Engine:
 
     def set_yolo(self, enabled: bool) -> bool:
         """Toggle YOLO mode: auto-approve every tool call that would otherwise
-        ask - in legacy mode that is all of them (allowlist and deny tokens
-        included), in ruleset mode everything a rule does not explicitly DENY,
-        which stays refused. Session-scoped and legal in
-        any phase - it only flips the policy flag, so it never races the state
-        machine. It does not revisit decisions already made this turn; it governs
-        every plan built afterwards. Returns the new state."""
+        ask - everything a rule does not explicitly DENY, which stays refused.
+        Session-scoped and legal in any phase: it only flips the policy flag, so
+        it never races the state machine. It does not revisit decisions already
+        made this turn; it governs every plan built afterwards. Returns the new
+        state."""
         self._policy.yolo = enabled
         self._session.append_event("yolo", enabled=enabled)
         return enabled
 
+    def set_unattended(self, enabled: bool) -> bool:
+        """Toggle "nobody is at the keyboard": every call that would have opened
+        a gate is auto-denied instead, because a question nobody answers must not
+        become a silent yes. Allow rules still run and deny rules still deny.
+
+        set_yolo's shape, and set_permission_mode's note: legal in any phase, not
+        retroactive (a gate already pending stays pending), and announced to the
+        model on the next results payload unless the session has not started -
+        IDLE means this is simply the state the session BEGINS in, which is
+        nothing to announce. Returns the new state."""
+        self._policy.unattended = enabled
+        self._session.append_event("unattended", enabled=enabled)
+        if self._phase is not Phase.IDLE:
+            self._mode_note = _UNATTENDED_NOTES[enabled]
+        return enabled
+
     def set_permission_mode(self, mode: PermissionMode) -> PermissionMode:
-        """Set the session's permission mode: "ask" (today's gates), "plan"
-        (exploration only - every edit/command is denied) or "unattended" (the
-        user is away - allow rules still run, anything that would gate is denied).
+        """Set the session's permission mode: "build" (the default builder - the
+        ruleset exactly as the user wrote it) or "plan" (exploration only - the
+        built-in overlay denies every edit, command, MCP call and delegation).
 
         set_yolo's shape exactly, and for its reasons: legal in any phase because
         it only writes a policy field, and NOT retroactive - a gate already
@@ -961,11 +975,9 @@ class Engine:
                 )
                 continue
             # Intercepted by name during execution; never pending, never gated.
-            # `delegate` joins them only in legacy mode: with a ruleset loaded it
-            # answers to the `task` permission like any other tool.
-            if call.tool in ("ask_user", "task_done") or (
-                call.tool == "delegate" and not self._policy.ruleset_mode
-            ):
+            # `delegate` is NOT one of them: it answers to the `task` permission
+            # like any other tool.
+            if call.tool in ("ask_user", "task_done"):
                 plan.append(
                     _Planned(call, spec, PendingAction(call, "auto", "", "handled by AgentClip"))
                 )
@@ -998,8 +1010,8 @@ class Engine:
                 else call.params.get("command", "")
             )
             if not preview:
-                # A read-only tool can gate too once a ruleset governs the
-                # session, and it has no diff and no command line to show.
+                # A read-only tool can gate too - the rules decide, not the
+                # approval kind - and it has no diff and no command line to show.
                 _, resource = self._policy.target(spec, call)
                 preview = f"{call.tool} {resource}".rstrip()
             plan.append(
@@ -1011,11 +1023,7 @@ class Engine:
                         kind,
                         preview,
                         None,
-                        always_pattern=(
-                            self._policy.always_rule(spec, call).pattern
-                            if self._policy.ruleset_mode
-                            else None
-                        ),
+                        always_pattern=self._policy.always_rule(spec, call).pattern,
                     ),
                     needs_decision=True,
                 )
@@ -1032,7 +1040,7 @@ class Engine:
             return ("denied by plan mode", "plan", self._denied_by_plan_result(call))
         if verdict == "deny_unattended":
             return (
-                "auto-denied (unattended mode)",
+                "auto-denied (unattended)",
                 "unattended",
                 self._denied_unattended_result(spec, call),
             )
@@ -1055,22 +1063,17 @@ class Engine:
         )
 
     def _denied_unattended_result(self, spec: ToolSpec, call: ToolCall) -> ToolResult:
-        """Unattended mode's refusal: the gate this call would have opened had
-        nobody to answer it. The relevant rules ride along when a ruleset is
-        loaded (the rule-deny path's payload), because "which rules would have
-        let this through" is exactly what the model needs to keep working."""
-        rules = (
-            f"\nHere are some of the relevant rules {self._policy.denied_rules_json(spec, call)}"
-            if self._policy.ruleset_mode
-            else ""
-        )
+        """The unattended toggle's refusal: the gate this call would have opened
+        had nobody to answer it. The relevant rules ride along (the rule-deny
+        path's payload), because "which rules would have let this through" is
+        exactly what the model needs to keep working."""
         return ToolResult(
             call_id=call.id,
             status="denied",
             body=(
-                "auto-denied: the user is away (unattended mode) and this call is not"
-                " covered by an allow rule."
-                + rules
+                "auto-denied: the user is away (unattended is on) and this call is not"
+                " covered by an allow rule.\nHere are some of the relevant rules "
+                + self._policy.denied_rules_json(spec, call)
                 + "\nhint: do not retry unchanged; continue with calls that allow rules"
                 " cover, or finish with task_done and list what was blocked."
             ),
@@ -1093,22 +1096,13 @@ class Engine:
         )
 
     def _auto_reason(self, spec: ToolSpec, call: ToolCall) -> tuple[str, str]:
-        if self._policy.ruleset_mode:
-            # Which rule let it through is the audit trail's whole point here:
-            # "allowed" without the pattern is unreviewable.
-            rule = self._policy.rule_for(spec, call)
-            if rule.action == "allow":
-                return f'allowed by rule {rule.permission}["{rule.pattern}"]', "rule"
-            return "YOLO mode (auto-approve all)", "yolo"
-        if spec.approval_kind == "auto":
-            return "read-only tool", "auto"
-        # Edits and commands only reach here when something auto-approved them.
-        if self._policy.yolo:
-            return "YOLO mode (auto-approve all)", "yolo"
-        if spec.approval_kind == "command":
-            matched = self._policy.command_auto_allowed(call.params.get("command", ""))
-            return f'matched "{matched}"', "allowlist"
-        return "auto-accept edits enabled", "auto_edits"
+        # Which rule let it through is the audit trail's whole point here:
+        # "allowed" without the pattern is unreviewable. Anything reaching this
+        # line without an allow rule was answered by YOLO.
+        rule = self._policy.rule_for(spec, call)
+        if rule.action == "allow":
+            return f'allowed by rule {rule.permission}["{rule.pattern}"]', "rule"
+        return "YOLO mode (auto-approve all)", "yolo"
 
     def _parse_issue_result(self, call: ToolCall) -> ToolResult:
         fatal = [i for i in call.issues if i.kind in _FATAL_ISSUES]
@@ -1317,8 +1311,10 @@ class Engine:
         return Send(outbound)
 
     def _take_mode_note(self) -> list[str]:
-        """The pending permission-mode note, once - consumed as it is handed to a
-        payload, so the model is told a mode change exactly one time."""
+        """The pending permission note (a mode change or an unattended toggle),
+        once - consumed as it is handed to a payload, so the model is told about
+        a change exactly one time. One slot for both: the latest change is the
+        one that describes the session the model is about to act in."""
         if self._mode_note is None:
             return []
         note, self._mode_note = self._mode_note, None

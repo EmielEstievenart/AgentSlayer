@@ -16,6 +16,7 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 from agentclip.engine.engine import Done, Engine, NewTurn, Phase, Send
 from agentclip.executor.tools.registry import (
@@ -27,6 +28,8 @@ from agentclip.executor.tools.registry import (
     tool_handler,
 )
 from agentclip.protocol.types import ToolCall
+
+from ..conftest import write_permissions
 
 # The conftest make_engine fixture (its EngineFactory alias lives there, but
 # `tests` is not an importable package - so spell the callable out).
@@ -90,18 +93,22 @@ def _registry_with(extra: ToolSpec) -> ToolRegistry:
     return ToolRegistry([*specs, extra])
 
 
-def _armed_engine(make_engine: EngineFactory, extra: ToolSpec) -> Engine:
+def _armed_engine(project: Path, make_engine: EngineFactory, extra: ToolSpec) -> Engine:
+    # The stand-in tool is in no permission table, so it answers to its own name
+    # and would otherwise gate like anything nobody has decided about.
+    write_permissions(project, {"permission": {extra.name: "allow"}})
     engine = make_engine(tools=_registry_with(extra))
     engine.start_task("Do the slow thing.")
     return engine
 
 
 def test_cancel_interrupts_the_running_call_and_skips_the_rest(
+    project: Path,
     make_engine: EngineFactory,
 ) -> None:
     hold = threading.Event()
     spec, started = _slow_tool(hold)
-    engine = _armed_engine(make_engine, spec)
+    engine = _armed_engine(project, make_engine, spec)
     assert isinstance(engine.ingest(REPLY_SLOW_BATCH), NewTurn)
 
     with ThreadPoolExecutor(max_workers=1) as pool:
@@ -130,11 +137,11 @@ def test_cancel_interrupts_the_running_call_and_skips_the_rest(
     assert status.phase is Phase.AWAITING_REPLY  # armed for the model's answer
 
 
-def test_a_normal_run_after_a_cancelled_one(make_engine: EngineFactory) -> None:
+def test_a_normal_run_after_a_cancelled_one(project: Path, make_engine: EngineFactory) -> None:
     """The cancel flag is per-run: the next turn must execute untouched."""
     hold = threading.Event()
     spec, started = _slow_tool(hold)
-    engine = _armed_engine(make_engine, spec)
+    engine = _armed_engine(project, make_engine, spec)
     assert isinstance(engine.ingest(REPLY_SLOW_BATCH), NewTurn)
     with ThreadPoolExecutor(max_workers=1) as pool:
         running = pool.submit(engine.execute)
@@ -152,11 +159,11 @@ def test_a_normal_run_after_a_cancelled_one(make_engine: EngineFactory) -> None:
     assert "cancelled" not in payload
 
 
-def test_cancel_while_nothing_executes_is_a_no_op(make_engine: EngineFactory) -> None:
+def test_cancel_while_nothing_executes_is_a_no_op(project: Path, make_engine: EngineFactory) -> None:
     hold = threading.Event()
     hold.set()
     spec, _ = _slow_tool(hold)
-    engine = _armed_engine(make_engine, spec)
+    engine = _armed_engine(project, make_engine, spec)
     engine.request_cancel()  # nothing is running - must not poison the next run
     assert isinstance(engine.ingest(REPLY_AFTER_CANCEL), NewTurn)
     step = engine.execute()

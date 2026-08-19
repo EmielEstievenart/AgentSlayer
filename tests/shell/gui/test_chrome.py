@@ -224,12 +224,12 @@ def test_with_no_session_the_bar_says_so_in_three_places(harness: Harness) -> No
     assert bar["turn"]["text"] == "turn -"
     # ...and the mode falls back to the controller's mirror, which is what
     # shift+tab would be changing before any engine exists.
-    assert bar["mode"]["text"] == "MODE:ask"
+    assert bar["mode"]["text"] == "MODE:build"
 
 
 @pytest.mark.parametrize(
     ("mode", "cls"),
-    [("ask", "st-dim"), ("plan", "st-plan"), ("unattended", "st-unattended")],
+    [("build", "st-dim"), ("plan", "st-plan")],
 )
 def test_each_permission_mode_has_its_own_style_and_never_red(
     harness: Harness, mode: str, cls: str

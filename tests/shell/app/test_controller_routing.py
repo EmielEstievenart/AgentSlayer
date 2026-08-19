@@ -149,7 +149,8 @@ async def test_the_session_context_round_trips(
     controller._stats.replies = 7
     controller._turn_glyphs = {1: ["✓", "read_file"]}
     controller._yolo = True
-    controller._mode = "unattended"
+    controller._mode = "plan"
+    controller._unattended = True
     saved = controller._snapshot_ctx()
     master_link = controller._link
     master_stats = controller._stats
@@ -164,16 +165,19 @@ async def test_the_session_context_round_trips(
     assert controller._stats.replies == 0
     assert controller._turn_glyphs == {}
     assert controller._yolo is False  # YOLO deliberately does not inherit
-    # ...but the permission mode does, and the divergence is deliberate: YOLO
-    # answers a question about ONE conversation, while the mode is a statement
-    # about the user that stays true of a sub-agent ("only exploring", "not at my
-    # desk"). _sub_run arms the sub-agent's engine with it too.
-    assert controller._mode == "unattended"
+    # ...but the permission mode and the unattended switch do, and the divergence
+    # is deliberate: YOLO answers a question about ONE conversation, while those
+    # two are statements about the user that stay true of a sub-agent ("only
+    # exploring", "not at my desk"). _sub_run arms the sub-agent's engine with
+    # both too.
+    assert controller._mode == "plan"
+    assert controller._unattended is True
     assert controller._last_outbound is None
 
-    # The dial survives the swap back untouched - it is not part of the saved
-    # context at all, so a cycle made DURING a delegation is still in force here.
-    controller._mode = "plan"
+    # The dials survive the swap back untouched - they are not part of the saved
+    # context at all, so a change made DURING a delegation is still in force here.
+    controller._mode = "build"
+    controller._unattended = False
     controller._restore_ctx(saved)
 
     assert controller._link is master_link
@@ -181,8 +185,11 @@ async def test_the_session_context_round_trips(
     assert controller._stats.replies == 7
     assert controller._turn_glyphs == {1: ["✓", "read_file"]}
     assert controller._yolo is True
-    assert controller._mode == "plan"  # the mirror won, not the snapshot
-    assert saved.engine_mode == "unattended"  # ...which is what re-arms the engine
+    assert controller._mode == "build"  # the mirror won, not the snapshot
+    assert controller._unattended is False
+    # ...and the snapshot holds what the master's ENGINE was left at, which is
+    # what _rearm_master_mode reconciles against on the way back.
+    assert (saved.engine_mode, saved.engine_unattended) == ("plan", True)
     assert controller._active is not None and controller._active.role == "master"
 
 

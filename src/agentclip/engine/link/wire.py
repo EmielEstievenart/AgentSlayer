@@ -250,6 +250,7 @@ SESSION_METHODS: tuple[str, ...] = (
     "status",
     "set_yolo",
     "set_permission_mode",
+    "set_unattended",
     "arm_extra_instructions",
 )
 
@@ -685,6 +686,7 @@ def encode_status(value: StatusSnapshot) -> dict[str, Any]:
         "auto_accept_edits": value.auto_accept_edits,
         "yolo": value.yolo,
         "mode": value.mode,
+        "unattended": value.unattended,
         # The ONE Path on the seam, and it travels as text on purpose: in a
         # remote session it names a directory on ANOTHER MACHINE, so the Shell
         # must treat it as display data - something to show in the sidebar or
@@ -706,6 +708,7 @@ def decode_status(value: Any, what: str = "status") -> StatusSnapshot:
         auto_accept_edits=_bool_at(data, "auto_accept_edits", what),
         yolo=_bool_at(data, "yolo", what),
         mode=decode_permission_mode(_field(data, "mode", what), f"{what}.mode"),
+        unattended=_bool_at(data, "unattended", what),
         session_dir=Path(_str_at(data, "session_dir", what)),
         last_outbound_chars=_int_at(data, "last_outbound_chars", what),
         has_extra_instructions=_bool_at(data, "has_extra_instructions", what),
@@ -1087,6 +1090,7 @@ _PARAMS: dict[str, tuple[_Param, ...]] = {
     "status": (),
     "set_yolo": (_Param("enabled", *_BOOL),),
     "set_permission_mode": (_Param("mode", _identity, decode_permission_mode),),
+    "set_unattended": (_Param("enabled", *_BOOL),),
     "arm_extra_instructions": (),
 }
 
@@ -1105,6 +1109,7 @@ _RESULTS: dict[str, _Value] = {
     "status": _Value(encode_status, decode_status),
     "set_yolo": _Value(_identity, _as_bool),
     "set_permission_mode": _Value(_identity, decode_permission_mode),
+    "set_unattended": _Value(_identity, _as_bool),
     "arm_extra_instructions": _Value(_identity, decode_arm_result),
 }
 

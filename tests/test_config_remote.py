@@ -13,7 +13,7 @@ import pytest
 
 from agentclip.config import RemoteTarget, load_config
 from agentclip.executor.hosts import FakeHost
-from agentclip.executor.permissions import PermissionRule, evaluate
+from agentclip.executor.permissions import PermissionRule, default_mode_rules, evaluate
 
 # The remote user's home, and the ruleset AgentClip keeps under it - which in a
 # remote session is composed from `home`, not asked of platformdirs (which
@@ -260,7 +260,7 @@ def test_permissions_are_read_through_the_host(
 
     cfg = load_config(Path("/srv/app"), global_config_path=global_path, host=host)
     assert cfg.permission_source == f"fake:{rules.as_posix()}"
-    assert cfg.permission_rules[-1].action == "allow"  # the REMOTE file's answer
+    assert cfg.permission_rules.build[-1].action == "allow"  # the REMOTE file's answer
 
 
 def test_the_remote_global_ruleset_comes_from_the_remote_home(global_path: Path) -> None:
@@ -270,7 +270,7 @@ def test_the_remote_global_ruleset_comes_from_the_remote_home(global_path: Path)
     host.add_file(REMOTE_RULES, '{"permission": {"bash": "deny"}}')
 
     cfg = _remote(global_path, host)
-    assert cfg.permission_rules[-1] == PermissionRule("bash", "*", "deny")
+    assert cfg.permission_rules.build[-1] == PermissionRule("bash", "*", "deny")
     assert cfg.permission_source == f"fake:{REMOTE_RULES}"
 
 
@@ -297,15 +297,16 @@ def test_the_projects_ruleset_outranks_the_remote_global_one(
     cfg = _remote(global_path, host)
     # Ordered rules, last match wins: both layers are present, the project's
     # answers.
-    assert evaluate("bash", "ls", cfg.permission_rules).action == "allow"
+    assert evaluate("bash", "ls", cfg.permission_rules.build).action == "allow"
     assert cfg.permission_source == f"fake:{REMOTE_RULES}, fake:{REMOTE_PROJECT_RULES}"
 
 
-def test_a_target_with_no_ruleset_stays_in_legacy_mode(global_path: Path) -> None:
-    """Exactly what a local machine with no ruleset gets: the defaults are NOT
-    returned on their own, because empty is the signal for the allowlist gate."""
+def test_a_target_with_no_permissions_file_runs_on_the_defaults(global_path: Path) -> None:
+    """Exactly what a local machine with no permissions.json gets. The SOURCE is
+    what goes empty - a statement about provenance, not about whether rules are
+    in force."""
     cfg = _remote(global_path, FakeHost("/srv/app"))
-    assert cfg.permission_rules == ()
+    assert cfg.permission_rules == default_mode_rules()
     assert cfg.permission_source == ""
     assert cfg.warnings == ()
 
@@ -329,45 +330,45 @@ def test_the_remote_projects_approval_table_takes_effect(global_path: Path) -> N
     host = FakeHost("/srv/app")
     host.add_file(
         "/srv/app/.agentclip.toml",
-        '[approval]\nyolo = true\nmode = "unattended"\n[general]\nservice = "claude"\n',
+        '[approval]\nyolo = true\nmode = "build"\n[general]\nservice = "claude"\n',
     )
 
     cfg = _remote(global_path, host)
     assert cfg.approval.yolo is True
-    assert cfg.approval.mode == "unattended"  # the TARGET's project file wins
+    assert cfg.approval.mode == "build"  # the TARGET's project file wins
     assert cfg.general.service == "claude"
     assert cfg.warnings == ()  # no pinning, so nothing to warn about
 
 
 def test_the_remote_projects_command_rules_take_effect(global_path: Path) -> None:
-    """The whole table, not just the two live-state keys: the legacy allowlist
-    and the deny-token backstop come off the target too."""
+    """The whole table, not just the live-state keys: the deny-token backstop
+    comes off the target too."""
     global_path.write_text(
-        '[approval]\ncommand_allowlist = ["ls*"]\ncommand_deny_tokens = [";"]\n',
+        '[approval]\ncommand_deny_tokens = [";", "&&"]\nunattended = true\n',
         encoding="utf-8",
     )
     host = FakeHost("/srv/app")
     host.add_file(
         "/srv/app/.agentclip.toml",
-        '[approval]\ncommand_allowlist = ["pytest*"]\n',
+        '[approval]\ncommand_deny_tokens = [";"]\n',
     )
 
     cfg = _remote(global_path, host)
     # Lists REPLACE, never concatenate - the project tightens rather than adds.
-    assert cfg.approval.command_allowlist == ("pytest*",)
-    # A key the project did not mention still merges down from this PC's file.
     assert cfg.approval.command_deny_tokens == (";",)
+    # A key the project did not mention still merges down from this PC's file.
+    assert cfg.approval.unattended is True
 
 
 def test_the_global_approval_table_still_arms_a_remote_session(global_path: Path) -> None:
     """A target with no [approval] of its own: this PC's config.toml is the only
     layer left, exactly as it is for every other table."""
     global_path.write_text(
-        '[approval]\nyolo = true\ncommand_allowlist = ["ls*"]\n', encoding="utf-8"
+        '[approval]\nyolo = true\ncommand_deny_tokens = ["|"]\n', encoding="utf-8"
     )
     cfg = _remote(global_path, FakeHost("/srv/app"))
     assert cfg.approval.yolo is True
-    assert cfg.approval.command_allowlist == ("ls*",)
+    assert cfg.approval.command_deny_tokens == ("|",)
 
 
 def test_a_remote_project_setting_approval_is_not_warned_about(
@@ -389,9 +390,9 @@ def test_a_local_project_still_supplies_its_own_approval_table(
 ) -> None:
     """The local case, unchanged throughout: one machine, one merge."""
     (project / ".agentclip.toml").write_text(
-        '[approval]\nyolo = true\nmode = "unattended"\n', encoding="utf-8"
+        '[approval]\nyolo = true\nmode = "plan"\n', encoding="utf-8"
     )
     cfg = _load(project, global_path)
     assert cfg.approval.yolo is True
-    assert cfg.approval.mode == "unattended"
+    assert cfg.approval.mode == "plan"
     assert cfg.warnings == ()

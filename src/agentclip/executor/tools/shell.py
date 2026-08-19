@@ -1,6 +1,6 @@
 """run_command: command execution with merged output and tail capping.
 
-The allowlist/approval decision is NOT made here - the engine gates the call
+The approval decision is NOT made here - the engine gates the call
 before the handler runs. This handler just executes:
 
 - ctx.host.spawn(command, cwd=workspace.root), stdout+stderr merged so

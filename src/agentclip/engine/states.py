@@ -23,10 +23,12 @@ class Phase(Enum):
 class Decision(Enum):
     APPROVE = auto()
     REJECT = auto()  # optional reason rides as Engine.decide(..., note=...)
-    APPROVE_ALL_EDITS = auto()  # sticky for the session; never applies to commands
+    # "Allow every edit from here on": remembers ("edit", "*", "allow") for the
+    # session. Never applies to commands - that is the whole difference from
+    # APPROVE_ALWAYS, which remembers a rule shaped like the call in hand.
+    APPROVE_ALL_EDITS = auto()
     # "Always allow calls like this one": remembers a permission rule for the
-    # session (ruleset mode - engine/approval.py). Falls back to
-    # APPROVE_ALL_EDITS's behaviour when no ruleset governs the session.
+    # session (engine/approval.py).
     APPROVE_ALWAYS = auto()
 
 

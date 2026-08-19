@@ -738,7 +738,7 @@ async def test_the_policy_banner_names_the_machine_and_where_policy_comes_from(
     harness.view.connect_fields("box", REMOTE_ROOT)
     await run_connect(harness)
     lines = last_connect(harness)["policy"]
-    assert any("No permission ruleset found on dev@box" in line for line in lines)
+    assert any("No permissions.json on dev@box" in line for line in lines)
     # ...and the whole of [approval] is read over there too, now that the engine
     # is: this PC's config.toml is not even reachable from the target
     # (docs/design/remote-executor.md §2.5, §2.6).

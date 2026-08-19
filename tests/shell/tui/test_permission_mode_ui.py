@@ -67,7 +67,7 @@ def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard, Path]:
     (project / "src").mkdir(parents=True)
     (project / "src" / "utils.py").write_text(UTILS_PY, encoding="utf-8", newline="")
     config = load_config(project, global_config_path=project / "no-such-global.toml")
-    assert config.approval.mode == "ask", "the suite assumes the shipped default"
+    assert config.approval.mode == "build", "the suite assumes the shipped default"
     fake = FakeClipboard()
     app = AgentClipApp(
         config=config,
@@ -122,7 +122,7 @@ async def test_status_bar_shows_the_mode_before_any_session(tmp_path: Path) -> N
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
-        assert _mode_text(app) == "MODE:ask"
+        assert _mode_text(app) == "MODE:build"
         assert _mode_segment(app).has_class("st-dim")
         # Leftmost: the first .seg child of the bar, ahead of the watcher.
         first = main.status_bar.query(".seg").first()
@@ -142,21 +142,17 @@ async def test_shift_tab_cycles_the_mode_from_the_composer(tmp_path: Path) -> No
         main.composer.focus()
         await pilot.pause()
         assert app.focused is main.composer, f"composer should be focused, got {app.focused!r}"
-        assert _mode_text(app) == "MODE:ask"
+        assert _mode_text(app) == "MODE:build"
 
         await _cycle_to(app, pilot, "MODE:plan")
         assert app.focused is main.composer, "shift+tab must not move focus"
         assert _mode_segment(app).has_class("st-plan")
         assert main._controller.permission_mode == "plan"
 
-        await _cycle_to(app, pilot, "MODE:unattended")
-        assert _mode_segment(app).has_class("st-unattended")
-        assert main._controller.permission_mode == "unattended"
-
         # ...and back round to the start.
-        await _cycle_to(app, pilot, "MODE:ask")
+        await _cycle_to(app, pilot, "MODE:build")
         assert _mode_segment(app).has_class("st-dim")
-        assert main._controller.permission_mode == "ask"
+        assert main._controller.permission_mode == "build"
 
 
 async def test_plan_mode_denies_an_edit_without_opening_a_gate(

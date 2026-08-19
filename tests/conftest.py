@@ -8,6 +8,7 @@ window they are looking at, or throw a fullscreen overlay in their face.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections.abc import Callable
@@ -139,13 +140,13 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
 def _no_real_permissions_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No test reads the developer's real ``~/.config/agentclip/permissions.json``.
 
-    A permission ruleset REPLACES the legacy allowlist gate (engine/approval.py),
-    so a machine whose owner has written one would run this suite under those
-    private rules - green here, red on the next machine, and the failure would
-    look like an approval bug rather than a leak. Sharper than it used to be:
-    ``/config global`` CREATES that file, so any developer who has tried the
-    command once has one. Tests that want a ruleset point
-    ``[permission] permissions_config`` at a file they wrote.
+    The ruleset is the whole permission system (engine/approval.py), so a
+    machine whose owner has written one would run this suite under those rules -
+    green here, red on the next machine, and the failure would look like an
+    approval bug rather than a leak. Sharper than it used to be: ``/config
+    global`` CREATES that file, so any developer who has tried the command once
+    has one. Tests that want their own rules write them (``write_permissions``,
+    or ``[permission] permissions_config`` pointed at a file).
     """
     missing = tmp_path / "no-such-permissions.json"
     monkeypatch.setattr(
@@ -188,6 +189,20 @@ def project(tmp_path: Path) -> Path:
     return root
 
 
+def write_permissions(project: Path, document: dict[str, object]) -> Path:
+    """Write ``<project>/.agentclip/permissions.json`` and return its path.
+
+    The permission ruleset is the ONLY approval mechanism, so a test whose tool
+    calls must run without gating says so here rather than relying on a default.
+    Written as the PROJECT layer, which loads last, so it outranks anything else
+    a test set up.
+    """
+    path = project / ".agentclip" / "permissions.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
 @pytest.fixture
 def config(project: Path) -> Config:
     """Default config: the global file does not exist; <project>/.agentclip.toml
@@ -214,7 +229,7 @@ def make_engine(project: Path, registry: ToolRegistry) -> EngineFactory:
     """Factory building a fully wired, headless Engine over the tmp project.
 
     Reloads config on each call so tests can drop a .agentclip.toml into the
-    project (e.g. to extend the command allowlist) before building. Pass
+    project (e.g. to point [permission] elsewhere) before building. Pass
     ``tools=`` to swap the registry (e.g. for a fake slow tool) and ``role=``
     to build a sub-agent engine (pair it with a sub-agent registry).
     """

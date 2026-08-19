@@ -21,6 +21,8 @@ from agentclip.executor.tools.registry import (
 )
 from agentclip.protocol.types import ToolCall
 
+from ..conftest import write_permissions
+
 # Same local alias as tests/engine/test_cancel.py: the conftest fixture is
 # injected by name, only the annotation is spelled out here.
 EngineFactory = Callable[..., Engine]
@@ -110,8 +112,13 @@ task: delegate again, which must not be possible
 
 
 @pytest.fixture
-def master(make_engine: EngineFactory) -> Engine:
-    """A master engine whose sub-agent chat is calibrated (delegate offered)."""
+def master(project: Path, make_engine: EngineFactory) -> Engine:
+    """A master engine whose sub-agent chat is calibrated (delegate offered).
+
+    `delegate` answers to the `task` permission, which the shipped defaults ask
+    about; these tests are about the parking machinery rather than about the
+    gate, so the project allows it outright."""
+    write_permissions(project, {"permission": {"task": "allow"}})
     return make_engine(tools=default_registry(allow_delegate=True))
 
 
@@ -120,7 +127,7 @@ def test_delegate_parks_mid_turn_and_resumes_into_the_rest(
 ) -> None:
     master.start_task("t")
     assert isinstance(master.ingest(DELEGATE_MID_TURN_REPLY), NewTurn)
-    # delegate is intercepted by name: it is never a pending approval.
+    # delegate answers to an allow rule here, so only the write gates.
     assert [p.call.id for p in master.pending()] == [3]
     master.decide(3, Decision.APPROVE)
 
@@ -230,6 +237,7 @@ def test_two_delegations_in_one_reply_park_one_at_a_time(master: Engine) -> None
 
 
 def test_a_cancelled_batch_never_parks_on_a_delegation(
+    project: Path,
     make_engine: EngineFactory,
 ) -> None:
     """A cancel must not be able to strand the turn on a sub-agent run that the
@@ -247,6 +255,7 @@ def test_a_cancelled_batch_never_parks_on_a_delegation(
     base = default_registry(allow_delegate=True)
     specs = [s for s in (base.get(n) for n in base.names()) if s is not None]
     slow_spec = ToolSpec("slow_tool", "auto", slow, None, "slow_tool()\n  test double")
+    write_permissions(project, {"permission": {"task": "allow", "slow_tool": "allow"}})
     engine = make_engine(tools=ToolRegistry([*specs, slow_spec]))
     engine.start_task("t")
     assert isinstance(engine.ingest(SLOW_THEN_DELEGATE_REPLY), NewTurn)

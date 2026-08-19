@@ -1114,11 +1114,11 @@
     ],
     [
       "Permission mode (bottom-left of the status bar)",
-      "shift+tab cycles it: ask -> plan -> unattended -> ask. ask asks you about " +
-        "every edit and command; plan REFUSES both, so the model can only read " +
-        "and propose; unattended refuses anything that would have asked, for " +
-        "when you walk away. The key works while you are typing and while a turn " +
-        "is running."
+      "shift+tab cycles it: build -> plan -> build. build is the default " +
+        "builder - your permission rules decide, and anything they do not cover " +
+        "asks you first; plan REFUSES every edit, command, MCP call and " +
+        "delegation, so the model can only read and propose. The key works " +
+        "while you are typing and while a turn is running."
     ],
     [
       "Sub-agents (only once the sub-agent window is calibrated - see the sidebar)",
@@ -2184,7 +2184,7 @@
     { keys: ["F8"], on: ["F8"], mods: "", hot: true, section: "App",
       what: "hide/show the HARNESS DECISION LOG (also /log)", run: function () { toggleLog(); } },
     { keys: ["shift+tab"], on: ["Tab"], mods: "shift", hot: true, section: "App",
-      what: "cycle the permission mode: ask -> plan -> unattended -> ask. Works before a session and mid-turn",
+      what: "cycle the permission mode: build -> plan -> build. Works before a session and mid-turn",
       run: function () { api("mode"); } },
     { keys: ["ctrl+enter"], on: ["Enter"], mods: "ctrl", hot: true, section: "App",
       what: "send the chat box without having to be in it", run: function () { send(); } },

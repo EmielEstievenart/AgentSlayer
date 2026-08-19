@@ -53,6 +53,7 @@ from agentclip.config import (
     Config,
     ServicePreset,
     default_permissions_config_path,
+    default_permissions_document,
     project_permissions_path,
 )
 from agentclip.engine.approval import PERMISSION_MODES, normalize_mode
@@ -170,25 +171,31 @@ _NOISE_TEXT = {
 # one-liner on the next results payload (engine._MODE_NOTES) - these two say the
 # same thing to two different readers, so neither borrows the other's wording.
 _MODE_NOTE_TEXT: dict[str, str] = {
-    "ask": (
-        "permission mode: ASK - the normal gates are back. Edits and commands that no "
-        "rule covers ask you before they run."
+    "build": (
+        "permission mode: BUILD - the default builder. Your permission rules decide, "
+        "and anything they do not cover asks you before it runs."
     ),
     "plan": (
-        "permission mode: PLAN - exploration only. Every edit and command call is "
-        "auto-denied (YOLO does not override this); reads, greps and listings run as "
-        "usual, so the model can research and hand you a plan."
+        "permission mode: PLAN - exploration only. Edits, commands, MCP calls and "
+        "delegations are denied (YOLO does not override this); reads, greps and "
+        "listings run as usual, so the model can research and hand you a plan."
     ),
-    "unattended": (
-        "permission mode: UNATTENDED - nothing will ask you. Calls an allow rule covers "
-        "run; everything that would have opened a gate is auto-denied instead, and deny "
+}
+
+# The unattended toggle's own notes. A separate table from the modes because it
+# is a separate switch: either can be changed without touching the other.
+_UNATTENDED_NOTE_TEXT: dict[bool, str] = {
+    True: (
+        "UNATTENDED ON - nothing will ask you. Calls an allow rule covers run; "
+        "everything that would have opened a gate is auto-denied instead, and deny "
         "rules still deny."
     ),
+    False: "UNATTENDED OFF - the normal gates are back and will wait for your answer.",
 }
 
 # Said on top of the UNATTENDED note when YOLO is on: the two settings pull in
 # opposite directions and the user has to know which one wins.
-_MODE_YOLO_CAUTION = (
+_UNATTENDED_YOLO_CAUTION = (
     " CAUTION: YOLO is ON, and it still auto-APPROVES every call that would have asked "
     "- so those run instead of being denied. /yolo off to make unattended mean what it "
     "says."
@@ -200,15 +207,19 @@ _REINSTRUCT_NOTE = (
 )
 
 _MODE_ALERT_TEXT: dict[str, str] = {
-    "ask": "mode: ASK - approvals restored",
-    "plan": "mode: PLAN - edits and commands are denied",
-    "unattended": "mode: UNATTENDED - nothing will ask you",
+    "build": "mode: BUILD - your rules decide",
+    "plan": "mode: PLAN - nothing that changes anything runs",
 }
 
-# What `/config` writes into a permissions.json that does not exist yet: the two
-# blocks the loader reads and nothing else, so an editor opens a valid document
-# whose shape is already the answer to "where do I put a rule?".
-_CONFIG_TEMPLATE = '{\n  "permission": {},\n  "mcp": {}\n}\n'
+_UNATTENDED_ALERT_TEXT: dict[bool, str] = {
+    True: "UNATTENDED - nothing will ask you",
+    False: "UNATTENDED off - approvals restored",
+}
+
+# What `/config` writes into a permissions.json that does not exist yet: the
+# rules that were ALREADY in force, spelled out (config.py owns the shape of
+# that file, so the document is built there).
+_CONFIG_TEMPLATE = default_permissions_document()
 
 # Said every time /config names a file, because the read is a LAUNCH read
 # (cli.py builds one Config per process): an edit made now changes nothing until
@@ -247,7 +258,7 @@ def _call_detail(call: ToolCall) -> str:
 
 
 def _next_mode(current: PermissionMode) -> PermissionMode:
-    """The mode one step around the cycle (ask -> plan -> unattended -> ask)."""
+    """The mode one step around the cycle (build -> plan -> build)."""
     return PERMISSION_MODES[(PERMISSION_MODES.index(current) + 1) % len(PERMISSION_MODES)]
 
 
@@ -359,13 +370,15 @@ class _SessionContext:
     last_outbound: str | None
     has_outbound: bool
     yolo: bool
-    # NOT a value to restore into the mirror - the permission mode is app-wide
-    # and outlives every swap (see _restore_ctx). This records what the SAVED
-    # ENGINE's policy was left at, which is the only thing a delegation can make
-    # stale: a mode cycled while the sub-agent held the engine slot reached the
-    # sub-agent's policy and never the master's. Comparing the two on the way
-    # back is how the master gets re-armed, and only when it actually moved.
+    # NOT values to restore into the mirrors - the permission mode and the
+    # unattended switch are app-wide and outlive every swap (see _restore_ctx).
+    # These record what the SAVED ENGINE's policy was left at, which is the only
+    # thing a delegation can make stale: a dial turned while the sub-agent held
+    # the engine slot reached the sub-agent's policy and never the master's.
+    # Comparing the two on the way back is how the master gets re-armed, and only
+    # when it actually moved.
     engine_mode: PermissionMode
+    engine_unattended: bool
 
 
 class SessionController:
@@ -457,7 +470,11 @@ class SessionController:
         # The session's permission mode, mirrored from the engine the way _yolo
         # is: read by the status bar and by the bare `/mode`, which toggles
         # against it. The engine's policy is the truth; this follows it.
-        self._mode: PermissionMode = normalize_mode(config.approval.mode) or "ask"
+        self._mode: PermissionMode = normalize_mode(config.approval.mode) or "build"
+        # "I have stepped away", mirrored the same way and for the same reason.
+        # Like the mode and unlike YOLO it is a statement about the USER, so it
+        # outlives /new and reaches every engine the app builds.
+        self._unattended = config.approval.unattended
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -747,14 +764,14 @@ class SessionController:
         await self._refresh_status()  # repaint the status bar (YOLO badge)
         if target:
             await self._view.add_note(
-                "YOLO mode ON - every tool call (edits AND commands) auto-approves, "
-                "bypassing the allowlist and deny tokens. /yolo off restores the gates."
+                "YOLO mode ON - every call that would have asked you auto-approves, "
+                "deny tokens included. Deny rules still deny. /yolo off restores the gates."
             )
             self._view.alert("YOLO mode ON - approvals are off", severity="warning")
             self._view.notify("YOLO mode ON - every tool call auto-approves", severity="warning")
         else:
             await self._view.add_note(
-                "YOLO mode OFF - edits and non-allowlisted commands gate again."
+                "YOLO mode OFF - anything your rules do not allow gates again."
             )
             self._view.alert("YOLO mode OFF", severity="information")
             self._view.notify("YOLO mode OFF - approvals restored", severity="information")
@@ -786,13 +803,13 @@ class SessionController:
         self._view.spawn(self._apply_mode(mode))
 
     def cycle_permission_mode(self) -> None:
-        """The next mode round the cycle: ask -> plan -> unattended -> ask."""
+        """The next mode round the cycle: build -> plan -> build."""
         self.set_permission_mode(_next_mode(self._mode))
 
     def _cmd_mode(self, arg: str) -> None:
-        """`/mode [plan|ask|unattended]`. Bare `/mode` REPORTS rather than cycles:
-        a command that names three states must not require the user to remember
-        which one they are in to reach the one they want."""
+        """`/mode [plan|build]`. Bare `/mode` REPORTS rather than cycles: a
+        command that names a state must not require the user to remember which
+        one they are in to reach the one they want."""
         if not arg:
             self._view.notify(
                 f"permission mode: {self._mode} - /mode [{'|'.join(PERMISSION_MODES)}] to change",
@@ -836,13 +853,47 @@ class SessionController:
                 return
         self._mode = target
         await self._refresh_status()  # repaint the status bar (mode segment)
-        note = _MODE_NOTE_TEXT[target]
-        if target == "unattended" and self._yolo:
-            note += _MODE_YOLO_CAUTION
-        await self._view.add_note(note)
-        severity: Severity = "information" if target == "ask" else "warning"
+        await self._view.add_note(_MODE_NOTE_TEXT[target])
+        severity: Severity = "information" if target == "build" else "warning"
         self._view.alert(_MODE_ALERT_TEXT[target], severity=severity)
         self._view.notify(_MODE_ALERT_TEXT[target], severity=severity)
+
+    # -- the unattended switch --------------------------------------------------
+    # ``_apply_mode``'s shape, on the toggle half of the pair: same off-loop
+    # engine call, same resync-on-failure, same "no engine yet is not an error".
+    # It is deliberately NOT part of the mode cycle - a user who steps away has
+    # said something about themselves, not about what the model may build.
+
+    @property
+    def unattended(self) -> bool:
+        """Whether gates auto-deny, as the controller last saw it. Meaningful
+        with or without a live session, exactly like ``permission_mode``."""
+        return self._unattended
+
+    def set_unattended(self, enabled: bool) -> None:
+        self._view.spawn(self._apply_unattended(enabled))
+
+    async def _apply_unattended(self, target: bool) -> None:
+        link = self._link
+        if link is not None:
+            try:
+                await link.set_unattended(target)
+            except Exception as exc:
+                await self._refresh_status()
+                if self._snap is not None:
+                    self._unattended = self._snap.unattended
+                await self._view.add_error(f"could not record the unattended toggle: {exc}")
+                self._view.alert("unattended toggle failed - see transcript", severity="error")
+                return
+        self._unattended = target
+        await self._refresh_status()
+        note = _UNATTENDED_NOTE_TEXT[target]
+        if target and self._yolo:
+            note += _UNATTENDED_YOLO_CAUTION
+        await self._view.add_note(note)
+        severity: Severity = "warning" if target else "information"
+        self._view.alert(_UNATTENDED_ALERT_TEXT[target], severity=severity)
+        self._view.notify(_UNATTENDED_ALERT_TEXT[target], severity=severity)
 
     # -- the extra-instructions re-inject (`r`) --------------------------------
 
@@ -1557,6 +1608,10 @@ class SessionController:
             # which is how it knows this is a starting mode and not a change to
             # announce to a conversation that has not begun.
             await link.set_permission_mode(self._mode)
+            # The unattended switch is the mode's twin: app-wide, carried across
+            # /new, and armed here while the engine is still IDLE so a session
+            # started by someone who has already walked away never opens a gate.
+            await link.set_unattended(self._unattended)
             # Same story for a `/yolo` thrown at the start prompt, but only when
             # it DIVERGES from what the fresh engine already believes: the engine
             # builds its policy from the same config default the mirror started
@@ -2000,7 +2055,7 @@ class SessionController:
         return outcome
 
     async def _rearm_master_mode(self, master: _SessionContext) -> None:
-        """Hand the master's engine any mode change it slept through.
+        """Hand the master's engine any dial change it slept through.
 
         Only one engine is reachable at a time (``_apply_mode`` writes to
         whatever ``self._link`` currently is), so a shift+tab pressed during a
@@ -2010,22 +2065,26 @@ class SessionController:
         one and gets told on the way back.
 
         Silent when nothing moved: re-sending the same mode would arm a "the mode
-        is now ask" note on a conversation whose mode never changed. When it DID
-        move the note is exactly right - the master really was re-dialled while
-        it was parked, and its next results payload should say so.
+        is now build" note on a conversation whose mode never changed. When it
+        DID move the note is exactly right - the master really was re-dialled
+        while it was parked, and its next results payload should say so. The
+        unattended switch rides along on the same rule, for the same reasons.
 
         Never raises: this runs in ``_run_subagent``'s ``finally``, where an
         exception would replace the delegation's own outcome (or a _TurnAborted
         on its way out) with a bookkeeping failure.
         """
         link = self._link
-        if link is None or master.engine_mode == self._mode:
+        if link is None:
             return
         try:
-            await link.set_permission_mode(self._mode)
+            if master.engine_mode != self._mode:
+                await link.set_permission_mode(self._mode)
+            if master.engine_unattended != self._unattended:
+                await link.set_unattended(self._unattended)
         except Exception as exc:
             await self._view.add_error(
-                f"could not re-arm the permission mode after the sub-agent run: {exc}"
+                f"could not re-arm the permission dials after the sub-agent run: {exc}"
             )
 
     async def _sub_run(
@@ -2074,6 +2133,7 @@ class SessionController:
         # so the sub-agent's very first verdict already obeys plan/unattended and
         # nothing is announced to a conversation that has not started.
         await link.set_permission_mode(self._mode)
+        await link.set_unattended(self._unattended)
         await self._view.add_note(
             f"sub-agent chat: {link.chat_name} - a fresh chat with its own context; "
             "it sees nothing of the conversation that delegated to it"
@@ -2232,6 +2292,7 @@ class SessionController:
             has_outbound=self._has_outbound,
             yolo=self._yolo,
             engine_mode=self._mode,
+            engine_unattended=self._unattended,
         )
 
     def _adopt_ctx(self, ref: SessionRef, link: Link) -> None:
@@ -2242,14 +2303,14 @@ class SessionController:
         inherit: ``ApprovalPolicy`` is per-engine, so a sub-agent starts from the
         configured default and the user re-arms it per session if they mean it.
 
-        The permission mode does the OPPOSITE, and the divergence is the point.
-        YOLO is an answer to a question ("approve everything in THIS
-        conversation"); the mode is a statement about the user ("I am only
-        exploring", "I am not at my desk"), and both stay true of a sub-agent -
-        a delegation that could still edit files while plan mode is on, or open
-        a gate for an absent user while unattended is, would break the promise
-        the mode's own denial bodies make. So the mirror is left alone here and
-        ``_sub_run`` arms the sub-agent's engine with it before its first
+        The permission mode and the unattended switch do the OPPOSITE, and the
+        divergence is the point. YOLO is an answer to a question ("approve
+        everything in THIS conversation"); those two are statements about the
+        user ("I am only exploring", "I am not at my desk"), and both stay true
+        of a sub-agent - a delegation that could still edit files while plan mode
+        is on, or open a gate for an absent user, would break the promise their
+        own denial bodies make. So those mirrors are left alone here and
+        ``_sub_run`` arms the sub-agent's engine with them before its first
         payload, exactly as ``_session_flow`` does for the master.
         """
         self._active = ref
@@ -2276,11 +2337,12 @@ class SessionController:
         self._last_outbound = ctx.last_outbound
         self._has_outbound = ctx.has_outbound
         self._yolo = ctx.yolo
-        # ``self._mode`` is deliberately NOT restored: the dial is the user's and
-        # app-wide, so a cycle made while the sub-agent held the engine slot is
-        # still what the user wants now. The saved ``engine_mode`` is only what
-        # the master's POLICY was left at - ``_rearm_master_mode`` reconciles the
-        # engine to the mirror, never the mirror to the snapshot.
+        # ``self._mode`` and ``self._unattended`` are deliberately NOT restored:
+        # the dials are the user's and app-wide, so a change made while the
+        # sub-agent held the engine slot is still what the user wants now. The
+        # saved ``engine_*`` values are only what the master's POLICY was left at
+        # - ``_rearm_master_mode`` reconciles the engine to the mirror, never the
+        # mirror to the snapshot.
         self._push_state()
 
     # -- summary / reset ------------------------------------------------------
@@ -2337,12 +2399,13 @@ class SessionController:
         self._has_outbound = False
         self._queued_capture = None
         self._yolo = self._config.approval.yolo  # back to the configured default
-        # ...but NOT the permission mode, which survives every reset for the life
-        # of the app run. It is a dial the user holds, not a property of one
-        # conversation: like the service picker, "I am only exploring today" or
-        # "I have stepped away" is still true of the person after /new, and a
-        # mode that silently reverted to `ask` on a reset would hand the next
-        # session's first edit to a user who thought they had turned changes off.
+        # ...but NOT the permission mode or the unattended switch, which survive
+        # every reset for the life of the app run. They are dials the user holds,
+        # not properties of one conversation: like the service picker, "I am only
+        # exploring today" or "I have stepped away" is still true of the person
+        # after /new, and a mode that silently reverted to `build` on a reset
+        # would hand the next session's first edit to a user who thought they had
+        # turned changes off.
         # The status segment keeps showing it the whole time, so it can never be
         # a surprise; a session that really should start fresh is `[approval]
         # mode` plus a restart, or one more shift+tab.

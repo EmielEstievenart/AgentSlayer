@@ -136,6 +136,8 @@ class Link(Protocol):
 
     async def set_permission_mode(self, mode: PermissionMode) -> PermissionMode: ...
 
+    async def set_unattended(self, enabled: bool) -> bool: ...
+
     async def arm_extra_instructions(self) -> ArmResult: ...
 
     # -- what the engine's MACHINE is running, not what the session is --------
@@ -261,6 +263,9 @@ class LocalLink:
 
     async def set_permission_mode(self, mode: PermissionMode) -> PermissionMode:
         return await self._call(self.engine.set_permission_mode, mode)
+
+    async def set_unattended(self, enabled: bool) -> bool:
+        return await self._call(self.engine.set_unattended, enabled)
 
     async def arm_extra_instructions(self) -> ArmResult:
         return await self._call(self.engine.arm_extra_instructions)

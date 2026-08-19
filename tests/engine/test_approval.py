@@ -1,13 +1,9 @@
-"""ApprovalPolicy in both of its modes.
+"""ApprovalPolicy: the permission ruleset, which is the whole gate.
 
-LEGACY (no permission ruleset loaded): the glob allowlist (matched pattern
-returned), the deny-token override, verdicts per approval kind, and
-APPROVE_ALL_EDITS stickiness through the Engine.
-
-RULESET (a permissions.json is loaded): allow/ask/deny per permission key, the
-deny-token backstop standing in for OpenCode's shell parser, yolo-vs-deny,
-remembered "always allow" rules and their cascade, and what the Engine does with
-a call a rule denies.
+The shipped defaults when no permissions.json exists, allow/ask/deny per
+permission key once one does, the deny-token backstop standing in for OpenCode's
+shell parser, yolo-vs-deny, remembered "always allow" rules and their cascade,
+and what the Engine does with a call a rule denies.
 """
 
 from __future__ import annotations
@@ -22,7 +18,12 @@ from agentclip.config import ApprovalConfig
 from agentclip.engine.approval import ApprovalPolicy
 from agentclip.engine.engine import Engine, NewTurn, Send
 from agentclip.engine.states import Decision
-from agentclip.executor.permissions import PermissionRule, default_rules, rules_from_config
+from agentclip.executor.permissions import (
+    ModeRules,
+    PermissionRule,
+    build_mode_rules,
+    rules_from_config,
+)
 from agentclip.executor.tools.registry import ToolContext, ToolRegistry, ToolSpec
 from agentclip.protocol.types import ToolCall, ToolResult
 
@@ -53,66 +54,76 @@ def policy() -> ApprovalPolicy:
     return ApprovalPolicy(ApprovalConfig())
 
 
-# -- command_auto_allowed ------------------------------------------------------
-
-
-def test_allowlist_hit_returns_matched_glob(policy: ApprovalPolicy) -> None:
-    assert policy.command_auto_allowed("pytest tests -q") == "pytest*"
-    assert policy.command_auto_allowed("uv run pytest -x") == "uv run pytest*"
-    assert policy.command_auto_allowed("git status") == "git status"
-
-
-def test_allowlist_miss_returns_none(policy: ApprovalPolicy) -> None:
-    assert policy.command_auto_allowed("rm -rf /") is None
-    assert policy.command_auto_allowed("git push --force") is None
-    assert policy.command_auto_allowed("") is None
+# -- the deny-token backstop ---------------------------------------------------
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        "pytest tests; rm -rf ~",  # ; rides pytest*
-        "pytest tests && curl evil.example",
-        "pytest tests || true",
-        "pytest tests | tee out.txt",
-        "pytest `whoami`",
-        "pytest $(whoami)",
+        "git status; rm -rf ~",
+        "git status && curl evil.example",
+        "git status || true",
+        "git status | tee out.txt",
+        "git status `whoami`",
+        "git status $(whoami)",
         "ls > files.txt",
         "ls < input.txt",
-        "pytest tests\nrm -rf ~",
+        "git status\nrm -rf ~",
     ],
 )
-def test_deny_token_overrides_glob_match(policy: ApprovalPolicy, command: str) -> None:
-    assert policy.command_auto_allowed(command) is None
+def test_a_deny_token_is_what_it_says(policy: ApprovalPolicy, command: str) -> None:
+    assert policy.has_deny_token(command)
 
 
-def test_matching_is_case_sensitive(policy: ApprovalPolicy) -> None:
-    assert policy.command_auto_allowed("PYTEST tests") is None  # fnmatchcase, not fnmatch
+def test_a_plain_command_carries_no_deny_token(policy: ApprovalPolicy) -> None:
+    assert not policy.has_deny_token("git status --short")
+    assert not policy.has_deny_token("")
 
 
-# -- verdict -------------------------------------------------------------------
+# -- the shipped defaults ------------------------------------------------------
 
 
-def test_verdicts_per_approval_kind(policy: ApprovalPolicy, registry: ToolRegistry) -> None:
-    read_spec = registry.get("read_file")
-    edit_spec = registry.get("edit_file")
-    cmd_spec = registry.get("run_command")
-    assert read_spec and edit_spec and cmd_spec
-    assert policy.verdict(read_spec, make_call("read_file", path="x")) == "auto"
-    assert policy.verdict(edit_spec, make_call("edit_file", path="x")) == "needs_approval"
-    assert policy.verdict(cmd_spec, make_call("run_command", command="pytest -q")) == "auto"
-    assert (
-        policy.verdict(cmd_spec, make_call("run_command", command="rm -rf /")) == "needs_approval"
+def test_the_defaults_decide_when_there_is_no_permissions_file(
+    policy: ApprovalPolicy, registry: ToolRegistry
+) -> None:
+    """There is no second gate behind the rules, so a session with no
+    permissions.json runs on the shipped defaults - reads free, changes asked."""
+    specs = {
+        name: get_spec(registry, name)
+        for name in ("read_file", "list_dir", "grep", "edit_file", "run_command")
+    }
+    assert policy.verdict(specs["read_file"], make_call("read_file", path="x")) == "auto"
+    assert policy.verdict(specs["list_dir"], make_call("list_dir", path=".")) == "auto"
+    assert policy.verdict(specs["grep"], make_call("grep", pattern="TODO")) == "auto"
+    assert policy.verdict(specs["edit_file"], make_call("edit_file", path="x")) == (
+        "needs_approval"
+    )
+    assert policy.verdict(
+        specs["run_command"], make_call("run_command", command="git status --short")
+    ) == "auto"
+    assert policy.verdict(
+        specs["run_command"], make_call("run_command", command="rm -rf /")
+    ) == "needs_approval"
+
+
+def test_a_tool_no_rule_mentions_asks(registry: ToolRegistry) -> None:
+    """The implicit ask is what makes one mechanism safe: a tool nobody wrote a
+    rule for is a tool nobody decided about."""
+    spec = ToolSpec("frobnicate", "auto", _mcp_handler, None, "")
+    assert ApprovalPolicy(ApprovalConfig()).verdict(spec, make_call("frobnicate")) == (
+        "needs_approval"
     )
 
 
-def test_auto_accept_edits_flag_changes_edit_verdict_only(
-    policy: ApprovalPolicy, registry: ToolRegistry
+def test_auto_accept_edits_from_config_is_one_remembered_rule(
+    registry: ToolRegistry,
 ) -> None:
-    edit_spec = registry.get("write_file")
-    cmd_spec = registry.get("run_command")
-    assert edit_spec and cmd_spec
-    policy.auto_accept_edits = True
+    """One mechanism, not two: the config key seeds the same session rule the
+    APPROVE_ALL_EDITS button writes, so the rules stay the only thing deciding."""
+    policy = ApprovalPolicy(ApprovalConfig(auto_accept_edits=True))
+    edit_spec = get_spec(registry, "write_file")
+    cmd_spec = get_spec(registry, "run_command")
+    assert policy.session_rules == [PermissionRule("edit", "*", "allow")]
     assert policy.verdict(edit_spec, make_call("write_file", path="x", content="y")) == "auto"
     # never applies to commands
     assert (
@@ -120,7 +131,7 @@ def test_auto_accept_edits_flag_changes_edit_verdict_only(
     )
 
 
-# -- APPROVE_ALL_EDITS stickiness through the Engine ----------------------------
+# -- APPROVE_ALL_EDITS through the Engine ----------------------------
 
 TWO_EDITS_REPLY = """===CLIP:CALL id=1 tool=write_file===
 path: notes_a.txt
@@ -146,8 +157,8 @@ EOT
 ===CLIP:EOM calls=1 chat=amber-falcon===
 """
 
-UNLISTED_COMMAND_REPLY = """===CLIP:CALL id=1 tool=run_command===
-command: definitely-not-allowlisted --flag
+UNGOVERNED_COMMAND_REPLY = """===CLIP:CALL id=1 tool=run_command===
+command: definitely-not-covered-by-a-rule --flag
 ===CLIP:END===
 ===CLIP:EOM calls=1 chat=amber-falcon===
 """
@@ -178,12 +189,12 @@ def test_approve_all_edits_sticks_for_session(engine: Engine, project) -> None:
     assert isinstance(step, Send)
     assert (project / "notes_c.txt").read_text(encoding="utf-8") == "gamma"
 
-    # but a non-allowlisted command still gates
-    assert isinstance(engine.ingest(UNLISTED_COMMAND_REPLY), NewTurn)
+    # but a command no rule allows still gates
+    assert isinstance(engine.ingest(UNGOVERNED_COMMAND_REPLY), NewTurn)
     pend = engine.pending()
     assert len(pend) == 1
     assert pend[0].kind == "command"
-    assert "definitely-not-allowlisted --flag" in pend[0].preview
+    assert "definitely-not-covered-by-a-rule --flag" in pend[0].preview
 
 
 # -- YOLO mode: auto-approve EVERYTHING ----------------------------------------
@@ -208,7 +219,7 @@ def test_yolo_auto_approves_edits_and_any_command(registry: ToolRegistry) -> Non
     del_spec = registry.get("delete_file")
     cmd_spec = registry.get("run_command")
     assert read_spec and edit_spec and write_spec and del_spec and cmd_spec
-    # read-only tools were always auto - unchanged
+    # read-only tools the defaults allow - unchanged
     assert policy.verdict(read_spec, make_call("read_file", path="x")) == "auto"
     # every edit kind now auto-approves
     assert policy.verdict(edit_spec, make_call("edit_file", path="x")) == "auto"
@@ -257,38 +268,30 @@ def test_yolo_loads_from_toml(project, make_engine) -> None:
     # ...and turning it off restores normal gating for the next plan.
     assert engine.set_yolo(False) is False
     engine.start_task("t")
-    assert isinstance(engine.ingest(UNLISTED_COMMAND_REPLY), NewTurn)
+    assert isinstance(engine.ingest(UNGOVERNED_COMMAND_REPLY), NewTurn)
     pend = engine.pending()
     assert len(pend) == 1 and pend[0].kind == "command"
 
 
-# -- the MCP invoker in legacy mode ---------------------------------------------
+# -- the MCP invoker ------------------------------------------------------------
 
 
-def test_legacy_mode_never_lets_an_mcp_call_ride_the_allowlist() -> None:
-    """The allowlist matches shell command lines; a composite MCP tool id is not
-    one, so `mcp` gates no matter what the allowlist says (docs/design/mcp.md
-    section 4). The decoy is the sharper danger: the branch used to read
-    `params["command"]`, so an mcp call carrying `command: git status` would have
-    bought itself an allowlist hit and auto-approved."""
-    plain = ApprovalPolicy(ApprovalConfig())
-    call = mcp_call("github_create_issue")
-    assert plain.verdict(MCP_SPEC, call) == "needs_approval"
-
-    wide_open = ApprovalPolicy(ApprovalConfig(command_allowlist=("*",)))
-    assert wide_open.verdict(MCP_SPEC, call) == "needs_approval"
+def test_an_mcp_call_cannot_buy_itself_a_bash_rule_with_a_decoy() -> None:
+    """`mcp`'s resource is a composite tool id, not a shell command line, so a
+    call carrying `command: git status` must not be judged by the bash rules that
+    would allow it (docs/design/mcp.md section 4). The target comes from
+    permission_target, never from the raw params."""
+    wide_open = ApprovalPolicy(
+        ApprovalConfig(), mode_rules("""{"permission": {"bash": "allow"}}""")
+    )
+    assert wide_open.verdict(MCP_SPEC, mcp_call("github_create_issue")) == "needs_approval"
     decoy = mcp_call("github_create_issue", command="git status")
     assert wide_open.verdict(MCP_SPEC, decoy) == "needs_approval"
-    assert plain.verdict(MCP_SPEC, decoy) == "needs_approval"
-    # ...and a real command still consults the allowlist as it always did.
-    assert plain.command_auto_allowed("git status") == "git status"
 
 
-def test_legacy_yolo_answers_an_mcp_call_too() -> None:
-    """Deliberate, and the reason the yolo check was NOT moved below the command
-    branch: in legacy mode YOLO is the user's explicit "approve everything for
-    me" and it already answers every edit and every command. `mcp` is not carved
-    out of that - only the allowlist shortcut is closed to it."""
+def test_yolo_answers_an_mcp_call_too() -> None:
+    """Deliberate: YOLO is the user's explicit "approve everything for me" and it
+    answers every ask, `mcp` included. Only an explicit deny rule still refuses."""
     policy = ApprovalPolicy(ApprovalConfig(yolo=True))
     assert policy.verdict(MCP_SPEC, mcp_call("github_create_issue")) == "auto"
 
@@ -318,15 +321,28 @@ RULESET_JSON = """{
 ASK_ONLY_RULESET = """{"permission": {"*": "ask", "bash": {"*": "ask"}}}"""
 
 
-def ruleset(json_text: str = RULESET_JSON) -> tuple[PermissionRule, ...]:
-    """The effective ruleset a config carrying ``json_text`` would produce."""
-    rules, warnings = rules_from_config(json.loads(json_text)["permission"])
+def mode_rules(json_text: str = RULESET_JSON) -> ModeRules:
+    """The per-mode rulesets a config carrying ``json_text`` would produce - the
+    shared block layered the way config.py layers it, agent blocks included."""
+    data = json.loads(json_text)
+    shared, warnings = rules_from_config(data.get("permission", {}))
     assert not warnings
-    return default_rules() + rules
+    per_mode: dict[str, tuple[PermissionRule, ...]] = {}
+    for mode, block in (data.get("agent") or {}).items():
+        if "permission" in block:
+            rules, agent_warnings = rules_from_config(block["permission"])
+            assert not agent_warnings
+            per_mode[mode] = rules
+    return build_mode_rules(shared, per_mode)
+
+
+def ruleset(json_text: str = RULESET_JSON) -> tuple[PermissionRule, ...]:
+    """That config's `build` ruleset - what a session runs in the default mode."""
+    return mode_rules(json_text).build
 
 
 def ruled_policy(json_text: str = RULESET_JSON, **kwargs: Any) -> ApprovalPolicy:
-    return ApprovalPolicy(ApprovalConfig(**kwargs), ruleset(json_text))
+    return ApprovalPolicy(ApprovalConfig(**kwargs), mode_rules(json_text))
 
 
 def get_spec(registry: ToolRegistry, name: str) -> ToolSpec:
@@ -346,16 +362,17 @@ def write_ruleset(project: Path, json_text: str = RULESET_JSON) -> Path:
     return path
 
 
-def test_rules_replace_the_allowlist(registry: ToolRegistry) -> None:
+def test_a_users_rules_replace_the_shipped_bash_defaults(registry: ToolRegistry) -> None:
+    """The user's block loads after the defaults and the last match wins, so
+    their `bash: {"*": "ask"}` takes back what the defaults allowed."""
     policy = ruled_policy()
-    assert policy.ruleset_mode is True
     cmd_spec = registry.get("run_command")
     assert cmd_spec
-    # `pytest*` is on the legacy allowlist and in no rule: under a ruleset the
-    # allowlist is gone, so it asks like anything else.
     assert policy.verdict(cmd_spec, make_call("run_command", command="pytest -q")) == (
         "needs_approval"
     )
+    # ...and `ls *`, which the defaults allow, now asks too.
+    assert policy.verdict(cmd_spec, make_call("run_command", command="dir")) == "needs_approval"
     assert policy.verdict(cmd_spec, make_call("run_command", command="git status")) == "auto"
 
 
@@ -365,13 +382,13 @@ def test_verdict_per_permission_key(registry: ToolRegistry) -> None:
     assert policy.verdict(specs["read_file"], make_call("read_file", path="src/a.py")) == "auto"
     assert policy.verdict(specs["grep"], make_call("grep", pattern="TODO")) == "auto"
     assert policy.verdict(specs["edit_file"], make_call("edit_file", path="src/a.py")) == "auto"
-    # No `list` rule, so the user's "*": "ask" catch-all decides - even though a
-    # read-only tool would never have gated in legacy mode.
+    # No `list` rule in the user's block, so their "*": "ask" catch-all decides -
+    # a read-only tool gates like anything else once the rules say so.
     assert policy.verdict(specs["list_dir"], make_call("list_dir", path=".")) == "needs_approval"
     # The shipped default asks before reading a dotenv - but this user's blanket
     # "read": "allow" is appended after it, and the last match wins.
     assert policy.verdict(specs["read_file"], make_call("read_file", path=".env")) == "auto"
-    bare = ApprovalPolicy(ApprovalConfig(), default_rules())
+    bare = ApprovalPolicy(ApprovalConfig(), build_mode_rules(()))
     assert bare.verdict(specs["read_file"], make_call("read_file", path=".env")) == (
         "needs_approval"
     )
@@ -428,15 +445,18 @@ def test_session_rules_outrank_the_config(registry: ToolRegistry) -> None:
     assert policy.verdict(cmd_spec, call) == "auto"
 
 
-def test_legacy_mode_is_untouched_when_no_rules_are_loaded(
-    policy: ApprovalPolicy, registry: ToolRegistry
-) -> None:
-    assert policy.ruleset_mode is False
-    cmd_spec = registry.get("run_command")
-    list_spec = registry.get("list_dir")
-    assert cmd_spec and list_spec
-    assert policy.verdict(cmd_spec, make_call("run_command", command="pytest -q")) == "auto"
-    assert policy.verdict(list_spec, make_call("list_dir", path=".")) == "auto"
+def test_session_rules_are_shared_by_both_modes(registry: ToolRegistry) -> None:
+    """An "always allow" is an answer about a CALL, not about the ruleset the
+    user happened to be in, so it does not evaporate on a shift+tab. What it
+    cannot do is un-deny plan mode from the build side - plan's own denial is a
+    rule, and session rules evaluate after it."""
+    policy = ruled_policy(ASK_ONLY_RULESET)
+    cmd_spec = get_spec(registry, "run_command")
+    call = make_call("run_command", command="git commit -m x")
+    policy.remember(policy.always_rule(cmd_spec, call))
+    assert policy.verdict(cmd_spec, call) == "auto"
+    policy.mode = "plan"
+    assert policy.verdict(cmd_spec, call) == "auto"
 
 
 # -- the MCP invoker under a ruleset ---------------------------------------------
@@ -596,8 +616,9 @@ def test_approve_all_edits_becomes_an_edit_rule_under_a_ruleset(project, make_en
     step = engine.execute()
     assert isinstance(step, Send)
     assert (project / "notes_b.txt").read_text(encoding="utf-8") == "beta"
-    # One mechanism, not two: the sticky flag stays off, a session rule does it.
-    assert engine.status().auto_accept_edits is False
+    # One mechanism, not two: the flag is only what the status bar paints - the
+    # session rule is what actually decided.
+    assert engine.status().auto_accept_edits is True
     assert isinstance(engine.ingest(THIRD_EDIT_REPLY), NewTurn)
     assert engine.pending() == ()
 
@@ -669,9 +690,13 @@ def test_real_world_config_verdicts(
     assert policy.verdict(spec, make_call(tool, **params)) == expected
 
 
-def test_an_agent_block_never_leaks_into_the_ruleset() -> None:
-    """OpenCode's per-agent permissions name OpenCode agents; AgentClip has no
-    equivalent, so guessing a mapping would grant or refuse things the user
-    never decided. Only the top-level block is read."""
-    rules = ruleset(REAL_WORLD_JSON)
-    assert all(rule.action != "deny" or rule.permission == "bash" for rule in rules)
+def test_an_agent_block_for_an_agent_agentclip_does_not_have_is_ignored() -> None:
+    """The `build` and `plan` blocks ARE read (they are AgentClip's two modes -
+    see tests/test_config.py), but `explore` names an OpenCode agent this tool
+    never runs, and guessing a mapping for it would refuse things the user never
+    decided. Its blanket "*": "deny" therefore reaches neither mode."""
+    rules = mode_rules(REAL_WORLD_JSON)
+    assert all(rule.action != "deny" or rule.permission == "bash" for rule in rules.build)
+    # ...and plan's own denies are the built-in overlay's, never explore's.
+    denied = {rule.permission for rule in rules.plan if rule.action == "deny"}
+    assert denied == {"edit", "bash", "mcp", "task"}

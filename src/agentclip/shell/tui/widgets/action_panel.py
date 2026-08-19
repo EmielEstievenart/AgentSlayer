@@ -66,12 +66,7 @@ def preview_renderable(action: PendingAction) -> RenderableType:
         if reason:
             text.append(f"{reason}\n", style="italic")
         text.append("\n")
-        text.append(
-            "no rule allows this - approve to run it once"
-            if action.always_pattern is not None
-            else "not on the allowlist - approve to run once in the project root",
-            style="dim",
-        )
+        text.append("no rule allows this - approve to run it once", style="dim")
         timeout = action.call.params.get("timeout")
         if timeout:
             text.append(f"\ntimeout: {timeout}s", style="dim")

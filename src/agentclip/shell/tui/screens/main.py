@@ -715,8 +715,7 @@ class MainScreen(Screen[None]):
         self._profiles: dict[str, ServiceProfile] = {}
         self._snap: StatusSnapshot | None = None  # mirrors SessionView.snapshot (read by tests)
         self._gate_kind: str | None = None  # the in-flight gate's kind, for a/check_action
-        # The pattern `a` would remember at the in-flight gate, or None in legacy
-        # mode (where `a` is the edits-only auto-accept).
+        # The pattern `a` would remember at the in-flight gate.
         self._gate_always: str | None = None
         # Mirrors SessionView.session_role/title: whose session the chrome is
         # currently describing (see render_state).
@@ -2457,9 +2456,8 @@ class MainScreen(Screen[None]):
         self._controller.submit_decision(Decision.APPROVE, None)
 
     def action_auto_edits(self) -> None:
-        """The gate's third answer: "stop asking me about these". Under a
-        permission ruleset it remembers a rule for calls like this one; in legacy
-        mode it is the edits-only auto-accept, offered at edit gates alone."""
+        """The gate's third answer: "stop asking me about these" - it remembers
+        a permission rule for calls like this one, for the rest of the session."""
         if self._gate_always is not None:
             self._controller.submit_decision(Decision.APPROVE_ALWAYS, None)
         elif self._gate_kind == "edit":
@@ -3783,7 +3781,7 @@ class MainScreen(Screen[None]):
         self._controller.cancel_execution()
 
     def action_cycle_permission_mode(self) -> None:
-        """shift+tab: ask -> plan -> unattended -> ask (§2.6a).
+        """shift+tab: build -> plan -> build (§2.6a).
 
         Deliberately ungated in ``check_action`` (it falls through to the
         default ``True``), unlike every single-letter key on this screen: the
@@ -3991,7 +3989,7 @@ class MainScreen(Screen[None]):
         # like every other field here); before one, the controller's mirror of
         # the configured default is what shift+tab would be changing.
         mode = snap.mode if snap else self._controller.permission_mode
-        mode_class = {"plan": "st-plan", "unattended": "st-unattended"}.get(mode, "st-dim")
+        mode_class = "st-plan" if mode == "plan" else "st-dim"
         service = f"{snap.service_key} {_fmt_k(snap.budget_chars)}" if snap else "no session"
         out = (
             f"out {_fmt_k(snap.last_outbound_chars)}/{_fmt_k(snap.budget_chars)} (1/1)"

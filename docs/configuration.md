@@ -65,6 +65,8 @@ In-app changes (service editor, theme pickers, saved remote targets) are persist
 | `max_grep_matches` | `200` | Per grep |
 | `command_timeout_s` | `120` | Command wall clock |
 
+A result too big for `max_result_chars`, or a whole turn too big for the service's `max_paste_chars`, is truncated in the middle. Nothing is lost: AgentClip keeps the full output and the marker left in the cut body tells the model the id and part count to ask for, which it does with the built-in `fetch_chunk` tool (auto-approved — it only re-reads what AgentClip already produced). The cache holds the last truncated payload, so a fetch is worth making in the next turn or two, not ten turns later.
+
 ### [notify], [gui], [backup], [paths]
 
 | Key | Default | Meaning |
@@ -132,7 +134,7 @@ One schema for both the global and the project file. `/config` tells you where t
   "permission": {
     "read": { "*": "allow", "*.env": "ask", "*.env.*": "ask", "*.env.example": "allow" },
     "list": "allow", "glob": "allow", "grep": "allow",
-    "skill": "allow", "mcp_schema": "allow",
+    "skill": "allow", "mcp_schema": "allow", "fetch_chunk": "allow",
     "edit": "ask", "task": "ask", "mcp": "ask",
     "bash": {
       "*": "ask",
@@ -164,6 +166,7 @@ That block *is* the built-in default — a machine with no permissions.json beha
 | `mcp` | MCP tool calls | `server_tool` composite id |
 | `mcp_schema` | MCP schema listing (metadata only) | — |
 | `skill` | loading a skill | skill name |
+| `fetch_chunk` | re-reading a truncated result | chunk id |
 
 A kind that is missing from every file defaults to `ask`. `ask_user` and `task_done` are deliberately ungateable — gating them would deadlock the conversation.
 

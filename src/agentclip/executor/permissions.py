@@ -259,6 +259,12 @@ DEFAULT_CONFIG: dict[str, object] = {
         # touches no server (docs/design/mcp.md section 4). Its own key rather
         # than `mcp`'s, so it stays cheap where `mcp` itself is locked down.
         "mcp_schema": "allow",
+        # Re-reading output AgentClip already produced, out of its own in-memory
+        # cache: no file is touched and no command is run, so gating it would
+        # only make the model pay a prompt to finish reading a result the user
+        # approved a turn ago. Same reasoning as mcp_schema's, and it stays a
+        # separate key so a user can still say otherwise.
+        "fetch_chunk": "allow",
         "edit": "ask",
         "task": "ask",
         "mcp": "ask",
@@ -422,6 +428,10 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "grep": ("grep", "pattern"),
     "run_command": ("bash", "command"),
     "skill": ("skill", "name"),
+    # The resource is the chunk id, so a rule can be written per id at all - not
+    # that anyone would, but the alternative (no entry) would resolve to a `*`
+    # resource and make the key unable to say anything more specific later.
+    "fetch_chunk": ("fetch_chunk", "id"),
     "delegate": ("task", "task"),
     # The MCP invoker's resource is the composite tool id (sanitize(server) + "_"
     # + sanitize(tool)), so a ruleset rule such as {"mcp": {"github_*": "allow"}}

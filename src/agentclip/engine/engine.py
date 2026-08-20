@@ -51,6 +51,7 @@ from agentclip.engine.store.backups import BackupStore, UndoReport
 from agentclip.engine.store.session import SessionStore
 from agentclip.executor.hosts.base import Host
 from agentclip.executor.hosts.local import LocalHost
+from agentclip.executor.tools.chunks import CachedChunks, chunk_chars_for
 from agentclip.executor.tools.fs_tools import numbered_requested, split_lines
 from agentclip.executor.tools.registry import ToolContext, ToolRegistry, ToolSpec, error_result
 from agentclip.executor.tools.sandbox import SandboxViolation, Workspace
@@ -79,6 +80,12 @@ _NOTE_WARNINGS = frozenset({"renumbered", "duplicate_id", "missing_end", "unknow
 
 # Chunks of one outbound are joined with this separator in outbound/turn-NNNN.txt.
 _CHUNK_SEPARATOR = "\n␞\n"
+
+# Result bodies below this never get a fetch_chunk id (Engine._mint_chunks). The
+# marker alone is ~100 characters, so caching a body barely longer than one buys
+# nothing worth the id - and a payload so crowded that its LARGEST body is under
+# a kilobyte has no room to serve a part back either.
+_CHUNK_MINT_FLOOR = 1_000
 
 # How many times in a row the engine answers a TRANSPORT-BROKEN reply BY ITSELF
 # (an id=0 reply_flattened or reply_unfenced payload asking for a fenced resend)
@@ -362,6 +369,21 @@ class Engine:
         # Set by request_cancel() from the UI thread while the plan runs on the
         # engine's worker thread; cleared at the start of every plan run.
         self._cancel = threading.Event()
+        # The full text of the bodies the last payload had to truncate, keyed by
+        # the id its marker names, and the counter those ids come from. Engine-
+        # side only: nothing about it touches `Outbound`/`ToolResult`, so a
+        # remote session inherits it with no wire change - the engine that
+        # composed the payload is the engine that holds the cache, wherever it
+        # runs. Handed to the ToolContext by IDENTITY and only ever mutated in
+        # place afterwards (see _update_chunk_cache): `fetch_chunk` reads this
+        # very dict a turn or more later, and a rebind here would leave the
+        # handler holding the cache as it was when the session started.
+        #
+        # The id counter is engine-global and monotonic, deliberately unlike
+        # `ToolResult.call_id`, which the parser renumbers from 1 every turn and
+        # therefore cannot name anything across one.
+        self._chunk_cache: dict[str, CachedChunks] = {}
+        self._next_chunk_id = 1
         self._ctx = ToolContext(
             workspace=workspace,
             limits=config.limits,
@@ -369,6 +391,7 @@ class Engine:
             host=self._host,
             backup_hook=self._backup_hook,
             cancel_event=self._cancel,
+            chunk_cache=self._chunk_cache,
         )
         # The session's agreed chat name, normalized once for comparison. The
         # composer stamps the same name on every outbound; ingest requires the
@@ -648,7 +671,7 @@ class Engine:
                 " inside one ~~~~ fence, or copy the reply from its raw/code view"
                 " instead of the rendered message"
             )
-        outbound = self._compose_results([_flattened_result(quoted)], [])
+        outbound = self._compose_results([_flattened_result(quoted)], [], keep_chunks=True)
         return AutoReply(
             outbound,
             f"{issue.detail}. Nothing ran - asked the chat to resend the whole reply"
@@ -694,7 +717,7 @@ class Engine:
                 " fence, copy it from the raw/code view instead of the rendered message,"
                 " or turn the require-fenced setting off for this service (F2)"
             )
-        outbound = self._compose_results([_unfenced_result()], [])
+        outbound = self._compose_results([_unfenced_result()], [], keep_chunks=True)
         return AutoReply(
             outbound,
             "the reply arrived outside a code fence, where this host rewrites code"
@@ -1535,25 +1558,114 @@ class Engine:
         results: list[ToolResult],
         notes: list[str],
         numbered_reads: Sequence[tuple[int, str]] = (),
+        *,
+        keep_chunks: bool = False,
     ) -> Outbound:
-        capped = fit_results(results, self._config.limits.max_result_chars)
+        """Render one results payload, and settle the chunk cache around it.
+
+        ``keep_chunks`` is for the payloads that are not a turn: a transport
+        bounce (`reply_flattened`/`reply_unfenced`) carries one synthetic result
+        and executed nothing, so treating it as "a payload with no truncations
+        and no fetch" would throw away a cache the model is one resend away from
+        using.
+        """
+        minted = self._mint_chunks(results)
+        markers = {entry.call_id: entry.marker for entry in minted}
+        capped = fit_results(results, self._config.limits.max_result_chars, markers)
         next_turn = self._turn + 1
         try:
-            outbound = self._composer.results(next_turn, capped, notes)
+            outbound = self._composer.results(next_turn, capped, notes, markers)
         except BudgetExceeded as exc:
             # The composer's line-boundary fitting could not get under budget
             # (e.g. a single enormous line). Cut harder, mid-line if needed.
             self._session.append_event("error", detail=f"results over budget, refitting: {exc}")
             budget = self._config.preset().max_paste_chars
             per_result = max(120, (budget - 600) // max(len(capped), 1) - 150)
-            outbound = self._composer.results(next_turn, fit_results(capped, per_result), notes)
+            outbound = self._composer.results(
+                next_turn, fit_results(capped, per_result, markers), notes, markers
+            )
         self._turn = next_turn
+        payload = _CHUNK_SEPARATOR.join(outbound.chunks)
         # After the fitting, never before: the record has to describe the text
         # that is really going out, and the refit above can cut a body a second
-        # time (engine/numbered.py).
-        self._record_numbered_reads(_CHUNK_SEPARATOR.join(outbound.chunks), numbered_reads)
+        # time (engine/numbered.py). The chunk cache is settled here for exactly
+        # the same reason.
+        self._record_numbered_reads(payload, numbered_reads)
+        self._update_chunk_cache(payload, minted, results, keep=keep_chunks)
         self._register_outbound(outbound)
         return outbound
+
+    def _mint_chunks(self, results: Sequence[ToolResult]) -> list[CachedChunks]:
+        """Pre-slice every body that a truncation pass might go after.
+
+        Minted BEFORE composing because the marker has to name the part count,
+        and the part count is a fact about the original body - which is exactly
+        the thing that stops existing the moment either pass runs. Ids are spent
+        eagerly and dropped freely: which of these bodies was really cut is not
+        knowable until the payload has been rendered and measured, so the honest
+        order is mint, render, then keep what survived. Unused ids are simply
+        never reused, which is why the ids in a session are not consecutive.
+        """
+        chunk_chars = chunk_chars_for(
+            self._config.preset().max_paste_chars, self._config.limits.max_result_chars
+        )
+        minted: list[CachedChunks] = []
+        for result in results:
+            if len(result.body) <= _CHUNK_MINT_FLOOR:
+                continue
+            chunk_id = f"c{self._next_chunk_id}"
+            self._next_chunk_id += 1
+            minted.append(
+                CachedChunks.of(
+                    chunk_id,
+                    result.body,
+                    call_id=result.call_id,
+                    turn=self._turn + 1,
+                    tool=result.tool,
+                    chunk_chars=chunk_chars,
+                )
+            )
+        return minted
+
+    def _update_chunk_cache(
+        self,
+        payload: str,
+        minted: Sequence[CachedChunks],
+        results: Sequence[ToolResult],
+        *,
+        keep: bool,
+    ) -> None:
+        """THE EVICTION RULE for the fetch_chunk cache, in the one place it applies.
+
+        A cache with no expiry is a memory leak that also hands the model stale
+        ids for output three tasks old; a cache cleared every turn cannot be
+        fetched from at all, because a fetch by definition happens in a LATER
+        turn than the truncation. So, in order:
+
+        1. REPLACED when this payload truncated something. The markers minted
+           above are checked against the RENDERED text - derived truth, like
+           `_record_numbered_reads` - so an id is only cached when the model can
+           actually see it, and the newest truncations are the ones worth
+           holding. Wholesale, never merged: "the output you were just handed"
+           has to mean literally that.
+        2. SURVIVES a payload answering a turn that CALLED fetch_chunk. A fetch
+           must not evict what it is fetching, and a model working through parts
+           1..K would otherwise lose the cache to its own first fetch.
+        3. CLEARED otherwise - a turn came and went, nothing was cut and nothing
+           was fetched, so whatever is held is output the model has moved on
+           from. Fetching an evicted id then gets the handler's "this expired,
+           re-run the original tool" rather than the wrong text.
+
+        Mutated in place, never rebound: the ToolContext holds this same dict.
+        """
+        survived = {entry.chunk_id: entry for entry in minted if entry.marker in payload}
+        if survived:
+            self._chunk_cache.clear()
+            self._chunk_cache.update(survived)
+            return
+        if keep or any(r.tool == "fetch_chunk" for r in results):
+            return
+        self._chunk_cache.clear()
 
     # -- shared internals -----------------------------------------------------------
 

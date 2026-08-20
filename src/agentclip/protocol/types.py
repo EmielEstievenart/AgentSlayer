@@ -54,6 +54,7 @@ ERROR_CODES = frozenset(
         "reply_flattened",
         "reply_unfenced",
         "unknown_skill",
+        "unknown_chunk",
         "client_mangled_reply",
     }
 )

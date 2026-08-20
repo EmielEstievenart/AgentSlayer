@@ -426,6 +426,57 @@ def test_results_unfittable_raises_budget_exceeded() -> None:
 
 
 # ---------------------------------------------------------------------------
+# caller-supplied truncation markers (the engine's fetch_chunk hint)
+
+
+def _two_big_results() -> list[ToolResult]:
+    return [
+        ToolResult(1, "ok", "\n".join(f"first body line {i:04d}" for i in range(200))),
+        ToolResult(2, "ok", "\n".join(f"second body line {i:04d}" for i in range(200))),
+    ]
+
+
+def test_a_cut_body_carries_the_marker_its_own_result_was_given() -> None:
+    """Per result, not per payload: the id in a marker names THAT body's cached
+    text, so swapping two of them would send the model to the wrong output."""
+    markers = {1: "[cut: fetch_chunk id=c1 part=1..3]", 2: "[cut: fetch_chunk id=c2 part=1..3]"}
+    payload = make_composer(2_000).results(3, _two_big_results(), markers=markers).chunks[0]
+    bodies = extract_result_bodies(payload)
+    assert markers[1] in bodies[1]
+    assert markers[2] in bodies[2]
+    assert TRUNCATION_MARKER not in payload
+
+
+def test_a_result_with_no_marker_offered_falls_back_to_the_plain_one() -> None:
+    """A partial mapping is legal: the engine mints ids only for bodies big
+    enough to be worth caching, and everything else still says what it can."""
+    payload = (
+        make_composer(2_000)
+        .results(3, _two_big_results(), markers={1: "[cut: fetch_chunk id=c1 part=1..3]"})
+        .chunks[0]
+    )
+    bodies = extract_result_bodies(payload)
+    assert "id=c1" in bodies[1]
+    assert TRUNCATION_MARKER in bodies[2]
+
+
+def test_no_markers_at_all_is_exactly_the_old_behaviour() -> None:
+    results = _two_big_results()
+    assert (
+        make_composer(2_000).results(3, results, markers={}).chunks[0]
+        == make_composer(2_000).results(3, results).chunks[0]
+    )
+
+
+def test_a_marker_is_only_stamped_into_a_body_that_was_actually_cut() -> None:
+    """What the engine keys its cache off: a minted id whose marker is nowhere
+    in the rendered payload is an id for text the model can already see whole."""
+    results = [ToolResult(1, "ok", "\n".join(f"line {i}" for i in range(20)))]
+    payload = make_composer(12_000).results(2, results, markers={1: "[cut: id=c1]"}).chunks[0]
+    assert "c1" not in payload
+
+
+# ---------------------------------------------------------------------------
 # the outbound fence (composer module docstring; protocol.md section 4)
 
 

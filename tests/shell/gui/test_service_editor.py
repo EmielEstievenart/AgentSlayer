@@ -304,6 +304,62 @@ def test_edit_by_lines_is_its_own_setter_not_part_of_the_detection_set(
     assert editor.services["chatgpt"].edit_by_lines is False
 
 
+def test_the_after_delivery_pair_is_its_own_setter_too(editor: ServiceEditor) -> None:
+    """The TUI's AFTER DELIVERY block, here at last: the switch that stops
+    AgentClip stealing the foreground back, and the beep. Read as a PAIR (the
+    page sends both boxes on any change) and writing only those two fields."""
+    before = editor.services["chatgpt"]
+    assert (before.snap_back, before.alert_sound) == (True, False)
+
+    editor.set_after_delivery(snap_back=False, alert_sound=True)
+
+    after = editor.services["chatgpt"]
+    assert after == replace(before, snap_back=False, alert_sound=True)
+    state = editor.state()
+    assert (state["snap_back"], state["alert_sound"]) == (False, True)
+    # Worded on this side like every other tick, and each carries the sentence
+    # its three words have no room for - these are the two settings a user goes
+    # hunting for after something surprised them.
+    assert state["labels"]["snap_back"] == "focus back after send"
+    assert state["labels"]["alert_sound"] == "beep when it stalls"
+    assert "debug aid" in state["titles"]["snap_back"]
+    assert "alert" in state["titles"]["alert_sound"]
+    assert "0 says it once" in state["titles"]["alert_repeat"]
+
+
+def test_the_alert_repeat_is_a_validated_form_field(editor: ServiceEditor) -> None:
+    """The seconds beside the beep ride the FORM, not the tick pair: it is a
+    number like the sizes, with the loader's own bounds (config.py) so a value
+    this editor accepts is never silently rewritten on the next start."""
+    edit(editor, repeat="30")
+    assert editor.error == ""
+    assert editor.services["chatgpt"].alert_repeat_seconds == 30
+
+    edit(editor, repeat="")  # cleared: "no repeat", not a refusal to save
+    assert editor.error == ""
+    assert editor.services["chatgpt"].alert_repeat_seconds == 0
+
+    edit(editor, repeat="soon")
+    assert editor.error == "alert repeat must be a whole number of seconds"
+    edit(editor, repeat="3601")
+    assert editor.error == "alert repeat must be between 0 and 3600 seconds"
+    edit(editor, repeat="3600")
+    assert editor.error == ""
+    assert editor.services["chatgpt"].alert_repeat_seconds == 3600
+
+
+def test_the_after_delivery_block_shows_what_add_would_create(
+    editor: ServiceEditor,
+) -> None:
+    """"+ Add new" shows the defaults rather than blanks, here as everywhere:
+    an unticked "focus back after send" over a preset born with it ON is a lie
+    about a setting the user cannot see anywhere else (brief §3.5)."""
+    editor.select(NEW_SENTINEL)
+    state = editor.state()
+    assert (state["snap_back"], state["alert_sound"]) == (True, False)
+    assert state["form"]["repeat"] == "0"
+
+
 def test_the_toggles_apply_even_while_the_form_is_invalid(editor: ServiceEditor) -> None:
     """Independent of the form's validity, exactly as the brief says."""
     edit(editor, max="not a number")
@@ -956,6 +1012,28 @@ def test_the_saved_table_round_trips_and_writes_only_what_differs(
     assert acme.max_paste_chars == 5000 and acme.total_context_chars == 50000
 
 
+def test_the_after_delivery_settings_round_trip_through_the_real_save_path(
+    project: Path, config: Config, profiles: Path, tmp_path: Path
+) -> None:
+    """All three of them out through ``save_services`` and back through
+    ``load_config``: the two ticks and the seconds are ordinary preset fields,
+    so the GUI's editor gets them onto disk by the same path as every other."""
+    target = tmp_path / "config.toml"
+    editor = ServiceEditor(config, profiles, "chatgpt", opencv=True)
+    editor.set_after_delivery(snap_back=False, alert_sound=True)
+    edit(editor, repeat="45")
+    result = asyncio.run(editor.close())
+    assert result.edits is not None and result.edits.services is not None
+    save_services(result.edits.services, target)
+
+    reloaded = load_config(project, global_config_path=target).services["chatgpt"]
+    assert reloaded.snap_back is False
+    assert reloaded.alert_sound is True
+    assert reloaded.alert_repeat_seconds == 45
+    # ...and a service nobody touched is still absent from the file entirely.
+    assert "[services.claude]" not in target.read_text(encoding="utf-8")
+
+
 def test_a_reset_builtin_disappears_from_the_file(
     project: Path, config: Config, profiles: Path, tmp_path: Path
 ) -> None:
@@ -985,7 +1063,9 @@ def test_f2_crosses_as_one_event_carrying_the_whole_surface(harness: Harness) ->
     assert event["open"] and event["reload"]
     assert event["selected"] == harness.view._config.general.service
     assert len(event["kinds"]) == 7
-    assert set(event["form"]) == {"key", "label", "max", "total", "stable", "extra"}
+    assert set(event["form"]) == {
+        "key", "label", "max", "total", "stable", "repeat", "extra"
+    }
     assert event["hint"].startswith("escape closes")
     # The five stand-alone ticks are worded on this side, like the checklist.
     assert event["labels"]["stream"] == "paste the payload in chunks"
@@ -1057,6 +1137,7 @@ def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
     api.svc_form({"label": "x"})
     api.svc_detection({"signals": ["stale"]})
     api.svc_edit_by_lines(True)
+    api.svc_after_delivery({"snap_back": False, "alert_sound": True})
     api.svc_scroll("end")
     api.svc_matcher("opencv")
     api.svc_tolerance(12)
@@ -1075,6 +1156,7 @@ def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
         "svc_form",
         "svc_detection",
         "svc_edit_by_lines",
+        "svc_after_delivery",
         "svc_scroll",
         "svc_matcher",
         "svc_tolerance",
@@ -1089,6 +1171,7 @@ def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
         "svc_close",
     ]
     assert ("svc_edit_by_lines", (True,)) in calls
+    assert ("svc_after_delivery", ({"snap_back": False, "alert_sound": True},)) in calls
     assert ("svc_tolerance", (12,)) in calls
     assert ("svc_capture", ("busy",)) in calls
     assert ("svc_next", ("busy",)) in calls
@@ -1251,6 +1334,11 @@ def test_every_editor_id_the_page_writes_into_exists_in_the_markup() -> None:
         "svc-total", "svc-stable", "svc-extra", "svc-error", "svc-kinds", "svc-templates",
         "svc-forget", "svc-hint", "svc-add", "svc-reset", "svc-delete", "svc-close",
         "edit-services",
+        # AFTER DELIVERY: the two ticks, their label spans and the two rows the
+        # hover sentences are written onto.
+        "svc-snap-back", "svc-snap-back-label", "svc-snap-back-row",
+        "svc-alert-sound", "svc-alert-sound-label", "svc-alert-sound-row",
+        "svc-alert-repeat",
     ):
         assert f'id="{element_id}"' in html, element_id
     js = (assets / "app.js").read_text(encoding="utf-8")

@@ -2825,11 +2825,13 @@ class AutomationController:
         the click as its activation and the page never sees it routed to the
         input field, which leaves the window focused, the caret nowhere, and
         the Ctrl+V below going into nothing the user can see. The second lands
-        on a window that is already awake. Safe HERE and nowhere else - the box
-        is empty at this point in the sequence, so there is no word for a
-        double click to select - which is why it lives in this method rather
-        than in ``focus_click``, whose other callers aim at a transcript full
-        of text.
+        on a window that is already awake, and the gap is wide enough (half a
+        second) that a busy page has finished reflowing its composer AND that
+        the OS reads the pair as two single clicks rather than a double one.
+        It lives in this method rather than in ``focus_click`` anyway, because
+        this is the only caller aiming at an EMPTY box: the other ones aim at a
+        transcript full of text, where a pair of clicks close enough together
+        would select a word of somebody's reply.
 
         The verdict is the FIRST click's: it is the one that proves the OS
         accepts input for that target at all, and a second click refused after
@@ -3135,7 +3137,16 @@ class AutomationController:
             # The response is on its way to the clipboard - hand focus back to
             # AgentClip so the user watches the ingest here, not the browser.
             # The beat before it is ``snap_back_after_click``'s.
-            await self.snap_back_after_click()
+            #
+            # ...unless the service says not to (``ServicePreset.snap_back``),
+            # the same switch the auto-send snap reads. It is a debugging aid,
+            # and an aid that covered only the delivery would be no aid at all:
+            # the harvest fires seconds later on the same turn and would take
+            # the browser away again just as the user was watching where the
+            # clicks landed. Default True, so nothing moves for anyone who has
+            # not deliberately turned it off.
+            if self._live_preset().snap_back:
+                await self.snap_back_after_click()
             try:
                 await self._host.ingest_harvest()
             finally:

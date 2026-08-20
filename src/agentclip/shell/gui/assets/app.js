@@ -1799,6 +1799,10 @@
       max: el.svcMax.value,
       total: el.svcTotal.value,
       stable: el.svcStable.value,
+      // The alert's seconds ride the FORM rather than the tick pair beside
+      // them: it is a validated number like the sizes and the stale window,
+      // and the model refuses a bad one the same way.
+      repeat: el.svcAlertRepeat.value,
       extra: el.svcExtra.value
     };
   }
@@ -1817,6 +1821,15 @@
       require_fenced: el.svcFenced.checked,
       stream: el.svcStream.checked,
       auto_submit: el.svcAutoSubmit.checked
+    };
+  }
+
+  // The AFTER DELIVERY pair, read together for svcDetection's reason: one
+  // handler on both boxes, never trusting which of them fired.
+  function svcAfterDelivery() {
+    return {
+      snap_back: el.svcSnapBack.checked,
+      alert_sound: el.svcAlertSound.checked
     };
   }
 
@@ -2177,6 +2190,7 @@
       el.svcMax.value = form.max || "";
       el.svcTotal.value = form.total || "";
       el.svcStable.value = form.stable || "";
+      el.svcAlertRepeat.value = form.repeat || "";
       el.svcExtra.value = form.extra || "";
     }
     // Immutable once created: only a new service may name itself.
@@ -2189,7 +2203,18 @@
     el.svcStreamLabel.textContent = labels.stream || "";
     el.svcAutoSubmitLabel.textContent = labels.auto_submit || "";
     el.svcEditByLinesLabel.textContent = labels.edit_by_lines || "";
+    el.svcSnapBackLabel.textContent = labels.snap_back || "";
+    el.svcAlertSoundLabel.textContent = labels.alert_sound || "";
     el.svcToleranceLabel.textContent = labels.tolerance || "";
+
+    // The hover sentences for the AFTER DELIVERY block, on the whole row rather
+    // than on the box: three words of label is not room to say what unticking
+    // one of these DOES, and a title on the input alone would only answer while
+    // the pointer is on the 13 pixels of the checkbox itself.
+    var titles = event.titles || {};
+    el.svcSnapBackRow.title = titles.snap_back || "";
+    el.svcAlertSoundRow.title = titles.alert_sound || "";
+    el.svcAlertRepeat.title = titles.alert_repeat || "";
 
     var off = Boolean(event.controls_disabled);
     (event.signals || []).forEach(function (sig) {
@@ -2200,6 +2225,8 @@
     svcToggle(el.svcStream, event.stream, off);
     svcToggle(el.svcAutoSubmit, event.auto_submit, off);
     svcToggle(el.svcEditByLines, event.edit_by_lines, off);
+    svcToggle(el.svcSnapBack, event.snap_back, off);
+    svcToggle(el.svcAlertSound, event.alert_sound, off);
     Object.keys(svcScrolls).forEach(function (value) {
       svcToggle(svcScrolls[value], value === event.scroll, off);
     });
@@ -3177,6 +3204,13 @@
       svcAutoSubmitLabel: id("svc-auto-submit-label"),
       svcEditByLines: id("svc-edit-by-lines"),
       svcEditByLinesLabel: id("svc-edit-by-lines-label"),
+      svcSnapBack: id("svc-snap-back"),
+      svcSnapBackLabel: id("svc-snap-back-label"),
+      svcSnapBackRow: id("svc-snap-back-row"),
+      svcAlertSound: id("svc-alert-sound"),
+      svcAlertSoundLabel: id("svc-alert-sound-label"),
+      svcAlertSoundRow: id("svc-alert-sound-row"),
+      svcAlertRepeat: id("svc-alert-repeat"),
       svcSignalWarning: id("svc-signal-warning"),
       svcScroll: id("svc-scroll"),
       svcMatcher: id("svc-matcher"),
@@ -3348,13 +3382,19 @@
     el.editServices.addEventListener("click", function () {
       api("svc_open");
     });
-    [el.svcKey, el.svcLabel, el.svcMax, el.svcTotal, el.svcStable, el.svcExtra].forEach(
-      function (input) {
-        input.addEventListener("input", function () {
-          api("svc_form", svcForm());
-        });
-      }
-    );
+    [
+      el.svcKey,
+      el.svcLabel,
+      el.svcMax,
+      el.svcTotal,
+      el.svcStable,
+      el.svcAlertRepeat,
+      el.svcExtra
+    ].forEach(function (input) {
+      input.addEventListener("input", function () {
+        api("svc_form", svcForm());
+      });
+    });
     [el.svcHover, el.svcFenced, el.svcStream, el.svcAutoSubmit].forEach(
       function (box) {
         box.addEventListener("change", function () {
@@ -3368,6 +3408,14 @@
     // is found).
     el.svcEditByLines.addEventListener("change", function () {
       api("svc_edit_by_lines", el.svcEditByLines.checked);
+    });
+    // The AFTER DELIVERY pair, on one call of their own: they are about what
+    // happens to the user's attention once a delivery or a harvest is over,
+    // which is neither how a reply is found nor how the model edits.
+    [el.svcSnapBack, el.svcAlertSound].forEach(function (box) {
+      box.addEventListener("change", function () {
+        api("svc_after_delivery", svcAfterDelivery());
+      });
     });
     // A real range input, live and ungated: it cannot express a value outside
     // the range config.py enforces, so there is no invalid state to withhold.

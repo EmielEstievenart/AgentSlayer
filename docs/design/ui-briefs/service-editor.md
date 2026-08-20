@@ -716,6 +716,18 @@ built from (`tui.md:295`).
   (120×45 and 100×35) fail the moment it grows. In the GUI it gets its own
   `svc_edit_by_lines` bridge call rather than joining the `set_detection`
   set, which is the left column's toggles read together as one group.
+- **`AFTER DELIVERY` lives in the FORM column, in both shells** — "focus
+  back after send" (`snap_back`), "beep when it stalls" (`alert_sound`)
+  and the "Alert repeat (seconds, 0 = once)" box (`alert_repeat_seconds`),
+  directly above the `EDITING` tick. Same two reasons as the bullet above:
+  they are about what happens to the *user's attention* once a delivery or
+  a harvest is over rather than about how a reply is found, and the left
+  column has no rows to spare. In the GUI the two ticks ride one
+  `svc_after_delivery` bridge call (read as a pair, never per-box) and the
+  seconds is a validated number that rides the form like the sizes do
+  (blank = 0, bounds `[0, 3600]` — the loader's). `snap_back` is the debug
+  aid and reads as one, so it gates **every** snap the loop makes by
+  itself: the auto-send's and the auto-copy harvest's.
 - **Built-ins can be edited and reset, never deleted.** `BUILTIN_SERVICE_KEYS`
   (12 keys) always show "Reset to default" and never show "Delete".
   Non-built-in (custom) keys show the reverse.

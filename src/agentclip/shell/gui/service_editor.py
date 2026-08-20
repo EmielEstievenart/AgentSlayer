@@ -146,6 +146,35 @@ AUTO_SUBMIT_LABEL = "press Enter after auto-paste"
 # which means nothing to anyone who has not turned it on yet.
 EDIT_BY_LINES_LABEL = "edit files by line number"
 
+# The AFTER DELIVERY block: the two ticks about what happens once AgentClip has
+# acted on the browser by itself. The TUI's wording verbatim (its own
+# ``SNAP_BACK_LABEL``/``ALERT_SOUND_LABEL``) - both shells are describing the
+# same two switches to the same user, and this is the drift that would send
+# somebody hunting for a setting under a name only one shell uses.
+SNAP_BACK_LABEL = "focus back after send"
+ALERT_SOUND_LABEL = "beep when it stalls"
+# ...and the hover text, which is the room the tick's own three words do not
+# have. Both of these are settings a user goes looking for after something
+# surprised them - the window that took the foreground away, the beep they
+# cannot find - so each says in one sentence what it does and, for the debug
+# aid, why anyone would turn it off.
+SNAP_BACK_TITLE = (
+    "Untick to keep the browser focused after delivery — the debug aid for "
+    "watching where clicks land."
+)
+ALERT_SOUND_TITLE = (
+    "Play the two-tone alert when the loop stalls and needs you to paste or "
+    "copy by hand. Untick it for silence."
+)
+ALERT_REPEAT_TITLE = (
+    "How often the alert repeats while the loop is still waiting, in seconds. "
+    "0 says it once."
+)
+# The alert-repeat bounds, which are ``config.py``'s loader's: a value this
+# editor accepts must never be silently rewritten the next time the app starts.
+ALERT_REPEAT_MIN = 0
+ALERT_REPEAT_MAX = 3_600
+
 MATCHER_LABELS: dict[str, str] = {
     MATCHER_ANCHORS: "Anchors (built-in)",
     MATCHER_OPENCV: "OpenCV (exhaustive)",
@@ -470,13 +499,28 @@ class ServiceEditor:
                 "stream": STREAM_DELIVERY_LABEL,
                 "auto_submit": AUTO_SUBMIT_LABEL,
                 "edit_by_lines": EDIT_BY_LINES_LABEL,
+                "snap_back": SNAP_BACK_LABEL,
+                "alert_sound": ALERT_SOUND_LABEL,
                 "tolerance": TOLERANCE_LABEL,
+            },
+            # The hover sentences, beside the labels rather than mixed into
+            # them: a label is what the control is CALLED and a title is what it
+            # does, and the page writes them into two different attributes.
+            "titles": {
+                "snap_back": SNAP_BACK_TITLE,
+                "alert_sound": ALERT_SOUND_TITLE,
+                "alert_repeat": ALERT_REPEAT_TITLE,
             },
             "hover_scan": shown.hover_scan,
             "require_fenced": shown.require_fenced_reply,
             "stream": shown.delivery == DELIVERY_STREAM,
             "auto_submit": shown.auto_submit,
             "edit_by_lines": shown.edit_by_lines,
+            # The AFTER DELIVERY ticks. Read off ``shown`` like every other
+            # toggle, so the "+ add new" form shows what the press would really
+            # create rather than a pair of blanks.
+            "snap_back": shown.snap_back,
+            "alert_sound": shown.alert_sound,
             "scroll": shown.scroll_action,
             "scrolls": [{"value": name, "label": SCROLL_LABELS[name]} for name in SCROLL_ACTIONS],
             "matcher": shown.matcher,
@@ -549,6 +593,10 @@ class ServiceEditor:
                 # universal default, and "add a service" should stay a
                 # four-field job for anyone who never touches the detector.
                 "stable": str(DEFAULT_STABLE_SECONDS),
+                # Pre-filled for the same reason, and from the defaults preset
+                # rather than a literal: the box must show what "Add service"
+                # would really file, exactly as the toggles do.
+                "repeat": str(_NEW_PRESET_DEFAULTS.alert_repeat_seconds),
                 "extra": "",
             }
         else:
@@ -559,6 +607,7 @@ class ServiceEditor:
                 "max": str(preset.max_paste_chars),
                 "total": str(preset.total_context_chars),
                 "stable": str(preset.stable_seconds),
+                "repeat": str(preset.alert_repeat_seconds),
                 "extra": preset.extra_instructions,
             }
         self._pending_new = None
@@ -627,7 +676,7 @@ class ServiceEditor:
         which control fired), and here it is forced anyway: ``max <= total`` is
         a cross-field rule, so a per-field validator could not exist.
         """
-        for name in ("key", "label", "max", "total", "stable", "extra"):
+        for name in ("key", "label", "max", "total", "stable", "repeat", "extra"):
             if name in fields:
                 self._form[name] = str(fields[name])
         self._reload = False
@@ -647,6 +696,7 @@ class ServiceEditor:
         max_text = self._form.get("max", "").strip()
         total_text = self._form.get("total", "").strip()
         stable_text = self._form.get("stable", "").strip()
+        repeat_text = self._form.get("repeat", "").strip()
         # Stripped as the TUI strips it: the box holds newlines, and a trailing
         # one from a stray Enter is not guidance the model needs shipped.
         extra_text = self._form.get("extra", "").strip()
@@ -697,6 +747,22 @@ class ServiceEditor:
                 if not (STABLE_MIN <= stable_val <= STABLE_MAX):
                     error = "stale seconds must be between 0.5 and 60"
 
+        repeat_val: int | None = None
+        if error is None:
+            # Blank means zero rather than an error, exactly as the TUI reads
+            # it: an empty box says "no repeat", and refusing to save the whole
+            # service over a field the user cleared would be absurd.
+            if not repeat_text:
+                repeat_val = 0
+            else:
+                try:
+                    repeat_val = int(repeat_text)
+                except ValueError:
+                    error = "alert repeat must be a whole number of seconds"
+                else:
+                    if not (ALERT_REPEAT_MIN <= repeat_val <= ALERT_REPEAT_MAX):
+                        error = "alert repeat must be between 0 and 3600 seconds"
+
         self._error = error
         if error is not None:
             self._pending_new = None
@@ -707,6 +773,7 @@ class ServiceEditor:
             and max_val is not None
             and total_val is not None
             and stable_val is not None
+            and repeat_val is not None
         )
         if is_new:
             self._pending_new = ServicePreset(
@@ -716,6 +783,7 @@ class ServiceEditor:
                 total_context_chars=total_val,
                 stable_seconds=stable_val,
                 extra_instructions=extra_text,
+                alert_repeat_seconds=repeat_val,
             )
         else:
             self._services[key] = replace(
@@ -725,6 +793,7 @@ class ServiceEditor:
                 total_context_chars=total_val,
                 stable_seconds=stable_val,
                 extra_instructions=extra_text,
+                alert_repeat_seconds=repeat_val,
             )
 
     # == the toggles, the radios and the slider ================================
@@ -772,6 +841,31 @@ class ServiceEditor:
         if key is None or key not in self._services:
             return
         self._services[key] = replace(self._services[key], edit_by_lines=bool(on))
+
+    def set_after_delivery(self, *, snap_back: bool, alert_sound: bool) -> None:
+        """The AFTER DELIVERY block's two ticks, folded back together.
+
+        Its own setter rather than a member of ``set_detection`` for
+        :meth:`set_edit_by_lines`'s reason: that method folds the LEFT column's
+        toggles back as one set because they describe one thing (how a finished
+        reply is recognised and delivered), and these two describe what happens
+        to the user's attention AFTERWARDS - where the foreground goes, and
+        whether the machine says anything out loud. Read as a pair rather than
+        per-box because that is what the page sends: one handler on both boxes,
+        never trusting which one fired.
+
+        The seconds beside them is not here - it is a validated text field and
+        rides the form (``repeat``), where the rest of the numbers are.
+        """
+        key = self._selected_key
+        self._reload = False
+        if key is None or key not in self._services:
+            return
+        self._services[key] = replace(
+            self._services[key],
+            snap_back=bool(snap_back),
+            alert_sound=bool(alert_sound),
+        )
 
     def set_scroll(self, action: str) -> None:
         """How the auto-copy flow reaches the newest reply. Writes only that field."""
@@ -1095,6 +1189,11 @@ def kind_of(name: str) -> TemplateKind | None:
 
 
 __all__: Sequence[str] = [
+    "ALERT_REPEAT_MAX",
+    "ALERT_REPEAT_MIN",
+    "ALERT_REPEAT_TITLE",
+    "ALERT_SOUND_LABEL",
+    "ALERT_SOUND_TITLE",
     "AUTO_SUBMIT_LABEL",
     "CAPTURE_BUSY",
     "CLICK_X_LABEL",
@@ -1114,6 +1213,8 @@ __all__: Sequence[str] = [
     "SCROLL_LABELS",
     "SIGNAL_LABELS",
     "SIGNAL_UNCAPTURED",
+    "SNAP_BACK_LABEL",
+    "SNAP_BACK_TITLE",
     "STABLE_MAX",
     "STABLE_MIN",
     "STREAM_DELIVERY_LABEL",

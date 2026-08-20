@@ -341,15 +341,15 @@ async def test_a_paste_with_nowhere_to_paste_logs_why_it_asked_for_a_manual_one(
 ) -> None:
     """The first decision of every run, and the one users meet first: the
     bootstrap is copied, the tool tries to insert it itself, and with no chat
-    box drawn the click is refused. The rail shows MANUAL_INSERT; the log says
-    which of its causes this was."""
+    window drawn there is nowhere to aim. The rail shows MANUAL_INSERT; the log
+    says which of its causes this was."""
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         await _start_session(app, pilot)
 
         text = await _read_log(app, pilot)
         assert "IDLE → AUTO_INSERT — an outbound payload is ready" in text
-        assert "AUTO_INSERT → MANUAL_INSERT — the focus click did not land" in text
+        assert "AUTO_INSERT → MANUAL_INSERT — no chat window is drawn" in text
         assert "session started" in text
 
 
@@ -368,7 +368,7 @@ async def test_a_disarmed_paste_is_logged_as_suppressed_rather_than_failed(
         text = await _read_log(app, pilot)
         assert "DISARMED - watching only" in text
         assert "auto-insert suppressed: disarmed" in text
-        assert "the focus click did not land" not in text  # nothing was attempted
+        assert "no chat window is drawn" not in text  # nothing was attempted
 
 
 async def test_a_clipboard_capture_logs_its_size_and_the_move_to_interpreting(
@@ -700,5 +700,5 @@ async def test_new_logs_the_reset_and_the_log_survives_it(
         assert "session reset: the transcript is cleared" in text
         assert "→ IDLE — session reset" in text
         # ...and the run that led here is still there to read.
-        assert "AUTO_INSERT → MANUAL_INSERT — the focus click did not land" in text
+        assert "AUTO_INSERT → MANUAL_INSERT — no chat window is drawn" in text
         assert main.transcript.entries == []  # the transcript, in contrast, went

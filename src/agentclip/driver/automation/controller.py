@@ -2112,15 +2112,22 @@ class AutomationController:
     async def chatbox_target(self) -> tuple[ScreenRegion, ScreenRegion] | None:
         """The chat box's rectangle AND the one pixel in it to click, or None.
 
-        Both, because the two callers need both: the point is where the caret
-        goes, and the rectangle is what a keyboard scroll measures its
-        "just above the box" from (``flow.above_chatbox``).
+        Both, because the caller needs both: the point is where the caret goes,
+        and the rectangle is what a keyboard scroll measures its "just above the
+        box" from (``flow.above_chatbox``).
 
         The point is the service's own (``ServiceProfile.click_point``) only
         when a capture actually matched. The whole-drawn-window fallback below
         keeps its centre: a per-image click point describes where inside THAT
         PICTURE to click, and a window the user drew around their whole chat is
         not that picture - aiming 10% into it would land in the transcript.
+
+        This is the HARVEST's question - the focus click the auto-copy flow
+        makes before it scrolls, which only has to put the page in front and
+        aims deliberately AWAY from the input field. The delivery asks
+        :meth:`verified_chatbox_target` instead, and the difference between the
+        two is the whole point: a click that is about to be followed by a paste
+        may not land on a guess.
         """
         found = await self._chatbox_match()
         if found is None:
@@ -2130,8 +2137,44 @@ class AutomationController:
             return box, box
         return box, click_point_region(box, *self._live_profile().click_point(kind))
 
+    async def verified_chatbox_target(self) -> ScreenRegion | None:
+        """The one pixel to click when the chat box is really ON SCREEN - or
+        None, which means "do not click at all".
+
+        The DELIVERY's question, and the one rule the paste path has: a payload
+        goes into a box we can see, or it goes nowhere. There used to be no
+        such rule - the delivery took :meth:`chatbox_target`'s whole-drawn-window
+        fallback and clicked the middle of the user's own rectangle - and the
+        middle of a chat window is the TRANSCRIPT: the click selects a word of
+        an old response, or lands on a link, and the synthetic Ctrl+V that
+        follows goes wherever that left the caret. A paste into the void is
+        recoverable; a paste into the wrong place is what the user has to
+        notice and undo. So the fallback is refused here, on all three of its
+        roads at once:
+
+        * neither appearance matched - the page is mid-transition, a dialog is
+          over it, or the capture has drifted;
+        * two of one layout matched, which is two conversations under one drawn
+          region and a coin toss between them;
+        * the service has no chat box captured at all, the pre-calibration
+          degraded mode.
+
+        All three land on the same banner (``LoopState.MANUAL_INSERT``): the
+        payload is already parked on the clipboard, so the user clicks their own
+        chat box and presses Ctrl+V - which is the manual path that has always
+        been there, reached without a second implementation of it.
+        """
+        found = await self._chatbox_match()
+        if found is None:
+            return None
+        box, kind = found
+        if kind is None:
+            return None
+        return click_point_region(box, *self._live_profile().click_point(kind))
+
     async def _chatbox_match(self) -> tuple[ScreenRegion, TemplateKind | None] | None:
-        """The chat box and WHICH appearance found it - None for the fallback.
+        """The chat box and WHICH appearance found it - None kind for the
+        fallback, and None outright when nothing at all is drawn.
 
         A fresh chat centres its input box and an ongoing one docks it at the
         bottom, so both appearances are hunted in ONE capture of the live chat
@@ -2140,17 +2183,17 @@ class AutomationController:
         case, and the search stops at the first hit.
 
         When neither is found (the page is mid-transition, a dialog covers it,
-        or the service has no chat box captured at all) the whole chat window
-        is the answer rather than nothing: clicking a window is recoverable,
-        not clicking at all means the paste never lands.
+        or the service has no chat box captured at all) the whole chat window is
+        the answer, with no kind beside it. Two input boxes of the same layout
+        inside the region take that same answer: an appearance belongs to the
+        SERVICE, so a second window of it under one drawn region resolves the
+        same box twice and picking one is a coin toss between two conversations.
 
-        Two input boxes of the same layout inside the region take that same
-        fallback, and for a sharper reason: this click is what focuses the
-        window a payload is about to be pasted into, so poking the wrong one
-        pastes a whole turn into somebody else's conversation. The drawn region
-        is the user's own answer to "where is this chat", so a click in the
-        middle of it is the conservative move - and it is exactly what happens
-        with no chat box captured at all.
+        That un-kinded answer is a WEAK one, and every caller reads it as such.
+        The harvest's focus click takes it - it only has to put the page in
+        front, and the region is the user's own answer to "where is this chat".
+        The delivery refuses it outright (:meth:`verified_chatbox_target`),
+        because the click it makes is followed by a paste.
 
         Always the LIVE slot: mid-delegation this is the sub-agent's window.
         """
@@ -2168,8 +2211,8 @@ class AutomationController:
             if len(found) > 1:
                 self._view.notify(
                     f"found {len(found)} things that look like the {kind.label} in the chat "
-                    "window - clicking its centre instead; redraw the window so it contains "
-                    "only this chat",
+                    "window - AgentClip will not paste into a maybe-wrong one; redraw the "
+                    "window so it contains only this chat",
                     severity="warning",
                 )
                 return region, None
@@ -2565,6 +2608,15 @@ class AutomationController:
         service that opted in - tap Enter. True only when the payload really
         landed in the box.
 
+        ...and *only* when the input box is actually on screen. There is no
+        blind click here and no aiming at the drawn window: with no captured
+        chat box verifying inside it (``verified_chatbox_target``) this refuses
+        the whole OS half and puts the "your move" banner up instead. The single
+        door every outbound goes through - the bootstrap, a turn's results, the
+        `c` re-delivery, the retry button and a sub-agent's first paste are all
+        ``copy_outbound`` or ``retry_insert`` onto this - so that refusal is one
+        rule rather than five.
+
         The payload is already on the clipboard when this runs (``copy_outbound``
         and ``retry_insert`` both park it there first): this half is the OS work
         on top of that write, and it is a method of its own precisely so the
@@ -2587,8 +2639,20 @@ class AutomationController:
         # simply do not happen. Everything after this is the existing "the click
         # never landed" path (MANUAL_INSERT, the Ctrl+V nag), which is exactly
         # the disarmed UX and needs no second implementation.
+        #
+        # The chat box is resolved HERE rather than inside the click, because
+        # "there is nowhere to aim" and "the aim was refused" are two different
+        # things to say on the banner - and the first of them is the one this
+        # whole branch exists for. ``verified_chatbox_target`` answers None
+        # unless a captured appearance actually matched inside the drawn region:
+        # no guess, no whole-window fallback, and therefore no click and no
+        # paste. Clicking the middle of the user's rectangle would be clicking
+        # the TRANSCRIPT, and a synthetic Ctrl+V after that lands wherever the
+        # page left the caret.
+        target: ScreenRegion | None = None
         if self._os_armed:
-            clicked = await self._click_after_response()
+            target = await self.verified_chatbox_target()
+            clicked = target is not None and await self._click_after_response(target)
         else:
             clicked = False
             self._view.notify(
@@ -2627,10 +2691,11 @@ class AutomationController:
             else:
                 pasted = await asyncio.to_thread(self._ops.send_paste)
         # The auto-insert resolved: the payload is in the box awaiting the
-        # user's Enter, or it never landed and the Ctrl+V is theirs to do. Three
-        # reasons, not two, because "the Ctrl+V is yours" has two very different
-        # causes and only one of them is a failure - the switch the user threw
-        # themselves reads as a fault otherwise.
+        # user's Enter, or it never landed and the Ctrl+V is theirs to do. Four
+        # reasons, not one, because "the Ctrl+V is yours" has four very different
+        # causes and only two of them are failures - the switch the user threw
+        # themselves reads as a fault otherwise, and a chat box that is simply
+        # not on screen is a different thing to fix than a click the OS refused.
         auto_sent = False
         if pasted:
             self.set_loop_state(
@@ -2658,11 +2723,46 @@ class AutomationController:
                 "auto-insert suppressed: disarmed - the payload is on your clipboard "
                 "to paste yourself",
             )
+        elif target is None:
+            # The user's complaint, answered: nothing that looks like the chat
+            # box verified inside the drawn region, so nothing was clicked and
+            # nothing was pasted. The toast says what to do about it and the
+            # banner keeps saying it until they have - and the payload is on the
+            # clipboard already, so "click it and paste" is the whole recovery.
+            #
+            # Two sentences rather than one, because the two roads here want
+            # different things done about them: an undrawn window is a setup
+            # step the user has not taken yet, while a box that did not verify
+            # inside a window they DID draw is a page to look at (or a capture
+            # to re-take with F2).
+            if self.live.chat_region is None:
+                self._view.notify(
+                    "no chat window is drawn, so there was nowhere to paste - the payload "
+                    "is on your clipboard: draw the window (SET REGION), or paste it "
+                    "yourself",
+                    severity="warning",
+                )
+                self.set_loop_state(
+                    LoopState.MANUAL_INSERT,
+                    "no chat window is drawn, so nothing was clicked - paste it yourself",
+                )
+            else:
+                self._view.notify(
+                    "the chat box was not found on screen - nothing was clicked: the "
+                    "payload is on your clipboard, click the chat box and press Ctrl+V "
+                    "yourself",
+                    severity="warning",
+                )
+                self.set_loop_state(
+                    LoopState.MANUAL_INSERT,
+                    "the chat box was not found on screen - click it and paste yourself "
+                    "(press c to re-copy)",
+                )
         elif not clicked:
             self.set_loop_state(
                 LoopState.MANUAL_INSERT,
-                "the focus click did not land, so nothing was pasted - "
-                "no chat box is drawn, or the click was refused",
+                "the chat box was found but the focus click on it was refused, "
+                "so nothing was pasted",
             )
         else:
             self.set_loop_state(
@@ -2709,12 +2809,16 @@ class AutomationController:
             await self.snap_back_after_click()
         return pasted
 
-    async def _click_after_response(self) -> bool:
-        """The payload is on the clipboard - poke the chat (when something is
-        calibrated) so the browser has focus and the paste lands without
-        alt-tab. Returns True only when a target was known AND the click landed
-        - the signal ``deliver`` uses to decide whether it is safe to send
-        Ctrl+V.
+    async def _click_after_response(self, target: ScreenRegion) -> bool:
+        """The payload is on the clipboard - poke the chat box at ``target`` so
+        the browser has focus and the paste lands without alt-tab. Returns True
+        only when the click landed, which is the signal ``deliver`` uses to
+        decide whether it is safe to send Ctrl+V.
+
+        WHERE is the caller's, and deliberately so: this method may only ever be
+        handed a point that a captured chat box actually verified at
+        (``verified_chatbox_target``), so there is no route through here that
+        clicks a guess.
 
         TWO clicks, ``delivery.FOCUS_CLICK_GAP_S`` apart. The first one is
         spent waking the browser: a window that is not in the foreground takes
@@ -2732,10 +2836,6 @@ class AutomationController:
         the first landed would only mean the burst was throttled, not that the
         box is unfocused. So the reinforcement is best effort.
         """
-        found = await self.chatbox_target()
-        if found is None:
-            return False
-        _box, target = found
         clicked = await self.focus_click(target)
         if not clicked:
             return False

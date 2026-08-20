@@ -38,6 +38,7 @@ from textual.widgets import Button, Static
 import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
+from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.profile import TemplateKind
@@ -55,6 +56,17 @@ ONGOING_BOX = ScreenRegion(1300, 860, 400, 90)
 
 # Every button has to be on screen for pilot.click to reach it.
 SIZE = (110, 100)
+
+
+@pytest.fixture(autouse=True)
+def _chatbox_always_found() -> None:
+    """Override the directory-wide stand-in: THIS suite is the one about finding
+    the chat box, so it may not be handed one.
+
+    The conftest fixture of this name declares the live region found for every
+    other suite here, because a delivery that cannot verify a box refuses to
+    click - a precondition everywhere else, and the subject here.
+    """
 
 
 @pytest.fixture(autouse=True)
@@ -324,15 +336,23 @@ async def test_the_initial_box_wins_when_only_it_is_on_screen(
         assert clicks == focus_clicks(aimed_at(INITIAL_BOX))
 
 
-async def test_neither_on_screen_falls_back_to_the_chat_window(
+async def test_neither_on_screen_means_no_click_and_no_paste(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Mid-transition (or behind a dialog) neither appearance is found. Clicking
-    the window is recoverable; not clicking means the paste never lands."""
+    """Mid-transition (or behind a dialog) neither appearance is found - so
+    nothing is clicked at all.
+
+    This used to click the middle of the drawn window and paste there, on the
+    grounds that clicking a window is recoverable. The middle of a chat window
+    is the TRANSCRIPT: the click lands on an old response (or a link in it) and
+    the Ctrl+V that follows goes wherever that left the caret. The payload is on
+    the clipboard already, so the honest answer is the banner asking the user to
+    paste it themselves.
+    """
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
     monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
-    app, _ = _make_app(tmp_path, profile_root)
+    app, fake = _make_app(tmp_path, profile_root)
     _seed_boxes(profile_root, app, TemplateKind.CHATBOX_INITIAL, TemplateKind.CHATBOX_ONGOING)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
@@ -344,7 +364,9 @@ async def test_neither_on_screen_falls_back_to_the_chat_window(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == focus_clicks(CHAT_REGION)
+        assert clicks == []
+        assert main._loop_state is LoopState.MANUAL_INSERT
+        assert fake.read_text() is not None  # ...and the payload is parked to paste
 
 
 async def test_a_second_image_of_one_layout_is_ored_in_not_counted_twice(
@@ -383,14 +405,18 @@ async def test_a_second_image_of_one_layout_is_ored_in_not_counted_twice(
         assert await main._chatbox_region() == ONGOING_BOX
 
 
-async def test_two_boxes_of_one_layout_fall_back_to_the_drawn_window(
+async def test_two_boxes_of_one_layout_refuse_the_delivery(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two windows of the same service under one drawn box show two identical
     input boxes. This click is what focuses the window a whole turn is about to
     be pasted into, so poking the wrong one puts the payload in somebody else's
-    conversation - the drawn region's centre is the user's own answer to "where
-    is this chat", and it is what a service with no box captured gets anyway."""
+    conversation - and there is no third option that is safe to click, so the
+    delivery refuses and the user is asked to redraw the window.
+
+    The HARVEST still takes the drawn region as its answer (``_chatbox_region``
+    below): that focus click only has to put the page in front before a scroll,
+    and no payload rides on it."""
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
     monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
@@ -419,14 +445,17 @@ async def test_two_boxes_of_one_layout_fall_back_to_the_drawn_window(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == focus_clicks(CHAT_REGION)
+        assert clicks == []
+        assert main._loop_state is LoopState.MANUAL_INSERT
 
 
-async def test_the_chat_region_alone_is_enough_to_click(
+async def test_the_chat_region_alone_is_not_enough_to_click(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No appearance captured at all: the drawn chatbot window gets the click,
-    exactly as before - one drawn box is the whole minimum setup."""
+    """No appearance captured at all - the pre-calibration degraded mode. A
+    rectangle the user drew around a whole chat says where the CHAT is, never
+    where its input box is, so it is not a click target for a paste either: the
+    banner asks for the Ctrl+V until the box has been captured (F2)."""
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
     monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
@@ -440,14 +469,16 @@ async def test_the_chat_region_alone_is_enough_to_click(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == focus_clicks(CHAT_REGION)
+        assert clicks == []
+        assert main._loop_state is LoopState.MANUAL_INSERT
 
 
-async def test_a_failed_capture_of_the_region_still_clicks_the_window(
+async def test_a_failed_capture_of_the_region_clicks_nothing(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A screen we cannot read is not a reason to skip the focus click: the
-    window is where the box is, whatever the pixels say."""
+    """A screen we cannot read says nothing about where the box is - which is
+    exactly the state a click that is about to be pasted into may not be aimed
+    from."""
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
     app, _ = _make_app(tmp_path, profile_root)
@@ -467,7 +498,8 @@ async def test_a_failed_capture_of_the_region_still_clicks_the_window(
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
         await _wait_for(pilot, lambda: not main.busy, "session flow settled")
-        assert clicks == focus_clicks(CHAT_REGION)
+        assert clicks == []
+        assert main._loop_state is LoopState.MANUAL_INSERT
 
 
 async def test_nothing_drawn_means_no_click(

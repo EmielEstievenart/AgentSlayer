@@ -44,6 +44,7 @@ from pathlib import Path
 import pytest
 from textual.pilot import Pilot
 
+from agentclip.driver.automation.controller import AutomationController
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.profile_store import save_template
@@ -171,6 +172,34 @@ def new_chat_click_lands(monkeypatch: pytest.MonkeyPatch) -> None:
         self._reset_after_new_browser_chat(slot)
 
     monkeypatch.setattr(MainScreen, "_new_browser_chat", _click_landed)
+
+
+@pytest.fixture(autouse=True)
+def _chatbox_always_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Declare the live chat box found, for every suite that is not about
+    finding one.
+
+    A delivery refuses to click at all unless a captured chat-box appearance
+    really matched inside the drawn region (§3.4b): no verified box means no
+    click, no synthetic Ctrl+V and the "your move" banner instead. Finding it is
+    one suite's whole subject (test_chatbox_ui.py, which overrides this with a
+    no-op) and a mere PRECONDITION for every other suite here that sends an
+    outbound - the armed switch, the drawn region, /new, the retry button, the
+    streamed delivery, a delegation end to end. Without this each of them would
+    have to seed a searchable appearance AND fake a scene to find it in, to set
+    up something none of them is asserting.
+
+    Autouse for the same reason ``_no_real_activation_wait`` below is: it is
+    paid by tests that are not about it. It answers with the LIVE slot's drawn
+    region, which is the rectangle those suites' click traces already name - and
+    None when nothing is drawn, so "nothing calibrated means no click" still
+    holds.
+    """
+
+    async def _found(self: AutomationController) -> ScreenRegion | None:
+        return self.live.chat_region
+
+    monkeypatch.setattr(AutomationController, "verified_chatbox_target", _found)
 
 
 @pytest.fixture(autouse=True)

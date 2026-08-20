@@ -41,14 +41,22 @@ from agentclip.driver.automation.delivery import (
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.automation.ops import ScreenOps
 from agentclip.driver.clip.fake import FakeClipboard
-from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
-from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot
 
 from .conftest import FakeAutomationView
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
+# The docked input box inside it, and where a click on it lands. Every delivery
+# here needs one: since the blind-click fallback went, a payload is only ever
+# pasted into a chat box that a captured appearance really MATCHED, so a suite
+# with nothing on screen would assert the banner and never the paste. The aim is
+# the service's own click point (the middle of the picture until a test moves
+# it), which is what ``AIMED`` spells out.
+CHAT_BOX = ScreenRegion(1100, 800, 601, 41)
+AIMED = click_point_region(CHAT_BOX, 50, 50)
 PAYLOAD = "===CLIP:BEGIN=== the outbound ===CLIP:END==="
 # Small enough that a readable payload is several chunks, big enough that a short
 # one is exactly one.
@@ -247,7 +255,17 @@ def ops() -> ScriptedOps:
 
 @pytest.fixture
 def host() -> FakeHost:
-    return FakeHost(_preset())
+    """A service whose docked input box is on screen where ``CHAT_BOX`` says.
+
+    Seeded here rather than per test because it is a PRECONDITION of every
+    delivery now: with no chat box matching inside the drawn region the paste
+    path refuses to click at all, so a host with an empty screen would turn
+    every assertion in this file into the same one about the banner. The suites
+    that are about the refusal clear it (``host.on_screen.clear()``).
+    """
+    fake = FakeHost(_preset())
+    fake.on_screen[TemplateKind.CHATBOX_ONGOING] = [CHAT_BOX]
+    return fake
 
 
 @pytest.fixture
@@ -270,11 +288,10 @@ def delivery(
     clipboard: FakeClipboard,
     alarm: RecordingAlarm,
 ) -> AutomationController:
-    """A controller with a drawn chat window and a real (fake) clipboard - the
-    state an outbound payload is delivered out of. No chat box appearance is
-    captured, so the focus click lands on the drawn window itself, which is the
-    delivery's documented fallback. The alarm is a recording one throughout, so
-    nothing in this file can make the machine beep."""
+    """A controller with a drawn chat window, a chat box on screen inside it and
+    a real (fake) clipboard - the state an outbound payload is delivered out of.
+    The alarm is a recording one throughout, so nothing in this file can make the
+    machine beep."""
     automation = AutomationController(
         view=view, host=host, ops=ops, clipboard=clipboard, alarm=alarm
     )
@@ -360,6 +377,138 @@ async def test_no_drawn_window_means_no_click_at_all(
     assert clipboard.written == [PAYLOAD]  # ...but the payload is still parked
     assert automation.loop_state is LoopState.MANUAL_INSERT
     assert _flash(view) == (PASTE_FLASH_TEXT, True)
+
+
+# -- no chat box on screen: the refusal ------------------------------------------
+# The one rule the paste path has. There used to be a fallback here - no chat box
+# found meant clicking the middle of the region the user drew and pasting into
+# whatever that focused - and the middle of a chat window is the TRANSCRIPT: the
+# click selects a word of an old response or lands on a link, and the synthetic
+# Ctrl+V goes wherever the page left the caret. Every road to "no verified box"
+# now lands on the same banner instead, with the payload parked.
+
+
+async def test_a_chat_box_that_is_not_on_screen_is_never_clicked_or_pasted_into(
+    delivery: AutomationController,
+    host: FakeHost,
+    ops: ScriptedOps,
+    clipboard: FakeClipboard,
+    view: FakeAutomationView,
+) -> None:
+    """The whole bug report in one test: mid-transition, behind a dialog, or a
+    capture that has drifted - nothing verified, so nothing is clicked, nothing
+    is typed, and the user is told."""
+    host.on_screen.clear()
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events == []
+    assert ops.clicked == []
+    assert clipboard.written == [PAYLOAD]  # ...and it is still theirs to paste
+    assert delivery.loop_state is LoopState.MANUAL_INSERT
+    assert _flash(view) == (PASTE_FLASH_TEXT, True)
+    assert _said(view, "the chat box was not found on screen")
+    assert any("the chat box was not found on screen" in e.text for e in delivery.harness_log)
+
+
+async def test_a_service_with_no_chat_box_captured_lands_on_the_same_banner(
+    delivery: AutomationController,
+    host: FakeHost,
+    ops: ScriptedOps,
+    clipboard: FakeClipboard,
+) -> None:
+    """The pre-calibration degraded mode - one drawn window and no appearance
+    behind it - is not a licence to click either: a rectangle the user drew
+    around a whole chat says where the CHAT is, never where its input box is."""
+    host.profile = ServiceProfile(key="fake")  # nothing captured at all
+    host.on_screen.clear()
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events == []
+    assert clipboard.written == [PAYLOAD]
+    assert delivery.loop_state is LoopState.MANUAL_INSERT
+
+
+async def test_two_boxes_of_one_layout_refuse_the_paste_rather_than_guess(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, view: FakeAutomationView
+) -> None:
+    """Two windows of one service under a single drawn region resolve the same
+    appearance twice, and picking one is a coin toss between two conversations -
+    the losing one gets a whole turn pasted into it."""
+    second = ScreenRegion(CHAT_BOX.left, CHAT_BOX.top + 300, CHAT_BOX.width, CHAT_BOX.height)
+    host.on_screen[TemplateKind.CHATBOX_ONGOING] = [CHAT_BOX, second]
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events == []
+    assert delivery.loop_state is LoopState.MANUAL_INSERT
+    assert _said(view, "redraw the window so it contains only this chat")
+
+
+async def test_a_screen_that_cannot_be_read_is_not_a_licence_to_click(
+    delivery: AutomationController, ops: ScriptedOps, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A capture that failed says nothing about where the box is, which is
+    exactly the state a click may not be aimed from."""
+
+    def boom(region: ScreenRegion) -> RegionImage:
+        raise CaptureError("no display")
+
+    monkeypatch.setattr(ops, "capture", boom)
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events == []
+    assert delivery.loop_state is LoopState.MANUAL_INSERT
+
+
+async def test_a_stream_service_streams_nothing_without_a_box_to_stream_into(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, clipboard: FakeClipboard
+) -> None:
+    """The chunked path rides the same focus click, so it refuses with it - and
+    the clipboard is left holding the WHOLE payload rather than a chunk."""
+    host.preset = _preset(delivery=DELIVERY_STREAM)
+    host.on_screen.clear()
+
+    await delivery.copy_outbound(PAYLOAD)
+
+    assert ops.events == []
+    assert clipboard.written == [PAYLOAD]
+    assert clipboard.read_text() == PAYLOAD
+
+
+async def test_the_retry_refuses_the_same_way_when_the_box_is_still_gone(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+) -> None:
+    """The retry button re-runs ``deliver``, so it inherits the refusal instead
+    of being a second way in."""
+    host.on_screen.clear()
+    await delivery.copy_outbound(PAYLOAD)
+    ops.events.clear()
+
+    await delivery.retry_insert()
+
+    assert ops.events == []
+    assert delivery.loop_state is LoopState.MANUAL_INSERT
+
+
+async def test_a_box_that_comes_back_delivers_normally_on_the_next_try(
+    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+) -> None:
+    """The refusal is about THIS frame, not about the session: a box that was
+    momentarily missing (a dialog, a reflow) is delivered into as soon as it is
+    back, which is what makes the retry worth pressing."""
+    host.on_screen.clear()
+    await delivery.copy_outbound(PAYLOAD)
+    host.on_screen[TemplateKind.CHATBOX_ONGOING] = [CHAT_BOX]
+    ops.events.clear()
+
+    await delivery.retry_insert()
+
+    assert ops.events == [*FOCUS, "paste"]
+    assert ops.clicked == [AIMED, AIMED]
+    assert delivery.loop_state is LoopState.WAIT_SEND
 
 
 async def test_a_paste_that_did_not_go_through_says_so_in_its_own_words(
@@ -620,16 +769,14 @@ async def test_both_focus_clicks_land_where_the_service_aims_them(
     assert ops.clicked == [aimed, aimed]
 
 
-async def test_the_whole_window_fallback_keeps_its_centre_click(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+async def test_the_default_aim_is_the_middle_of_the_matched_box(
+    delivery: AutomationController, ops: ScriptedOps
 ) -> None:
-    """With no chat box on screen the target is the region the USER drew, which
-    no per-picture click point describes."""
-    host.profile.set_click_point(TemplateKind.CHATBOX_ONGOING, 25, 0)
-
+    """A service that never moved its click point aims at the centre of the
+    picture that matched - not at the centre of the drawn window."""
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.clicked == [CHAT_REGION, CHAT_REGION]
+    assert ops.clicked == [AIMED, AIMED]
 
 
 async def test_a_refused_first_click_is_never_followed_by_a_second(

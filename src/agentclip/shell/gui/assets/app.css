@@ -1113,7 +1113,12 @@ button:not(:disabled) {
 
 .sidebar {
   flex: none;
-  width: 300px;
+  /* 300px whenever the window can spare it, and a share of the window rather
+     than a number once it cannot: the column is dense text, so it reads fine
+     narrower, while the chat next to it does not read at all once this eats
+     it. Below the narrow breakpoint (end of file) it stops squeezing the chat
+     at all and floats over it instead. */
+  width: clamp(220px, 28vw, 300px);
   overflow-y: auto;
   padding: 14px 16px 18px;
   border-left: 1px solid var(--line);
@@ -1239,7 +1244,9 @@ button:not(:disabled) {
 
 .elements {
   flex: none;
-  width: 210px;
+  /* Same bargain as the sidebar, one size down: the thumbnails scale with the
+     row, so a narrower column loses detail rather than content. */
+  width: clamp(160px, 20vw, 210px);
   overflow-y: auto;
   padding: 14px 14px 18px;
   border-left: 1px solid var(--line);
@@ -1524,7 +1531,10 @@ button:not(:disabled) {
 .svc-modal {
   display: flex;
   flex-direction: column;
-  width: min(1120px, 96vw);
+  /* 100%, not a vw fraction: the scrim pads itself, and a viewport-relative
+     width does not know about that padding - it overflows it by a few pixels
+     on a narrow window, exactly where there are none to spare. */
+  width: min(1120px, 100%);
   max-height: 92vh;
   padding: 16px 18px;
   border: 1px solid var(--line);
@@ -1540,7 +1550,11 @@ button:not(:disabled) {
 
 .svc-body {
   display: grid;
-  grid-template-columns: 260px minmax(220px, 1fr) 320px;
+  /* The two outer lanes are still fixed-looking at any comfortable width; the
+     minmax() only lets them give ground before the modal starts overflowing
+     its own scrim. Under the narrow breakpoint (end of file) the three lanes
+     stack instead. */
+  grid-template-columns: minmax(200px, 260px) minmax(220px, 1fr) minmax(240px, 320px);
   gap: 18px;
   min-height: 0;
   overflow: auto;
@@ -1788,7 +1802,8 @@ button:not(:disabled) {
 .conn-modal {
   display: flex;
   flex-direction: column;
-  width: min(860px, 96vw);
+  /* 100% rather than a vw fraction, for the reason .svc-modal gives. */
+  width: min(860px, 100%);
   max-height: 92vh;
   padding: 16px 18px;
   border: 1px solid var(--line);
@@ -1813,7 +1828,7 @@ button:not(:disabled) {
 
 .conn-cols {
   display: grid;
-  grid-template-columns: 260px 1fr;
+  grid-template-columns: minmax(200px, 260px) minmax(0, 1fr);
   gap: 18px;
 }
 
@@ -2001,4 +2016,91 @@ button:not(:disabled) {
 
 .side-remote-lost div:nth-child(2) {
   color: var(--warn);
+}
+
+/* == narrow windows =======================================================
+   The window's minimum is 400x300 (shell.py) because it has to be able to sit
+   in half of a small portrait monitor - 450 wide is a real size here, not a
+   corner case. Everything above is written for a desktop-width window and
+   degrades by squeezing; these rules are the places where squeezing stops
+   working and the layout has to CHANGE SHAPE instead. Nothing here fires above
+   its breakpoint, so a normal window is untouched. */
+
+/* Under this width the two side columns cannot take their share and leave the
+   chat readable, so they stop being columns: they float over the chat,
+   right-anchored, shown and hidden by the same F3/F7 toggles - they are still
+   only [hidden] to app.js, which is why none of this needed script. */
+@media (max-width: 640px) {
+  .body {
+    position: relative;
+  }
+
+  .sidebar,
+  .elements {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    /* Above the chat and the log pane, below the toasts (20) and every scrim
+       (25+): a floating column is still part of the page, not a modal. */
+    z-index: 12;
+    box-shadow: var(--shadow);
+  }
+
+  .sidebar {
+    width: min(300px, 80vw);
+  }
+
+  .elements {
+    width: min(210px, 62vw);
+  }
+
+  /* Both open at once: the narrower one steps left so neither is buried. */
+  .body:has(> .sidebar:not([hidden])) > .elements {
+    right: min(300px, 80vw);
+  }
+
+  /* A shortcut wrapped onto two lines is still readable; a key column holding
+     190px of a 450px window is not. */
+  .help-rows .k,
+  .help-rows .k.cmd {
+    width: auto;
+    white-space: normal;
+  }
+
+  /* 16px a side is a frame at 1200px wide and a tax at 450. Same for the 8vh
+     the dialogs leave above and below themselves. */
+  .svc-scrim,
+  .conn-scrim {
+    padding: 8px;
+  }
+
+  .svc-modal,
+  .conn-modal {
+    max-height: 96vh;
+  }
+
+  /* A row of buttons plus a hint is wider than the panel now. */
+  .svc-footer,
+  .conn-footer {
+    flex-wrap: wrap;
+  }
+}
+
+/* The service editor's three lanes need roughly 700px between them before the
+   middle one stops being a form and starts being a gutter. Below that they
+   stack in document order - settings, form, appearance - and .svc-body's own
+   scroll carries the height. */
+@media (max-width: 860px) {
+  .svc-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Same move, one column earlier: the connect dialog's target list and its
+   checklist stop reading side by side. */
+@media (max-width: 560px) {
+  .conn-cols {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }

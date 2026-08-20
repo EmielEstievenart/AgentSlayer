@@ -48,14 +48,21 @@ failure mode behind it.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Literal
 
 from agentclip.config import BudgetCaps, ServicePreset
 from agentclip.protocol.spec import SECTION_TASK_HEADER, render_spec
 from agentclip.protocol.types import Outbound, ToolResult
 
-# In-band marker substituted for the cut middle of an over-budget result body.
+# In-band marker substituted for the cut middle of an over-budget result body,
+# used when the caller offered nothing better. The engine normally DOES: it
+# caches the full body first and passes down a marker naming the id and part
+# count a `fetch_chunk` can ask for (executor/tools/chunks.py), which is the
+# only advice that works for output no range re-read can reproduce. This one is
+# the fallback for a composer used without that cache - by a test, or by any
+# future caller that has no way to serve the omitted text - and it therefore
+# still says the most useful thing possible with no id to offer.
 TRUNCATION_MARKER = "[truncated by AgentClip to fit the paste budget - request specific ranges]"
 
 # Bounded refinement passes when fitting RESULTS payloads to the budget.
@@ -141,12 +148,17 @@ def pick_heredoc_tag(content: str, base: str = "R") -> str:
     return tag
 
 
-def _truncate_middle(body: str, target: int) -> str:
+def _truncate_middle(body: str, target: int, marker: str = TRUNCATION_MARKER) -> str:
     """Middle-truncate body to roughly ``target`` chars on line boundaries.
 
     The first and last lines are always kept; the cut middle is replaced with
-    TRUNCATION_MARKER. May still exceed ``target`` when even the minimal form
-    (first line + marker + last line) is longer - the caller re-checks.
+    ``marker``. May still exceed ``target`` when even the minimal form (first
+    line + marker + last line) is longer - the caller re-checks.
+
+    ``marker`` is data here, and that is the layering: this module cannot know
+    what a caller is able to offer in place of the text it is about to drop, so
+    the caller says. The engine passes one naming a `fetch_chunk` id; a caller
+    with nothing cached gets the default.
     """
     if len(body) <= target:
         return body
@@ -156,7 +168,7 @@ def _truncate_middle(body: str, target: int) -> str:
     head: list[str] = [lines[0]]
     tail: list[str] = [lines[-1]]
     middle = lines[1:-1]
-    size = len(lines[0]) + len(TRUNCATION_MARKER) + len(lines[-1]) + 2  # + joins
+    size = len(lines[0]) + len(marker) + len(lines[-1]) + 2  # + joins
     front, back = 0, len(middle)
     take_front = True
     while front < back:
@@ -173,18 +185,24 @@ def _truncate_middle(body: str, target: int) -> str:
         take_front = not take_front
     if front >= back:  # defensive: everything fit after all
         return body
-    return "\n".join([*head, TRUNCATION_MARKER, *tail])
+    return "\n".join([*head, marker, *tail])
 
 
-def _fit_bodies(bodies: Sequence[str], available: int) -> list[str]:
+def _fit_bodies(
+    bodies: Sequence[str], available: int, markers: Sequence[str] | None = None
+) -> list[str]:
     """Shrink the largest bodies so their total is <= available (approx).
 
     Finds the largest per-body cap T with sum(min(len(b), T)) <= available and
     middle-truncates every body longer than T. Only the largest bodies shrink;
     bodies already under the cap are untouched.
+
+    ``markers`` is parallel to ``bodies``: each body carries away the marker its
+    own result was assigned, because the id in it names THAT body's cached text.
     """
     if not bodies:
         return []
+    marks = list(markers) if markers is not None else [TRUNCATION_MARKER] * len(bodies)
     sizes = [len(b) for b in bodies]
     if sum(sizes) <= available:
         return list(bodies)
@@ -196,7 +214,10 @@ def _fit_bodies(bodies: Sequence[str], available: int) -> list[str]:
         else:
             hi = mid - 1
     cap = lo
-    return [_truncate_middle(b, cap) if len(b) > cap else b for b in bodies]
+    return [
+        _truncate_middle(b, cap, m) if len(b) > cap else b
+        for b, m in zip(bodies, marks, strict=True)
+    ]
 
 
 class Composer:
@@ -307,6 +328,7 @@ class Composer:
         turn: int,
         results: Sequence[ToolResult],
         notes: Sequence[str] = (),
+        markers: Mapping[int, str] | None = None,
     ) -> Outbound:
         """The combined results payload for one executed turn.
 
@@ -314,9 +336,18 @@ class Composer:
         result bodies (sentinel lines are never touched; the first and last
         line of each body are always kept). Raises BudgetExceeded only when
         even maximal truncation cannot fit.
+
+        ``markers`` maps a result's ``call_id`` to the in-band marker to stamp
+        into THAT body if it is cut, defaulting to TRUNCATION_MARKER. It is how
+        the engine offers a way back to the omitted text without this module
+        knowing anything about caches or tools: the engine pre-slices the full
+        bodies, hands down markers naming their `fetch_chunk` ids, and afterwards
+        keeps only the ids whose marker it can see in what was actually rendered.
+        A caller who passes nothing gets exactly the old behaviour.
         """
         budget = self._preset.max_paste_chars
         bodies = [self._result_body(r) for r in results]
+        marks = [(markers or {}).get(r.call_id, TRUNCATION_MARKER) for r in results]
         payload = self._render_results(turn, results, bodies, notes)
         if len(payload) <= budget:
             return Outbound("results", (payload,), len(payload), turn)
@@ -327,7 +358,7 @@ class Composer:
         for _ in range(_FIT_ATTEMPTS):
             if available < 0:
                 break
-            fitted = _fit_bodies(bodies, available)
+            fitted = _fit_bodies(bodies, available, marks)
             payload = self._render_results(turn, results, fitted, notes)
             if len(payload) <= budget:
                 return Outbound("results", (payload,), len(payload), turn)

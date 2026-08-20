@@ -36,6 +36,23 @@ def test_truncate_tail_noop_under_cap() -> None:
     assert truncate_tail("ok", 100) == "ok"
 
 
+def test_fit_results_stamps_the_marker_the_caller_gave_that_result() -> None:
+    """This pass runs FIRST, against limits.max_result_chars, so it is often the
+    one that cuts - a fetch_chunk hint carried only by the composer's pass would
+    be a hint the model gets only sometimes."""
+    fitted = fit_results(
+        [
+            ToolResult(call_id=1, status="ok", body=LONG, tool="run_command"),
+            ToolResult(call_id=2, status="ok", body=LONG, tool="run_command"),
+        ],
+        600,
+        {1: "[cut: fetch_chunk id=c1 part=1..9]"},
+    )
+    assert "id=c1" in fitted[0].body
+    assert TRUNCATION_MARKER not in fitted[0].body
+    assert TRUNCATION_MARKER in fitted[1].body  # no marker offered: the fallback
+
+
 def test_fit_results_caps_only_oversized_bodies() -> None:
     small = ToolResult(call_id=1, status="ok", body="tiny", tool="read_file")
     big = ToolResult(call_id=2, status="ok", body=LONG, tool="read_file")

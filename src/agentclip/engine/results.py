@@ -9,7 +9,7 @@ never cuts a body's first/last line; truncate_middle here can cut anything).
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
 from agentclip.protocol.composer import TRUNCATION_MARKER
@@ -53,15 +53,27 @@ def truncate_tail(text: str, max_chars: int, marker: str = TRUNCATION_MARKER) ->
     return f"{marker}\n{tail}"
 
 
-def fit_results(results: Sequence[ToolResult], budget: int) -> tuple[ToolResult, ...]:
+def fit_results(
+    results: Sequence[ToolResult],
+    budget: int,
+    markers: Mapping[int, str] | None = None,
+) -> tuple[ToolResult, ...]:
     """Cap every result body to ``budget`` chars via middle truncation.
 
     Statuses, codes, and user notes are untouched; only over-long bodies
     shrink, each carrying the in-band truncation marker.
+
+    ``markers`` maps a result's ``call_id`` to the marker to use for THAT body,
+    exactly as `composer.results` takes it. Both passes need it for the same
+    reason: either one can be the pass that cuts a given body - this one runs
+    first and cuts against the per-result cap, the composer's runs second and
+    cuts against the whole payload - so a hint carried by only one of them is a
+    hint the model gets only sometimes.
     """
     out: list[ToolResult] = []
     for result in results:
         if len(result.body) > budget:
-            result = replace(result, body=truncate_middle(result.body, budget))
+            marker = (markers or {}).get(result.call_id, TRUNCATION_MARKER)
+            result = replace(result, body=truncate_middle(result.body, budget, marker))
         out.append(result)
     return tuple(out)

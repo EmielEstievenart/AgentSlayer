@@ -1,4 +1,4 @@
-"""Registry shape: all 10 tools, approval kinds, catalog rendering, meta stubs."""
+"""Registry shape: all 11 tools, approval kinds, catalog rendering, meta stubs."""
 
 from __future__ import annotations
 
@@ -25,9 +25,14 @@ ALL_TOOLS = (
     "glob",
     "grep",
     "run_command",
+    "fetch_chunk",
     "ask_user",
     "task_done",
 )
+
+# The one entry with no worked example: its syntax is taught by the truncation
+# marker at the moment it is needed (executor/tools/chunks.py).
+NO_EXAMPLE = ("fetch_chunk",)
 
 
 def make_ctx(root: Path) -> ToolContext:
@@ -38,8 +43,21 @@ def make_ctx(root: Path) -> ToolContext:
     )
 
 
-def test_default_registry_has_all_ten_tools_in_order() -> None:
+def test_default_registry_has_all_eleven_tools_in_order() -> None:
     assert default_registry().names() == ALL_TOOLS
+
+
+def test_fetch_chunk_is_always_there_and_never_gated() -> None:
+    """Truncation is a property of the transport, not of a preset: there is no
+    configuration in which a body can be cut and the way back to it be absent."""
+    for reg in (
+        default_registry(),
+        default_registry(edit_by_lines=True),
+        default_registry(role="subagent"),
+    ):
+        spec = _get(reg, "fetch_chunk")
+        assert spec.approval_kind == "auto"
+        assert spec.preview is None
 
 
 # -- the ranged-edit mode (protocol.md section 3.1) ----------------------------
@@ -106,11 +124,13 @@ def test_unknown_tool_returns_none() -> None:
 
 def test_render_catalog_contains_every_tool_and_examples() -> None:
     catalog = default_registry().render_catalog()
-    for name in ALL_TOOLS:
+    with_examples = [name for name in ALL_TOOLS if name not in NO_EXAMPLE]
+    for name in with_examples:
         assert f"tool={name}" in catalog, name  # each entry has a worked example
+    for name in ALL_TOOLS:
         assert name in catalog
-    assert catalog.count("===CLIP:CALL") == len(ALL_TOOLS)
-    assert catalog.count("===CLIP:END===") == len(ALL_TOOLS)
+    assert catalog.count("===CLIP:CALL") == len(with_examples)
+    assert catalog.count("===CLIP:END===") == len(with_examples)
     # bootstrap section-4 size target: ~4,200 chars
     assert 2_500 <= len(catalog) <= 6_000, len(catalog)
 
@@ -123,7 +143,7 @@ def test_mcp_specs_slot_between_run_command_and_the_meta_tools() -> None:
         return ToolSpec(name, "auto", lambda ctx, call: ok_result(call, ""), None, f"{name}()")
 
     reg = default_registry(mcp_specs=(spec("mcp_schema"), spec("mcp")))
-    assert reg.names() == (*ALL_TOOLS[:8], "mcp_schema", "mcp", "ask_user", "task_done")
+    assert reg.names() == (*ALL_TOOLS[:9], "mcp_schema", "mcp", "ask_user", "task_done")
 
 
 def test_meta_handlers_are_inert_stubs(tmp_path: Path) -> None:

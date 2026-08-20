@@ -25,6 +25,7 @@ from agentclip.executor.tools.sandbox import SandboxViolation, Workspace
 from agentclip.protocol.types import ToolCall, ToolResult
 
 if TYPE_CHECKING:
+    from agentclip.executor.tools.chunks import CachedChunks
     from agentclip.executor.tools.skills import Skill
 
 
@@ -64,6 +65,15 @@ class ToolContext:
     way to catch a file mutated by an earlier call in the SAME reply; empty (the
     default) simply means nobody is making that promise, and the tool trusts the
     range it was given.
+
+    chunk_cache is what `fetch_chunk` reads: the full text of the bodies the
+    last payload had to truncate, keyed by the id its marker names. It is the
+    one field here that is deliberately CROSS-TURN, and the shape follows from
+    that - `numbered_slices` is rebuilt per plan and so may be reassigned, but a
+    fetch arrives one or more turns after the truncation that filled this, so
+    the engine and the context must be looking at the SAME dict. The engine owns
+    it, mutates it in place (never rebinds it), and writes the eviction rule
+    where the eviction happens; a handler only ever reads.
     """
 
     workspace: Workspace
@@ -74,6 +84,7 @@ class ToolContext:
     cancel_event: threading.Event | None = None
     on_output: Callable[[int, str], None] | None = None
     numbered_slices: dict[int, str] = field(default_factory=dict)
+    chunk_cache: dict[str, CachedChunks] = field(default_factory=dict)
 
     def cancelled(self) -> bool:
         """True once the user asked to cancel the batch this call belongs to."""
@@ -103,7 +114,11 @@ class ToolSpec:
     approval_kind: Literal["auto", "edit", "command"]  # edit = write_file/edit_file/delete_file
     handler: Callable[[ToolContext, ToolCall], ToolResult]
     preview: Callable[[ToolContext, ToolCall], str] | None  # gated tools: diff / command line
-    catalog_doc: str  # bootstrap section-4 entry incl. worked example
+    # Bootstrap section-4 entry, normally including a worked example. The one
+    # exception is `fetch_chunk`, whose syntax is taught by the truncation marker
+    # at the moment it is needed rather than by an example nobody reads until
+    # then (executor/tools/chunks.py, FETCH_CHUNK_DOC).
+    catalog_doc: str
 
 
 class ToolRegistry:
@@ -166,8 +181,9 @@ def default_registry(
     host that does not need it (it contaminates the find-blocks a model copies
     back), and an unused catalog entry is bootstrap budget spent for nothing.
     """
-    # Local imports: fs_tools/shell/meta/skills import helpers from this module.
+    # Local imports: fs_tools/shell/meta/skills/chunks import helpers from this module.
     from agentclip.executor.tools import fs_tools, meta, shell
+    from agentclip.executor.tools.chunks import FETCH_CHUNK_SPEC
     from agentclip.executor.tools.skills import make_skill_spec
 
     specs: list[ToolSpec] = [
@@ -180,6 +196,12 @@ def default_registry(
         fs_tools.GLOB_SPEC,
         fs_tools.GREP_SPEC,
         shell.RUN_COMMAND_SPEC,
+        # Last of the built-ins, and unconditional: it is the recovery path for
+        # the tools above it, so it belongs beside them rather than in the
+        # closing hand-off block, and no preset or permission can make a body
+        # un-truncatable - a registry without it would have failure modes with
+        # no way out.
+        FETCH_CHUNK_SPEC,
     ]
     listable = [s for s in skills if s.model_invocable]
     if listable:

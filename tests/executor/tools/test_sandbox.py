@@ -33,6 +33,8 @@ def ws(tmp_path: Path) -> Workspace:
     (tmp_path / "README.md").write_text("readme\n", encoding="utf-8")
     (tmp_path / ".git").mkdir()
     (tmp_path / ".git" / "config").write_text("[core]\n", encoding="utf-8")
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".vscode" / "settings.json").write_text("{}\n", encoding="utf-8")
     (tmp_path / ".agentclip").mkdir()
     (tmp_path / ".agentclip" / "secrets.txt").write_text("s\n", encoding="utf-8")
     return Workspace(tmp_path, Config().excluded_names())
@@ -112,22 +114,51 @@ def test_missing_root_raises_at_construction(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     "rel",
     [
-        ".git/config",
         ".agentclip/secrets.txt",
         ".agentclip.toml",
-        "node_modules/pkg/index.js",
-        "src/node_modules/x.js",  # excluded component anywhere in the path
+        "src/.agentclip/notes.txt",  # sealed component anywhere in the path
     ],
 )
-def test_excluded_rejected_for_read_and_write(ws: Workspace, rel: str) -> None:
+def test_hard_excluded_rejected_for_read_and_write(ws: Workspace, rel: str) -> None:
+    """The two sealed names: the model may neither read nor write its own rules."""
     with pytest.raises(SandboxViolation):
         ws.resolve_read(rel)
     with pytest.raises(SandboxViolation):
         ws.resolve_write(rel)
 
 
+@pytest.mark.parametrize(
+    "rel",
+    [
+        ".git/config",
+        ".vscode/settings.json",
+        "node_modules/pkg/index.js",
+        "src/node_modules/x.js",  # excluded component anywhere in the path
+    ],
+)
+def test_configured_excludes_are_readable_but_not_writable(ws: Workspace, rel: str) -> None:
+    """`paths.exclude` is budget hygiene, not secrecy: name the file and you get it."""
+    assert ws.resolve_read(rel) == ws.root.joinpath(*rel.split("/"))
+    with pytest.raises(SandboxViolation):
+        ws.resolve_write(rel)
+
+
+def test_the_hard_floor_holds_even_if_the_caller_omits_it(tmp_path: Path) -> None:
+    """A Workspace built from a bare exclude list still seals .agentclip."""
+    (tmp_path / ".agentclip").mkdir()
+    ws = Workspace(tmp_path, ["node_modules"])
+    assert ".agentclip" in ws.excludes
+    with pytest.raises(SandboxViolation):
+        ws.resolve_read(".agentclip/x.txt")
+    with pytest.raises(SandboxViolation):
+        ws.resolve_write(".agentclip/x.txt")
+    assert ws.is_excluded(ws.root / ".agentclip")
+
+
 def test_is_excluded_helper(ws: Workspace) -> None:
+    """Traversal still skips the FULL merged set - readability changes nothing here."""
     assert ws.is_excluded(ws.root / ".git" / "config")
+    assert ws.is_excluded(ws.root / ".vscode" / "settings.json")
     assert ws.is_excluded(ws.root / ".agentclip")
     assert ws.is_excluded(ws.root.parent / "elsewhere.txt")  # outside root counts
     assert not ws.is_excluded(ws.root / "src" / "utils.py")

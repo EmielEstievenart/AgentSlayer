@@ -72,7 +72,7 @@ In-app changes (service editor, theme pickers, saved remote targets) are persist
 | `notify.bell` / `notify.toast` | `true` / `true` | Attention signals |
 | `gui.theme` | `"dark"` | GUI palette: `dark`, `light`, `claude-warm`, `claude-dark` (separate from `[general] theme` — different theme systems) |
 | `backup.keep_sessions` | `5` | Per-turn backup retention, 1–1000 |
-| `paths.exclude` | `.git`, `node_modules`, `.venv`, `__pycache__`, caches, `dist`, `build`, IDE dirs, … | Directory names the tools skip. `.agentclip/` and `.agentclip.toml` are **always** excluded — the model can never read its own rules or backups |
+| `paths.exclude` | `.git`, `node_modules`, `.venv`, `__pycache__`, caches, `dist`, `build`, IDE dirs, … | Directory names kept out of listings and sweeps (`list_dir`, `glob`, `grep` never descend into them) and **write-protected** — but a file inside one **can be read** when the model names it explicitly, so "read `.vscode/settings.json`" works. This is budget hygiene, not secrecy. `.agentclip/` and `.agentclip.toml` are **always** excluded and stay sealed in *both* directions — the model can never read or rewrite its own rules and backups |
 
 ### [remote.\<name\>] — saved SSH targets
 

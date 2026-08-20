@@ -212,7 +212,8 @@ def tool_handler(
                 call,
                 "path_outside_workspace",
                 f"path not allowed: {exc.detail}",
-                "use a relative path inside the project root and avoid excluded directories.",
+                "use a relative path inside the project root; excluded directories "
+                "can be read from but not written to, and .agentclip is off limits.",
             )
         except OSError as exc:
             return error_result(

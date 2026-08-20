@@ -416,12 +416,14 @@ class ToolContext:
 # non-streaming host and a listener that raises all cost the model nothing.
 
 # executor/tools/sandbox.py -------------------------------------------------------
+HARD_EXCLUDED_NAMES = frozenset({".agentclip", ".agentclip.toml"})  # sealed both ways
 class Workspace:
     root: Path                               # Path(root).resolve(strict=True) at startup
-    excludes: frozenset[str]
-    def resolve_read(self, rel: str) -> Path      # raises SandboxViolation
+    excludes: frozenset[str]                 # paths.exclude | hard_excludes: traversal + writes
+    hard_excludes: frozenset[str]            # the sealed names: reads are checked against ONLY these
+    def resolve_read(self, rel: str) -> Path      # raises SandboxViolation; hard names only
     def resolve_write(self, rel: str) -> Path     # parent-resolving variant (file may not exist)
-    def is_excluded(self, p: Path) -> bool
+    def is_excluded(self, p: Path) -> bool        # traversal predicate: the full merged set
 
 # engine/approval.py -----------------------------------------------------
 class ApprovalPolicy:
@@ -598,8 +600,10 @@ max_grep_matches = 200
 command_timeout_s = 120
 
 [paths]
-# .agentclip and .agentclip.toml are ALWAYS excluded (hard-coded) so the LLM
-# cannot read/tamper with backups, transcripts, or its own approval rules.
+# Skipped by list_dir/glob/grep and refused for writes; a file inside one can
+# still be READ when named explicitly. .agentclip and .agentclip.toml are ALWAYS
+# excluded (hard-coded) and sealed both ways, so the LLM cannot read or tamper
+# with backups, transcripts, or its own approval rules.
 exclude = [
   ".git", ".hg", ".svn", "node_modules", ".venv", "venv",
   "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache",
@@ -745,7 +749,12 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
    - Reads (`resolve_read`): `candidate = (root / rel).resolve()` — non-strict resolve in 3.11+ resolves all existing symlink components; a symlink pointing outside root produces a path that fails step 3.
    - Writes (`resolve_write`): the file may not exist, and non-strict resolve does not chase symlinks in a non-existent tail. So: find the deepest **existing** ancestor of `root / rel`, `resolve(strict=True)` it, verify *it* passes step 3, then append the remaining (non-existent) components after rejecting any `..` or symlink-named component among them. Refuse to write *through* a symlinked directory whose target escapes root.
 3. **Containment:** `candidate == root or candidate.is_relative_to(root)` else `SandboxViolation`. (Case-insensitive comparison hazards on Windows are avoided because both sides come from the same `resolve()` normalization.)
-4. **Exclusion:** if any path component ∈ `paths.exclude` ∪ `{".agentclip", ".agentclip.toml"}` → refused for read *and* write (`.git` may hold credentials in remote URLs; `.agentclip` holds the backups the LLM must not touch). Traversal tools (`list_dir`, `glob`, `grep`) silently skip excluded directories instead of erroring.
+4. **Exclusion — two policies, not one**, because the list answers two different questions:
+   - **Writes** (and deletes): refused if any path component ∈ `paths.exclude` ∪ `HARD_EXCLUDED_NAMES`. Nothing the model does may edit a dependency tree, a VCS directory or a build output.
+   - **Reads**: refused only if a component ∈ `HARD_EXCLUDED_NAMES` = `{".agentclip", ".agentclip.toml"}` — the backups, transcripts and approval rules the LLM must never see or rewrite. An *explicitly named* path inside a configured excluded directory (`.vscode/settings.json`, `node_modules/left-pad/index.js`) **is readable**: `paths.exclude` exists for budget hygiene, not secrecy, and refusing it stranded users whose own project files lived there.
+   - **Traversal** (`list_dir`, `glob`, `grep`) silently skips the *full merged* set instead of erroring, so an excluded tree never floods a listing or a sweep — it has to be asked for by name.
+
+   `HARD_EXCLUDED_NAMES` is defined in `executor/tools/sandbox.py`, next to the `Workspace` that enforces it, and folded into `excludes` at construction — a caller passing a bare `paths.exclude` still gets a jail that seals `.agentclip`. `config.Config.excluded_names()` therefore returns exactly what the user configured.
 
 `SandboxViolation` is reported back to the LLM as a tool error result (`error: path outside project root`), not hidden — the model can self-correct. `run_command` is *not* path-sandboxed (it runs with `cwd=root`; the `bash` rules + the approval gate are its control) — document this honestly rather than pretending subprocesses are containable.
 
@@ -935,9 +944,12 @@ tests/                               # mirrors src/agentclip: one directory per 
 │   │   └── test_ssh_real.py         # @real_ssh: AGENTCLIP_SSH_TESTS=1 + AGENTCLIP_SSH_TARGET only
 │   ├── mcp/                         # the permissions.json mcp reader and the client runtime (mcp.md)
 │   └── tools/
+│       ├── test_excluded_reads.py   # the read/write/traversal split on paths.exclude, through
+│       │                            #   the tools: .vscode reads, .vscode writes refused,
+│       │                            #   .agentclip sealed, sweeps still skip
 │       ├── test_sandbox.py          # ../escape, absolute POSIX + C:\ + UNC, drive letter, NUL,
 │       │                            #   symlink-out-of-root (skipif Windows without symlink privilege),
-│       │                            #   write-through-symlink-dir, excluded dirs (.git, .agentclip)
+│       │                            #   write-through-symlink-dir, the read/write exclusion split
 │       ├── test_fs_tools.py         # edit_file uniqueness/no-match errors, read ranges, truncation caps
 │       ├── test_fs_tools_fake_host.py # the same tools + jail over FakeHost: nothing bypasses the seam
 │       └── test_shell.py            # timeout kill, output cap, cwd=root; scripted-host cancel/timeout

@@ -67,10 +67,13 @@ from agentclip.executor.permissions import (
     rules_from_config,
 )
 
-# Always excluded from file tools, not configurable: the LLM must never read
-# backups/transcripts or tamper with its own approval rules.
-HARD_EXCLUDED_NAMES = frozenset({".agentclip", ".agentclip.toml"})
-
+# Directory names the file tools keep out of listings and sweeps, and refuse to
+# write into. NOT a secrecy list: an explicitly named file inside one of these
+# can still be read (docs/configuration.md, `paths.exclude`). The two names that
+# ARE sealed in both directions - .agentclip and .agentclip.toml - are
+# HARD_EXCLUDED_NAMES in executor/tools/sandbox.py, defined and folded in by the
+# Workspace that enforces them, so config never has to be trusted to include
+# them and the layer direction (config is a leaf) stays intact.
 DEFAULT_EXCLUDES = (
     ".git",
     ".hg",
@@ -561,7 +564,13 @@ class Config:
         return caps_for_budget(self.preset().max_paste_chars)
 
     def excluded_names(self) -> frozenset[str]:
-        return frozenset(self.exclude) | HARD_EXCLUDED_NAMES
+        """The configured exclusion list, as the Workspace wants it.
+
+        The always-sealed names are NOT added here: the Workspace folds its own
+        HARD_EXCLUDED_NAMES in at construction, so this set stays exactly what
+        the user asked for and the hard floor has one owner.
+        """
+        return frozenset(self.exclude)
 
 
 def default_global_config_path() -> Path:

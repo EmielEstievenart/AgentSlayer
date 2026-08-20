@@ -81,7 +81,7 @@ Permission mode (bottom-left of the status bar, e.g. MODE:build)
          can only read and propose. Switch back to build to carry the plan out.
   The key works while you are typing and while a turn is running.
   Which rules those are is a file: /config says where it lives (one global, one
-  per project), /config reset global|local puts the shipped rules back.
+  per project), /config global|local reset puts the shipped rules back.
 
 Walking away from the PC (/unattended on, ⚠ UNATTENDED in the status bar)
   Everything that would have opened a gate is auto-denied instead - the run

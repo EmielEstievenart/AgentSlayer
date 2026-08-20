@@ -125,7 +125,7 @@ Built-ins can be edited but not deleted. Fields (all editable in the F2 service 
 
 ## permissions.json — the rules
 
-One schema for both the global and the project file. `/config` tells you where they live; `/config reset global|local` rewrites one to the shipped defaults (preserving your `mcp` block). **Rules are read once, at launch** — not even `/new` re-reads them; restart AgentClip after editing.
+One schema for both the global and the project file. `/config` tells you where they live; `/config global|local reset` rewrites one to the shipped defaults (preserving your `mcp` block). **Rules are read once, at launch** — not even `/new` re-reads them; restart AgentClip after editing.
 
 ```json
 {

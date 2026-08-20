@@ -1034,7 +1034,7 @@ async def test_a_typo_writes_nothing_and_says_what_would_have_worked(
 
     assert not project_permissions_path(project).exists()
     assert view.parked == []
-    assert any("usage: /config [global|local|reset" in message for message in view.toasts())
+    assert any("usage: /config [global|local|global reset" in message for message in view.toasts())
 
 
 async def test_config_local_refuses_in_a_remote_session(
@@ -1074,7 +1074,7 @@ async def test_config_reset_writes_the_shipped_defaults_over_the_file(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('{"permission": {"bash": "deny"}}', encoding="utf-8")
 
-    controller.submit_message("/config reset local")
+    controller.submit_message("/config local reset")
     await settle(view)
 
     assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": {}}
@@ -1094,7 +1094,7 @@ async def test_config_reset_keeps_the_mcp_block_it_found(
     servers = {"fs": {"command": "npx", "args": ["-y", "server-filesystem"]}}
     path.write_text(json.dumps({"permission": {"bash": "deny"}, "mcp": servers}), encoding="utf-8")
 
-    controller.submit_message("/config reset local")
+    controller.submit_message("/config local reset")
     await settle(view)
 
     assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": servers}
@@ -1110,7 +1110,7 @@ async def test_config_reset_replaces_a_file_that_does_not_parse(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('{"permission": {,,,', encoding="utf-8")
 
-    controller.submit_message("/config reset local")
+    controller.submit_message("/config local reset")
     await settle(view)
 
     assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": {}}
@@ -1124,7 +1124,7 @@ async def test_config_reset_global_creates_the_directories_it_needs(
     path = agentclip.config.default_permissions_config_path()
     assert not path.exists()
 
-    controller.submit_message("/config reset global")
+    controller.submit_message("/config global reset")
     await settle(view)
 
     assert json.loads(path.read_text(encoding="utf-8")) == {**DEFAULT_CONFIG, "mcp": {}}
@@ -1139,7 +1139,7 @@ async def test_config_reset_local_refuses_in_a_remote_session(
     controller = SessionController(remote, make_factory(project), project, view=view)
     view.controller = controller
 
-    controller.submit_message("/config reset local")
+    controller.submit_message("/config local reset")
     await settle(view)
 
     assert not project_permissions_path(project).exists()
@@ -1149,9 +1149,17 @@ async def test_config_reset_local_refuses_in_a_remote_session(
 async def test_a_reset_typo_writes_nothing_either(
     controller: SessionController, view: FakeChatView, project: Path
 ) -> None:
-    """The leading word has to BE "reset": the branch that overwrites a file is
-    the last one that may be reached by a near miss."""
-    for typo in ("/config resetlocal", "/config reset", "/config reset locl"):
+    """The layer comes first and the trailing word has to BE "reset": the branch
+    that overwrites a file is the last one that may be reached by a near miss.
+    The old `reset <layer>` order is a near miss like any other now - it is not
+    kept alive as an alias, so a user who learned it is told the shape once."""
+    for typo in (
+        "/config localreset",
+        "/config reset",
+        "/config local resett",
+        "/config reset local",
+        "/config reset global",
+    ):
         controller.submit_message(typo)
         await settle(view)
 

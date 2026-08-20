@@ -47,6 +47,14 @@ SCREEN_MARGIN = 80
 # The page paints its own background; matching it here stops the white flash
 # WebView2 would otherwise show between window creation and first paint.
 WINDOW_BACKGROUND = "#14161a"
+# Whether the mouse may select the text in the page. pywebview's default is
+# False, and it enforces that by INJECTING `body { user-select: none }` into the
+# document after the stylesheet has loaded - so no rule in app.css can win it
+# back, and a transcript nobody can copy out of is not a transcript. True hands
+# the question to the page, which answers it per element: everything the user
+# reads is selectable, and the chrome turns selection off again for itself
+# (assets/app.css, "what may be selected").
+WINDOW_TEXT_SELECT = True
 
 WEBVIEW2_DOWNLOAD = "https://developer.microsoft.com/microsoft-edge/webview2/"
 
@@ -272,6 +280,7 @@ def run_gui(
                 height=height,
                 min_size=MIN_WINDOW_SIZE,
                 background_color=WINDOW_BACKGROUND,
+                text_select=WINDOW_TEXT_SELECT,
                 js_api=runner.js_api,
             )
             runner.attach(window.evaluate_js, on_close=window.destroy)

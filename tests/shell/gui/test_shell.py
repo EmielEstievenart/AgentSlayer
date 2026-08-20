@@ -29,6 +29,7 @@ from agentclip.shell.gui.shell import (
     MIN_WINDOW_SIZE,
     SCREEN_MARGIN,
     WINDOW_SIZE,
+    WINDOW_TEXT_SELECT,
     WINDOW_TITLE,
     asset_dir,
     entry_url,
@@ -237,6 +238,7 @@ def test_a_window_can_be_described_without_starting_a_loop() -> None:
             width=WINDOW_SIZE[0],
             height=WINDOW_SIZE[1],
             min_size=MIN_WINDOW_SIZE,
+            text_select=WINDOW_TEXT_SELECT,
             hidden=True,
         )
     try:
@@ -244,6 +246,11 @@ def test_a_window_can_be_described_without_starting_a_loop() -> None:
         assert (window.initial_width, window.initial_height) == WINDOW_SIZE
         assert window.min_size == MIN_WINDOW_SIZE
         assert str(window.original_url).startswith("file://")
+        # The one kwarg with no visible geometry to give it away, and the one
+        # that would silently take copy-out-of-the-transcript away again if it
+        # went missing: pywebview defaults it to False and enforces THAT with
+        # injected CSS the stylesheet cannot outrank (shell.WINDOW_TEXT_SELECT).
+        assert window.text_select is True
     finally:
         del webview.windows[before:]
 

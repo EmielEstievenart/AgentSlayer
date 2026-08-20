@@ -298,7 +298,7 @@ every later increment is built on:
   thread and the drainer parks inside `evaluate_js` waiting on that very thread,
   so tearing down from there would make the two wait on each other.
 
-### Two GUI-side decisions the TUI has no equivalent for
+### Three GUI-side decisions the TUI has no equivalent for
 
 - **Enter sends, Shift+Enter is a newline.** The TUI uses `ctrl+j` for the
   newline because Enter is its send key inside a Textual `TextArea`; the GUI
@@ -310,6 +310,20 @@ every later increment is built on:
   write one layer up. The GUI's honest equivalent is to **show** the payload in
   a selectable `<pre>` block with a toast saying the copy is theirs to make (and
   naming `.agentclip/sessions/<id>/outbound/` as the other way to it).
+- **Text is selectable, and the chrome opts out.** A terminal's selection
+  belongs to the terminal emulator; a window's belongs to us, and pywebview's
+  default is to switch it off by injecting `body { user-select: none }` after
+  the stylesheet has loaded — which no rule in `app.css` can outrank. So
+  `create_window` is passed `text_select=True` (`shell.WINDOW_TEXT_SELECT`, and
+  `tests/shell/gui/test_shell.py` pins it on a real window), and the page
+  answers the question per element: everything the user *reads* — transcripts,
+  code blocks, the gate preview, run output, the log pane, sidebar status,
+  modal bodies — can be dragged over and copied with Ctrl+C, and only *click
+  targets* (the titlebar, tabs, buttons, the key-hint strip, the run panel's
+  toggle line, checkbox labels) turn selection off again for themselves. The
+  two handlers that would eat a selection anyway are guarded: the run panel's
+  click-to-toggle ignores the click that ended a drag, and the state push that
+  puts the caret back in the composer skips it while a selection is live.
 
 ### How big the window may be
 

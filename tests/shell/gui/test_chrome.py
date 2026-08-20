@@ -723,3 +723,47 @@ def test_every_key_action_is_on_the_view_the_runner_marshals_to() -> None:
         "set_service",
     ):
         assert callable(getattr(GuiView, name, None)), name
+
+
+# == what may be selected =====================================================
+# The window is opened with `text_select=True` (tests/shell/gui/test_shell.py
+# pins that end), which only hands the question to the page. These two pin the
+# page's answer: what you READ can be dragged over and copied, what you PRESS
+# cannot.
+
+
+def test_the_stylesheet_turns_selection_off_for_click_targets_only() -> None:
+    """Every ``user-select: none`` in the file has to be on something you press.
+
+    The failure this catches is the easy one: a blanket rule - on ``body``, on
+    ``*``, on ``.shell`` - that takes copy-out-of-the-transcript away again for
+    the whole window, which is exactly what pywebview's default did before
+    ``text_select`` was passed.
+    """
+    css = re.sub(r"/\*.*?\*/", "", (ASSETS / "app.css").read_text(encoding="utf-8"), flags=re.S)
+    blocked = set()
+    for block in re.finditer(r"([^{}]+)\{([^{}]*)\}", css):
+        if re.search(r"user-select:\s*none", block.group(2)):
+            blocked.update(part.strip() for part in block.group(1).split(","))
+    assert blocked == {
+        ".titlebar",  # the drag region
+        ".keyhints",  # the cheatsheet strip, which also refuses the mousedown
+        ".wintabs",  # the tab strip
+        "button",  # every button label - the tabs and the connect rows too
+        ".run-head",  # the line that toggles the run panel
+        ".ev details summary",  # the disclosure line
+        ".set-choice",  # a radio row you click by its label
+        ".svc-check",  # ditto, a checkbox row
+    }
+
+
+def test_the_run_panel_and_the_refocus_both_stand_off_a_live_selection() -> None:
+    """The two handlers that would eat a selection made with the mouse: the
+    panel-wide click-to-toggle (a drag ending in the command output still fires
+    ``click`` on the panel) and the state push that puts the caret back in the
+    composer (focusing a textarea collapses the document's selection)."""
+    js = (ASSETS / "app.js").read_text(encoding="utf-8")
+    assert "function draggedOutText()" in js
+    assert js.count("draggedOutText()") == 3  # the definition and both guards
+    toggle = js[js.index('el.run.addEventListener("click"') :]
+    assert "if (draggedOutText()) return;" in toggle[: toggle.index("});")]

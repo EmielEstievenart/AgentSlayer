@@ -169,8 +169,13 @@ same thing in both tools: `sanitize(server) + "_" + sanitize(tool)` with
 - **`mcp`** (approval_kind `command`): `tool: <id>` plus `args` as a JSON
   object riding a **heredoc** (`args << EOT ... EOT`), the same mechanism
   write_file uses for bodies; a missing `args` means `{}`. The handler
-  json-parses, calls through the manager, and renders the result's text
-  content (truncated per `ToolContext.caps`, like every other tool).
+  json-parses, calls through the manager, and returns the result's text
+  content WHOLE — bounded only by the memory guard every non-re-derivable
+  output shares with `run_command` (`limits.max_command_output_chars`, auto
+  512k). What the model sees is decided one layer up, by the passes that cache
+  what they cut (protocol.md §3.2): a cap applied here would land before the
+  cache is filled, which is the bug that made a 1,172-line answer arrive as its
+  last 308 lines with no way back to the first 864.
 
 `command` for the invoker is deliberate: an MCP tool can do anything, so an
 unknown one must fall back to a gated key, and reusing the existing kind buys

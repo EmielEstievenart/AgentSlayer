@@ -10,12 +10,19 @@ from pathlib import Path
 
 import pytest
 
-from agentclip.config import Config, LimitsConfig, caps_for_budget
+from agentclip.config import (
+    Config,
+    LimitsConfig,
+    caps_for_budget,
+    default_services,
+    resolve_limits,
+)
 from agentclip.executor.permissions import DEFAULT_CONFIG, TOOL_PERMISSIONS, permission_target
 from agentclip.executor.tools.chunks import (
     CACHE_BODY_CAP,
     FETCH_CHUNK_DOC,
     FETCH_CHUNK_SPEC,
+    FETCH_HEADER_RESERVE,
     CachedChunks,
     chunk_chars_for,
     chunk_marker,
@@ -31,7 +38,7 @@ LINES = "".join(f"line {i:04d} {'x' * 40}\n" for i in range(1, 201))
 def make_ctx(root: Path, cache: dict[str, CachedChunks] | None = None) -> ToolContext:
     return ToolContext(
         workspace=Workspace(root, Config().excluded_names()),
-        limits=LimitsConfig(),
+        limits=resolve_limits(LimitsConfig(), 12_000),
         caps=caps_for_budget(12_000),
         chunk_cache=cache if cache is not None else {},
     )
@@ -104,6 +111,22 @@ def test_a_part_is_clamped_under_both_caps_that_could_cut_it() -> None:
 
 def test_a_part_never_sizes_to_zero_on_an_absurd_config() -> None:
     assert chunk_chars_for(400, 200) > 0
+
+
+@pytest.mark.parametrize("budget", sorted({p.max_paste_chars for p in default_services().values()}))
+def test_one_part_plus_its_header_fits_every_shipped_preset(budget: int) -> None:
+    """The invariant the whole tool rests on, checked against auto-resolved
+    limits at every budget AgentClip ships.
+
+    `max_result_chars` is now half the paste budget rather than a fixed 6,000
+    (config.resolve_limits), so the two caps this sizing is clamped under both
+    MOVE with the preset - and a part that came back one header longer than the
+    per-result cap would be cut by the very pass it exists to escape.
+    """
+    result_cap = resolve_limits(LimitsConfig(), budget).max_result_chars
+    part = chunk_chars_for(budget, result_cap)
+    assert 0 < part + FETCH_HEADER_RESERVE <= result_cap
+    assert part + FETCH_HEADER_RESERVE <= budget
 
 
 # -- the marker ---------------------------------------------------------------

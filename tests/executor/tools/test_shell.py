@@ -1,4 +1,4 @@
-"""run_command tests: roundtrip, merged output, timeout/cancel kill, tail cap."""
+"""run_command tests: roundtrip, merged output, timeout/cancel kill, memory guard."""
 
 from __future__ import annotations
 
@@ -9,7 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from agentclip.config import BudgetCaps, Config, LimitsConfig, caps_for_budget
+from agentclip.config import (
+    BudgetCaps,
+    Config,
+    LimitsConfig,
+    caps_for_budget,
+    resolve_limits,
+)
 from agentclip.executor.hosts import FakeHost, Host, LocalHost
 from agentclip.executor.tools import shell
 from agentclip.executor.tools.registry import ToolContext
@@ -43,7 +49,12 @@ def make_ctx(
 ) -> ToolContext:
     return ToolContext(
         workspace=Workspace(root, Config().excluded_names()),
-        limits=limits or LimitsConfig(),
+        # Resolved exactly as Engine.__init__ resolves it, against the same 12k
+        # budget these caps are derived from: `[limits]`'s two auto keys are a
+        # sentinel until a session answers them, so a ToolContext assembled by
+        # hand around the raw dataclass would hand the handler a zero-sized
+        # memory guard and truncate everything.
+        limits=resolve_limits(limits or LimitsConfig(), 12_000),
         caps=caps or caps_for_budget(12_000),
         host=host or LocalHost(),
         cancel_event=cancel_event,
@@ -172,24 +183,40 @@ def test_timeout_still_reports_exec_timeout_with_a_cancel_event_present(tmp_path
     assert "timed out after 1s" in res.body
 
 
-def test_tail_cap_keeps_the_end(tmp_path: Path) -> None:
+def test_a_finished_command_keeps_its_whole_output_however_tight_the_caps(
+    tmp_path: Path,
+) -> None:
+    """The budget's caps do NOT cut a finished command's output any more.
+
+    They used to, and that was the bug: the cut landed before the engine's
+    fetch_chunk cache was filled, so the cache held a tail and the head of the
+    output existed nowhere. Truncating for display is now solely the engine's,
+    which is the pass that also remembers. The caps below are the tightest tier
+    there is, and they take nothing away.
+    """
     caps = BudgetCaps(600, 100, command_tail_lines=5, command_tail_chars=400,
                       listing_max_entries=400, advised_max_calls=8)
     ctx = make_ctx(tmp_path, caps=caps)
     code = "print('\\n'.join('line' + str(i) for i in range(50)))"
     res = shell.run_command(ctx, make_call(command=f'{PY} "{code}"'))
     assert res.status == "ok"
-    assert "[truncated: showing last 5 of 50 output lines]" in res.body
-    assert "line49" in res.body  # the tail survives
-    assert "line0\n" not in res.body  # the head is gone
+    assert "[truncated" not in res.body
+    assert "\nline0\n" in res.body  # the head is there...
+    assert res.body.rstrip().endswith("line49")  # ...and so is the tail
 
 
-def test_char_cap_via_limits(tmp_path: Path) -> None:
+def test_output_past_the_memory_guard_is_tail_capped_and_says_so(tmp_path: Path) -> None:
+    """The one cut run_command still makes, and the one that is really lossy:
+    `max_command_output_chars` is a memory bound (auto: the same 512k the chunk
+    cache stops holding at), so what it drops is past anything a fetch could
+    have reached - hence the honest marker, here and nowhere else."""
     ctx = make_ctx(tmp_path, limits=LimitsConfig(max_command_output_chars=200))
     code = "print('\\n'.join('line' + str(i) for i in range(100)))"
     res = shell.run_command(ctx, make_call(command=f'{PY} "{code}"'))
-    assert "[truncated:" in res.body
-    assert "line99" in res.body
+    assert "[truncated: showing last " in res.body
+    assert "of 100 output lines]" in res.body
+    assert "line99" in res.body  # the tail survives
+    assert "line0\n" not in res.body
     assert len(res.body) < 600
 
 

@@ -28,11 +28,11 @@ from __future__ import annotations
 import threading
 from collections import deque
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
-from agentclip.config import Config
+from agentclip.config import Config, resolve_limits
 from agentclip.engine.approval import (
     DENY_VERDICTS,
     EDITS_RULE,
@@ -348,6 +348,19 @@ class Engine:
         host: Host | None = None,
         build_warnings: Sequence[str] = (),
     ) -> None:
+        # THE ONE PLACE `[limits]` stops being a wish and becomes numbers. Two of
+        # its keys default to config.AUTO_LIMIT because the right value for them
+        # is a fraction of the paste budget, and the budget is a per-SESSION
+        # fact: the preset is chosen when a session starts, and a sub-agent runs
+        # on its own preset, so no loader could have known it. Here both halves
+        # are finally in hand, so they are married once - and the resolved config
+        # is what gets stored, so `self._config.limits` is the only version
+        # anything downstream can reach and no consumer needs an `or default` of
+        # its own. (Everything that reads limits does so through this object or
+        # through the ToolContext built from it a few lines below.)
+        config = replace(
+            config, limits=resolve_limits(config.limits, config.preset().max_paste_chars)
+        )
         self._config = config
         self._role = role
         # One-line facts about how this session was ASSEMBLED that the user

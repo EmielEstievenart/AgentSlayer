@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from agentclip.config import Config, LimitsConfig, caps_for_budget
+from agentclip.config import Config, LimitsConfig, caps_for_budget, resolve_limits
 from agentclip.executor.tools import fs_tools
 from agentclip.executor.tools.registry import ToolContext
 from agentclip.executor.tools.sandbox import Workspace
@@ -32,7 +32,7 @@ def make_call(tool: str, **params: str) -> ToolCall:
 def ctx(tmp_path: Path) -> ToolContext:
     return ToolContext(
         workspace=Workspace(tmp_path, Config().excluded_names()),
-        limits=LimitsConfig(),
+        limits=resolve_limits(LimitsConfig(), 12_000),
         caps=caps_for_budget(12_000),
         backup_hook=None,
     )

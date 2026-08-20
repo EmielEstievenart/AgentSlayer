@@ -37,6 +37,12 @@ class ToolContext:
     the filesystem or run a command. Local by default; a remote session swaps in
     a different implementation and every tool follows (docs/design/remote-ssh.md).
 
+    limits arrive RESOLVED (config.resolve_limits, called once in
+    Engine.__init__): two of its keys are the config.AUTO_LIMIT sentinel until a
+    session's paste budget answers them, and a handler must never be the one to
+    find that out - a zero-sized cap silently truncates everything. Anything
+    building a context by hand (tests, embedders) resolves first.
+
     backup_hook(rel_path, abs_path, action) with action in {"write", "delete"}:
     the engine wires this to the BackupStore; mutating handlers MUST call it
     before first touching a file.

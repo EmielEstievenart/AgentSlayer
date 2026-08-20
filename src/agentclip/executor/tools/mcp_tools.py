@@ -44,11 +44,12 @@ from agentclip.executor.tools.registry import (
     tool_handler,
 )
 
-# Private on purpose, imported anyway: run_command and this share ONE output
-# capping policy ("truncated per ToolContext.caps, like every other tool",
-# docs/design/mcp.md section 4). A local copy would drift from the tail-cap
-# semantics - keep the end, mark what was dropped - the moment either changed.
-from agentclip.executor.tools.shell import _tail_cap
+# run_command and this share ONE retention policy, and share the function that
+# is it: both produce output that cannot be re-derived by asking again with a
+# narrower range, so both hand the engine the whole thing and let the pass that
+# CACHES what it cuts do the cutting (docs/design/mcp.md section 4). A local copy
+# would drift the moment either side's idea of "keep it all" changed.
+from agentclip.executor.tools.shell import retain_output
 from agentclip.protocol.types import ToolCall
 
 # One listed description is one clipped line, as in skills.py: the full text
@@ -243,8 +244,8 @@ _MCP_DOC = """\
 mcp(tool*, args)
   Call one of the MCP tools listed above (mcp_schema has their input
   schemas). args is a JSON object riding a heredoc - omit it entirely when
-  the tool takes no arguments. The result body is the server's text output,
-  tail-capped. The space before EOT is required.
+  the tool takes no arguments. The result body is the server's text
+  output. The space before EOT is required.
 ===CLIP:CALL id=1 tool=mcp===
 tool: {example}
 args << EOT
@@ -286,9 +287,14 @@ def _call_body(source: McpToolSource, ctx: ToolContext, call: ToolCall) -> str:
         raise ToolError(exc.code, exc.message, _call_error_hint(source, exc, tool_id)) from None
     if not text.strip():
         return "(the tool returned no text content)"
-    # Exactly run_command's cap: same policy, same marker, one implementation.
-    max_chars = min(ctx.caps.command_tail_chars, ctx.limits.max_command_output_chars)
-    return _tail_cap(text, ctx.caps.command_tail_lines, max_chars)
+    # The server's answer WHOLE, exactly as run_command now returns a finished
+    # command's output whole: the only bound here is the memory guard, and what
+    # the model sees is decided one layer up, by the passes that cache what they
+    # cut. This handler used to tail-cap to the paste budget's caps, and that is
+    # the bug this fixes - a 1,172-line answer reached the fetch_chunk cache as
+    # its last 308 lines, so part 1 began at line 865 and lines 1-864 were gone
+    # before anything could have remembered them.
+    return retain_output(text, ctx.limits.max_command_output_chars)
 
 
 def _preview_body(source: McpToolSource, call: ToolCall) -> str:

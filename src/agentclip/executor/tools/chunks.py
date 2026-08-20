@@ -47,6 +47,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from agentclip.config import MAX_RETAINED_RESULT_CHARS
 from agentclip.executor.tools.registry import (
     ToolContext,
     ToolError,
@@ -57,14 +58,13 @@ from agentclip.executor.tools.registry import (
 )
 from agentclip.protocol.types import ToolCall
 
-# The most of one body the cache will hold. A bound is needed because the cache
-# outlives the turn that filled it and a single `run_command` can emit tens of
-# megabytes; 512k is ~85 parts at a 12k preset, which is far more turns of
-# fetching than any real recovery uses, so the cap is a guard against pathology
-# rather than a limit anyone should meet. When it bites, the marker says so
-# (:func:`chunk_marker`) - a truncation the model is not told about is exactly
-# the failure this whole module exists to remove.
-CACHE_BODY_CAP = 512_000
+# The most of one body the cache will hold - this module's name for the one
+# retention number the system has (config.MAX_RETAINED_RESULT_CHARS, where the
+# reasoning about its size lives). It is the SAME number the handlers guard their
+# own output with, and that is the whole point: a handler that kept less than
+# this could hand the cache a body already gutted, and no marker here would be
+# able to say so. When it does bite, :func:`chunk_marker` says so.
+CACHE_BODY_CAP = MAX_RETAINED_RESULT_CHARS
 
 # How much of the paste budget one fetched part may occupy. Not the whole
 # budget: a fetch shares its payload with the envelope, any notes, and whatever

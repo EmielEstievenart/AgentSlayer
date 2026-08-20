@@ -412,7 +412,7 @@ class ToolContext:
 # on_output is cancel_event's mirror image. That one is written by the UI thread
 # and read here; this one is called FROM here, on the engine's worker thread,
 # and read by the UI. It is a courtesy channel only: the model's copy of a
-# command's output is still the tail-capped ToolResult, so a None hook, a
+# command's output is still the composed ToolResult, so a None hook, a
 # non-streaming host and a listener that raises all cost the model nothing.
 
 # executor/tools/sandbox.py -------------------------------------------------------
@@ -594,8 +594,8 @@ permissions_config = ""        # "" = <user_config_dir>/agentclip/permissions.js
 
 [limits]
 max_file_read_chars = 20000    # read_file hard cap per call (LLM asks for ranges beyond this)
-max_command_output_chars = 8000
-max_result_chars = 6000        # per-tool-result cap inside the outbound payload
+max_command_output_chars = 0   # 0 = auto: how much raw output a handler RETAINS (512k, the chunk cache's own cap)
+max_result_chars = 0           # 0 = auto: per-tool-result cap in the payload = max_paste_chars // 2
 max_grep_matches = 200
 command_timeout_s = 120
 

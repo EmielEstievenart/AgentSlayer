@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agentclip.config import Config, LimitsConfig, caps_for_budget
+from agentclip.config import Config, LimitsConfig, caps_for_budget, resolve_limits
 from agentclip.executor.tools import meta
 from agentclip.executor.tools.registry import (
     ToolContext,
@@ -38,7 +38,7 @@ NO_EXAMPLE = ("fetch_chunk",)
 def make_ctx(root: Path) -> ToolContext:
     return ToolContext(
         workspace=Workspace(root, Config().excluded_names()),
-        limits=LimitsConfig(),
+        limits=resolve_limits(LimitsConfig(), 12_000),
         caps=caps_for_budget(12_000),
     )
 

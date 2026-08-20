@@ -509,13 +509,89 @@ class RemoteConfig:
         )
 
 
+# The `[limits]` value that means "you work it out": not a size, and never seen
+# by anything that consumes a limit, because :func:`resolve_limits` turns it into
+# a number before the session starts. Zero is the right spelling for it - it is
+# outside every key's valid range, so a config that says 0 cannot be a config
+# that meant a size, and TOML has no "auto" literal to write instead.
+AUTO_LIMIT = 0
+
+# The most of ONE tool result AgentClip keeps whole - the handlers' memory guard
+# and, identically, the most of one body the fetch_chunk cache will hold
+# (executor/tools/chunks.CACHE_BODY_CAP is this constant). The two have to be one
+# number: a handler that retained less than the cache can hold would throw output
+# away before the cache ever saw it, which is precisely the bug that made a
+# 1,200-line MCP answer unrecoverable. It lives HERE rather than beside the cache
+# because `[limits]` resolves its auto value from it and config sits below the
+# tools layer.
+#
+# 512k is a guard against pathology (a `run_command` that emits tens of megabytes
+# into a dict that outlives its turn), not a limit anyone should meet: it is ~85
+# parts at a 12k preset, far more fetching than any real recovery does. When it
+# does bite, the marker says so - both the cache's (chunks.chunk_marker) and the
+# handler's honest tail-cap - because a truncation the model is not told about is
+# the failure this whole mechanism exists to remove.
+MAX_RETAINED_RESULT_CHARS = 512_000
+
+# The floor an auto-resolved `max_result_chars` cannot go under, and the same 200
+# the explicit key is clamped to: below it there is no sane per-result cap at all
+# (chunks._MIN_CHUNK_CHARS makes the same argument from the other end).
+_MIN_RESULT_CHARS = 200
+
+
 @dataclass(frozen=True, slots=True)
 class LimitsConfig:
+    """The hard caps on what one tool call may produce.
+
+    Two of the five default to :data:`AUTO_LIMIT` rather than to a size, because
+    a fixed number here fights the paste budget it is supposed to serve: a
+    6,000-char result cap is exactly right at a 12,000-char preset and absurd at
+    a 96,000-char one, where it throws away seven eighths of the room the user
+    paid for. Their auto values come from that budget instead
+    (:func:`resolve_limits`), which is a fact about the SESSION, so nothing built
+    from this dataclass alone is usable until an engine has resolved it.
+
+    The two are also no longer the same KIND of cap, which is why only one of
+    them scales with the budget:
+
+    - ``max_result_chars`` is what the model SEES of one result. Half the paste
+      budget, so several results still fit in one turn, and whatever it cuts is
+      cached for `fetch_chunk`.
+    - ``max_command_output_chars`` is what a handler RETAINS of a command's or
+      an MCP tool's raw output before any of that happens. It is a memory guard
+      (:data:`MAX_RETAINED_RESULT_CHARS`), and text it drops is gone for good -
+      so it is deliberately far bigger than anything the model could be shown.
+    """
+
     max_file_read_chars: int = 20_000
-    max_command_output_chars: int = 8_000
-    max_result_chars: int = 6_000
+    max_command_output_chars: int = AUTO_LIMIT
+    max_result_chars: int = AUTO_LIMIT
     max_grep_matches: int = 200
     command_timeout_s: int = 120
+
+
+def resolve_limits(limits: LimitsConfig, max_paste_chars: int) -> LimitsConfig:
+    """``limits`` with every :data:`AUTO_LIMIT` answered for one paste budget.
+
+    Called ONCE, where a session's limits first meet a session's preset
+    (``Engine.__init__``), so that every consumer downstream - tool handlers
+    through ToolContext, `fit_results`, `chunk_chars_for` - is handed numbers and
+    no consumer anywhere has to know the sentinel exists. A sub-agent resolves
+    separately, against its own preset, because that is the budget its pastes are
+    really made against.
+
+    ``max_paste_chars // 2`` reproduces the historical 6,000 at the classic
+    12,000-char presets - so a default install sees no change at all - and scales
+    from there. Half rather than all of it because a turn routinely carries
+    several results, and a cap that let one result fill the payload would leave
+    the composer's whole-payload pass to do the cutting instead, which is the
+    same cut with less of a plan behind it.
+    """
+    return replace(
+        limits,
+        max_command_output_chars=limits.max_command_output_chars or MAX_RETAINED_RESULT_CHARS,
+        max_result_chars=limits.max_result_chars or max(_MIN_RESULT_CHARS, max_paste_chars // 2),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -688,6 +764,30 @@ def _take_int(table: dict, key: str, default: int, lo: int, hi: int, ctx: str, w
     if not (lo <= value <= hi):
         warnings.append(f"config: [{ctx}] {key}={value} outside {lo}..{hi}; using {default}")
         return default
+    return value
+
+
+def _take_auto_int(table: dict, key: str, lo: int, hi: int, ctx: str, warnings: list[str]) -> int:
+    """An integer key whose default - and whose extra legal value - is "auto".
+
+    :data:`AUTO_LIMIT` is deliberately outside ``lo..hi`` rather than inside it,
+    so this is a special case and not a widened range: 0 means the user declined
+    to pick and the session answers from its paste budget, while every real size
+    is clamped exactly as :func:`_take_int` clamps it. A rejected value falls
+    back to auto, which is the default it would have had - never to a fixed size
+    the user never asked for.
+    """
+    value = table.get(key, AUTO_LIMIT)
+    if isinstance(value, bool) or not isinstance(value, int):
+        warnings.append(f"config: [{ctx}] {key} must be an integer; using auto")
+        return AUTO_LIMIT
+    if value == AUTO_LIMIT:
+        return AUTO_LIMIT
+    if not (lo <= value <= hi):
+        warnings.append(
+            f"config: [{ctx}] {key}={value} outside {lo}..{hi} (0 = auto); using auto"
+        )
+        return AUTO_LIMIT
     return value
 
 
@@ -1271,10 +1371,10 @@ def load_config(
         ),
         limits=LimitsConfig(
             max_file_read_chars=_take_int(limits_t, "max_file_read_chars", 20_000, 500, 10_000_000, "limits", warnings),
-            max_command_output_chars=_take_int(
-                limits_t, "max_command_output_chars", 8_000, 500, 10_000_000, "limits", warnings
+            max_command_output_chars=_take_auto_int(
+                limits_t, "max_command_output_chars", 500, 10_000_000, "limits", warnings
             ),
-            max_result_chars=_take_int(limits_t, "max_result_chars", 6_000, 200, 10_000_000, "limits", warnings),
+            max_result_chars=_take_auto_int(limits_t, "max_result_chars", 200, 10_000_000, "limits", warnings),
             max_grep_matches=_take_int(limits_t, "max_grep_matches", 200, 1, 100_000, "limits", warnings),
             command_timeout_s=_take_int(limits_t, "command_timeout_s", 120, 1, 86_400, "limits", warnings),
         ),

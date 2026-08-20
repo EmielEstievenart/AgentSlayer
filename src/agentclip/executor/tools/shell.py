@@ -1,4 +1,4 @@
-"""run_command: command execution with merged output and tail capping.
+"""run_command: command execution with merged output, kept whole.
 
 The approval decision is NOT made here - the engine gates the call
 before the handler runs. This handler just executes:
@@ -6,10 +6,28 @@ before the handler runs. This handler just executes:
 - ctx.host.spawn(command, cwd=workspace.root), stdout+stderr merged so
   interleaving survives;
 - timeout param (seconds, default 60) capped by limits.command_timeout_s;
-- output TAIL-capped (build/test verdicts live at the end) to
-  caps.command_tail_lines / caps.command_tail_chars;
+- the WHOLE output, bounded only by the memory guard
+  (limits.max_command_output_chars, :func:`retain_output`);
 - first body line is "exit N (X.Xs)"; a timeout becomes an exec_timeout
   error carrying the partial tail.
+
+Why the whole output, when a paste budget obviously cannot carry it
+--------------------------------------------------------------------
+Because this handler is no longer the last thing that sees it. The engine
+truncates for display AND caches what it cut, so a body that arrives here whole
+reaches the model as head-plus-tail with a `fetch_chunk` marker naming the rest
+(executor/tools/chunks.py). A handler that tail-capped first would be cutting
+BEFORE the cache is filled: the cache would then faithfully hold the tail it was
+handed, part 1 would start in the middle, and the head would not exist anywhere -
+which is exactly the failure fetch_chunk was built to end. Truncating in two
+places cannot be half-right; it has to happen in the one place that can also
+remember. The guard that remains is a memory bound and nothing else, set to the
+same number the cache stops at, so it can only ever drop text no fetch could have
+reached anyway.
+
+The one exception is the kill/drain path: a command that had to be killed leaves
+a buffer, not a result, and nothing will ever chunk-fetch it - so that tail stays
+tail-capped to the budget's caps, where a bounded emergency drain belongs.
 
 The required `reason` param is the one thing here that never touches the
 shell: the model states in one line why it wants this command, and the
@@ -28,8 +46,8 @@ Being the one handler that runs for minutes also makes it the one worth
 WATCHING, so each slice ends by peeking at the handle's buffer and pushing the
 characters that appeared since the last look to ctx.on_output (the TUI's run
 panel shows them live). That is a side channel and nothing more: the model's
-copy of the output is still the tail-capped body composed at the end, and a
-host that cannot stream simply shows nothing until then.
+copy of the output is still the body composed at the end, and a host that cannot
+stream simply shows nothing until then.
 
 Everything here is host-agnostic: the spawn/wait/kill/drain handle comes from
 ctx.host, so the same polling loop drives a local subprocess or a remote one.
@@ -77,6 +95,39 @@ def _tail_cap(text: str, max_lines: int, max_chars: int) -> str:
     return joined
 
 
+def retain_output(text: str, max_chars: int) -> str:
+    """``text`` whole, unless holding it whole is itself the problem.
+
+    THE memory guard, shared by run_command and the MCP handler (both produce
+    output nobody can re-derive by asking again with a narrower range). Under the
+    bound this is the identity function, which is the entire point: display
+    truncation belongs to the engine, which caches what it cuts, and a handler
+    that anticipated it would destroy the head of the very body the cache is
+    about to be filled from.
+
+    Over the bound - a build that printed a megabyte, an MCP server that answered
+    with a database - the tail is kept and the ordinary in-band marker says how
+    much was dropped. It stays the HONEST marker (rather than a fetch_chunk one)
+    because this is the one truncation that really is unrecoverable: the bound is
+    the cache's own per-body cap, so there is nothing past it left to fetch. Only
+    the char dimension bites; the line cap is handed the text's own line count,
+    because "you may have 512k but only 500 lines of it" would be the display
+    policy this function exists to stay out of.
+
+    The two normalisations it does make are the ones `_tail_cap` always did, kept
+    so a body's SHAPE is unchanged by this fix: CRLF becomes LF (payloads are
+    LF-only, and a remote host's output is not), and the one trailing newline
+    every command ends with is dropped, because the heredoc the body is rendered
+    into supplies its own.
+    """
+    text = text.replace("\r\n", "\n")
+    if text.endswith("\n"):
+        text = text[:-1]
+    if len(text) <= max_chars:
+        return text
+    return _tail_cap(text, len(text.splitlines()), max_chars)
+
+
 def _effective_timeout(ctx: ToolContext, call: ToolCall) -> int:
     requested = int_param(call, "timeout", _DEFAULT_TIMEOUT_S)
     if requested < 1:
@@ -87,7 +138,15 @@ def _effective_timeout(ctx: ToolContext, call: ToolCall) -> int:
 
 
 def _kill_and_drain(ctx: ToolContext, handle: ExecHandle, max_chars: int) -> str:
-    """Kill the process tree and return the tail of whatever it managed to emit."""
+    """Kill the process tree and return the tail of whatever it managed to emit.
+
+    The one place a run_command body is still tail-capped to the budget's caps,
+    and deliberately: what a killed process left in its buffer is an emergency
+    drain, not a result. It rides inside an error message rather than as a body,
+    the model is being told to stop rather than to read, and nothing will ever
+    hand it a fetch_chunk id - so bounding it small is the kindness here, where
+    bounding a finished command's output small was the bug.
+    """
     handle.kill()
     return _tail_cap(handle.drain(_DRAIN_S), ctx.caps.command_tail_lines, max_chars)
 
@@ -115,7 +174,9 @@ def run_command(ctx: ToolContext, call: ToolCall) -> str:
     # can show the user WHY this command is being run, in the model's words.
     command, _reason = require(call, "command", "reason")
     timeout_s = _effective_timeout(ctx, call)
-    max_chars = min(ctx.caps.command_tail_chars, ctx.limits.max_command_output_chars)
+    # For the DRAIN paths below only (see _kill_and_drain): the user's explicit
+    # cap still bounds it, but the budget's own tail cap is what normally wins.
+    drain_chars = min(ctx.caps.command_tail_chars, ctx.limits.max_command_output_chars)
 
     start = time.monotonic()
     deadline = start + timeout_s
@@ -132,7 +193,7 @@ def run_command(ctx: ToolContext, call: ToolCall) -> str:
         # The user's cancel wins over the deadline: it is the more specific
         # story, and it is the one they are waiting to see.
         if ctx.cancelled():
-            partial = _kill_and_drain(ctx, handle, max_chars)
+            partial = _kill_and_drain(ctx, handle, drain_chars)
             waited = time.monotonic() - start
             message = (
                 f"command cancelled by the user before completion (killed after {waited:.1f}s)"
@@ -146,7 +207,7 @@ def run_command(ctx: ToolContext, call: ToolCall) -> str:
                 " ask what they want instead.",
             ) from None
         if time.monotonic() >= deadline:
-            partial = _kill_and_drain(ctx, handle, max_chars)
+            partial = _kill_and_drain(ctx, handle, drain_chars)
             message = f"command timed out after {timeout_s}s"
             if partial:
                 message += f"\npartial output (tail):\n{partial}"
@@ -158,10 +219,10 @@ def run_command(ctx: ToolContext, call: ToolCall) -> str:
             ) from None
     elapsed = time.monotonic() - start
 
-    tail = _tail_cap(finished.output, ctx.caps.command_tail_lines, max_chars)
+    output = retain_output(finished.output, ctx.limits.max_command_output_chars)
     body = f"exit {finished.exit_code} ({elapsed:.1f}s)"
-    if tail:
-        body += f"\n{tail}"
+    if output:
+        body += f"\n{output}"
     return body
 
 
@@ -169,8 +230,8 @@ RUN_COMMAND_DOC = """\
 run_command(command*, reason*, timeout)
   Run a shell command from the project root (timeout secs, default 60).
   reason: one line, why this command - the user sees it.
-  Returns "exit N (X.Xs)" plus merged stdout+stderr, tail-capped (the end
-  of the output - where test verdicts live - always survives). A timed out
+  Returns "exit N (X.Xs)" plus merged stdout+stderr (a body too big for
+  one paste is cut, and its marker says how to get the rest). A timed out
   or user-cancelled command is killed and reported as exec_timeout /
   cancelled with the partial tail. NEVER modify files with commands (no
   sed/redirects/rm) - use write_file/edit_file/delete_file so every change

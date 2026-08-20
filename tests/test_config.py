@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from agentclip.config import (
+    AUTO_LIMIT,
     BUILTIN_SERVICE_KEYS,
     DEFAULT_DELIVERY,
     DEFAULT_FINISH_SIGNALS,
@@ -25,6 +26,7 @@ from agentclip.config import (
     DELIVERY_MODES,
     FINISH_SIGNALS,
     MATCHERS,
+    MAX_RETAINED_RESULT_CHARS,
     SCROLL_ACTIONS,
     TOLERANCE_MAX,
     TOLERANCE_MIN,
@@ -36,6 +38,7 @@ from agentclip.config import (
     load_config,
     normalize_finish_signals,
     project_permissions_path,
+    resolve_limits,
     save_active_services,
     save_services,
     save_theme,
@@ -168,6 +171,77 @@ def test_load_config_rejects_out_of_range_total_context_chars(
     cfg = load_config(project, global_config_path=global_path)
     assert cfg.services["claude"].total_context_chars == default_services()["claude"].total_context_chars
     assert any("total_context_chars" in w for w in cfg.warnings)
+
+
+# -- [limits] and the auto sentinel --------------------------------------------
+
+
+def test_the_two_budget_shaped_limits_default_to_auto(project: Path, global_path: Path) -> None:
+    """Unset means "work it out from the paste budget", which no loader can do:
+    the budget is a per-session choice. So the loader leaves the sentinel and
+    `Engine.__init__` answers it - and the OTHER three limits, which have nothing
+    to do with the budget, keep their fixed defaults."""
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.limits.max_result_chars == AUTO_LIMIT
+    assert cfg.limits.max_command_output_chars == AUTO_LIMIT
+    assert cfg.limits.max_file_read_chars == 20_000
+    assert not cfg.warnings
+
+
+def test_auto_resolves_to_half_the_paste_budget(project: Path, global_path: Path) -> None:
+    """6,000 at the 12,000-char presets - the number [limits] used to ship, so a
+    default install is unchanged - and eight times that at a 96k preset, which is
+    the whole point: a fixed cap threw away the room the user paid for."""
+    limits = load_config(project, global_config_path=global_path).limits
+    assert resolve_limits(limits, 12_000).max_result_chars == 6_000
+    assert resolve_limits(limits, 96_000).max_result_chars == 48_000
+    assert resolve_limits(limits, 4_000).max_result_chars == 2_000
+
+
+def test_auto_command_output_resolves_to_the_retention_cap(
+    project: Path, global_path: Path
+) -> None:
+    """Not a display cap any more: it is what a handler RETAINS, so it resolves
+    to the same number the fetch_chunk cache stops holding at, at every budget."""
+    limits = load_config(project, global_config_path=global_path).limits
+    for budget in (4_000, 12_000, 96_000):
+        resolved = resolve_limits(limits, budget)
+        assert resolved.max_command_output_chars == MAX_RETAINED_RESULT_CHARS
+
+
+def test_an_explicit_limit_survives_resolution(project: Path, global_path: Path) -> None:
+    global_path.write_text(
+        "[limits]\nmax_result_chars = 3000\nmax_command_output_chars = 40000\n", encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert not cfg.warnings
+    resolved = resolve_limits(cfg.limits, 96_000)
+    assert resolved.max_result_chars == 3_000
+    assert resolved.max_command_output_chars == 40_000
+
+
+def test_an_out_of_range_limit_warns_and_falls_back_to_auto(
+    project: Path, global_path: Path
+) -> None:
+    """To auto, never to a fixed size: auto is the default the key would have
+    had, and substituting a number the user never wrote would be a second
+    surprise on top of the typo."""
+    global_path.write_text("[limits]\nmax_result_chars = 50\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.limits.max_result_chars == AUTO_LIMIT
+    assert any("max_result_chars" in w and "0 = auto" in w for w in cfg.warnings)
+    assert resolve_limits(cfg.limits, 12_000).max_result_chars == 6_000
+
+
+def test_a_zero_is_auto_spelled_out_and_not_a_rejected_value(
+    project: Path, global_path: Path
+) -> None:
+    """0 is outside the key's valid range on purpose - it cannot be mistaken for
+    a size somebody meant - so writing it is a legal way to say "you decide"."""
+    global_path.write_text("[limits]\nmax_result_chars = 0\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.limits.max_result_chars == AUTO_LIMIT
+    assert not cfg.warnings
 
 
 # -- stable_seconds (the stale finish detector's stillness window) -------------

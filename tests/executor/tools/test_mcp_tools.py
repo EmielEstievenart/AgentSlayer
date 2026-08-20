@@ -13,7 +13,13 @@ from typing import Any
 
 import pytest
 
-from agentclip.config import BudgetCaps, Config, LimitsConfig, caps_for_budget
+from agentclip.config import (
+    BudgetCaps,
+    Config,
+    LimitsConfig,
+    caps_for_budget,
+    resolve_limits,
+)
 from agentclip.executor.mcp.client import McpCallError, McpErrorCode
 from agentclip.executor.mcp.types import McpToolInfo
 from agentclip.executor.tools.mcp_tools import make_mcp_specs, mcp_listing
@@ -77,7 +83,8 @@ def make_ctx(
 ) -> ToolContext:
     return ToolContext(
         workspace=Workspace(root, Config().excluded_names()),
-        limits=limits or LimitsConfig(),
+        # Resolved as Engine.__init__ resolves it (test_shell.make_ctx says why).
+        limits=resolve_limits(limits or LimitsConfig(), 12_000),
         caps=caps or caps_for_budget(12_000),
     )
 
@@ -203,7 +210,17 @@ def test_missing_tool_param(ctx: ToolContext) -> None:
     assert source.calls == []  # nothing was invoked
 
 
-def test_long_result_text_is_tail_capped_like_a_command(tmp_path: Path) -> None:
+def test_a_long_result_reaches_the_engine_whole_however_small_the_budget(
+    tmp_path: Path,
+) -> None:
+    """The handler does NOT anticipate the paste budget - run_command's rule,
+    for run_command's reason (executor/tools/shell.retain_output).
+
+    A tail cap here would be a cut made BEFORE the engine's fetch_chunk cache is
+    filled: the cache would then hold the tail it was handed, part 1 would begin
+    in the middle, and the head would be gone. The caps below are the tightest
+    tier there is, and they still take nothing away.
+    """
     caps = BudgetCaps(
         600, 100, command_tail_lines=5, command_tail_chars=400,
         listing_max_entries=400, advised_max_calls=8,
@@ -212,18 +229,26 @@ def test_long_result_text_is_tail_capped_like_a_command(tmp_path: Path) -> None:
     _, call_spec = specs(StubSource(ALL, text=text))
     res = call_spec.handler(make_ctx(tmp_path, caps=caps), mcp_call(tool="github_list_issues"))
     assert res.status == "ok"
-    assert "[truncated: showing last 5 of 50 output lines]" in res.body
-    assert "line49" in res.body  # the tail survives
-    assert "line0\n" not in res.body  # the head is gone
+    assert res.body == text
+    assert "[truncated" not in res.body
 
 
-def test_the_char_cap_from_limits_applies_too(tmp_path: Path) -> None:
+def test_output_past_the_memory_guard_is_tail_capped_and_says_so(tmp_path: Path) -> None:
+    """The one cut this handler still makes, and the one that is really lossy.
+
+    `max_command_output_chars` is a memory bound (auto: the same 512k the chunk
+    cache stops holding at), so text past it is past what any fetch could reach -
+    which is why the honest "showing last N of M" marker stays exactly here and
+    nowhere else.
+    """
     text = "\n".join(f"line{i}" for i in range(100))
     _, call_spec = specs(StubSource(ALL, text=text))
     ctx = make_ctx(tmp_path, limits=LimitsConfig(max_command_output_chars=200))
     res = call_spec.handler(ctx, mcp_call(tool="github_list_issues"))
-    assert "[truncated:" in res.body
-    assert "line99" in res.body
+    assert "[truncated: showing last " in res.body
+    assert "of 100 output lines]" in res.body
+    assert "line99" in res.body  # the tail survives
+    assert "line0\n" not in res.body
     assert len(res.body) < 600
 
 

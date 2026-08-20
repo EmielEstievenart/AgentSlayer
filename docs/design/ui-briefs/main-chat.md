@@ -388,7 +388,7 @@ parse again from the press onwards.
   collapsed]" — `run_panel.py:55-63`, `tui.md` §8a (lines 963-967).
   Symmetric with the harness-log-pane division of labour cited there.
   **The buffer is torn down whole when the turn ends** — the model's own copy
-  of the output (already tail-capped) lives in the results payload / the
+  of the output (fitted to the budget by the engine) lives in the results payload / the
   transcript, never in this buffer.
 - **The three-way approve/approve-always/reject choice is per-call, not
   per-turn**, and "Approve + auto-edits" only ever appears for `kind ==

@@ -60,10 +60,15 @@ In-app changes (service editor, theme pickers, saved remote targets) are persist
 | Key | Default | Meaning |
 |---|---|---|
 | `max_file_read_chars` | `20000` | Per file read |
-| `max_command_output_chars` | `8000` | Per command |
-| `max_result_chars` | `6000` | Per tool result |
+| `max_command_output_chars` | `0` (auto) | How much of a command's or MCP tool's raw output AgentClip **keeps** |
+| `max_result_chars` | `0` (auto) | How much of one result the model **sees** in the payload |
 | `max_grep_matches` | `200` | Per grep |
 | `command_timeout_s` | `120` | Command wall clock |
+
+**`0` means auto**, and it is the default for the two keys above: they are worked out from the service's `max_paste_chars` when a session starts, because the right value for them depends on the budget you are actually pasting into. Write a number to override; anything you write wins at every budget.
+
+- `max_result_chars` auto = **half the paste budget**. That is 6,000 at the 12,000-char presets — exactly what AgentClip used to hard-code, so nothing changes for a default setup — and 48,000 on a 96,000-char preset, where a fixed 6,000 used to throw away seven eighths of the room you had paid for.
+- `max_command_output_chars` auto = **512,000**, and it is not a display cap at all. It is how much output a tool hands to AgentClip in the first place — a memory guard, set to the same size the recovery cache below stops at. Output past it really is gone, and the result says so in as many words (`[truncated: showing last N of M output lines]`).
 
 A result too big for `max_result_chars`, or a whole turn too big for the service's `max_paste_chars`, is truncated in the middle. Nothing is lost: AgentClip keeps the full output and the marker left in the cut body tells the model the id and part count to ask for, which it does with the built-in `fetch_chunk` tool (auto-approved — it only re-reads what AgentClip already produced). The cache holds the last truncated payload, so a fetch is worth making in the next turn or two, not ten turns later.
 

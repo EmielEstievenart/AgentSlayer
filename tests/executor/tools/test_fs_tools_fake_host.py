@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from agentclip.config import Config, LimitsConfig, caps_for_budget
+from agentclip.config import Config, LimitsConfig, caps_for_budget, resolve_limits
 from agentclip.executor.hosts import FakeHost
 from agentclip.executor.tools import fs_tools
 from agentclip.executor.tools.registry import ToolContext
@@ -33,7 +33,7 @@ def host() -> FakeHost:
 def ctx(host: FakeHost) -> ToolContext:
     return ToolContext(
         workspace=Workspace(host.root, Config().excluded_names(), host=host),
-        limits=LimitsConfig(),
+        limits=resolve_limits(LimitsConfig(), 12_000),
         caps=caps_for_budget(12_000),
         host=host,
     )
@@ -193,7 +193,7 @@ def test_glob_folds_case_on_a_case_insensitive_host() -> None:
     host = FakeHost("/project", case_sensitive=False)
     ctx = ToolContext(
         workspace=Workspace(host.root, Config().excluded_names(), host=host),
-        limits=LimitsConfig(),
+        limits=resolve_limits(LimitsConfig(), 12_000),
         caps=caps_for_budget(12_000),
         host=host,
     )

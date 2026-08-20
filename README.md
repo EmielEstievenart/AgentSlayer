@@ -74,7 +74,7 @@ To use `agentclip` from any directory without the checkout, freeze it into a sin
 
 This builds `dist\agentclip.exe` (PyInstaller onefile, ~78 MB, no Python needed to run it), smoke-tests it, and copies it to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`. Re-run it to update after changing the source. Useful flags: `-Clean` (fresh build), `-NoInstall` (build only), `-InstallDir <path>`.
 
-The exe carries **both UI shells and every optional extra the desktop needs**: the TUI, the GUI shell (`agentclip.exe --gui`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. Nothing extra to install, which is most of the 78 MB. The build script proves all three against the exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`) and refuses to install one that fails.
+The exe carries **both UI shells and every optional extra the desktop needs**: the TUI, the GUI shell (`agentclip.exe --gui`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the GUI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three against the exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
 
 The build is driven by `packaging/agentclip.spec`; a onefile exe unpacks to `%TEMP%` on each launch, costing a second or two of startup.
 
@@ -98,7 +98,7 @@ A frozen binary is architecture- and glibc-specific, so build it on (or for) the
 
 ## Configuration
 
-TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (Windows: `%APPDATA%\agentclip\config.toml`) → `<project>/.agentclip.toml` → CLI flags. See [docs/configuration.md](docs/configuration.md) for every setting, the service presets (paste-size budgets per chat service), the `permissions.json` rule format, and MCP server config — and [docs/commands.md](docs/commands.md) for all slash commands and keyboard shortcuts.
+TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (Windows: `%APPDATA%\agentclip\config.toml`) → `<project>/.agentclip.toml` → CLI flags. See [docs/configuration.md](docs/configuration.md) for every setting, the service presets (paste-size budgets per chat service), the `permissions.json` rule format, and MCP server config — and [docs/commands.md](docs/commands.md) for all slash commands and keyboard shortcuts. Both pages are readable inside the app: the GUI's titlebar has a **docs** button that opens them (`F1` stays the key/command cheatsheet).
 
 ## Design documents
 

@@ -25,6 +25,22 @@
         <span class="spacer"></span>
         <span class="version" id="version"></span>
 
+        <!-- The USER GUIDE's door: docs/commands.md and docs/configuration.md,
+             rendered in the page (app.js: openDocs). Deliberately NOT the F1
+             sheet - that one is the cheatsheet this window is drawn from (its
+             own KEYS table and the command registry), this one is the manual,
+             and a manual that only opens from a function key is a manual
+             nobody finds. A button and no binding: every F-key is taken and a
+             letter would fire into the transcript's single-key shortcuts. -->
+        <button
+          id="docs-open"
+          class="chrome-btn"
+          type="button"
+          title="User guide - commands and configuration (Esc closes)"
+        >
+          docs
+        </button>
+
         <!-- The "your move" banner the automation raises when a payload is
              waiting on the user's Ctrl+V or Enter. It blinks, deliberately: the
              user is looking at their browser, not at this window. Full width

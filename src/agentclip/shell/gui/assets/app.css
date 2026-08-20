@@ -1,10 +1,10 @@
 /* The GUI shell's chrome. Flat, and only as big as what exists: after parity
    increment 6 that is the window tabs, the per-window transcripts, the
    composer and its slash-command popup, the run panel, the approval gate, the
-   toasts, the modals (the session summary, the help sheet and the settings
-   picker among them), the sidebar, the status bar, the harness log pane, the
-   elements column and the service editor - and it still invents no vocabulary
-   the remaining increment (the SSH dialog) would argue with.
+   toasts, the modals (the session summary, the help sheet, the settings picker
+   and the user guide among them), the sidebar, the status bar, the harness log
+   pane, the elements column and the service editor - and it still invents no
+   vocabulary the remaining increment (the SSH dialog) would argue with.
    Only system fonts - nothing here may reach the network. */
 
 /* The palettes, and the whole difference between them is this region: every
@@ -213,6 +213,27 @@ button,
   color: var(--text-dim);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+}
+
+/* The titlebar's own button (the user guide's door). It wears the .pill shape
+   rather than the page's button shape: a full-size accent button up here would
+   read as an action the app is asking for, and this is a door that is never
+   urgent. It only takes the accent when the pointer is on it, which is the
+   whole of its affordance. */
+.chrome-btn {
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.chrome-btn:not(:disabled) {
+  border-color: var(--line);
+  color: var(--text-dim);
+}
+
+.chrome-btn:not(:disabled):hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* The "your move" banner: as loud as the TUI's, for the same reason - the user
@@ -1084,6 +1105,171 @@ button:not(:disabled) {
 
 .help-rows .d {
   color: var(--text-dim);
+}
+
+/* -- the user guide (the titlebar's "docs" button) -------------------------
+   The third rider of the one modal element, and the only one whose body is a
+   DOCUMENT: docs/commands.md and docs/configuration.md, read off disk and
+   rendered by app.js's markdown renderer. Two things it needs that the help
+   sheet does not - a switcher that stays put while the page under it scrolls,
+   and typography for a real document - and nothing else: the width, the scrim
+   and the Esc are the modal's own.
+
+   So the modal becomes a flex column here (the tab strip fixed, the body the
+   only thing that scrolls) instead of one scrolling box. Everything below is
+   scoped to .doc-body, which is CONTENT: it stays selectable, because a
+   configuration table you cannot copy a key out of is half a table. */
+.modal.docs {
+  display: flex;
+  flex-direction: column;
+  /* Taller than the ordinary modal: this one is meant to be read, and a
+     document in a 82vh box wastes the window it was opened in. */
+  max-height: 88vh;
+  overflow: hidden;
+}
+
+/* The title, the actions and the hint keep their natural heights; the body is
+   the only thing that gives, and inside it only .doc-body scrolls - which is
+   what keeps the switcher on screen at the bottom of a 200-line document. */
+.modal.docs .modal-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.doc-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+/* The selected page. A pressed state rather than a second colour: these are
+   two views of one surface, not two actions. */
+.doc-tab.on:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-solid);
+}
+
+.doc-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding-top: 14px;
+}
+
+.doc-body h1,
+.doc-body h2,
+.doc-body h3,
+.doc-body h4 {
+  margin: 20px 0 8px;
+  color: var(--accent);
+  letter-spacing: 0.02em;
+}
+
+.doc-body h1 {
+  margin-top: 0;
+  font-size: 20px;
+}
+
+.doc-body h2 {
+  font-size: 16px;
+}
+
+.doc-body h3,
+.doc-body h4 {
+  font-size: 14px;
+}
+
+.doc-body p,
+.doc-body ul,
+.doc-body ol,
+.doc-body blockquote {
+  margin: 8px 0;
+}
+
+.doc-body ul,
+.doc-body ol {
+  padding-left: 22px;
+}
+
+.doc-body li {
+  margin: 3px 0;
+}
+
+.doc-body blockquote {
+  padding-left: 12px;
+  border-left: 3px solid var(--line);
+  color: var(--text-dim);
+}
+
+.doc-body code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--bg-sunken);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.doc-body pre {
+  margin: 10px 0;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+}
+
+.doc-body pre code {
+  padding: 0;
+  background: none;
+}
+
+/* A table is the one thing in these documents that cannot be squeezed - the
+   configuration reference is three and four columns of keys and defaults - so
+   it gets its own scroll box rather than pushing the modal sideways. */
+.doc-table {
+  margin: 10px 0;
+  overflow-x: auto;
+}
+
+.doc-table table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.doc-table th,
+.doc-table td {
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+
+.doc-table th {
+  background: var(--bg-sunken);
+  font-weight: 700;
+}
+
+.doc-table td {
+  color: var(--text-dim);
+}
+
+/* The first column of a reference table is what you are looking FOR, so it
+   keeps the full text colour the rest of the row gives up. */
+.doc-table td:first-child {
+  color: var(--text);
+}
+
+/* A cross-reference between the two pages: the only live link in here, because
+   this window has no browser to send anything else to (app.js: renderMarkdown
+   leaves every other href as its own words). */
+.doc-body a {
+  color: var(--accent);
+  cursor: pointer;
 }
 
 /* The theme picker: real radios, because that is what "one of these" is. */
@@ -2140,6 +2326,19 @@ button:not(:disabled) {
   .help-rows .k.cmd {
     width: auto;
     white-space: normal;
+  }
+
+  /* The guide is a document and this is a column: give it the height the
+     dialogs get, and stop spending six characters of every table cell on
+     padding. The cells still scroll sideways inside .doc-table rather than
+     widening the modal. */
+  .modal.docs {
+    max-height: 96vh;
+  }
+
+  .doc-table th,
+  .doc-table td {
+    padding: 4px 6px;
   }
 
   /* 16px a side is a frame at 1200px wide and a tax at 450. Same for the 8vh

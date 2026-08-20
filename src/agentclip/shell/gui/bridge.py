@@ -245,6 +245,8 @@ HAVE rather than to be told about::
      rows: [{name: str, label: str, summary: str}, ...]}   # COMMANDS, in order
     {type: "settings", theme: "dark"|"light",
      themes: [{value: str, label: str}, ...]}
+    {type: "docs",                                         # the titlebar's button
+     pages: [{name: str, title: str, text: str, found: bool}, ...]}
 
 ``commands`` is ``agentclip.shell.app.commands.COMMANDS`` - the one table the
 controller's dispatch, `/help`, the unknown-command hint and the TUI's own popup
@@ -253,15 +255,25 @@ autocomplete popup and the help modal's command section, so neither can document
 a command that no longer exists. The filtering rules stay on the page (a round
 trip per keystroke would be latency for string work); the data never does.
 
+``docs`` is the USER GUIDE - ``docs/commands.md`` and ``docs/configuration.md``
+read off disk verbatim (``gui/docs.py``) and rendered page-side by the same
+``renderMarkdown`` the transcripts use. It rides this one-way channel rather
+than being a ``js_api`` method the button awaits, because the files are static
+text: the page needs to HAVE them, exactly as it needs the command registry, and
+a request/response for a fixed string would be the only value-returning call in
+a bridge whose whole design is one FIFO. ``found`` is false when this build
+carries no guide at all; ``text`` is then the short markdown note that says so,
+so the viewer always has a page to draw.
+
 ``settings`` is the F4 surface in full, which is one setting: the TUI's
 SettingsScreen is a theme picker and nothing else, so this one is too. The value
 lives in the shell's own config table (``[gui] theme``) because the GUI's
 palettes are CSS and ``[general] theme`` names a Textual theme - see
 ``config.VALID_GUI_THEMES``.
 
-Help, settings, the payload block and the quit-mid-turn confirm all reuse the
-ONE modal element the ``modal`` family above drives. Only the last of them is a
-``modal`` event: help and settings are page chrome (like F3's sidebar) and the
+Help, settings, the user guide, the payload block and the quit-mid-turn confirm
+all reuse the ONE modal element the ``modal`` family above drives. Only the last
+of them is a ``modal`` event: the first three are page chrome (like F3's sidebar) and the
 quit confirm is an ordinary ``ChatView.confirm``, raised from
 ``GuiView.confirm_quit`` after the window's ``closing`` handler refused the
 close (``gui/runner.py:window_closing``).

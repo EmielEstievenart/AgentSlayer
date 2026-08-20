@@ -79,10 +79,15 @@
   var modalId = null;
   var modalKind = null;
   // The page's OWN modals, which ride the same element the Python prompts do
-  // (docs/design/gui.md 3): "help" (F1), "settings" (F4) and "payload" (the
-  // clipboard fallback). Never both at once with a prompt - a prompt is a flow
-  // parked on an answer and it always wins.
+  // (docs/design/gui.md 3): "help" (F1), "settings" (F4), "docs" (the titlebar's
+  // user guide) and "payload" (the clipboard fallback). Never both at once with
+  // a prompt - a prompt is a flow parked on an answer and it always wins.
   var pageModal = null;
+  // The USER GUIDE, as it arrives from Python (the `docs` event: docs/*.md read
+  // off disk verbatim), and which page the viewer is on. The name outlives a
+  // close, so re-opening the button lands where the reader left off.
+  var docPages = [];
+  var docCurrent = "";
   // The slash-command registry, as it arrives from agentclip.shell.app.commands, and
   // the popup's two pieces of state. `popupIndex === null` is the RESTING state
   // of an unnarrowed list, not an error: nothing is highlighted until the user
@@ -228,32 +233,147 @@
   }
 
   /* == markdown =============================================================
-     Hand-written, and only what a transcript actually contains: fenced code,
-     headings, bullet/ordered lists, paragraphs, and the four inline forms.
-     HTML is escaped FIRST and never unescaped, so no model output can inject
-     markup - correctness over features, per docs/design/gui.md 2. */
+     Hand-written, and only what its two consumers actually contain: the
+     TRANSCRIPTS (fenced code, headings, bullet/ordered lists, paragraphs and
+     the four inline forms) and the USER GUIDE, which is what the four block
+     forms below it were grown for - pipe tables, block quotes, links, and the
+     backslash escapes GitHub's flavour needs to write a `|` inside a table cell
+     or a literal `<name>` in a heading.
+
+     HTML is escaped FIRST and never unescaped, so neither model output nor a
+     document full of literal <project> and <key> can inject markup -
+     correctness over features, per docs/design/gui.md 2. Everything here is
+     PURE - source in, HTML string out, no DOM and no state - which is what lets
+     one renderer serve a transcript block and a reference manual. */
+
+  // A code span's content, CommonMark's rule: one leading and one trailing
+  // space are stripped when both are there and something else is too, which is
+  // how a double-tick span around " ` " writes a literal backtick.
+  function codeSpan(code) {
+    if (
+      code.length > 2 &&
+      code.charAt(0) === " " &&
+      code.charAt(code.length - 1) === " " &&
+      /[^ ]/.test(code)
+    ) {
+      return code.slice(1, -1);
+    }
+    return code;
+  }
+
+  /* One pass, two jobs, because both are "lift this out before any other rule
+     can see it":
+
+       a CODE SPAN, by backtick RUN rather than by single tick - the
+       configuration guide spells a literal backtick as a double-tick span
+       around one, and a one-tick-only rule reads that line inside out;
+
+       a BACKSLASH ESCAPE - how a heading writes `\<name\>` and a table cell
+       writes `\|`. The HTML ENTITIES are in the list because escapeHtml has
+       already run by the time this is applied: `\<` is `\&lt;` by then.
+
+     What goes into the stash is finished HTML either way, so the restore at the
+     bottom of inlineMarkdown puts back exactly one thing. */
+  var SPANS = /(`+)([\s\S]*?)\1(?!`)|\\(&(?:amp|lt|gt|quot|#39);|[\\`*_{}[\]()#+\-.!|>~])/g;
+  var LINK = /\[([^\]]*)\]\(([^()\s]*)\)/g;
 
   function inlineMarkdown(text) {
-    // Code spans are lifted out FIRST, behind a marker the text cannot contain
+    // Both are lifted out FIRST, behind a marker the text cannot contain
     // (escapeHtml has already run, and a NUL survives no escaping), so
     // `*not italic*` inside backticks stays exactly what the model wrote.
     var codes = [];
-    var out = escapeHtml(text).replace(/`([^`]+)`/g, function (_, code) {
-      codes.push(code);
+    var out = escapeHtml(text).replace(SPANS, function (whole, ticks, code, escaped) {
+      codes.push(escaped === undefined ? "<code>" + codeSpan(code) + "</code>" : escaped);
       return "\u0000" + (codes.length - 1) + "\u0000";
     });
+    out = out.replace(LINK, docLink);
     out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
     out = out.replace(/__([^_]+)__/g, "<strong>$1</strong>");
     out = out.replace(/(^|[^*\w])\*([^*]+)\*/g, "$1<em>$2</em>");
     out = out.replace(/(^|[^_\w])_([^_]+)_/g, "$1<em>$2</em>");
     return out.replace(/\u0000(\d+)\u0000/g, function (_, n) {
-      return "<code>" + codes[Number(n)] + "</code>";
+      return codes[Number(n)];
     });
+  }
+
+  /* A link, in a window with nowhere to navigate to. Exactly one kind is live:
+     a cross-reference to another page of the guide, which SWITCHES THE VIEWER
+     (openDocs answers the click, and there is no href, so nothing can leave the
+     page). Every other link keeps its words - plus its URL in brackets when the
+     URL is one a user could paste into a browser themselves. */
+  function docLink(_, label, href) {
+    var found = /(?:^|\/)([\w-]+)\.md(?:#[\w-]*)?$/.exec(href);
+    var name = found ? found[1].toLowerCase() : "";
+    var known = docPages.some(function (page) {
+      return page.name === name;
+    });
+    if (known) return '<a data-doc="' + name + '">' + label + "</a>";
+    return /^https?:/i.test(href) ? label + " (" + href + ")" : label;
   }
 
   var BULLET = /^\s*([-*+]|\d+[.)])\s+(.*)$/;
   var HEADING = /^(#{1,6})\s+(.*)$/;
   var FENCE = /^\s*(`{3,}|~{3,})\s*([\w+-]*)\s*$/;
+  var QUOTE = /^\s*>\s?(.*)$/;
+
+  // A table is its SECOND line: GFM's delimiter row, which is pipes, dashes,
+  // alignment colons and nothing else. So a paragraph that happens to contain a
+  // pipe stays a paragraph, and a `---` rule with no pipe is not a table
+  // either. (Alignment is READ and ignored: these documents use none.)
+  function isTableRule(line) {
+    return /\|/.test(line) && /-/.test(line) && /^[\s|:-]+$/.test(line);
+  }
+
+  function startsTable(lines, i) {
+    return lines[i].indexOf("|") !== -1 && i + 1 < lines.length && isTableRule(lines[i + 1]);
+  }
+
+  // One row's cells: split on UNESCAPED pipes, and turn `\|` into a real one
+  // here rather than inline. That is GFM's order - the escape belongs to the
+  // TABLE and is resolved before any inline rule, so a `\|` inside a code span
+  // in a cell is a pipe there too, which is how commands.md writes
+  // `/armed [on|off]`.
+  function tableCells(line) {
+    var cells = [];
+    var cell = "";
+    var text = line.trim();
+    for (var i = text.charAt(0) === "|" ? 1 : 0; i < text.length; i++) {
+      var ch = text.charAt(i);
+      if (ch === "\\" && text.charAt(i + 1) === "|") {
+        cell += "|";
+        i += 1;
+      } else if (ch === "|") {
+        cells.push(cell.trim());
+        cell = "";
+      } else {
+        cell += ch;
+      }
+    }
+    // The closing pipe leaves an empty tail behind; a row without one does not.
+    if (cell.trim() !== "" || cells.length === 0) cells.push(cell.trim());
+    return cells;
+  }
+
+  // Wrapped in its own scroll box, because a four-column reference table is the
+  // one thing in these documents that cannot be squeezed into a 400px window -
+  // and a table that widened the modal would take the prose with it.
+  function renderTable(head, rows) {
+    var html = "<div class='doc-table'><table><thead><tr>";
+    head.forEach(function (cell) {
+      html += "<th>" + inlineMarkdown(cell) + "</th>";
+    });
+    html += "</tr></thead><tbody>";
+    rows.forEach(function (row) {
+      html += "<tr>";
+      // Ragged rows are legal markdown; padding to the header is what keeps
+      // every cell under the heading it belongs to.
+      for (var col = 0; col < head.length; col++) {
+        html += "<td>" + inlineMarkdown(col < row.length ? row[col] : "") + "</td>";
+      }
+      html += "</tr>";
+    });
+    return html + "</tbody></table></div>";
+  }
 
   function renderMarkdown(source) {
     var lines = String(source === undefined ? "" : source)
@@ -291,6 +411,31 @@
         i += 1;
         continue;
       }
+      if (startsTable(lines, i)) {
+        var head = tableCells(line);
+        i += 2; // the header row and the delimiter row under it
+        var rows = [];
+        while (i < lines.length && !/^\s*$/.test(lines[i]) && lines[i].indexOf("|") !== -1) {
+          rows.push(tableCells(lines[i]));
+          i += 1;
+        }
+        html.push(renderTable(head, rows));
+        continue;
+      }
+      var quote = QUOTE.exec(line);
+      if (quote) {
+        var quoted = [];
+        while (i < lines.length) {
+          var deeper = QUOTE.exec(lines[i]);
+          if (!deeper) break;
+          quoted.push(deeper[1]);
+          i += 1;
+        }
+        // Recursive, so a quoted list or table is one - and the recursion is
+        // bounded by the "> " this loop has already stripped.
+        html.push("<blockquote>" + renderMarkdown(quoted.join("\n")) + "</blockquote>");
+        continue;
+      }
       var bullet = BULLET.exec(line);
       if (bullet) {
         var ordered = /^\s*\d/.test(line);
@@ -311,7 +456,9 @@
           /^\s*$/.test(lines[i]) ||
           FENCE.test(lines[i]) ||
           HEADING.test(lines[i]) ||
-          BULLET.test(lines[i])
+          BULLET.test(lines[i]) ||
+          QUOTE.test(lines[i]) ||
+          startsTable(lines, i)
         ) {
           break;
         }
@@ -1074,6 +1221,10 @@
     pageModal = kind;
     modalKind = null;
     el.modal.classList.toggle("wide", Boolean(wide));
+    // The guide is the one rider that reshapes the modal itself (a column with
+    // a switcher that stays put while the page under it scrolls), so the class
+    // is set HERE - where every other screen also takes it off again.
+    el.modal.classList.toggle("docs", kind === "docs");
     el.modalTitle.textContent = title;
     el.modalBody.innerHTML = "";
     el.modalActions.innerHTML = "";
@@ -1087,6 +1238,7 @@
     if (!pageModal) return;
     pageModal = null;
     el.modal.classList.remove("wide");
+    el.modal.classList.remove("docs");
     el.scrim.hidden = true;
   }
 
@@ -1243,7 +1395,91 @@
     el.modalBody.innerHTML = html;
     el.modalHint.textContent = "escape (or F1) closes";
     el.modalHint.hidden = false;
+    // The way ON from the cheatsheet to the manual. This sheet is drawn from
+    // what the page HAS (its own key table, the command registry); the guide is
+    // the prose about what any of it is for, and the two are one press apart in
+    // both directions - the titlebar's button is the other door.
+    var guide = document.createElement("button");
+    guide.type = "button";
+    guide.textContent = "User guide";
+    guide.addEventListener("click", function () {
+      openDocs("");
+    });
+    el.modalActions.appendChild(guide);
     pageModalClose("Close (esc)");
+  }
+
+  /* == the user guide (the titlebar's "docs" button) ========================
+     docs/commands.md and docs/configuration.md, rendered in the page. The FILES
+     are the source of truth and nothing here holds a copy of a word of them:
+     Python reads them off disk (gui/docs.py) and pushes them whole on the
+     `docs` event, exactly as the command registry crosses, and the markdown
+     renderer at the top of this file turns them into the modal's body.
+
+     Two pages, one surface: a switcher rather than two buttons in the
+     titlebar, because "the manual" is one thing to open and which page you
+     wanted is a question you answer after it is up. */
+
+  function docPage(name) {
+    var wanted = null;
+    docPages.forEach(function (page) {
+      if (page.name === name) wanted = page;
+    });
+    return wanted || docPages[0] || null;
+  }
+
+  function openDocs(name) {
+    if (!openPageModal("docs", "USER GUIDE", true)) return;
+    var tabs = document.createElement("div");
+    tabs.className = "doc-tabs";
+    docPages.forEach(function (page) {
+      var tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "doc-tab";
+      tab.setAttribute("data-doc", page.name);
+      tab.textContent = page.title;
+      tab.addEventListener("click", function () {
+        showDoc(page.name);
+      });
+      tabs.appendChild(tab);
+    });
+    var body = document.createElement("div");
+    body.className = "doc-body";
+    // A cross-reference between the two pages is answered HERE rather than by
+    // an <a href>: this page is a file:// URL with nowhere to navigate to, so
+    // the only honest thing a link can do is move the switcher.
+    body.addEventListener("click", function (ev) {
+      var link = ev.target && ev.target.closest ? ev.target.closest("a[data-doc]") : null;
+      if (!link) return;
+      ev.preventDefault();
+      showDoc(link.getAttribute("data-doc"));
+    });
+    el.modalBody.appendChild(tabs);
+    el.modalBody.appendChild(body);
+    el.modalHint.textContent = "escape closes · these pages are docs/*.md in the repository";
+    el.modalHint.hidden = false;
+    pageModalClose("Close (esc)");
+    showDoc(name || docCurrent);
+  }
+
+  function showDoc(name) {
+    var body = el.modalBody.querySelector(".doc-body");
+    if (!body) return;
+    var page = docPage(name);
+    if (!page) {
+      // Only reachable before the first `docs` event, i.e. a window whose page
+      // came up before Python's first push. Says so rather than showing an
+      // empty box.
+      body.innerHTML = "<p>The guide has not arrived from the app yet.</p>";
+      return;
+    }
+    docCurrent = page.name;
+    Array.prototype.forEach.call(el.modalBody.querySelectorAll(".doc-tab"), function (tab) {
+      tab.classList.toggle("on", tab.getAttribute("data-doc") === page.name);
+    });
+    body.innerHTML = renderMarkdown(page.text);
+    // A switch is a new document, not a scroll position in an old one.
+    body.scrollTop = 0;
   }
 
   function openSettings() {
@@ -2189,6 +2425,13 @@
         // help sheet's command table (bridge.py's catalogue).
         commands = event.rows || [];
         return;
+      case "docs":
+        // The user guide, whole, once per load - `commands`' twin (bridge.py's
+        // catalogue). A viewer open across a repush is rebuilt on the page it
+        // was on rather than left showing a document that has been re-read.
+        docPages = event.pages || [];
+        if (pageModal === "docs") openDocs(docCurrent);
+        return;
       case "settings":
         themeChoices = event.themes || [];
         applyTheme(event.theme);
@@ -2860,6 +3103,7 @@
       flash: id("flash"),
       flashText: id("flash-text"),
       retryInsert: id("retry-insert"),
+      docsOpen: id("docs-open"),
       sidebar: id("sidebar"),
       rail: id("rail"),
       sideArmed: id("side-armed"),
@@ -3053,6 +3297,13 @@
     el.retryInsert.addEventListener("click", function (ev) {
       ev.stopPropagation();
       api("retry_insert");
+    });
+    // The titlebar's one button. No key goes with it: every F-key is taken and
+    // a bare letter belongs to the main screen's shortcuts, so the button IS
+    // the binding (and the help sheet carries the other door to the same
+    // screen).
+    el.docsOpen.addEventListener("click", function () {
+      openDocs("");
     });
     // A genuine user pick only: nothing here writes the value back into the
     // picker except paintSidebar, and setting .value programmatically fires no

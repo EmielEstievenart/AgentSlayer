@@ -447,13 +447,17 @@ def _gui_smoke() -> int:
     see because the spec names it), resolve the assets through
     ``importlib.resources`` and read every one of them (the classic frozen-app
     failure: the files are IN the archive but the resource reader cannot find
-    them under ``_MEIPASS``), and ask ``webview2_missing()``.
+    them under ``_MEIPASS``), and ask ``webview2_missing()``. The user guide the
+    window's "docs" button opens is read the same way and for the same reason -
+    it is collected by the spec at a package-relative path too, and a build that
+    lost it fails nothing until somebody presses the button.
 
     A machine without the WebView2 runtime still exits 0 and says so. What is
     under test is the FREEZE, not the box the build ran on - a build server
     with no Evergreen runtime must not be able to fail a packaging check, and
     the renderer word is printed so the state is never merely assumed.
     """
+    from agentclip.shell.gui.docs import load_doc_pages
     from agentclip.shell.gui.shell import ASSET_NAMES, asset_dir, webview2_missing
 
     try:
@@ -471,6 +475,16 @@ def _gui_smoke() -> int:
             if not text.strip():
                 print(f"gui-smoke: asset {name} is empty", file=sys.stderr)
                 return 2
+    # ...and the user guide the window's "docs" button opens, for exactly the
+    # assets' reason: the files are collected by the spec at a package-relative
+    # path and found through the same resource machinery, so a build that lost
+    # them opens a help button on a "this build does not carry it" note. It
+    # fails nothing at run time, which is what makes it a packaging check.
+    missing = [page.name for page in load_doc_pages() if not page.found]
+    if missing:
+        print(f"gui-smoke: the user guide is not in this build ({', '.join(missing)})",
+              file=sys.stderr)
+        return 2
     if platform.system() != "Windows":
         renderer = "n/a"
     else:

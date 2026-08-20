@@ -7,11 +7,13 @@ Build via ``scripts/build-exe.ps1``, or by hand from the repo root::
 
 The app itself is deliberately freeze-friendly (architecture.md S7): the Textual
 CSS lives in a class var, the protocol templates are string constants, and
-nothing resolves paths relative to ``__file__``. The GUI shell's page is the one
-exception and a deliberate one - three hand-written files that a browser engine
-loads over a ``file://`` URL cannot be string constants - so it is the only
-``datas`` of our own here (see ``gui_datas`` below). Everything else exists to
-work around *dependency* dynamism that PyInstaller's static analysis cannot see.
+nothing resolves paths relative to ``__file__``. Two things are deliberate
+exceptions and are the only ``datas`` of our own here: the GUI shell's page
+(three hand-written files that a browser engine loads over a ``file://`` URL
+cannot be string constants - see ``gui_datas``) and the user guide the GUI's
+"docs" button shows (``doc_datas``: the markdown IS the source of truth and is
+read, never compiled in). Everything else exists to work around *dependency*
+dynamism that PyInstaller's static analysis cannot see.
 
 The build environment must have the ``cv`` AND ``gui`` extras installed: the exe
 bundles the OpenCV matcher backend and both UI shells, and PyInstaller can only
@@ -88,6 +90,28 @@ gui_datas = [
     (os.path.join(GUI_ASSETS, name), "agentclip/shell/gui/assets")
     for name in sorted(os.listdir(GUI_ASSETS))
     if os.path.isfile(os.path.join(GUI_ASSETS, name))
+]
+
+# The USER GUIDE - docs/commands.md and docs/configuration.md, which the GUI's
+# "docs" button renders (shell/gui/docs.py). The same argument as the page
+# assets above, one package up, with one wrinkle of its own: these files live at
+# the REPO ROOT rather than under src/, so they are the only data of ours that a
+# checkout does not already carry as package data. The destination is
+# `agentclip/docs` because that is where ``files("agentclip") / "docs"`` looks -
+# and pyproject.toml force-includes them at exactly that path for a wheel, so
+# the frozen build and the wheel answer the reader identically. Without this the
+# exe opens the guide on a "this build does not carry it" note, which is a real
+# failure mode rather than a crash, which is why `--gui-smoke` reads them back
+# out of the frozen build beside the three assets.
+#
+# Globbed for the assets' reason: the docs/ subdirectories (design notes, UI
+# briefs) are not files and so are not collected, and a new top-level guide page
+# should not need this list edited to ship.
+DOC_PAGES_DIR = os.path.join(ROOT, "docs")
+doc_datas = [
+    (os.path.join(DOC_PAGES_DIR, name), "agentclip/docs")
+    for name in sorted(os.listdir(DOC_PAGES_DIR))
+    if os.path.isfile(os.path.join(DOC_PAGES_DIR, name))
 ]
 
 # pywebview's backend, named per PLATFORM (see the long note in hiddenimports
@@ -223,7 +247,7 @@ a = Analysis(
     [os.path.join(SRC, "agentclip", "__main__.py")],
     pathex=[SRC],
     binaries=textual_binaries,
-    datas=textual_datas + gui_datas,
+    datas=textual_datas + gui_datas + doc_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

@@ -1564,7 +1564,6 @@
     return {
       signals: signals,
       hover_scan: el.svcHover.checked,
-      capture_prose: el.svcProse.checked,
       require_fenced: el.svcFenced.checked,
       stream: el.svcStream.checked,
       auto_submit: el.svcAutoSubmit.checked
@@ -1936,7 +1935,6 @@
 
     var labels = event.labels || {};
     el.svcHoverLabel.textContent = labels.hover_scan || "";
-    el.svcProseLabel.textContent = labels.capture_prose || "";
     el.svcFencedLabel.textContent = labels.require_fenced || "";
     el.svcStreamLabel.textContent = labels.stream || "";
     el.svcAutoSubmitLabel.textContent = labels.auto_submit || "";
@@ -1947,7 +1945,6 @@
       if (svcSignals[sig.name]) svcToggle(svcSignals[sig.name], sig.on, off);
     });
     svcToggle(el.svcHover, event.hover_scan, off);
-    svcToggle(el.svcProse, event.capture_prose, off);
     svcToggle(el.svcFenced, event.require_fenced, off);
     svcToggle(el.svcStream, event.stream, off);
     svcToggle(el.svcAutoSubmit, event.auto_submit, off);
@@ -2904,8 +2901,6 @@
       svcSignalsBox: id("svc-signals"),
       svcHover: id("svc-hover-scan"),
       svcHoverLabel: id("svc-hover-scan-label"),
-      svcProse: id("svc-capture-prose"),
-      svcProseLabel: id("svc-capture-prose-label"),
       svcFenced: id("svc-require-fenced"),
       svcFencedLabel: id("svc-require-fenced-label"),
       svcStream: id("svc-stream"),
@@ -3083,7 +3078,7 @@
         });
       }
     );
-    [el.svcHover, el.svcProse, el.svcFenced, el.svcStream, el.svcAutoSubmit].forEach(
+    [el.svcHover, el.svcFenced, el.svcStream, el.svcAutoSubmit].forEach(
       function (box) {
         box.addEventListener("change", function () {
           api("svc_detection", svcDetection());

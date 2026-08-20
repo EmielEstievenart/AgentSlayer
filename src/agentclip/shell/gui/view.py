@@ -2699,7 +2699,6 @@ class GuiView:
         self._editor.set_detection(
             signals=[str(name) for name in state.get("signals") or ()],
             hover_scan=bool(state.get("hover_scan")),
-            capture_prose=bool(state.get("capture_prose")),
             require_fenced=bool(state.get("require_fenced")),
             stream=bool(state.get("stream")),
             auto_submit=bool(state.get("auto_submit")),
@@ -3206,13 +3205,16 @@ class GuiView:
         return await self._automation.verified_copy_click(target)
 
     async def ingest_harvest(self) -> None:
-        """A verified copy click landed: show a non-protocol reply as prose if
-        this service opted in (``ServicePreset.capture_prose``).
+        """A verified copy click landed: show a non-protocol reply as prose.
 
-        Protocol-shaped harvests are left alone entirely - the watcher ingests
-        those on its own, and reading them here too would ingest them twice.
+        Only inside the controller's one-shot ``prose_window`` - armed for the
+        verified click and disarmed the moment this returns - because that is
+        what makes THIS clipboard text known to be the model's reply rather than
+        something the user copied. Protocol-shaped harvests are left alone
+        entirely: the watcher ingests those on its own, and reading them here
+        too would ingest them twice.
         """
-        if not self.live_preset().capture_prose:
+        if not self._automation.prose_window:
             return
         try:
             text = await asyncio.to_thread(self._provider.read_text)
@@ -3224,7 +3226,8 @@ class GuiView:
         self._automation.log_harness(
             KIND_CLIPBOARD,
             f"the harvested reply has no CLIP blocks ({len(text)} chars); "
-            "capture_prose is on, so it goes to the transcript as prose",
+            "we clicked the copy button ourselves, so it goes to the "
+            "transcript as prose",
         )
         self._automation.set_loop_state(
             LoopState.INTERPRETING, "the reply has no CLIP blocks - showing it as prose"

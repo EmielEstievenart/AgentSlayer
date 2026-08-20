@@ -3485,21 +3485,27 @@ class MainScreen(Screen[None]):
 
     async def _ingest_prose_harvest(self) -> None:
         """Hand a verified copy click's harvest to the session even when it has
-        no CLIP blocks, if this service opted in (``ServicePreset.capture_prose``).
+        no CLIP blocks.
 
         The one loosening of protocol.md 1.4 tolerance #11, and deliberately
         scoped to the flow's own click rather than to the watcher: THIS
         clipboard text is known to be the model's reply - the flow just watched
         the copy button put it there - while the watcher sees every copy the
-        user makes and must keep ignoring the non-protocol ones. Protocol-shaped
-        harvests are left alone entirely; the watcher ingests those on its own,
-        exactly as before, and reading them here too would ingest them twice.
+        user makes and must keep ignoring the non-protocol ones. That scoping is
+        what ``automation.prose_window`` states outright: the controller arms it
+        for the one verified click and disarms it the moment this returns, so a
+        harvest reached any other way still goes the strict route.
+        Protocol-shaped harvests are left alone entirely; the watcher ingests
+        those on its own, exactly as before, and reading them here too would
+        ingest them twice.
 
         The prose is only ever DISPLAYED (the controller shows it in the
         transcript and invites a follow-up); nothing in it executes, and the
-        engine still counts it as noise.
+        engine still counts it as noise. Everything else stays strict: a forced
+        ingest overrides ``Noise("not-protocol")`` and nothing more, so the
+        own-outbound dedup and the chat-name gate still get their say.
         """
-        if not self._live_preset().capture_prose:
+        if not self._automation.prose_window:
             return
         try:
             text = await asyncio.to_thread(self._provider.read_text)
@@ -3511,7 +3517,8 @@ class MainScreen(Screen[None]):
         self._log_harness(
             KIND_CLIPBOARD,
             f"the harvested reply has no CLIP blocks ({len(text)} chars); "
-            "capture_prose is on, so it goes to the transcript as prose",
+            "we clicked the copy button ourselves, so it goes to the "
+            "transcript as prose",
         )
         self._set_loop_state(
             LoopState.INTERPRETING, "the reply has no CLIP blocks - showing it as prose"

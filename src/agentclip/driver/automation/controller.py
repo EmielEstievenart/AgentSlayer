@@ -445,6 +445,14 @@ class AutomationController:
         # flow's own scrolling/hover-scanning reads as "generating" to the
         # stale detector and would re-arm and re-fire the trigger forever.
         self._flow_running = False
+        # The one-shot window in which a harvest may be ingested as PROSE. Armed
+        # immediately before the flow's ``verified_copy_click`` and disarmed the
+        # moment ``ingest_harvest`` returns (and defensively in ``end_flow``), so
+        # the loosening of protocol.md 1.4 tolerance #11 is scoped to exactly one
+        # click: the one whose clipboard change we just watched happen. Plain
+        # attribute writes on the event-loop thread - never read from the poller
+        # thread, so it is deliberately outside ``_tick_lock``.
+        self._prose_window = False
         # ``_copy_armed``/``_copy_changed_streak`` track the probe sequence that
         # fires the auto-copy flow - see ``evaluate_finish``. Trigger state, not
         # calibration, so it is reset whenever the live slot moves.
@@ -1086,6 +1094,17 @@ class AutomationController:
         return self._awaiting_pasted_reply
 
     @property
+    def prose_window(self) -> bool:
+        """May the harvest about to arrive be ingested even with no CLIP blocks?
+
+        True for exactly one act: from just before the flow's verified copy
+        click until its ``ingest_harvest`` returns. A shell's harvest reads it
+        to know that THIS clipboard text is the model's reply - the flow watched
+        the copy button write it - rather than some copy the user made.
+        """
+        return self._prose_window
+
+    @property
     def flow_running(self) -> bool:
         """Is the auto-copy flow driving the mouse right now?"""
         return self._flow_running
@@ -1170,7 +1189,13 @@ class AutomationController:
         detectors watch, so every streak it leaves behind describes the flow's
         own mouse work rather than the model's - including the send-arming run,
         whose large deltas were the flow's own scrolling.
+
+        The prose window is closed here too, defensively: the flow's own path
+        closes it the moment the harvest returns, but a click that never
+        verifies, a MANUAL_COPY exit or an exception must not leave it open for
+        whatever the user copies next.
         """
+        self._prose_window = False
         with self._tick_lock:
             self._flow_running = False
             self.reset_trackers()
@@ -2992,6 +3017,12 @@ class AutomationController:
             match_rect(region, template, match),
             *self._live_profile().click_point(TemplateKind.COPY),
         )
+        # Arm the prose window for THIS click and nothing else: whatever the
+        # clipboard holds when the click verifies is the model's reply, so the
+        # harvest may show it even with no CLIP blocks in it. Disarmed the
+        # moment the harvest returns below - and by ``end_flow`` on every other
+        # way out of here.
+        self._prose_window = True
         clicked = await self._host.verified_copy_click(target)
         if clicked:
             self._view.notify(f"copy button clicked (diff {match.diff:.2f})")
@@ -3005,7 +3036,11 @@ class AutomationController:
             # AgentClip so the user watches the ingest here, not the browser.
             # The beat before it is ``snap_back_after_click``'s.
             await self.snap_back_after_click()
-            await self._host.ingest_harvest()
+            try:
+                await self._host.ingest_harvest()
+            finally:
+                # Back to strict checking the instant the harvest is in.
+                self._prose_window = False
             return
 
         # Every attempt clicked but the clipboard never changed - leave the

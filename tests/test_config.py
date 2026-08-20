@@ -512,21 +512,19 @@ def test_save_services_writes_scroll_action_only_when_it_differs(
     assert "scroll_action" not in tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["my-llm"]
 
 
-# -- auto_submit + capture_prose (the two automation opt-ins) --------------------
+# -- auto_submit (the automation opt-in) ----------------------------------------
 
 
 def test_the_automation_opt_ins_ship_off() -> None:
-    """A synthetic Enter and a prose ingest are both acts the loop otherwise
-    always leaves to the user, so nobody gets either without asking."""
+    """A synthetic Enter is an act the loop otherwise always leaves to the user,
+    so nobody gets one without asking."""
     for key, preset in default_services().items():
         assert preset.auto_submit is False, key
-        assert preset.capture_prose is False, key
     fresh = ServicePreset("k", "K", 1_000, 5_000)
     assert fresh.auto_submit is False
-    assert fresh.capture_prose is False
 
 
-@pytest.mark.parametrize("field", ["auto_submit", "capture_prose"])
+@pytest.mark.parametrize("field", ["auto_submit"])
 def test_load_config_reads_an_automation_opt_in(
     project: Path, global_path: Path, field: str
 ) -> None:
@@ -536,7 +534,7 @@ def test_load_config_reads_an_automation_opt_in(
     assert not cfg.warnings
 
 
-@pytest.mark.parametrize("field", ["auto_submit", "capture_prose"])
+@pytest.mark.parametrize("field", ["auto_submit"])
 def test_load_config_rejects_a_non_bool_automation_opt_in(
     project: Path, global_path: Path, field: str
 ) -> None:
@@ -546,7 +544,7 @@ def test_load_config_rejects_a_non_bool_automation_opt_in(
     assert any(field in w for w in cfg.warnings)
 
 
-@pytest.mark.parametrize("field", ["auto_submit", "capture_prose"])
+@pytest.mark.parametrize("field", ["auto_submit"])
 def test_save_then_load_round_trips_an_automation_opt_in(
     project: Path, global_path: Path, field: str
 ) -> None:
@@ -575,9 +573,21 @@ def test_save_services_writes_the_opt_ins_only_when_they_differ(
     save_services(services, global_path)
     written = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
     assert "auto_submit" not in written
-    assert "capture_prose" not in written
     assert "require_fenced_reply" not in written
     assert "extra_instructions" not in written
+
+
+def test_a_retired_preset_key_is_simply_ignored(project: Path, global_path: Path) -> None:
+    """``capture_prose`` was deleted when a verified auto-copy click started
+    ingesting prose unconditionally. Config files in the wild still carry it, and
+    a key the schema no longer knows must cost the user nothing: no raise, and
+    nothing else in the table disturbed."""
+    global_path.write_text(
+        "[services.claude]\ncapture_prose = true\nauto_submit = true\n", encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].auto_submit is True
+    assert not hasattr(cfg.services["claude"], "capture_prose")
 
 
 # -- require_fenced_reply (the unfenced-reply gate, protocol.md 1.4 #15) --------

@@ -235,12 +235,6 @@ class ServicePreset:
     # always leaves to the user, and a synthetic Enter into the wrong widget is
     # a sent half-thought. The send gate still verifies the send either way.
     auto_submit: bool = False
-    # May the auto-copy flow's verified copy click ingest a reply that carries
-    # NO CLIP blocks at all, showing it in the transcript as prose? Off by
-    # default per protocol.md 1.4 tolerance #11 (non-protocol clipboard text is
-    # ignored); scoped to the flow's own click - the watcher never loosens, so
-    # the user's ordinary copies stay invisible either way.
-    capture_prose: bool = False
     # Refuse a reply that carries CALL blocks but arrived with no code fence
     # around them, and ask for a fenced resend instead (protocol.md 1.4
     # tolerance #15).
@@ -1097,9 +1091,6 @@ def load_config(
             auto_submit=_take_bool(
                 table, "auto_submit", base.auto_submit if base else False, ctx, warnings
             ),
-            capture_prose=_take_bool(
-                table, "capture_prose", base.capture_prose if base else False, ctx, warnings
-            ),
             require_fenced_reply=_take_bool(
                 table,
                 "require_fenced_reply",
@@ -1349,8 +1340,6 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
             services_table[key]["scroll_action"] = preset.scroll_action
         if preset.auto_submit != (base.auto_submit if base else False):
             services_table[key]["auto_submit"] = preset.auto_submit
-        if preset.capture_prose != (base.capture_prose if base else False):
-            services_table[key]["capture_prose"] = preset.capture_prose
         # Newest of all, same write-only-when-moved rule: a user who never met
         # a host that corrupts unfenced replies gets a file that never mentions
         # the gate.

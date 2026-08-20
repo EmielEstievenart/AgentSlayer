@@ -20,6 +20,7 @@ import pytest
 from agentclip.driver.automation.host import AutomationHost
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.automation.view import AutomationView
+from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.engine.engine import Decision, PendingAction, Phase, StatusSnapshot
@@ -848,3 +849,86 @@ async def test_find_all_refuses_a_slot_and_a_scene_together(harness: Harness) ->
             slot=AgentSlot.MASTER,
             scene=object(),  # type: ignore[arg-type] - refused before it is read
         )
+
+
+# == the no-CLIP harvest ======================================================
+# The GUI half of protocol.md 1.4 tolerance #11's one exception: a copy click
+# AgentClip made itself always ingests what it harvested, prose or not, because
+# the flow watched the button write that text. The EXTENT of the loosening is
+# pinned in tests/driver/automation/test_auto_copy_flow.py; what is pinned here
+# is that this adapter honours it and keeps its two standing guards.
+
+PROSE_HARVEST = "Here is my plain answer - no tool calls, just words."
+
+PROTOCOL_HARVEST = """~~~~
+===CLIP:CALL id=1 tool=task_done===
+summary: all done
+===CLIP:END===
+===CLIP:EOM calls=1 chat=amber-falcon===
+~~~~
+"""
+
+
+class IngestSpy(ControllerSpy):
+    """A ControllerSpy that also remembers what was handed to the session."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.submitted: list[tuple[str, bool]] = []
+
+    def submit_clipboard(self, text: str, *, accept_prose: bool = False) -> None:
+        self.submitted.append((text, accept_prose))
+
+
+def _harvest_ready(harness: Harness, text: str) -> IngestSpy:
+    """A view whose clipboard holds ``text`` and whose session is a spy."""
+    spy = IngestSpy()
+    harness.view._controller = spy  # type: ignore[assignment]
+    clipboard = FakeClipboard()
+    clipboard.set_text(text)
+    harness.view._provider = clipboard
+    return spy
+
+
+async def test_a_harvest_inside_the_window_goes_in_as_prose(harness: Harness) -> None:
+    """No configuration at all: the window the controller arms around its own
+    verified click is the whole permission, and ``accept_prose`` is what tells
+    the session this text is known to be the reply."""
+    spy = _harvest_ready(harness, PROSE_HARVEST)
+    harness.view.automation._prose_window = True
+
+    await harness.view.ingest_harvest()
+
+    assert spy.submitted == [(PROSE_HARVEST, True)]
+    assert harness.view.automation.loop_state is LoopState.INTERPRETING
+
+
+async def test_a_harvest_outside_the_window_ingests_nothing(harness: Harness) -> None:
+    """Reached any other way, this adapter has no grounds to call the clipboard
+    the model's reply - so it does not."""
+    spy = _harvest_ready(harness, PROSE_HARVEST)
+    assert harness.view.automation.prose_window is False
+
+    await harness.view.ingest_harvest()
+
+    assert spy.submitted == []
+
+
+async def test_a_protocol_shaped_harvest_is_left_to_the_watcher(harness: Harness) -> None:
+    """The watcher ingests protocol traffic on its own; reading it here too
+    would be a double ingest of every normal reply."""
+    spy = _harvest_ready(harness, PROTOCOL_HARVEST)
+    harness.view.automation._prose_window = True
+
+    await harness.view.ingest_harvest()
+
+    assert spy.submitted == []
+
+
+async def test_an_empty_harvest_ingests_nothing(harness: Harness) -> None:
+    spy = _harvest_ready(harness, "")
+    harness.view.automation._prose_window = True
+
+    await harness.view.ingest_harvest()
+
+    assert spy.submitted == []

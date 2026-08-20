@@ -136,7 +136,6 @@ CLICK_X_LABEL = "click point: % across the captured image (50 = the middle)"
 CLICK_Y_LABEL = "click point: % down the captured image (50 = the middle)"
 
 HOVER_SCAN_LABEL = "hover-scan for copy icon"
-CAPTURE_PROSE_LABEL = "ingest replies with no CLIP"
 REQUIRE_FENCED_LABEL = "require fenced replies"
 STREAM_DELIVERY_LABEL = "paste the payload in chunks"
 AUTO_SUBMIT_LABEL = "press Enter after auto-paste"
@@ -461,14 +460,12 @@ class ServiceEditor:
             # window, and two shells with two wordings of that is drift.
             "labels": {
                 "hover_scan": HOVER_SCAN_LABEL,
-                "capture_prose": CAPTURE_PROSE_LABEL,
                 "require_fenced": REQUIRE_FENCED_LABEL,
                 "stream": STREAM_DELIVERY_LABEL,
                 "auto_submit": AUTO_SUBMIT_LABEL,
                 "tolerance": TOLERANCE_LABEL,
             },
             "hover_scan": shown.hover_scan,
-            "capture_prose": shown.capture_prose,
             "require_fenced": shown.require_fenced_reply,
             "stream": shown.delivery == DELIVERY_STREAM,
             "auto_submit": shown.auto_submit,
@@ -729,7 +726,6 @@ class ServiceEditor:
         *,
         signals: Iterable[str],
         hover_scan: bool,
-        capture_prose: bool,
         require_fenced: bool,
         stream: bool,
         auto_submit: bool,
@@ -751,7 +747,6 @@ class ServiceEditor:
             finish_signals=normalize_finish_signals(signals),
             hover_scan=bool(hover_scan),
             delivery=DELIVERY_STREAM if stream else DELIVERY_PASTE,
-            capture_prose=bool(capture_prose),
             require_fenced_reply=bool(require_fenced),
             auto_submit=bool(auto_submit),
         )
@@ -1080,7 +1075,6 @@ def kind_of(name: str) -> TemplateKind | None:
 __all__: Sequence[str] = [
     "AUTO_SUBMIT_LABEL",
     "CAPTURE_BUSY",
-    "CAPTURE_PROSE_LABEL",
     "CLICK_X_LABEL",
     "CLICK_Y_LABEL",
     "CLOSE_BUSY",

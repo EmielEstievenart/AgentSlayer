@@ -96,6 +96,15 @@ class FakeHost:
         self.harvests = 0
         self.rebuilds = 0
         self.seen_note = ""
+        # The controller under test, when a test wants to see the prose window
+        # from INSIDE the two calls it brackets - the only vantage point from
+        # which "armed for exactly this act" is observable at all.
+        self.watch: AutomationController | None = None
+        self.window_at_click: list[bool | None] = []
+        self.window_at_harvest: list[bool | None] = []
+
+    def _window(self) -> bool | None:
+        return self.watch.prose_window if self.watch is not None else None
 
     def live_preset(self) -> ServicePreset:
         return self.preset
@@ -114,10 +123,12 @@ class FakeHost:
 
     async def verified_copy_click(self, target: ScreenRegion) -> bool:
         self.copy_clicks.append(target)
+        self.window_at_click.append(self._window())
         return self.click_takes
 
     async def ingest_harvest(self) -> None:
         self.harvests += 1
+        self.window_at_harvest.append(self._window())
 
     def copy_seen_note(self) -> str:
         return self.seen_note
@@ -208,6 +219,7 @@ def flow(
     automation = AutomationController(view=view, host=host, clipboard=FakeClipboard())
     automation.set_calibration(AgentSlot.MASTER, CHAT_REGION)
     automation.set_own_window(OUR_WINDOW)
+    host.watch = automation
     return automation
 
 
@@ -388,6 +400,82 @@ async def test_a_copy_click_that_never_takes_hands_it_back(
     assert host.harvests == 0
     assert flow.loop_state is LoopState.MANUAL_COPY
     assert (TemplateKind.COPY, "24×24 · click did not take") in view.detection_lines
+
+
+# -- the prose window -------------------------------------------------------------
+# The one-shot loosening of protocol.md 1.4 tolerance #11: while it is open a
+# shell's harvest may show a reply that carries no CLIP blocks at all, because
+# the flow just watched the copy button write that text. Everything asserted
+# here is about its EXTENT - one act, and not a moment either side of it.
+
+
+async def test_the_prose_window_is_open_for_the_click_and_the_harvest(
+    flow: AutomationController, host: FakeHost, machine: _Machine
+) -> None:
+    """Armed immediately before the verified click, still open while the harvest
+    runs - that pair is the whole permission - and shut the moment it returns."""
+    machine.looks = [(MATCH, None)]
+    assert flow.prose_window is False  # nothing is armed until there is a target
+
+    await flow.auto_copy_flow()
+
+    assert host.window_at_click == [True]
+    assert host.window_at_harvest == [True]
+    assert flow.prose_window is False
+
+
+async def test_a_click_that_never_takes_leaves_no_window_open(
+    flow: AutomationController, host: FakeHost, machine: _Machine
+) -> None:
+    """The MANUAL_COPY exit: the click happened, the clipboard did not change,
+    so there is nothing to ingest and nothing may be ingested."""
+    machine.looks = [(MATCH, None)]
+    host.click_takes = False
+
+    await flow.run_auto_copy_flow()
+
+    assert host.harvests == 0
+    assert flow.loop_state is LoopState.MANUAL_COPY
+    assert flow.prose_window is False
+
+
+async def test_a_hunt_that_finds_nothing_never_arms_the_window(
+    flow: AutomationController, host: FakeHost
+) -> None:
+    """No copy button on screen means no click of ours to vouch for a harvest."""
+    await flow.run_auto_copy_flow()
+
+    assert host.copy_clicks == []
+    assert flow.loop_state is LoopState.MANUAL_COPY
+    assert flow.prose_window is False
+
+
+async def test_a_failed_capture_leaves_no_window_open(
+    flow: AutomationController, machine: _Machine
+) -> None:
+    """The flow stops before there is anything to look in, let alone click."""
+    machine.capture_fails = True
+
+    await flow.run_auto_copy_flow()
+
+    assert flow.prose_window is False
+
+
+async def test_the_bracket_shuts_the_window_a_raising_harvest_left_open(
+    flow: AutomationController
+) -> None:
+    """``end_flow``'s defensive close, from the one direction the flow's own
+    path cannot cover: a body that dies mid-flight. A window left armed would
+    hand the next thing the USER copies the reply's treatment."""
+
+    async def explode() -> None:
+        flow._prose_window = True
+        raise RuntimeError("the browser vanished")
+
+    with pytest.raises(RuntimeError):
+        await flow.run_auto_copy_flow(explode)
+
+    assert flow.prose_window is False
 
 
 # -- the suspension bracket -------------------------------------------------------

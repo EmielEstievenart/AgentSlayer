@@ -117,7 +117,6 @@ Built-ins can be edited but not deleted. Fields (all editable in the F2 service 
 | `scroll_action` | `"scroll"` | `scroll` \| `page_down` \| `end` |
 | `matcher` | `"anchors"` | `anchors` \| `opencv` (needs the `cv` extra) |
 | `tolerance` | `24` | Pixel-match slack, 0–64 |
-| `capture_prose` | `false` | Accept replies with no tool blocks as prose |
 | `require_fenced_reply` | `false` | Refuse unfenced replies that carry tool calls |
 | `extra_instructions` | `""` | Service-specific bootstrap text, armed with `r` |
 | `alert_sound` | `false` | Play the two-tone alert when the loop needs you (manual copy/insert) |

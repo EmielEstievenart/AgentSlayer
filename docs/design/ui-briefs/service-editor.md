@@ -27,9 +27,7 @@ Copilot, etc.) rather than of a window or a session. That covers:
   `auto_submit`);
 - how the auto-copy flow **scrolls** to the newest reply (`scroll_action`);
 - how a captured appearance is **found** on screen (`matcher` + `tolerance`);
-- whether a harvested reply with no CLIP blocks is shown as prose or
-  ignored (`capture_prose`), and whether an unfenced reply is refused
-  outright (`require_fenced_reply`);
+- whether an unfenced reply is refused outright (`require_fenced_reply`);
 - one short freeform note to the model about this host's quirks
   (`extra_instructions`).
 
@@ -63,7 +61,6 @@ Header: "DETECTION · finished when"
 | Checkbox | `svc-signal-idle` | "send icon appears" | `finish_signals` contains `"idle"` |
 | Checkbox | `svc-signal-stale` | "screen stops changing" | `finish_signals` contains `"stale"` |
 | Checkbox | `svc-hover-scan` | "hover-scan for copy icon" | `ServicePreset.hover_scan` |
-| Checkbox | `svc-capture-prose` | "ingest replies with no CLIP" | `ServicePreset.capture_prose` |
 | Checkbox | `svc-require-fenced` | "require fenced replies" | `ServicePreset.require_fenced_reply` |
 | Static (readout) | `svc-signal-warning` | e.g. "busy indicator: ticked but not captured — it will be skipped" | derived, not a control |
 
@@ -326,7 +323,6 @@ Source: `src/agentclip/config.py:207-277`. Frozen dataclass.
 | `tolerance` | `int` | `24` | per-channel pixel slack, 0-64 |
 | `scroll_action` | `str` | `"scroll"` | `"scroll"`, `"page_down"`, or `"end"` |
 | `auto_submit` | `bool` | `False` | press Enter automatically after auto-paste |
-| `capture_prose` | `bool` | `False` | ingest a no-CLIP-block reply as prose instead of ignoring it |
 | `require_fenced_reply` | `bool` | `False` | refuse/bounce an unfenced reply |
 | `extra_instructions` | `str` | `""` | free-text note shipped verbatim in the model bootstrap |
 
@@ -468,11 +464,11 @@ dataclass default, held until "Add service" is pressed
 
 ### 5.2 DETECTION checkboxes
 
-Any of the 6 checkboxes changing folds **all of them** back into the
+Any of the 5 checkboxes changing folds **all of them** back into the
 selected preset at once (not incrementally per-box), live, no validation
 gate (`_on_detection_changed`, `service_editor.py:982-1015`):
 `finish_signals` rebuilt via `normalize_finish_signals`, plus
-`hover_scan`, `delivery`, `capture_prose`, `require_fenced_reply`,
+`hover_scan`, `delivery`, `require_fenced_reply`,
 `auto_submit` all read fresh and written via `replace(...)`. Reading "as a
 set" rather than per-toggle is deliberate: it makes the handler immune to
 the echo Textual fires when the screen itself sets checkbox values while

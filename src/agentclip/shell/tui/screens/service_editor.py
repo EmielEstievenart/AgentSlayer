@@ -195,13 +195,7 @@ SIGNAL_TEMPLATE = {
     "idle": TemplateKind.IDLE,
 }
 HOVER_SCAN_LABEL = "hover-scan for copy icon"
-# The auto-copy click's opt-in for replies that carry no CLIP blocks at all:
-# harvested and shown in the transcript as prose (never executed) instead of
-# ignored. Rides the DETECTION column because it is a fact about what the
-# harvest may ingest, worded - like everything here - as what the user SEES.
-CAPTURE_PROSE_LABEL = "ingest replies with no CLIP"
-# The other end of the same column's question - what may be ingested - one step
-# stricter: on a host that markdown-processes unfenced text, a reply that
+# What may be ingested, one step stricter than the default: on a host that markdown-processes unfenced text, a reply that
 # arrived without a fence has been through the prose renderer and its code
 # cannot be trusted, so the whole reply is bounced back for a fenced resend
 # (protocol.md 1.4 tolerance #15). Off everywhere by default: per-block copy
@@ -595,7 +589,6 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                             SIGNAL_LABELS[signal], id=signal_checkbox_id(signal), compact=True
                         )
                     yield Checkbox(HOVER_SCAN_LABEL, id="svc-hover-scan", compact=True)
-                    yield Checkbox(CAPTURE_PROSE_LABEL, id="svc-capture-prose", compact=True)
                     yield Checkbox(
                         REQUIRE_FENCED_LABEL, id="svc-require-fenced", compact=True
                     )
@@ -874,7 +867,6 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             box = self.query_one(f"#{signal_checkbox_id(signal)}", Checkbox)
             box.value = signal in signals
         self.query_one("#svc-hover-scan", Checkbox).value = hover
-        self.query_one("#svc-capture-prose", Checkbox).value = shown.capture_prose
         self.query_one("#svc-require-fenced", Checkbox).value = shown.require_fenced_reply
         self.query_one("#svc-stream-delivery", Checkbox).value = shown.delivery == DELIVERY_STREAM
         self.query_one("#svc-auto-submit", Checkbox).value = shown.auto_submit
@@ -1215,7 +1207,6 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             finish_signals=signals,
             hover_scan=hover,
             delivery=DELIVERY_STREAM if streaming else DELIVERY_PASTE,
-            capture_prose=self.query_one("#svc-capture-prose", Checkbox).value,
             require_fenced_reply=self.query_one("#svc-require-fenced", Checkbox).value,
             auto_submit=self.query_one("#svc-auto-submit", Checkbox).value,
             snap_back=self.query_one("#svc-snap-back", Checkbox).value,

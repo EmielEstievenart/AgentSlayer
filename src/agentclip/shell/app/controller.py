@@ -590,7 +590,7 @@ class SessionController:
         engine's own chat gate is the backstop.
 
         ``accept_prose`` marks text the caller KNOWS is the model's reply (the
-        auto-copy flow's verified click put it there - ``capture_prose``): if
+        auto-copy flow's verified click put it there - ``prose_window``): if
         the engine judges it not-protocol, it is shown in the transcript as
         prose instead of being dropped with a toast, the same treatment a
         forced ingest (the `i` key) has always given it. Master path only; a

@@ -311,6 +311,28 @@ every later increment is built on:
   a selectable `<pre>` block with a toast saying the copy is theirs to make (and
   naming `.agentclip/sessions/<id>/outbound/` as the other way to it).
 
+### How big the window may be
+
+The window is freely resizable and the layout owes it a usable page at any size
+it can reach. The policy, in `shell/gui/shell.py` and `assets/app.css`:
+
+- **Minimum `400×300`.** Chosen so the window can take *half of a small
+  portrait monitor* — half of a 900×1400 panel is 450×1400 split vertically and
+  900×700 split horizontally, and both must be legal. A minimum that forbids
+  those forbids a layout the stylesheet already knows how to draw.
+- **The `1200×800` default is clamped into the primary screen** before
+  `create_window` sees it (`initial_window_size`, less `SCREEN_MARGIN` for the
+  taskbar and the frame), so a 1200-wide default never opens a third of itself
+  off a 900-wide panel. A screen pywebview cannot enumerate — headless, an
+  unfamiliar toolkit — leaves that axis at the default rather than failing.
+- **Two breakpoints do the reshaping**, and nothing above them changes. The
+  side columns (F3, F7) trade their fixed widths for a `clamp()` share of the
+  window, and **below 640px they stop being columns**: they float over the chat
+  right-anchored, still shown and hidden by the same toggles, because they are
+  still only `[hidden]` to `app.js` — no script was needed. The wide dialogs
+  stack their lanes into one scrolling column instead of squeezing them (the
+  service editor below 860px, the connect dialog below 560px).
+
 ### Slice 2's reduced-scope port methods (the parity backlog)
 
 Everything a *turn* passes through is the real thing — transcript, gate,
@@ -471,9 +493,10 @@ call the TUI's binding makes. `c`'s double tap needed nothing here —
 Three deliberate divergences, recorded rather than smuggled:
 
 - **The paste flash stays a full-width banner** instead of moving into the
-  sidebar where the TUI keeps it. A 300px column in a 1200px window is the
-  quietest place on screen and this banner's whole job is to be seen — and F3
-  must not be able to hide the thing asking for a keystroke. It blinks (a CSS
+  sidebar where the TUI keeps it. That column is the quietest place on screen —
+  a quarter of the window at best, and on a narrow window it is not even in the
+  flow (it floats over the chat) — while this banner's whole job is to be seen;
+  and F3 must not be able to hide the thing asking for a keystroke. It blinks (a CSS
   animation, not a 0.4s timer) and the `Retry insert` button rides with it,
   shown only under the Ctrl+V variant, exactly as `retry=True` says. It is an
   **overlay hanging off the titlebar's bottom edge**, not a row in the flow:

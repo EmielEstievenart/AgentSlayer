@@ -27,10 +27,13 @@ from agentclip.shell.gui.shell import (
     ASSET_PACKAGE,
     ENTRY_PAGE,
     MIN_WINDOW_SIZE,
+    SCREEN_MARGIN,
     WINDOW_SIZE,
     WINDOW_TITLE,
     asset_dir,
     entry_url,
+    initial_window_size,
+    primary_screen_size,
     run_gui,
 )
 
@@ -243,6 +246,90 @@ def test_a_window_can_be_described_without_starting_a_loop() -> None:
         assert str(window.original_url).startswith("file://")
     finally:
         del webview.windows[before:]
+
+
+# == how big the window may be ================================================
+# The monitor this policy was written for is 900x1400, and the ask was that the
+# window take half of it - either half. So the numbers below are not taste:
+# 450x1400 and 900x700 have to be sizes the window can actually be.
+
+HALF_A_SMALL_MONITOR = (900 // 2, 1400 // 2)
+
+
+def test_the_minimum_lets_the_window_take_half_a_small_portrait_monitor() -> None:
+    assert MIN_WINDOW_SIZE[0] <= HALF_A_SMALL_MONITOR[0]
+    assert MIN_WINDOW_SIZE[1] <= HALF_A_SMALL_MONITOR[1]
+
+
+def test_the_default_size_is_clamped_into_a_screen_it_would_not_fit() -> None:
+    """A 1200-wide default on a 900-wide panel opens a third of itself off the
+    screen; the height already fits and must be left alone."""
+    assert initial_window_size(900, 1400) == (900 - SCREEN_MARGIN, WINDOW_SIZE[1])
+
+
+def test_a_roomy_screen_gets_the_plain_default() -> None:
+    assert initial_window_size(2560, 1440) == WINDOW_SIZE
+
+
+def test_a_screen_too_small_for_the_minimum_still_gets_the_minimum() -> None:
+    """Clamping down is a courtesy; clamping below what the window may be
+    would hand pywebview a size it has to refuse anyway."""
+    assert initial_window_size(320, 240) == MIN_WINDOW_SIZE
+
+
+@pytest.mark.parametrize("screen", [(None, None), (0, 0), (None, 1400)])
+def test_an_unanswered_screen_leaves_that_axis_at_the_default(
+    screen: tuple[int | None, int | None],
+) -> None:
+    width, height = initial_window_size(*screen)
+    assert width == WINDOW_SIZE[0]
+    assert height == WINDOW_SIZE[1]
+
+
+def test_the_screen_reader_shrugs_at_a_toolkit_that_cannot_answer() -> None:
+    """webview.screens asks the native toolkit, which has no answer on a
+    headless box. Every way that can go wrong is the same (None, None)."""
+
+    class _Raises:
+        @property
+        def screens(self) -> list[object]:
+            raise RuntimeError("no display")
+
+    class _Empty:
+        screens: list[object] = []
+
+    class _Nameless:
+        screens = [object()]
+
+    assert primary_screen_size(_Raises()) == (None, None)
+    assert primary_screen_size(_Empty()) == (None, None)
+    assert primary_screen_size(_Nameless()) == (None, None)
+
+
+def test_the_screen_reader_takes_the_first_screen() -> None:
+    class _Screen:
+        def __init__(self, width: int, height: int) -> None:
+            self.width = width
+            self.height = height
+
+    class _Toolkit:
+        screens = [_Screen(900, 1400), _Screen(3840, 2160)]
+
+    assert primary_screen_size(_Toolkit()) == (900, 1400)
+
+
+def test_the_stylesheet_reshapes_itself_for_a_narrow_window() -> None:
+    """The minimum above is only honest if the page can be drawn at it: below
+    the breakpoint the side columns must FLOAT over the chat rather than go on
+    squeezing it, and the wide dialogs must stop being multi-column."""
+    css = asset_text("app.css")
+    for breakpoint in ("640px", "860px", "560px"):
+        assert f"@media (max-width: {breakpoint})" in css
+    narrow = css.split("@media (max-width: 640px)", 1)[1].split("@media", 1)[0]
+    assert ".sidebar,\n  .elements {" in narrow
+    assert "position: absolute;" in narrow
+    # And above the breakpoint they give ground instead of holding a number.
+    assert "width: clamp(220px, 28vw, 300px);" in css
 
 
 def test_the_webview2_check_answers_without_a_window() -> None:

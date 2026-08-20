@@ -103,7 +103,7 @@ Header: "MATCHING · how it is found".
 - Label "Pixel tolerance" (static), then a **slider** `svc-tolerance`,
   range 0-64, default 24 → `ServicePreset.tolerance`.
 
-### 2.6 Form column (middle, the one flexible/resizing column)
+### 2.6 Form column (middle, the flexible/resizing column while there are three)
 
 | Control | id | Field | Notes |
 |---|---|---|---|
@@ -789,3 +789,13 @@ replaced by native GUI equivalents, not ported:
   whole, one flexible column reserved for the editable form fields, a
   shared footer strip for the hint + the one visible mode-action button)
   is the part worth preserving, not the cell arithmetic.
+
+  Three lanes is itself a *wide-window* arrangement, not the layout. The GUI
+  holds the outer lanes near their intended widths only while the dialog has
+  room for them, and **below ~860px stacks all three into one scrolling
+  column in document order** — settings, form, appearance. The hierarchy
+  survives the stacking: each lane keeps its header and its place in the
+  order, so "which column am I in" becomes "how far down am I", and the
+  footer stays a strip (wrapping its buttons if it must). Any frontend whose
+  window can be half a small monitor owes the same fallback — a three-column
+  dialog that cannot become one column is a hidden minimum window size.

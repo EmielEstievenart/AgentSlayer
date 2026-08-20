@@ -34,7 +34,16 @@ from agentclip.shell.gui.view import McpStatusSource
 
 WINDOW_TITLE = "AgentClip"
 WINDOW_SIZE = (1200, 800)
-MIN_WINDOW_SIZE = (900, 600)
+# What the user is allowed to drag the window down to. Small on purpose: the
+# window has to be able to sit in half of a SMALL monitor - half of a 900x1400
+# portrait panel is 900x700, half of it side by side is 450x1400 - and a
+# minimum that forbids those sizes is a minimum that forbids the layout the
+# stylesheet already knows how to draw (assets/app.css, narrow windows).
+MIN_WINDOW_SIZE = (400, 300)
+# Taken off each screen dimension before the default size is clamped to it, so
+# the window opens INSIDE the screen rather than under the taskbar or with its
+# frame off the edge. One number for both axes; it is slack, not a measurement.
+SCREEN_MARGIN = 80
 # The page paints its own background; matching it here stops the white flash
 # WebView2 would otherwise show between window creation and first paint.
 WINDOW_BACKGROUND = "#14161a"
@@ -111,6 +120,48 @@ def entry_url(assets: Path) -> str:
     hard-coded string in the HTML would drift the first time __version__ moves.
     """
     return f"{(assets / ENTRY_PAGE).as_uri()}#v={__version__}"
+
+
+def initial_window_size(
+    screen_width: int | None, screen_height: int | None
+) -> tuple[int, int]:
+    """The size to open at on a screen of this size, in logical pixels.
+
+    ``WINDOW_SIZE`` is a comfortable desktop default, not a promise: on a small
+    or portrait panel - the 900x1400 this policy was written for - a 1200-wide
+    window would open with a third of itself off the screen, and the user's
+    first act would be to drag it back. So the default is clamped INTO the
+    screen (less ``SCREEN_MARGIN``) and never below ``MIN_WINDOW_SIZE``.
+
+    Either dimension may be ``None`` or 0 - a headless box, a pywebview that
+    could not enumerate its screens - and that axis then keeps the default.
+    """
+    width, height = WINDOW_SIZE
+    min_width, min_height = MIN_WINDOW_SIZE
+    if screen_width:
+        width = max(min_width, min(width, screen_width - SCREEN_MARGIN))
+    if screen_height:
+        height = max(min_height, min(height, screen_height - SCREEN_MARGIN))
+    return width, height
+
+
+def primary_screen_size(webview: Any) -> tuple[int | None, int | None]:
+    """How big the first screen pywebview reports is, or ``(None, None)``.
+
+    Reading ``webview.screens`` asks the native toolkit, which is exactly the
+    kind of call that has no answer on a headless box or under a toolkit this
+    build was not compiled against. Nothing about opening a window should die
+    for it, so every failure is the same shrug and ``initial_window_size``
+    falls back to the default.
+    """
+    try:
+        screens = list(webview.screens)
+    except Exception:
+        return (None, None)
+    if not screens:
+        return (None, None)
+    first = screens[0]
+    return (getattr(first, "width", None), getattr(first, "height", None))
 
 
 def webview2_missing() -> bool:
@@ -211,7 +262,7 @@ def run_gui(
         remote=remote,
         on_config_change=on_config_change,
     )
-    width, height = WINDOW_SIZE
+    width, height = initial_window_size(*primary_screen_size(webview))
     with asset_dir() as assets:
         try:
             window = webview.create_window(

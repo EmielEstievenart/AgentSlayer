@@ -224,6 +224,11 @@ def test_defaults_ask_about_dotenv_but_allow_its_example(case_sensitive: None) -
 def test_permission_target_maps_tools_to_keys_and_resources() -> None:
     assert permission_target("read_file", {"path": "./src/utils.py"}) == ("read", "src/utils.py")
     assert permission_target("write_file", {"path": r"src\a.py"}) == ("edit", "src/a.py")
+    # The ranged edit is the same act on the same resource as edit_file: a rule
+    # the user wrote to allow edits under src/ must not stop meaning that
+    # because a service turned edit_by_lines on (protocol.md 3.1).
+    assert TOOL_PERMISSIONS["replace_lines"] == ("edit", "path")
+    assert permission_target("replace_lines", {"path": "src/a.py"}) == ("edit", "src/a.py")
     assert permission_target("list_dir", {"path": "."}) == ("list", ".")
     assert permission_target("grep", {"pattern": "TODO"}) == ("grep", "TODO")
     assert permission_target("run_command", {"command": "git status"}) == ("bash", "git status")

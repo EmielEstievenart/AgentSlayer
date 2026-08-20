@@ -575,6 +575,7 @@ def test_save_services_writes_the_opt_ins_only_when_they_differ(
     assert "auto_submit" not in written
     assert "require_fenced_reply" not in written
     assert "extra_instructions" not in written
+    assert "edit_by_lines" not in written
 
 
 def test_a_retired_preset_key_is_simply_ignored(project: Path, global_path: Path) -> None:
@@ -588,6 +589,46 @@ def test_a_retired_preset_key_is_simply_ignored(project: Path, global_path: Path
     cfg = load_config(project, global_config_path=global_path)
     assert cfg.services["claude"].auto_submit is True
     assert not hasattr(cfg.services["claude"], "capture_prose")
+
+
+# -- edit_by_lines (the ranged-edit mode, protocol.md 3.1) ---------------------
+
+
+def test_edit_by_lines_ships_off_everywhere() -> None:
+    """The gutter contaminates the find-blocks a model copies back, and the
+    catalog entries cost bootstrap characters: it is worth it only on a host
+    that cannot echo code verbatim, so nothing ships with it on."""
+    for key, preset in default_services().items():
+        assert preset.edit_by_lines is False, key
+    assert ServicePreset("k", "K", 1_000, 5_000).edit_by_lines is False
+
+
+def test_load_config_reads_edit_by_lines(project: Path, global_path: Path) -> None:
+    global_path.write_text("[services.claude]\nedit_by_lines = true\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].edit_by_lines is True
+    assert not cfg.warnings
+
+
+def test_load_config_rejects_a_non_bool_edit_by_lines(project: Path, global_path: Path) -> None:
+    global_path.write_text('[services.claude]\nedit_by_lines = "yes"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].edit_by_lines is False
+    assert any("edit_by_lines" in w for w in cfg.warnings)
+
+
+def test_save_then_load_round_trips_edit_by_lines(project: Path, global_path: Path) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], edit_by_lines=True)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"]["edit_by_lines"] is True
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"] == services["claude"]
+    assert not cfg2.warnings
 
 
 # -- require_fenced_reply (the unfenced-reply gate, protocol.md 1.4 #15) --------

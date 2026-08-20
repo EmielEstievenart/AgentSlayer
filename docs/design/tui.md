@@ -421,7 +421,7 @@ IDLE ──copy bootstrap──▶ ARMED ──reply parsed──▶ EXECUTING �
 |---|---|
 | `read_file`, `list_dir`, `glob`, `grep` | whatever the rules say — the shipped defaults allow them (architecture §2); every tool answers to its permission key |
 | `run_command` | auto-run if a rule allows it (transcript shows which: `allowed by rule bash["git status *"]`); a rule that DENIES it skips the gate entirely and returns a denied result; else **gated** |
-| `write_file`, `edit_file` | **gated** by the shipped defaults, unless a rule allows it or session auto-accept-edits is ON |
+| `write_file`, `edit_file`, `replace_lines` | **gated** by the shipped defaults, unless a rule allows it or session auto-accept-edits is ON |
 | `ask_user` | pauses for typed answer (not an approval; §9) |
 | `delegate` | auto-runs (master only, and only when the sub-agent chat is calibrated): parks the turn and runs a sub-agent in the second window — §3.4c. It answers to the `task` key like any other tool (the shipped default asks: a delegation is a second actor doing what the master would have been gated for) |
 | `task_done` | auto-runs; ends the turn and marks the session complete (the user may still follow up to reopen it) |
@@ -945,6 +945,7 @@ The `RichLog` single-widget transcript was rejected: no per-message collapse/exp
 All diffs render as `rich.syntax.Syntax(..., theme="ansi_dark", word_wrap=False)` inside a `Static` in `#action-body` (`VerticalScroll`, so long diffs scroll with arrows/PgUp/PgDn; `word_wrap=False` keeps hunks readable, horizontal overflow clips). No `textual[syntax]` extra — pygments via Rich, per the digest.
 
 - **`edit_file` (find/replace)**: compute the post-edit file in memory, `difflib.unified_diff(old, new, n=3)` restricted to affected hunks, render with the `diff` lexer. Title line: `edit_file src/utils.py · 1 hunk · −1/+1`. If `find` matches zero or >1 locations, that is an executor *error result*, never a gate — nothing to approve.
+- **`replace_lines` (ranged edit, only on a service with `edit_by_lines` — protocol.md §3.1)**: identical treatment, from the same compute path (`_apply_replace_lines`). A range the model was not shown, or a file that has moved since it was shown, is refused by the engine *before* the gate, so this drawer never asks about an edit that cannot run.
 - **`write_file`, file exists**: same unified-diff path, title `write_file (overwrite) src/config.py · −12/+40`.
 - **`write_file`, new file**: full content as `Syntax(content, lexer_from_extension, line_numbers=True)` under a green banner `NEW FILE src/cli.py (84 lines)`. An all-`+` unified diff was rejected: `+` gutters add noise and lose language highlighting on brand-new code.
 - **`run_command` gate**: body is the command line in a bordered `Static` plus the cwd and why it is being asked about — no rule allows it. The third button offers the rule an *always* answer would remember (`bash["git commit *"]`); writing one by hand is `/config` (§3.3a), since the ruleset has no form (F2 only edits services, §1.4).

@@ -1,9 +1,19 @@
-"""Filesystem tools: read_file, write_file, edit_file, delete_file, list_dir, glob, grep.
+"""Filesystem tools: read_file, write_file, edit_file, replace_lines, delete_file,
+list_dir, glob, grep.
 
 Semantics are normative per docs/design/protocol.md section 3. Mutating
 handlers call ctx.backup_hook(rel, abs_path, action) BEFORE first touching the
 file. Preview functions share the same compute paths as the handlers
-(_apply_edit, _planned_write) so a preview can never diverge from execution.
+(_apply_edit, _apply_replace_lines, _planned_write) so a preview can never
+diverge from execution.
+
+read_file's `numbered` gutter and `replace_lines` are the two halves of ONE
+feature, the opt-in ranged-edit mode of ServicePreset.edit_by_lines: a model on
+a host that cannot echo code verbatim reads with the gutter and then edits by
+line range, so the file's own text never has to survive the round trip. The
+tools here are the mechanism only - the guarantee that a range was actually
+READ before it is written is the engine's (engine/numbered.py), because only
+the engine knows what the previous payload really contained.
 
 Every byte read, byte written and directory listed goes through ctx.host - the
 tools themselves know nothing about which machine they run on. What stays here
@@ -33,6 +43,15 @@ from agentclip.protocol.types import ToolCall
 
 _BINARY_SNIFF_BYTES = 8192
 
+# What separates a `numbered` read's line number from the line itself. Public
+# because the engine matches on it when it works out which numbered lines
+# survived truncation into the payload the model was actually handed
+# (engine/numbered.py). The trailing space is part of it: it keeps an empty
+# source line from gluing the number to the next character of anything, and it
+# is what makes the anchored gutter pattern unambiguous even when the file's
+# own content looks like a gutter.
+GUTTER_SEP = "| "
+
 
 # -- small shared helpers ------------------------------------------------------
 
@@ -52,6 +71,39 @@ def _write_norm(ctx: ToolContext, path: Path, text: str, newline: str) -> None:
     if newline == "\r\n":
         text = text.replace("\n", "\r\n")
     ctx.host.write_bytes(path, text.encode("utf-8"))
+
+
+def split_lines(text: str) -> tuple[list[str], bool]:
+    """LF-normalised text as its numbered lines, plus "did it end with a newline".
+
+    Deliberately ``split("\\n")`` rather than ``splitlines()``. read_file's
+    gutter and replace_lines' ranges have to agree, to the line, on what "line
+    40" is: splitlines() ALSO breaks on form feeds, \\x1c-\\x1e and the unicode
+    separators, none of which any editor - or the model counting the gutter -
+    treats as a line. One rule, one place, both tools.
+
+    The trailing flag is how the final newline survives a ranged edit: it is not
+    a line, so it must not be counted as one, and it must not be lost either.
+    """
+    if text == "":
+        return [], False
+    parts = text.split("\n")
+    trailing = len(parts) > 1 and parts[-1] == ""
+    return (parts[:-1] if trailing else parts), trailing
+
+
+def _truthy(value: str | None) -> bool:
+    return value is not None and value.strip().lower() in ("yes", "true", "1", "on")
+
+
+def numbered_requested(call: ToolCall) -> bool:
+    """Did this read ask for the line-number gutter?
+
+    Public because the engine asks the same question of the same call when it
+    records what it served (engine/numbered.py), and "what counts as yes" must
+    not be answered twice.
+    """
+    return call.tool == "read_file" and _truthy(call.params.get("numbered"))
 
 
 def _require_text_file(ctx: ToolContext, path: Path, disp: str) -> None:
@@ -116,7 +168,7 @@ def read_file(ctx: ToolContext, call: ToolCall) -> str:
     _require_text_file(ctx, abs_path, path_param)
 
     text, _ = _read_norm(ctx, abs_path)
-    lines = text.splitlines()
+    lines, _ = split_lines(text)
     total = len(lines)
     if total == 0:
         return f"{path_param} lines 0-0 of 0\n(empty file)"
@@ -137,6 +189,13 @@ def read_file(ctx: ToolContext, call: ToolCall) -> str:
         )
 
     selected = lines[eff_start - 1 : eff_end]
+    if _truthy(call.params.get("numbered")):
+        # Applied to the SLICE and before the char cap, so the cap accounts for
+        # what actually goes on the wire and the numbers survive truncation
+        # attached to their own line - which is what lets the engine work out,
+        # from the delivered payload alone, which lines the model really saw.
+        width = len(str(eff_end))
+        selected = [f"{eff_start + i:>{width}}{GUTTER_SEP}{line}" for i, line in enumerate(selected)]
     char_cap = ctx.limits.max_file_read_chars
     if sum(len(line) + 1 for line in selected) > char_cap:
         kept: list[str] = []
@@ -382,6 +441,103 @@ def preview_edit_file(ctx: ToolContext, call: ToolCall) -> str:
         _require_text_file(ctx, abs_path, path_param)
         text, _ = _read_norm(ctx, abs_path)
         outcome = _apply_edit(text, call, path_param)
+        return _unified_diff(text, outcome.new_text, _rel_display(ctx, abs_path))
+    except ToolError as exc:
+        return f"(edit will fail: {exc.code})\n{exc.message}"
+    except SandboxViolation as exc:
+        return f"(edit will fail: path_outside_workspace)\n{exc.detail}"
+    except OSError as exc:
+        return f"(cannot preview: {exc})"
+
+
+# -- replace_lines ---------------------------------------------------------------
+#
+# The other half of the `numbered` read. Everything this tool needs from the
+# model is a path, two integers and the NEW code - no find-block, so nothing
+# that came out of the file has to come back through a chat that mangles it.
+#
+# The safety of that trade lives in TWO places, and only one of them is here.
+# The engine refuses a call whose range was not in the payload it just sent
+# (engine/numbered.py); this file enforces what the engine cannot see from
+# outside - that the bytes on disk at the moment of the write are still the
+# bytes that were served. ctx.numbered_slices is how the engine hands that
+# expectation down, and both the handler and the preview read it, so the diff
+# in the approval drawer can never be of an edit that will not happen.
+
+
+@dataclass(frozen=True, slots=True)
+class _RangeEdit:
+    new_text: str
+    summary: str
+
+
+def _apply_replace_lines(ctx: ToolContext, text: str, call: ToolCall, disp: str) -> _RangeEdit:
+    """Shared by the replace_lines handler and its preview. Raises ToolError."""
+    _, _, _, replacement = require(call, "path", "start", "end", "replace")
+    start = int_param(call, "start", 1)
+    end = int_param(call, "end", start)
+    lines, trailing = split_lines(text)
+    total = len(lines)
+    if total == 0:
+        raise ToolError(
+            "bad_param",
+            f"{disp} is empty - there are no lines to replace",
+            "use write_file to put content in an empty file.",
+        )
+    if start < 1 or end < start or end > total:
+        raise ToolError(
+            "bad_param",
+            f"lines {start}-{end} are not a range in {disp} ({total} lines)",
+            f"start and end are 1-based and inclusive; use 1 <= start <= end <= {total}.",
+        )
+    expected = ctx.numbered_slices.get(call.id)
+    if expected is not None and "\n".join(lines[start - 1 : end]) != expected:
+        # The file moved under a range that WAS legitimately read - a
+        # run_command earlier in this same reply, most likely. Loud, because the
+        # alternative is writing the model's new code over lines it never saw.
+        raise ToolError(
+            "stale_read",
+            f"{disp} changed since you read it: lines {start}-{end} are no longer"
+            " the lines you were shown.",
+            "read_file that range again with numbered: yes, then resend the edit.",
+        )
+    # An empty replace DELETES the range: dropping lines is the common ranged
+    # edit, and a heredoc cannot express "one blank line" distinctly anyway
+    # (its body is joined without a trailing newline, so blank and empty arrive
+    # identical). Widen the range by a neighbour to write a blank line.
+    new_lines = [] if replacement == "" else replacement.split("\n")
+    merged = lines[: start - 1] + new_lines + lines[end:]
+    new_text = "\n".join(merged)
+    if trailing and merged:
+        new_text += "\n"
+    span = end - start + 1
+    return _RangeEdit(
+        new_text,
+        f"replaced lines {start}-{end} of {disp} ({span} lines -> {len(new_lines)} lines)",
+    )
+
+
+@tool_handler
+def replace_lines(ctx: ToolContext, call: ToolCall) -> str:
+    (path_param,) = require(call, "path")
+    abs_path = ctx.workspace.resolve_write(path_param)
+    _require_text_file(ctx, abs_path, path_param)
+    text, newline = _read_norm(ctx, abs_path)
+    outcome = _apply_replace_lines(ctx, text, call, path_param)
+    rel = _rel_display(ctx, abs_path)
+    if ctx.backup_hook is not None:
+        ctx.backup_hook(rel, abs_path, "write")
+    _write_norm(ctx, abs_path, outcome.new_text, newline)
+    return outcome.summary
+
+
+def preview_replace_lines(ctx: ToolContext, call: ToolCall) -> str:
+    try:
+        (path_param,) = require(call, "path")
+        abs_path = ctx.workspace.resolve_write(path_param)
+        _require_text_file(ctx, abs_path, path_param)
+        text, _ = _read_norm(ctx, abs_path)
+        outcome = _apply_replace_lines(ctx, text, call, path_param)
         return _unified_diff(text, outcome.new_text, _rel_display(ctx, abs_path))
     except ToolError as exc:
         return f"(edit will fail: {exc.code})\n{exc.message}"
@@ -654,10 +810,6 @@ def glob(ctx: ToolContext, call: ToolCall) -> str:
 # -- grep ------------------------------------------------------------------------
 
 
-def _truthy(value: str | None) -> bool:
-    return value is not None and value.strip().lower() in ("yes", "true", "1", "on")
-
-
 def _grep_files(ctx: ToolContext, target: Path, name_glob: str | None) -> list[Path]:
     """Every file to scan, in os.walk's order: a directory's own files (sorted)
     before its subdirectories (sorted), excluded subtrees never entered."""
@@ -774,6 +926,46 @@ start: 80
 end: 140
 ===CLIP:END==="""
 
+# The `numbered` variant, shown only when the service has edit_by_lines on
+# (registry.default_registry). Two docs rather than one paragraph with an "if":
+# with the toggle off the catalog must be byte-identical to a build that never
+# heard of ranged edits, and a model that has no replace_lines has no reason to
+# be told about a gutter that would only contaminate its find-blocks.
+READ_FILE_NUMBERED_DOC = """\
+read_file(path*, start, end, numbered)
+  Read a text file. start/end are 1-based inclusive line numbers; omit them
+  for the default span. The first result line is "<path> lines A-B of N".
+  numbered: yes prefixes each line with its number and "| ". Read that way
+  to edit with replace_lines; never copy a gutter into a call.
+  Out-of-range values are clamped with a note; long files are truncated with
+  an in-band [truncated: ...] line - re-request narrower ranges. Binary
+  files are refused (error binary_file).
+===CLIP:CALL id=1 tool=read_file===
+path: src/utils.py
+start: 80
+end: 140
+numbered: yes
+===CLIP:END==="""
+
+REPLACE_LINES_DOC = """\
+replace_lines(path*, start*, end*, replace*)
+  Replace lines start..end (1-based, inclusive) with replace, a heredoc of
+  the NEW text only - the old text is never sent back, so this survives a
+  host that mangles code. Empty replace deletes the range.
+  The range must lie inside a `read_file numbered: yes` of that file in the
+  results you were JUST handed, and the file must not have changed since.
+  Several ranges in one file in one reply: BOTTOM TO TOP (highest start
+  first), never overlapping. Refused? Re-read numbered and resend.
+===CLIP:CALL id=1 tool=replace_lines===
+path: src/utils.py
+start: 88
+end: 90
+replace << EOT
+def parse(s):
+    return parse_iso(s)
+EOT
+===CLIP:END==="""
+
 WRITE_FILE_DOC = """\
 write_file(path*, content*, mode)
   Write a whole file. mode: overwrite (default) | create (errors if the file
@@ -847,6 +1039,10 @@ context: 2
 
 
 READ_FILE_SPEC = ToolSpec("read_file", "auto", read_file, None, READ_FILE_DOC)
+READ_FILE_NUMBERED_SPEC = ToolSpec("read_file", "auto", read_file, None, READ_FILE_NUMBERED_DOC)
+REPLACE_LINES_SPEC = ToolSpec(
+    "replace_lines", "edit", replace_lines, preview_replace_lines, REPLACE_LINES_DOC
+)
 WRITE_FILE_SPEC = ToolSpec("write_file", "edit", write_file, preview_write_file, WRITE_FILE_DOC)
 EDIT_FILE_SPEC = ToolSpec("edit_file", "edit", edit_file, preview_edit_file, EDIT_FILE_DOC)
 DELETE_FILE_SPEC = ToolSpec(

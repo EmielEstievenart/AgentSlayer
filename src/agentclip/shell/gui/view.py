@@ -2728,6 +2728,12 @@ class GuiView:
         )
         self._push_editor()
 
+    def svc_edit_by_lines(self, on: bool) -> None:
+        if self._editor is None:
+            return
+        self._editor.set_edit_by_lines(on)
+        self._push_editor()
+
     def svc_scroll(self, action: str) -> None:
         if self._editor is None:
             return

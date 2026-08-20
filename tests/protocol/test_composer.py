@@ -212,6 +212,25 @@ def test_bootstrap_over_budget_raises() -> None:
     assert exc_info.value.needed_chars > 500
 
 
+def test_the_bootstrap_may_run_ten_percent_over_the_budget() -> None:
+    """max_paste_chars is a comfort setting for the paste the user makes EVERY
+    turn; the bootstrap is sent once and has no chunked fallback, so holding it
+    to that figure turns "a long first paste" into "the session never arms"
+    (protocol.md section 2, "Budget headroom")."""
+    budget = 20_000
+    composer = make_composer(budget)
+    overhead = len(composer.bootstrap("x").chunks[0]) - 1
+    ceiling = int(budget * 1.10)
+
+    fits = composer.bootstrap("x" * (ceiling - overhead))
+    assert budget < fits.total_chars == ceiling
+
+    with pytest.raises(BudgetExceeded) as exc_info:
+        composer.bootstrap("x" * (ceiling - overhead + 1))
+    # The exception still reports the budget the USER set, not the slack.
+    assert exc_info.value.budget_chars == budget
+
+
 # ---------------------------------------------------------------------------
 # task / note
 
@@ -241,11 +260,15 @@ def test_note_payload_exact_form() -> None:
 
 
 def test_task_and_note_over_budget_raise() -> None:
+    """Held to the budget EXACTLY - the bootstrap's 10% slack is its alone
+    (see it above). A task and a note are pastes the user makes over and over,
+    which is what the budget is a budget for. 610 chars of body is inside the
+    slack a bootstrap would get and still over budget here."""
     composer = make_composer(600)
     with pytest.raises(BudgetExceeded):
-        composer.task(2, "x" * 700)
+        composer.task(2, "x" * 610)
     with pytest.raises(BudgetExceeded):
-        composer.note(2, "x" * 700)
+        composer.note(2, "x" * 610)
 
 
 # ---------------------------------------------------------------------------

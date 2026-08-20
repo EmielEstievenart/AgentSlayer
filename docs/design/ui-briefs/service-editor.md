@@ -708,6 +708,14 @@ built from (`tui.md:295`).
   (protocol.md §2 budget headroom) — a paragraph pasted in here can push a
   session over budget and fail to arm. This is a soft UX nudge (box size
   + label wording), not an enforced limit.
+- **`edit_by_lines` lives in the FORM column, in both shells** (an
+  `EDITING` heading with one tick, below the alert fields). Not with the
+  other toggles on the left, for two reasons: it is about how the *model*
+  edits rather than how its reply is found or delivered, and the left
+  column is at its height ceiling — the narrow-terminal Pilot tests
+  (120×45 and 100×35) fail the moment it grows. In the GUI it gets its own
+  `svc_edit_by_lines` bridge call rather than joining the `set_detection`
+  set, which is the left column's toggles read together as one group.
 - **Built-ins can be edited and reset, never deleted.** `BUILTIN_SERVICE_KEYS`
   (12 keys) always show "Reset to default" and never show "Delete".
   Non-built-in (custom) keys show the reverse.

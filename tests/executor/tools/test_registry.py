@@ -42,6 +42,39 @@ def test_default_registry_has_all_ten_tools_in_order() -> None:
     assert default_registry().names() == ALL_TOOLS
 
 
+# -- the ranged-edit mode (protocol.md section 3.1) ----------------------------
+
+
+def test_edit_by_lines_adds_replace_lines_behind_edit_file() -> None:
+    """ADDED, not swapped: find/replace is still the better edit wherever the
+    host carries code faithfully (the user's ruling, and protocol.md 3.1)."""
+    names = default_registry(edit_by_lines=True).names()
+    assert "edit_file" in names
+    assert names.index("replace_lines") == names.index("edit_file") + 1
+    assert names == ALL_TOOLS[:3] + ("replace_lines",) + ALL_TOOLS[3:]
+
+
+def test_edit_by_lines_teaches_read_file_the_gutter() -> None:
+    doc = _get(default_registry(edit_by_lines=True), "read_file").catalog_doc
+    assert "numbered" in doc
+    assert "no line-number gutter" not in doc
+
+
+def test_the_catalog_is_byte_identical_with_the_toggle_off() -> None:
+    """The whole point of an opt-in: a service that never turns it on must get
+    exactly the bootstrap it got before the feature existed."""
+    assert default_registry(edit_by_lines=False).render_catalog() == default_registry().render_catalog()
+    catalog = default_registry().render_catalog()
+    assert "replace_lines" not in catalog
+    assert "numbered" not in catalog
+
+
+def test_replace_lines_is_an_edit_with_a_preview() -> None:
+    spec = _get(default_registry(edit_by_lines=True), "replace_lines")
+    assert spec.approval_kind == "edit"
+    assert spec.preview is not None
+
+
 def _get(reg: ToolRegistry, name: str) -> ToolSpec:
     spec = reg.get(name)
     assert spec is not None, name

@@ -444,11 +444,17 @@ def _sized_registry(
     surfaces (Engine.build_warnings).
     """
     max_skill_chars = cfg.preset().max_paste_chars // 6
+    # The ranged-edit mode is a fact about the SERVICE, so it is read here, from
+    # the config this build is for, and nothing downstream has to be told: a
+    # remote session builds its registry through this same function on the
+    # engine's side of the link, so SSH gets it for free.
+    edit_by_lines = cfg.preset().edit_by_lines
     base = default_registry(
         skills,
         max_skill_listing_chars=max_skill_chars,
         role=req.role,
         allow_delegate=req.allow_delegate,
+        edit_by_lines=edit_by_lines,
     )
     # No manager: MCP is unconfigured and this build is byte-identical to a
     # pre-MCP one. All-disabled servers keep the manager for status display but
@@ -500,6 +506,7 @@ def _sized_registry(
             role=req.role,
             allow_delegate=req.allow_delegate,
             mcp_specs=make_mcp_specs(manager, max_listing_chars=listing_budget),
+            edit_by_lines=edit_by_lines,
         )
         spec_with = render_spec(
             preset,

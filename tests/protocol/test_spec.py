@@ -29,9 +29,12 @@ def render(
     attach: bool = True,
     catalog: str = CATALOG,
     extra: str = "",
+    edit_by_lines: bool = False,
 ) -> str:
     preset = replace(
-        make_preset(budget, fence=fence, attach=attach), extra_instructions=extra
+        make_preset(budget, fence=fence, attach=attach),
+        extra_instructions=extra,
+        edit_by_lines=edit_by_lines,
     )
     return spec.render_spec(
         preset, caps_for_budget(budget), catalog, "AgentClip", "Windows 11", CHAT_NAME
@@ -43,6 +46,24 @@ def test_contains_batching_instruction_verbatim() -> None:
     assert spec.BATCHING_INSTRUCTION in text
     assert "Batch all independent calls into one reply" in text
     assert "each round trip costs the user a manual copy-paste" in text
+
+
+def test_the_ranged_edit_rule_is_absent_without_the_toggle() -> None:
+    """Section 5's budget is the bootstrap's: a service with no replace_lines
+    must not carry a rule about it."""
+    text = render()
+    assert "replace_lines" not in text
+    assert "bottom to top" not in text
+
+
+def test_the_ranged_edit_rule_appears_with_the_toggle() -> None:
+    """Ordering is a property of the REPLY, not of any one call in it, so it
+    belongs with the rules that are about replies (protocol.md 3.1)."""
+    text = render(edit_by_lines=True)
+    assert spec.RANGED_EDIT_RULE.strip() in text
+    assert "bottom to top" in text
+    # Still in section 5, next to the other editing rule.
+    assert text.index("Keep edit_file find-blocks") < text.index("replace_lines")
 
 
 def test_attachment_note_on() -> None:

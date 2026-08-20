@@ -61,6 +61,26 @@ TRUNCATION_MARKER = "[truncated by AgentClip to fit the paste budget - request s
 # Bounded refinement passes when fitting RESULTS payloads to the budget.
 _FIT_ATTEMPTS = 10
 
+# How far over ``max_paste_chars`` the BOOTSTRAP alone may go, as a fraction.
+#
+# `max_paste_chars` is not one number. It is a per-turn budget on the paste the
+# USER has to make repeatedly, chosen low enough that a long session stays
+# comfortable, and it is also the hard ceiling of what the host's message box
+# will swallow - and those two are not the same figure. The 12,000 on the
+# smallest presets is the first kind: a comfort setting. The bootstrap is the
+# ONE payload sent exactly once per session, and it is the one with no chunked
+# fallback, so applying a comfort budget to it means an oversized brief becomes
+# "the session never arms" rather than "the first paste is long". This slack
+# buys the brief room for optional sections (a service with edit_by_lines on
+# carries roughly 900 characters of ranged-edit doc) without moving the budget
+# that governs every OTHER payload - results are still fitted to
+# `max_paste_chars` exactly, because those are the pastes that repeat.
+#
+# Small on purpose: 10% of a comfort setting is still well inside any real
+# message box, and it is not a licence to grow section 5 (protocol.md section
+# 2's headroom discipline still stands - measure before and after).
+BOOTSTRAP_BUDGET_SLACK = 0.10
+
 # The shortest fence we ever emit. Three tildes would be legal (`parser._FENCE_RE`
 # accepts `~{3,}`), but four is what the bootstrap teaches the model to use, and
 # outbound is the example the model imitates - section 0.6's symmetry is a
@@ -327,8 +347,16 @@ class Composer:
         payload: str,
         turn: int,
     ) -> Outbound:
-        if len(payload) > self._preset.max_paste_chars:
-            raise BudgetExceeded(len(payload), self._preset.max_paste_chars)
+        # The bootstrap, and only the bootstrap, gets BOOTSTRAP_BUDGET_SLACK on
+        # top: it is sent once per session and has nothing to truncate, while a
+        # `user_answer` or a `note` is one of the pastes the user makes over and
+        # over and is held to the budget exactly. The reported budget in the
+        # exception stays the preset's, because that is the number the user set
+        # and the one they would go and change.
+        budget = self._preset.max_paste_chars
+        limit = int(budget * (1 + BOOTSTRAP_BUDGET_SLACK)) if kind == "bootstrap" else budget
+        if len(payload) > limit:
+            raise BudgetExceeded(len(payload), budget)
         return Outbound(kind, (payload,), len(payload), turn)
 
     @staticmethod

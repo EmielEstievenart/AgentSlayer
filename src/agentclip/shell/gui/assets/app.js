@@ -2174,6 +2174,7 @@
     el.svcFencedLabel.textContent = labels.require_fenced || "";
     el.svcStreamLabel.textContent = labels.stream || "";
     el.svcAutoSubmitLabel.textContent = labels.auto_submit || "";
+    el.svcEditByLinesLabel.textContent = labels.edit_by_lines || "";
     el.svcToleranceLabel.textContent = labels.tolerance || "";
 
     var off = Boolean(event.controls_disabled);
@@ -2184,6 +2185,7 @@
     svcToggle(el.svcFenced, event.require_fenced, off);
     svcToggle(el.svcStream, event.stream, off);
     svcToggle(el.svcAutoSubmit, event.auto_submit, off);
+    svcToggle(el.svcEditByLines, event.edit_by_lines, off);
     Object.keys(svcScrolls).forEach(function (value) {
       svcToggle(svcScrolls[value], value === event.scroll, off);
     });
@@ -3159,6 +3161,8 @@
       svcStreamLabel: id("svc-stream-label"),
       svcAutoSubmit: id("svc-auto-submit"),
       svcAutoSubmitLabel: id("svc-auto-submit-label"),
+      svcEditByLines: id("svc-edit-by-lines"),
+      svcEditByLinesLabel: id("svc-edit-by-lines-label"),
       svcSignalWarning: id("svc-signal-warning"),
       svcScroll: id("svc-scroll"),
       svcMatcher: id("svc-matcher"),
@@ -3344,6 +3348,13 @@
         });
       }
     );
+    // Its own bridge call, not part of the detection SET: that set is the left
+    // column's toggles read together, and this one is in the form column and
+    // about a different thing entirely (how the model edits, not how its reply
+    // is found).
+    el.svcEditByLines.addEventListener("change", function () {
+      api("svc_edit_by_lines", el.svcEditByLines.checked);
+    });
     // A real range input, live and ungated: it cannot express a value outside
     // the range config.py enforces, so there is no invalid state to withhold.
     // The readout is updated locally as well as by the repaint, so dragging

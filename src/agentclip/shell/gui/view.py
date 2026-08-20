@@ -2742,6 +2742,20 @@ class GuiView:
         self._editor.set_edit_by_lines(on)
         self._push_editor()
 
+    def svc_after_delivery(self, state: dict[str, Any]) -> None:
+        """Either tick in the AFTER DELIVERY block: both of them, at once.
+
+        The pair rides one call for the reason the detection set does - the page
+        reads both boxes on any change rather than trusting which one fired.
+        """
+        if self._editor is None:
+            return
+        self._editor.set_after_delivery(
+            snap_back=bool(state.get("snap_back")),
+            alert_sound=bool(state.get("alert_sound")),
+        )
+        self._push_editor()
+
     def svc_scroll(self, action: str) -> None:
         if self._editor is None:
             return

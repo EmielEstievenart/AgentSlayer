@@ -117,7 +117,7 @@ Built-ins can be edited but not deleted. Fields (all editable in the F2 service 
 | `attachment_note` | `true` | Mention attachments in the bootstrap |
 | `delivery` | `"paste"` | `paste` \| `stream` (typed keystrokes) |
 | `auto_submit` | `false` | May AgentClip press Enter after delivering |
-| `snap_back` | `true` | Return focus to AgentClip after an auto-send (`false` = debug aid) |
+| `snap_back` | `true` | Return focus to AgentClip after an auto-send or auto-copy (`false` = debug aid: the browser keeps focus) |
 | `finish_signals` | `["stale"]` | Which detectors may declare a reply finished: `busy`, `idle`, `stale`. Empty = never auto-detect |
 | `stable_seconds` | `2.0` | Stillness window for the stale detector, 0.5–60 |
 | `hover_scan` | `false` | May glide the cursor hunting a hover-only copy icon |
@@ -129,6 +129,8 @@ Built-ins can be edited but not deleted. Fields (all editable in the F2 service 
 | `alert_sound` | `false` | Play the two-tone alert when the loop needs you (manual copy/insert) |
 | `alert_repeat_seconds` | `0` | 0 = alert once; N = repeat every N seconds while still waiting |
 | `edit_by_lines` | `false` | Add `replace_lines` (edit by line range) to the catalog and teach `read_file` its `numbered` gutter. For a host that cannot echo code back verbatim — M365 Copilot rewrites lambdas, so a find/replace edit can never match there. Costs ~900 chars of bootstrap |
+
+**Debugging delivery.** When a paste lands somewhere odd, set `snap_back = false` (or untick "focus back after send" in the service editor — F2 in either shell): AgentClip stops taking the foreground back after its own auto-sends and auto-copies, so the browser keeps focus and you can watch where the clicks actually go. The beep you hear when the loop stalls and needs you is `alert_sound` ("beep when it stalls", same block) — it is off by default, and `alert_repeat_seconds` is how often it nags.
 
 ## permissions.json — the rules
 

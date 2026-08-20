@@ -352,6 +352,28 @@
             <input id="svc-total" type="text" placeholder="e.g. 500000" />
             <div class="side-title">Stale (seconds unchanged)</div>
             <input id="svc-stable" type="text" placeholder="e.g. 2.0" />
+            <!-- AFTER DELIVERY: what happens once AgentClip has acted on the
+                 browser by itself. In THIS column rather than beside the
+                 delivery ticks, exactly where the TUI puts it - the left column
+                 is already the tall one, and the seconds box the alert needs
+                 belongs among the other numbers anyway. The two ticks' labels
+                 and all three hover sentences come from
+                 gui/service_editor.py, like every other worded control here. -->
+            <div class="side-title">AFTER DELIVERY</div>
+            <label class="svc-check" id="svc-snap-back-row"
+              ><input type="checkbox" id="svc-snap-back" /><span
+                id="svc-snap-back-label"
+              ></span
+            ></label>
+            <label class="svc-check" id="svc-alert-sound-row"
+              ><input type="checkbox" id="svc-alert-sound" /><span
+                id="svc-alert-sound-label"
+              ></span
+            ></label>
+            <!-- The label carries what zero means, because "0 seconds"
+                 otherwise reads as "continuously". -->
+            <div class="side-title">Alert repeat (seconds, 0 = once)</div>
+            <input id="svc-alert-repeat" type="text" placeholder="e.g. 30" />
             <!-- Deliberately SMALL: this text rides the model bootstrap, which
                  has ~67 chars of slack on the smallest presets, so the size of
                  the box is the budget warning and the label repeats it. -->

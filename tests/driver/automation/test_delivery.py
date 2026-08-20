@@ -29,6 +29,7 @@ from typing import Any
 
 import pytest
 
+import agentclip.driver.automation.delivery as delivery_mod
 from agentclip.config import DELIVERY_STREAM, ServicePreset
 from agentclip.driver.automation.alerts import AttentionAlarm
 from agentclip.driver.automation.controller import AutomationController
@@ -66,10 +67,10 @@ CHUNK = 12
 # brought forward.
 OUR_WINDOW = 4242
 BROWSER_WINDOW = 1717
-# The pre-paste focus click is a DOUBLE click (``delivery.FOCUS_CLICK_GAP_S``):
-# one click to wake the browser window, one to land in the box it is now able to
-# route to. So every trace a delivery leaves opens with two of them, and the
-# assertions below say so once rather than sixteen times.
+# The pre-paste focus click is a PAIR of clicks (``delivery.FOCUS_CLICK_GAP_S``,
+# half a second apart): one click to wake the browser window, one to land in the
+# box it is now able to route to. So every trace a delivery leaves opens with two
+# of them, and the assertions below say so once rather than sixteen times.
 FOCUS = ["click", "click"]
 # ...except when the OS refuses the first: the second is never asked for, and
 # nothing is pasted into a window that may not be the browser's.
@@ -746,11 +747,14 @@ async def test_the_click_that_focuses_the_chat_box_is_a_double_click(
 ) -> None:
     """One click is spent waking the browser window; a page still activating
     never routes it to the input field, and the Ctrl+V lands nowhere the user
-    can see. Safe here and only here - the box is empty, so there is no word
-    for a double click to select."""
+    can see. The gap between them (``FOCUS_CLICK_GAP_S``) is half a second -
+    long enough for the woken window to be ready for the second one, and past
+    the OS double-click threshold, so the pair is two single clicks and cannot
+    select anything."""
     await delivery.copy_outbound(PAYLOAD)
 
     assert ops.events[:2] == FOCUS
+    assert delivery_mod.FOCUS_CLICK_GAP_S >= 0.5
 
 
 async def test_both_focus_clicks_land_where_the_service_aims_them(

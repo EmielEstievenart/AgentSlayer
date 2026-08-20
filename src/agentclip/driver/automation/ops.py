@@ -197,7 +197,9 @@ class ScreenOps:
         return ACTIVATION_POLL_S
 
     def focus_click_gap(self) -> float:
-        """The beat between the two clicks of the pre-paste focus double click."""
+        """The beat between the two clicks of the pre-paste focus click - long
+        enough that the woken window is ready for the second one, and past the
+        OS double-click threshold so the pair is two single clicks."""
         return FOCUS_CLICK_GAP_S
 
     def paste_settle(self) -> float:

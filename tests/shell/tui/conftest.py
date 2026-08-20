@@ -102,9 +102,11 @@ def aimed_at(box: ScreenRegion) -> ScreenRegion:
 def focus_clicks(*targets: ScreenRegion) -> list[ScreenRegion]:
     """The click trace ONE delivery per target leaves behind.
 
-    The click that focuses the chat box before a paste is a DOUBLE click
+    The click that focuses the chat box before a paste is a PAIR of clicks
     (``driver.automation.delivery.FOCUS_CLICK_GAP_S``): the first wakes the
-    browser window, the second lands in the box that window can now route to.
+    browser window, the second lands in the box that window can now route to -
+    half a second later, which is past the OS double-click threshold, so the
+    pair registers as two single clicks rather than as one double click.
     So every suite here that asserts *where* a delivery aimed sees each target
     twice, and says so through this helper rather than by doubling every
     literal - the interesting part of those assertions is the target, not the

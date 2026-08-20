@@ -387,9 +387,10 @@ class GuiRunner:
     def reconnect_now(self) -> None:
         self.schedule_call(self.view.reconnect_now)
 
-    # The service editor (F2). Sixteen one-line marshals for the reason the
-    # rest are one-line marshals: pywebview runs each js_api method on a thread
-    # of its own, and the editor's model is loop-owned state like every other.
+    # The service editor (F2). One one-line marshal per intent, for the reason
+    # the rest are one-line marshals: pywebview runs each js_api method on a
+    # thread of its own, and the editor's model is loop-owned state like every
+    # other.
 
     def open_service_editor(self) -> None:
         self.schedule_call(self.view.open_service_editor)
@@ -405,6 +406,9 @@ class GuiRunner:
 
     def svc_edit_by_lines(self, on: bool) -> None:
         self.schedule_call(self.view.svc_edit_by_lines, on)
+
+    def svc_after_delivery(self, state: dict[str, Any]) -> None:
+        self.schedule_call(self.view.svc_after_delivery, state)
 
     def svc_scroll(self, action: str) -> None:
         self.schedule_call(self.view.svc_scroll, action)

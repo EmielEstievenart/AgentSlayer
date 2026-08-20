@@ -46,15 +46,29 @@ ACTIVATION_ATTEMPTS = 10
 ACTIVATION_POLL_S = 0.1
 # Beat between the two clicks of the pre-paste focus click.
 #
-# The click that focuses the chat box is a DOUBLE click, because one was not
+# The click that focuses the chat box is a PAIR of clicks, because one was not
 # reliably enough: the first click is what brings the browser window forward,
 # and a page that is still activating can swallow it as the "wake up" click
 # without ever routing it to the input field - which leaves the window focused,
 # the caret nowhere, and the paste going into the void. The second click
 # arrives at a window that is already awake, so it lands where it was aimed.
-# Safe precisely here and nowhere else: the box is EMPTY at this point in the
-# sequence, so a double click has no word to select.
-FOCUS_CLICK_GAP_S = 0.12
+#
+# Half a second, up from 120ms, for two reasons that point the same way:
+#
+# * 120ms was sometimes not enough time for the woken window to be READY to
+#   route the second click into the input field - a busy page is still
+#   restyling and reflowing its composer while the pair goes out, so the second
+#   click was landing on a layout that had already moved. Deliveries were still
+#   intermittently failing, which is what this beat exists to stop.
+# * it also clears the OS double-click threshold (500ms by default on Windows),
+#   so the two register as two SINGLE clicks rather than as a double click. In
+#   a text box a double click selects a word - harmless while the box is empty
+#   (which is why the pair was safe here in the first place), but there is no
+#   reason to keep relying on the box being empty when a longer beat buys both
+#   the readiness and the guarantee.
+#
+# No config knob: timing knobs multiply, and this constant is the tuning point.
+FOCUS_CLICK_GAP_S = 0.5
 # Beat between the browser holding the foreground and the synthetic Ctrl+V.
 #
 # Still needed after the poll above, and this is the whole reason it did not
@@ -62,8 +76,8 @@ FOCUS_CLICK_GAP_S = 0.12
 # browser the foreground; the PAGE has still to route the click through to the
 # chat box and put a caret in it, and that is renderer work no window handle
 # reports on. Raised from 200ms to 300ms because inserts were still going
-# missing at 200, and to 600ms when the double click above went in: the two
-# together are what the failing case needed, and a page that reflows its
+# missing at 200, and to 600ms when the second focus click above went in: the
+# two together are what the failing case needed, and a page that reflows its
 # composer after taking focus can spend most of a second doing it. Tests shrink
 # it.
 PASTE_SETTLE_DELAY = 0.6

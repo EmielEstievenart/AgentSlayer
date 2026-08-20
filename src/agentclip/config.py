@@ -287,14 +287,19 @@ class ServicePreset:
     # file ever has to survive the trip back. That is a fact about one service,
     # so it is a per-service setting.
     edit_by_lines: bool = False
-    # After an auto-SENT payload, does the foreground come back to AgentClip?
-    # On by default, which is what it has always done: the message is in the
-    # box and already sent, so the next thing worth looking at is this window's
-    # rail. Turning it OFF is a debugging aid and nothing else - the browser
-    # keeps focus, so the user can see for themselves whether the chat box was
-    # ever really selected and where the caret ended up. It gates only the snap
-    # after a delivery; the auto-copy harvest's own snap back is a different
-    # moment and stays.
+    # After AgentClip has clicked in the browser on its own - an auto-SENT
+    # payload, or the auto-copy harvest's click on a reply's copy button - does
+    # the foreground come back to AgentClip? On by default, which is what it has
+    # always done: the message is sent (or the reply is on its way to the
+    # clipboard), so the next thing worth looking at is this window's rail.
+    #
+    # Turning it OFF is a debugging aid and nothing else - the browser keeps
+    # focus, so the user can see for themselves whether the chat box was ever
+    # really selected and where the caret ended up. That aid only works if it
+    # covers EVERY snap the loop makes by itself: a switch that left the harvest
+    # still stealing the foreground would take the browser away again a few
+    # seconds later, on the very turn the user is trying to watch. So both call
+    # sites read it (controller.deliver and controller.run_auto_copy_flow).
     snap_back: bool = True
     # Play a two-tone "uh-oh" when the loop stops being able to move on its own
     # and needs the user: the paste that never landed (MANUAL_INSERT) and the

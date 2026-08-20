@@ -251,6 +251,24 @@ async def test_the_harvest_snaps_hunts_clicks_and_comes_home(
     assert flow.loop_state is not LoopState.MANUAL_COPY
 
 
+async def test_a_service_can_refuse_the_harvests_snap_back_too(
+    flow: AutomationController, host: FakeHost, machine: _Machine
+) -> None:
+    """``ServicePreset.snap_back`` off is the debugging aid, and an aid that
+    covered only the auto-SEND would be no aid at all: the harvest fires seconds
+    later on the same turn and would take the browser away again just as the
+    user was watching where the clicks landed. Everything else is unchanged -
+    the copy is still clicked and the reply is still ingested."""
+    machine.looks = [(MATCH, None)]
+    host.preset = _preset(snap_back=False)
+
+    await flow.auto_copy_flow()
+
+    assert host.copy_clicks == [CLICK_TARGET]
+    assert machine.focuses == []
+    assert host.harvests == 1
+
+
 async def test_the_snap_back_needs_a_handle_to_snap_to(
     view: FakeAutomationView, host: FakeHost, machine: _Machine
 ) -> None:

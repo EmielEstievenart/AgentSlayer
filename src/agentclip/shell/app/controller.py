@@ -1357,7 +1357,7 @@ class SessionController:
         self._view.notify(f"theme: {wanted}")
 
     def _cmd_config(self, arg: str) -> None:
-        """`/config [global|local|reset global|reset local]`: where the
+        """`/config [global|local|global reset|local reset]`: where the
         permission + MCP ruleset lives, and how to get back to the shipped one.
 
         No session gate, `/theme`'s reasoning: a ruleset is a property of a
@@ -1378,32 +1378,34 @@ class SessionController:
         `reset` is the one that overwrites - the escape hatch for a ruleset that
         has been edited into a state where nothing runs any more.
         """
-        # Whitespace-squeezed so the two-word form is one shape, and the leading
-        # word has to BE "reset" rather than merely start with it - "resetglobal"
-        # is a typo, and `/armed`'s rule says a typo never writes a file.
+        # Layer first, action second - the layer is the noun both forms share, so
+        # the plain form is the two-word one with its verb dropped rather than a
+        # different shape. Whitespace-squeezed so the two-word form is one shape,
+        # and the trailing word has to BE "reset" rather than merely start with
+        # it - "globalreset" is a typo, and `/armed`'s rule says a typo never
+        # writes a file.
         wanted = " ".join(arg.split()).lower()
-        first, _, rest = wanted.partition(" ")
-        reset = first == "reset"
-        if reset:
-            wanted = rest
-        elif not wanted:
+        if not wanted:
             self._view.spawn(self._view.add_note(self._config_report()))
             return
-        if wanted not in ("global", "local"):
+        layer, _, rest = wanted.partition(" ")
+        reset = rest == "reset"
+        if layer not in ("global", "local") or (rest and not reset):
             self._view.notify(
-                "usage: /config [global|local|reset global|reset local] - "
+                "usage: /config [global|local|global reset|local reset] - "
                 "bare /config says where both files are",
                 severity="warning",
             )
             return
+        wanted = layer
         if wanted == "local" and self._config.remote.is_remote():
             # The project is on the target, and this shell can only write files
             # on THIS PC: creating a same-named file locally would put a ruleset
             # nobody will read next to a project that is not here. Said, not
             # guessed at (docs/design/remote-ssh.md, "the target owns its policy").
-            # `reset local` is refused for the same reason and more sharply - it
+            # `local reset` is refused for the same reason and more sharply - it
             # would overwrite a file that governs nothing.
-            typed = "/config reset local" if reset else "/config local"
+            typed = "/config local reset" if reset else "/config local"
             self._view.notify(
                 f"{typed} is not supported in a remote session yet - the project's "
                 f"ruleset lives on {self._config.remote.target}; edit it over there",
@@ -1431,7 +1433,7 @@ class SessionController:
             state = "exists" if path.is_file() else "not created yet"
             lines.append(f"  {label}:  {path}  ({state})")
         lines.append("  /config global or /config local creates it and copies the path")
-        lines.append("  /config reset global or /config reset local puts the shipped rules back")
+        lines.append("  /config global reset or /config local reset puts the shipped rules back")
         if self._config.remote.is_remote():
             # Neither local file governs a remote session - the target owns its
             # policy - and a listing that did not say so would read as if this

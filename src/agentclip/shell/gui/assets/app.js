@@ -1165,7 +1165,7 @@
         "asks you first; plan REFUSES every edit, command, MCP call and " +
         "delegation, so the model can only read and propose. The key works " +
         "while you are typing and while a turn is running. Which rules decide " +
-        "is a file: /config says where it lives, /config reset global|local " +
+        "is a file: /config says where it lives, /config global|local reset " +
         "puts the shipped rules back."
     ],
     [

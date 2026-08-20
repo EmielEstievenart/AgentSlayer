@@ -17,13 +17,13 @@ Slash commands are typed in the chat box. Keyboard shortcuts work when the chat 
 | `/mode [build\|plan]` | Set the permission mode; bare `/mode` reports it. Same dial as `shift+tab` |
 | `/theme [name]` | Set the theme; bare `/theme` lists them |
 | `/config [global\|local]` | Bare: report where both permissions.json files live. With a layer: create that file (defaults) if missing and copy its path to the clipboard |
-| `/config reset global\|local` | Overwrite that file's permission rules with the shipped defaults, **preserving its `mcp` block**. Rules are read at launch — restart to run under them |
+| `/config global\|local reset` | Overwrite that file's permission rules with the shipped defaults, **preserving its `mcp` block**. Rules are read at launch — restart to run under them |
 | `/unattended [on\|off]` | Auto-**deny** everything that would ask you (you're away). Bare toggles. Amber `⚠ UNATTENDED` badge; survives `/new` |
 | `/yolo [on\|off]` | Auto-**approve** everything that would ask you. Bare toggles. Red `⚡ YOLO` badge; dies with the session, never inherited by sub-agents. Explicit deny rules and the deny-token backstop still hold |
 
 Notes:
 
-- `/config local` and `/config reset local` refuse in a remote session — the project's rules live on the target; edit them there.
+- `/config local` and `/config local reset` refuse in a remote session — the project's rules live on the target; edit them there.
 - Unknown `/command` warns and lists the real ones; the box is cleared either way.
 - Typing `/` pops an autocomplete list (nothing preselected on a bare `/` — a stray `/` + Enter can never fire a command). Enter/Tab completes; the next Enter sends.
 

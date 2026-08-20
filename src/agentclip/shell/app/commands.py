@@ -111,7 +111,7 @@ COMMANDS: tuple[ChatCommand, ...] = (
     ),
     ChatCommand(
         name="config",
-        arg="[global|local|reset global|reset local]",
+        arg="[global|local|global reset|local reset]",
         summary="open the permissions/MCP file: bare /config says where both live",
     ),
     # Second-to-last, and for `/yolo`'s reason turned around: it is the other

@@ -6,24 +6,26 @@ Use any web-chat LLM (ChatGPT, Microsoft 365 Copilot, Claude.ai, Gemini, ...) as
 
 1. Start `agentclip` in your project directory and type a task. AgentClip copies a **bootstrap prompt** (protocol spec + tool catalog + your task) to the clipboard.
 2. Paste it into the chat UI and send. The LLM replies with structured tool calls — many per reply, to keep round trips down.
-3. Click the reply's **Copy** button. AgentClip's clipboard watcher detects it automatically, executes the tool calls locally (file edits show a diff for approval; commands are gated by an allowlist), and copies the combined results back to the clipboard.
+3. Click the reply's **Copy** button. AgentClip's clipboard watcher detects it automatically, executes the tool calls locally (file edits show a diff for approval; commands are gated by permission rules), and copies the combined results back to the clipboard.
 4. Paste the results back into the chat. Repeat until the LLM declares the task done.
 
 Every file change is backed up per turn — `undo turn` restores it without git.
 
 ## Approving actions
 
-By default AgentClip **gates** every file edit and every command that isn't on the allowlist, so you review before it runs. At the gate: `y` approve · `n` reject (with an optional reason) · `a` approve **and** auto-accept edits for the rest of the session (commands still gate).
+By default AgentClip **gates** every file edit and every command its permission rules don't already allow, so you review before it runs. At the gate: `y` approve · `n` reject (with an optional reason) · `a` approve **and** remember a rule for calls like it for the rest of the session. The rules live in an OpenCode-style `permissions.json` with a `build` and a read-only `plan` mode (`shift+tab` cycles them) — see [docs/configuration.md](docs/configuration.md).
 
-For trusted or throwaway projects you can skip the gate entirely with **YOLO mode** — type `/yolo` in the chat box to auto-approve *everything* (edits **and** commands, bypassing the allowlist and deny tokens). The status bar shows a red `⚡ YOLO` badge while it's armed; `/yolo off` turns it back off. It can also be armed from config with `[approval] yolo = true`.
+For trusted or throwaway projects you can skip the gate entirely with **YOLO mode** — type `/yolo` in the chat box to auto-approve everything an explicit deny rule doesn't refuse (red `⚡ YOLO` badge while armed). Its opposite is `/unattended`, which auto-denies whatever would ask you while you're away. Both can also start from config (`[approval]`).
 
-Chat-box commands (type with a leading slash):
+Chat-box commands (leading slash — full list in [docs/commands.md](docs/commands.md)):
 
 | Command | Effect |
 |---|---|
-| `/yolo [on\|off]` | Toggle auto-approve-everything (bare `/yolo` toggles). |
-| `/new` | Clear the chat and start a fresh session. |
-| `/help` | List the commands. |
+| `/help` | List all commands. |
+| `/new` | Clear the chat and start a fresh session (works mid-turn). |
+| `/mode [build\|plan]` | Set the permission mode. |
+| `/config` | Show/create/reset the permissions files. |
+| `/yolo` · `/unattended` | Auto-approve / auto-deny everything (bare toggles). |
 
 ## Install / run
 
@@ -96,7 +98,7 @@ A frozen binary is architecture- and glibc-specific, so build it on (or for) the
 
 ## Configuration
 
-TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (Windows: `%APPDATA%\agentclip\config.toml`) → `<project>/.agentclip.toml` → CLI flags. See `docs/design/architecture.md` for the full default config, service presets (paste-size budgets per chat service), and the command allowlist format.
+TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (Windows: `%APPDATA%\agentclip\config.toml`) → `<project>/.agentclip.toml` → CLI flags. See [docs/configuration.md](docs/configuration.md) for every setting, the service presets (paste-size budgets per chat service), the `permissions.json` rule format, and MCP server config — and [docs/commands.md](docs/commands.md) for all slash commands and keyboard shortcuts.
 
 ## Design documents
 

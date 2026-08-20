@@ -313,11 +313,20 @@ class SkillsFound:
     searched: tuple[str, ...] = ()
 
 
-async def test_skills_lists_every_skill_with_its_description_and_folder(
+def _skill_note(view: FakeChatView) -> str:
+    return next(text for text in view.notes() if text.startswith("Skills ("))
+
+
+async def test_skills_groups_its_rows_under_the_folder_they_were_found_in(
     project: Path, app_config: Config, view: FakeChatView
 ) -> None:
     """`/skills` answers the question the bootstrap's one-line listing cannot:
     WHICH copy of a skill is loaded, and out of which of the six folders.
+
+    Grouped, because the flat form repeated the same long absolute path on every
+    row and that repetition was most of what made the listing a wall: the root
+    is stated once as a heading and the rows under it are a name/description
+    table.
 
     The fallback path in full - no session, so the constructor's callable is the
     whole answer and it is read synchronously (`/mcp`'s arrangement).
@@ -325,7 +334,7 @@ async def test_skills_lists_every_skill_with_its_description_and_folder(
     report = SkillsFound(
         skills=(
             SkillRow("tdd", "test-first development", "/proj/.claude/skills/tdd"),
-            SkillRow("release", "cut a release", "/home/dev/.agents/skills/release", False),
+            SkillRow("release", "cut a release", "/proj/.claude/skills/release", False),
         ),
         searched=("/proj/.claude/skills",),
     )
@@ -337,15 +346,89 @@ async def test_skills_lists_every_skill_with_its_description_and_folder(
     controller.submit_message("/skills")
     await settle(view)
 
-    note = next(text for text in view.notes() if text.startswith("Skills:"))
-    assert "tdd - test-first development  (/proj/.claude/skills/tdd)" in note
+    lines = _skill_note(view).splitlines()
+    assert lines[0] == "Skills (2):"
+    # The root once, as its own line - not once per row.
+    assert lines[1] == "/proj/.claude/skills"
+    assert lines.count("/proj/.claude/skills") == 1
+    assert lines[2].startswith("  tdd ")
+    assert lines[2].endswith(" test-first development")
     # The ones the model may not call are listed too, and marked: a skill that
     # sets disable-model-invocation is loaded and simply unreachable, which is
     # exactly what somebody typing /skills is trying to find out.
-    assert "release - cut a release  (/home/dev/.agents/skills/release)  [hidden from the model]" in (
-        note
+    assert lines[3].endswith(" cut a release  [hidden from the model]")
+    assert "[hidden from the model]" not in lines[2]  # ...and only on that one
+    # One column, so the two descriptions start in the same place.
+    assert lines[2].index("test-first") == lines[3].index("cut a release")
+
+
+async def test_skills_opens_a_group_per_folder_the_skills_came_from(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """Two roots, two headings - and each one's name column is measured against
+    ITS OWN rows, so a folder full of long names cannot push another folder's
+    descriptions off to the right."""
+    report = SkillsFound(
+        skills=(
+            SkillRow("tdd", "test-first development", "/proj/.claude/skills/tdd"),
+            SkillRow("release", "cut a release", "/home/dev/.agents/skills/release"),
+        ),
+        searched=("/proj/.claude/skills", "/home/dev/.agents/skills"),
     )
-    assert "[hidden from the model]" not in note.splitlines()[1]  # ...and only on that one
+    controller = SessionController(
+        app_config, make_factory(project), project, view=view, skills=lambda: report
+    )
+    view.controller = controller
+
+    controller.submit_message("/skills")
+    await settle(view)
+
+    lines = _skill_note(view).splitlines()
+    assert lines == [
+        "Skills (2):",
+        "/proj/.claude/skills",
+        "  tdd      test-first development",
+        "/home/dev/.agents/skills",
+        "  release  cut a release",
+    ]
+
+
+async def test_skills_prints_a_bare_name_when_a_skill_has_no_description(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """No padding behind a name with nothing after it: trailing spaces are
+    invisible until somebody copies the listing out of the transcript."""
+    report = SkillsFound(skills=(SkillRow("tdd", "", "/proj/.claude/skills/tdd"),))
+    controller = SessionController(
+        app_config, make_factory(project), project, view=view, skills=lambda: report
+    )
+    view.controller = controller
+
+    controller.submit_message("/skills")
+    await settle(view)
+
+    assert _skill_note(view).splitlines()[2] == "  tdd"
+
+
+async def test_skills_splits_a_remote_folder_on_its_own_separator(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """The root is cut off the folder STRING, on either separator.
+
+    A remote session's rows were built on the target's OS, so a POSIX shell can
+    be listing Windows paths - and ``Path`` would parse those with the local
+    rules and hand back the whole thing as one component.
+    """
+    report = SkillsFound(skills=(SkillRow("tdd", "test-first", r"C:\dev\.claude\skills\tdd"),))
+    controller = SessionController(
+        app_config, make_factory(project), project, view=view, skills=lambda: report
+    )
+    view.controller = controller
+
+    controller.submit_message("/skills")
+    await settle(view)
+
+    assert _skill_note(view).splitlines()[1] == r"C:\dev\.claude\skills"
 
 
 async def test_skills_with_nothing_found_names_the_folders_it_searched(
@@ -395,8 +478,9 @@ async def test_skills_reads_the_live_link_rather_than_the_constructor_source(
     controller.submit_message("/skills")
     await settle(view)
 
-    note = next(text for text in view.notes() if text.startswith("Skills:"))
-    assert "deploy - ship it  (/srv/app/.claude/skills/deploy)" in note
+    note = _skill_note(view)
+    assert "/srv/app/.claude/skills" in note
+    assert "deploy" in note and "ship it" in note
     assert "stale-local" not in note
 
 

@@ -480,6 +480,16 @@ button,
   color: var(--text-dim);
   font-family: var(--mono);
   font-size: 12.5px;
+  /* A note is a BLOCK of text the controller composed, not a sentence: `/skills`
+     and `/mcp` both answer with a header and one indented row per thing, and
+     `/config` with a path per layer. The node is filled by innerHTML from an
+     escaped string, so without this the browser folds every one of those
+     newlines into a space and the listing arrives as a run-on paragraph -
+     which is exactly the wall of text the grouped listing was meant to end.
+     pre-wrap rather than pre so a long description still wraps inside the
+     panel instead of pushing a horizontal scrollbar; the font is already
+     monospace above, so the columns line up. */
+  white-space: pre-wrap;
 }
 
 /* A call's outcome, coloured from the glyph the controller wrote (app.js's

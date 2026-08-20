@@ -261,6 +261,7 @@ from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
 from agentclip.shell.app.link import Link, McpStatusLine, SkillReport
+from agentclip.shell.app.sizes import fmt_tokens_compact
 from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.tui.messages import (
@@ -567,10 +568,6 @@ class _MainScreenOps(ScreenOps):
 
     def stream_chunk_chars(self) -> int:
         return STREAM_CHUNK_CHARS
-
-
-def _fmt_k(chars: int) -> str:
-    return f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
 
 
 # Leading state glyphs the watcher segment prefixes its text with; a sub-agent
@@ -1162,7 +1159,10 @@ class MainScreen(Screen[None]):
                 )
                 with Vertical(id="chat-panels"):
                     for window in _WINDOW_SLOTS:
-                        yield TranscriptPanel(id=_panel_id(window))
+                        yield TranscriptPanel(
+                            id=_panel_id(window),
+                            chars_per_token=self._config.general.chars_per_token,
+                        )
                 yield ActionPanel(id="action")
                 yield RunPanel(id="running")
                 # Directly above the box, so the list a keystroke is filtering
@@ -4061,9 +4061,18 @@ class MainScreen(Screen[None]):
         # the configured default is what shift+tab would be changing.
         mode = snap.mode if snap else self._controller.permission_mode
         mode_class = "st-plan" if mode == "plan" else "st-dim"
-        service = f"{snap.service_key} {_fmt_k(snap.budget_chars)}" if snap else "no session"
+        # Tokens in both slots, off the same divisor, so ``out`` stays a true
+        # fraction of the budget beside it: this bar is where a user decides
+        # whether the next turn will fit, and that judgement is a token one.
+        divisor = self._config.general.chars_per_token
+        service = (
+            f"{snap.service_key} {fmt_tokens_compact(snap.budget_chars, divisor)} tok"
+            if snap
+            else "no session"
+        )
         out = (
-            f"out {_fmt_k(snap.last_outbound_chars)}/{_fmt_k(snap.budget_chars)} (1/1)"
+            f"out {fmt_tokens_compact(snap.last_outbound_chars, divisor)}"
+            f"/{fmt_tokens_compact(snap.budget_chars, divisor)} tok (1/1)"
             if snap
             else "out -"
         )

@@ -42,6 +42,7 @@ from textual.widget import Widget
 from textual.widgets import Collapsible, Markdown, Static
 
 from agentclip.protocol.types import Outbound, ToolCall
+from agentclip.shell.app.sizes import fmt_tokens
 
 
 def _fence(body: str) -> str:
@@ -69,8 +70,19 @@ class LogEvent:
 class TranscriptPanel(VerticalScroll):
     MAX_EVENTS = 500
 
-    def __init__(self, *, id: str | None = None) -> None:  # noqa: A002 - Textual API
+    def __init__(
+        self,
+        *,
+        id: str | None = None,  # noqa: A002 - Textual API
+        chars_per_token: int = 3,
+    ) -> None:
         super().__init__(id=id)
+        # The only configuration this deliberately-dumb widget holds, and it is
+        # here because the size it prints is computed here: an outbound's total
+        # is a CHARACTER count all the way up from the composer, and the user
+        # reads sizes in tokens (``shell/app/sizes.py``). Defaulted rather than
+        # required so a panel can still be mounted standalone in a test.
+        self._chars_per_token = chars_per_token
         self.entries: list[str] = []
         # NB: not ``log`` - Textual's Widget.log is the built-in logging helper.
         self.event_log: list[LogEvent] = []
@@ -232,13 +244,14 @@ class TranscriptPanel(VerticalScroll):
 
     async def add_outbound(self, outbound: Outbound, label: str) -> None:
         payload = outbound.chunks[0]
-        note = f"→ {label} ({outbound.total_chars:,} chars)"
+        size = fmt_tokens(outbound.total_chars, self._chars_per_token)
+        note = f"→ {label} ({size})"
         self._record(f"{note} [outbound turn {outbound.turn}]", payload, fenced=True)
         block = Vertical(
             Static(Text(note), classes="ev-note"),
             Collapsible(
                 Static(Text(payload)),
-                title=f"outbound turn {outbound.turn} ({outbound.total_chars:,} chars)",
+                title=f"outbound turn {outbound.turn} ({size})",
                 collapsed=True,
             ),
             classes="ev-call",

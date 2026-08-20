@@ -95,6 +95,7 @@ from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
 from agentclip.shell.app.commands import COMMANDS
 from agentclip.shell.app.link import Link, NoSkills, SkillReport
+from agentclip.shell.app.sizes import fmt_budget, fmt_tokens, fmt_tokens_compact
 from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.gui.bridge import Bridge
@@ -370,10 +371,6 @@ _STATE_GLYPHS = "●○■✓✗"
 
 def _strip_glyph(text: str) -> str:
     return text.lstrip(_STATE_GLYPHS).lstrip()
-
-
-def _fmt_k(chars: int) -> str:
-    return f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
 
 
 def _budget(chars: int) -> str:
@@ -1069,13 +1066,18 @@ class GuiView:
 
     async def add_outbound(self, outbound: Outbound, label: str) -> None:
         payload = outbound.chunks[0]
-        note = f"→ {label} ({outbound.total_chars:,} chars)"
+        # The size is rendered HERE, not in app.js: the divisor is configuration
+        # (``[general] chars_per_token``) and the page must not learn it - it
+        # renders what it is handed, the way every other composed label in this
+        # bridge works.
+        size = fmt_tokens(outbound.total_chars, self._config.general.chars_per_token)
+        note = f"→ {label} ({size})"
         self._record(f"{note} [outbound turn {outbound.turn}]", payload, fenced=True)
         self._send_transcript(
             kind="outbound",
             note=note,
             turn=outbound.turn,
-            chars=outbound.total_chars,
+            size=size,
             parts=len(outbound.chunks),
             payload=payload,
         )
@@ -3558,6 +3560,7 @@ class GuiView:
         # shift+tab would be changing.
         mode = snap.mode if snap else self._controller.permission_mode
         mode_class = "st-plan" if mode == "plan" else "st-dim"
+        divisor = self._config.general.chars_per_token
         # The edits slot follows the same rule, so a `/yolo` armed at the start
         # prompt is visible before the session it will govern exists.
         if snap.yolo if snap else self._controller.yolo:
@@ -3575,12 +3578,19 @@ class GuiView:
         segments += [
             {
                 "id": "service",
-                "text": f"{snap.service_key} {_fmt_k(snap.budget_chars)}" if snap else "no session",
+                # Tokens in both slots, off the same divisor, so ``out`` stays a
+                # true fraction of the budget beside it: this bar is where a user
+                # decides whether the next turn will fit, and that is a token
+                # judgement, never a character one.
+                "text": f"{snap.service_key} {fmt_tokens_compact(snap.budget_chars, divisor)} tok"
+                if snap
+                else "no session",
                 "cls": "",
             },
             {
                 "id": "out",
-                "text": f"out {_fmt_k(snap.last_outbound_chars)}/{_fmt_k(snap.budget_chars)} (1/1)"
+                "text": f"out {fmt_tokens_compact(snap.last_outbound_chars, divisor)}"
+                f"/{fmt_tokens_compact(snap.budget_chars, divisor)} tok (1/1)"
                 if snap
                 else "out -",
                 "cls": "",
@@ -3693,6 +3703,7 @@ class GuiView:
         slot = _WINDOW_SLOTS[window]
         service = self._service_for(slot)
         preset = self._config.services.get(service)
+        budget_divisor = self._config.general.chars_per_token
         cal = self._automation.calibration(slot)
         region = cal.chat_region
         live_window = _WINDOW_NAMES[
@@ -3710,9 +3721,14 @@ class GuiView:
             can_connect=self._remote is not None,
             services=_service_options(self._config),
             service=service,
+            # Both units, and characters first: these two numbers are the
+            # preset's CONFIGURED values (what a user edits in the service editor
+            # or config.toml, both of which are in characters), and the token
+            # estimate beside each is what says whether the budget is big enough.
             service_label=(
-                f"{preset.label} · {preset.max_paste_chars:,} chars per paste "
-                f"· {preset.total_context_chars:,} chars context"
+                f"{preset.label} "
+                f"· {fmt_budget(preset.max_paste_chars, budget_divisor)} per paste "
+                f"· {fmt_budget(preset.total_context_chars, budget_divisor)} context"
             )
             if preset
             else "",

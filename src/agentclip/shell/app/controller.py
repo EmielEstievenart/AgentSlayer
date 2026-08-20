@@ -83,6 +83,7 @@ from agentclip.protocol.parser import peek_chat_name
 from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus, ToolCall
 from agentclip.shell.app.commands import command_list, help_text, lookup
 from agentclip.shell.app.link import Link, McpStatusLine, NoSkills, SkillLine, SkillReport
+from agentclip.shell.app.sizes import fmt_budget_compact, fmt_tokens
 from agentclip.shell.app.types import SessionRef, SessionStats
 from agentclip.shell.app.view import ChatView, RunCall, SessionView, Severity
 
@@ -235,10 +236,6 @@ _CONFIG_TEMPLATE = default_permissions_document()
 _CONFIG_RESTART_NOTE = "read once at launch - restart AgentClip after editing it"
 
 
-def _fmt_k(chars: int) -> str:
-    return f"{chars / 1000:.1f}k" if chars >= 1000 else str(chars)
-
-
 # What a finished call's status looks like in one cell. Same alphabet the glyph
 # strip already uses at the gate, so a row does not change language halfway
 # through the turn.
@@ -331,14 +328,63 @@ def _mcp_server_line(status: McpStatusLine) -> str:
     return "  " + " · ".join(parts)
 
 
-def _skill_line(skill: SkillLine) -> str:
-    """One transcript row per skill: what it is called, what it is for, and the
-    folder it was loaded from - plus a mark on the ones the model cannot reach
-    (``disable-model-invocation``), which is the whole reason they are listed
-    here rather than only in the bootstrap."""
-    described = f"{skill.name} - {skill.description}" if skill.description else skill.name
-    hidden = "  [hidden from the model]" if not skill.model_invocable else ""
-    return f"  - {described}  ({skill.folder}){hidden}"
+# The narrowest the name column ever gets. Two short names in a folder would
+# otherwise butt their descriptions up against the indent and stop looking like
+# a column at all; eight cells is enough that the eye finds the second column
+# even in a group of one.
+_SKILL_NAME_COLUMN = 8
+
+
+def _skill_root(folder: str) -> str:
+    """The folder a skill was DISCOVERED in, i.e. the parent of its own folder.
+
+    ``SkillLine.folder`` is ``<root>/<name>`` and there is no separate root on
+    the row - and there must not be one, because the wire shape is pinned
+    (``SkillReport`` is what the engine already sends). So the split happens on
+    the STRING, and on either separator: a remote session's rows were built on
+    the target's OS, so a Windows shell can be listing POSIX paths and vice
+    versa, and ``Path`` would parse them with the LOCAL rules and quietly
+    return the whole thing.
+    """
+    cut = max(folder.rfind("/"), folder.rfind("\\"))
+    if cut < 0:  # no separator at all - the row is its own group
+        return folder
+    return folder[:cut] or folder[: cut + 1]  # a root at the filesystem's top keeps its slash
+
+
+def _skill_rows(skills: Sequence[SkillLine]) -> str:
+    """The `/skills` listing, grouped by the folder each skill came from.
+
+    The flat form repeated a long absolute path on every row, which is most of
+    what made the listing a wall: six search roots means six paths, not one per
+    skill. Grouping states each path once and turns the rows underneath into a
+    two-column table - name, then what it is for - which is the shape somebody
+    typing `/skills` is actually scanning.
+
+    Groups appear in the order their roots first show up in the report (the
+    report is sorted by skill name, so this is stable), and the name column is
+    padded per GROUP rather than across the whole listing: one deep path full of
+    long names must not push every other group's descriptions to the right.
+    """
+    groups: dict[str, list[SkillLine]] = {}
+    for skill in skills:
+        groups.setdefault(_skill_root(skill.folder), []).append(skill)
+    lines: list[str] = []
+    for root, members in groups.items():
+        lines.append(root)
+        width = max(_SKILL_NAME_COLUMN, *(len(skill.name) for skill in members))
+        for skill in members:
+            # A mark on the ones the model cannot reach
+            # (``disable-model-invocation``), which is the whole reason those are
+            # listed here rather than only in the bootstrap.
+            hidden = "" if skill.model_invocable else "  [hidden from the model]"
+            if skill.description:
+                lines.append(f"  {skill.name:<{width}} {skill.description}{hidden}")
+            else:
+                # No padding behind a name with nothing after it: trailing spaces
+                # are invisible until you copy the listing out of the transcript.
+                lines.append(f"  {skill.name}{hidden}")
+    return "\n".join(lines)
 
 
 class _SubagentAborted(Exception):
@@ -574,6 +620,16 @@ class SessionController:
         session already in flight (its Engine was built from its own Config
         snapshot at start time)."""
         self._config = config
+
+    def _tokens(self, chars: int) -> str:
+        """This session's size vocabulary: ``~4.2k tokens`` for a character count.
+
+        A method rather than a bare call so every notice in this file reads the
+        divisor from the CURRENT config - ``update_config`` may have swapped it
+        since the session started, and a size the user is about to compare
+        against their own ``chars_per_token`` should be the one they just set.
+        """
+        return fmt_tokens(chars, self._config.general.chars_per_token)
 
     # -- view-facing events ---------------------------------------------------
 
@@ -1278,8 +1334,8 @@ class SessionController:
                 )
             )
             return
-        listing = "\n".join(_skill_line(skill) for skill in report.skills)
-        self._view.spawn(self._view.add_note(f"Skills:\n{listing}"))
+        listing = _skill_rows(report.skills)
+        self._view.spawn(self._view.add_note(f"Skills ({len(report.skills)}):\n{listing}"))
 
     def _cmd_identify(self) -> None:
         """Show the user what the tool believes it can see in the chat window.
@@ -1891,13 +1947,15 @@ class SessionController:
                 "sub-agent in the calibrated second chat; /abort ends a run in flight"
             )
         await self._view.add_note(
-            f"→ bootstrap copied ({out.total_chars:,} chars) - paste into {self._preset.label}"
+            f"→ bootstrap copied ({self._tokens(out.total_chars)}) - "
+            f"paste into {self._preset.label}"
         )
         self._session_active = True
         await self._refresh_status()
         self._view.start_input()  # starts the watcher (or shows the manual-mode note)
         self._view.notify(
-            f"bootstrap copied ({out.total_chars:,} chars) - paste into {self._preset.label}",
+            f"bootstrap copied ({self._tokens(out.total_chars)}) - "
+            f"paste into {self._preset.label}",
             timeout=8,
         )
 
@@ -2134,7 +2192,8 @@ class SessionController:
                 continue
             text, status, code = await self._run_subagent(step)
             await self._view.add_note(
-                f"← sub-agent result ({len(text):,} chars, {status}) - handed back to the model"
+                f"← sub-agent result ({self._tokens(len(text))}, {status}) - "
+                "handed back to the model"
             )
             step = await self._run_engine_step(
                 link.deliver_delegate_result, text, status=status, code=code
@@ -2143,7 +2202,8 @@ class SessionController:
             await self._copy_outbound(step.outbound)
             await self._view.add_outbound(step.outbound, "results copied")
             self._view.alert(
-                f"results copied ({step.outbound.total_chars:,} chars) - paste into the chat"
+                f"results copied ({self._tokens(step.outbound.total_chars)}) - "
+                "paste into the chat"
             )
             await self._refresh_status()
             return
@@ -2393,8 +2453,8 @@ class SessionController:
             await self._view.add_note(f"! {warning}")
             self._view.notify(warning, severity="warning", timeout=8)
         await self._view.add_note(
-            f"→ sub-agent bootstrap copied ({out.total_chars:,} chars) - it goes into the "
-            "sub-agent chat"
+            f"→ sub-agent bootstrap copied ({self._tokens(out.total_chars)}) - it goes into "
+            "the sub-agent chat"
         )
         await self._refresh_status()
         return (await self._sub_loop(link), "ok", None)
@@ -2476,7 +2536,9 @@ class SessionController:
                 # The deliverable goes in this tab too, not only into the
                 # master's payload: it is the whole point of the run, and this
                 # tab is the only place the user can ever read it again.
-                await self._view.add_note(f"→ result handed back ({len(deliverable):,} chars)")
+                await self._view.add_note(
+                    f"→ result handed back ({self._tokens(len(deliverable))})"
+                )
                 if deliverable != step.summary.strip():
                     await self._view.add_prose(deliverable)
                 await self._refresh_status()
@@ -2485,7 +2547,7 @@ class SessionController:
             await self._copy_outbound(step.outbound)
             await self._view.add_outbound(step.outbound, "results copied")
             self._view.alert(
-                f"sub-agent: results copied ({step.outbound.total_chars:,} chars) - "
+                f"sub-agent: results copied ({self._tokens(step.outbound.total_chars)}) - "
                 "paste into the sub-agent chat"
             )
             await self._refresh_status()
@@ -2604,8 +2666,15 @@ class SessionController:
         rows.append(("tool calls", calls or "none"))
         if self._stats.subagents:
             rows.append(("sub-agent runs", str(self._stats.subagents)))
-        rows.append(("chars copied out", f"{self._stats.chars_out:,}"))
-        rows.append(("chars ingested", f"{self._stats.chars_in:,}"))
+        # Tokens first, characters in the parenthesis: the estimate is the number
+        # a reader is comparing against a context window, and the raw count is
+        # what they would need if they ever wanted to check the arithmetic.
+        rows.append(
+            ("copied out", f"{self._tokens(self._stats.chars_out)} ({self._stats.chars_out:,} chars)")
+        )
+        rows.append(
+            ("ingested", f"{self._tokens(self._stats.chars_in)} ({self._stats.chars_in:,} chars)")
+        )
         if snap is not None:
             rows.append(("session dir", str(snap.session_dir)))
         return rows
@@ -2685,7 +2754,8 @@ class SessionController:
         if notice is not None:
             await self._copy_outbound(notice)
             await self._view.add_note(
-                f"→ revert notice copied ({notice.total_chars:,} chars) - paste it into the chat"
+                f"→ revert notice copied ({self._tokens(notice.total_chars)}) - "
+                "paste it into the chat"
             )
 
     async def _follow_up_flow(self, text: str) -> None:
@@ -2696,7 +2766,9 @@ class SessionController:
         await self._view.add_user(text)
         await self._copy_outbound(out)
         await self._refresh_status()
-        self._view.notify(f"follow-up copied ({out.total_chars:,} chars) - paste into the chat")
+        self._view.notify(
+            f"follow-up copied ({self._tokens(out.total_chars)}) - paste into the chat"
+        )
 
     async def _force_ingest_flow(self) -> None:
         text = await self._view.read_clipboard()
@@ -2733,7 +2805,8 @@ class SessionController:
         # a double tap nobody is told about is a feature nobody has.
         await self._view.park_outbound(text)
         self._view.notify(
-            f"re-copied the last outbound ({len(text):,} chars) - press c again to deliver it"
+            f"re-copied the last outbound ({self._tokens(len(text))}) - "
+            "press c again to deliver it"
         )
 
     # -- export log -----------------------------------------------------------
@@ -2763,7 +2836,10 @@ class SessionController:
         meta = [f"Exported: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"]
         preset = self._preset
         if preset is not None:
-            meta.append(f"Service: {preset.label} ({_fmt_k(preset.max_paste_chars)} budget)")
+            budget = fmt_budget_compact(
+                preset.max_paste_chars, self._config.general.chars_per_token
+            )
+            meta.append(f"Service: {preset.label} ({budget} budget)")
         try:
             root = str(Path("~") / self._project_root.relative_to(Path.home()))
         except ValueError:

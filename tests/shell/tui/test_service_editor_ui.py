@@ -1118,9 +1118,9 @@ async def test_the_checkboxes_follow_the_selected_service(
 async def test_the_automation_ticks_round_trip_into_the_saved_services(
     tmp_path: Path, profile_root: Path
 ) -> None:
-    """``auto_submit`` and ``capture_prose`` are per-service policy like every
-    other tick on this column: the working copy, then the close-and-persist
-    path, nothing of their own."""
+    """``auto_submit`` is per-service policy like every other tick on this
+    column: the working copy, then the close-and-persist path, nothing of its
+    own."""
     app, global_path = _make_app(tmp_path, profile_root)
     async with app.run_test(size=(120, 45)) as pilot:
         main = app.main_screen
@@ -1132,25 +1132,19 @@ async def test_the_automation_ticks_round_trip_into_the_saved_services(
 
         editor.query_one("#svc-select", Select).value = "claude"
         await pilot.pause()
-        # The shipped defaults: both acts stay the user's.
+        # The shipped default: the act stays the user's.
         assert not editor.query_one("#svc-auto-submit", Checkbox).value
-        assert not editor.query_one("#svc-capture-prose", Checkbox).value
 
         editor.query_one("#svc-auto-submit", Checkbox).value = True
         await pilot.pause()
-        editor.query_one("#svc-capture-prose", Checkbox).value = True
-        await pilot.pause()
         assert editor._services["claude"].auto_submit is True
-        assert editor._services["claude"].capture_prose is True
 
         await pilot.press("escape")
         await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
 
         assert app.app_config.services["claude"].auto_submit is True
-        assert app.app_config.services["claude"].capture_prose is True
         raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
         assert raw["services"]["claude"]["auto_submit"] is True
-        assert raw["services"]["claude"]["capture_prose"] is True
 
 
 async def test_the_require_fenced_tick_round_trips_into_the_saved_services(

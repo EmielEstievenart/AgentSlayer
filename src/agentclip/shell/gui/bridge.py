@@ -174,7 +174,7 @@ the one family whose event is the entire surface rather than one block of it
      is_new: bool, key_locked: bool,
      form: {key, label, max, total, stable, extra},   # all strings
      error: str,            # why the candidate is not being applied, or ""
-     signals: [{name, label, on}, ...], hover_scan: bool, capture_prose: bool,
+     signals: [{name, label, on}, ...], hover_scan: bool,
      require_fenced: bool, stream: bool, auto_submit: bool,
      scroll: str, scrolls: [{value, label}, ...],
      matcher: str, matchers: [{value, label}, ...], matcher_warning: str,

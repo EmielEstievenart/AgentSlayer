@@ -266,7 +266,6 @@ def detection(editor: ServiceEditor, **overrides: Any) -> None:
     payload: dict[str, Any] = {
         "signals": [row["name"] for row in state["signals"] if row["on"]],
         "hover_scan": state["hover_scan"],
-        "capture_prose": state["capture_prose"],
         "require_fenced": state["require_fenced"],
         "stream": state["stream"],
         "auto_submit": state["auto_submit"],
@@ -281,10 +280,10 @@ def test_the_whole_toggle_group_folds_in_at_once(editor: ServiceEditor) -> None:
     # Canonical order, unknown values dropped - normalize_finish_signals'.
     assert preset.finish_signals == ("busy", "stale")
     assert preset.hover_scan and preset.delivery == DELIVERY_STREAM
-    detection(editor, stream=False, require_fenced=True, capture_prose=True, auto_submit=True)
+    detection(editor, stream=False, require_fenced=True, auto_submit=True)
     preset = editor.services["chatgpt"]
     assert preset.delivery == DELIVERY_PASTE
-    assert preset.require_fenced_reply and preset.capture_prose and preset.auto_submit
+    assert preset.require_fenced_reply and preset.auto_submit
 
 
 def test_the_toggles_apply_even_while_the_form_is_invalid(editor: ServiceEditor) -> None:
@@ -1224,7 +1223,7 @@ def test_every_editor_id_the_page_writes_into_exists_in_the_markup() -> None:
     assets = Path(__file__).resolve().parents[3] / "src" / "agentclip" / "shell" / "gui" / "assets"
     html = (assets / "index.html").read_text(encoding="utf-8")
     for element_id in (
-        "svc-scrim", "svc-select", "svc-signals", "svc-hover-scan", "svc-capture-prose",
+        "svc-scrim", "svc-select", "svc-signals", "svc-hover-scan",
         "svc-require-fenced", "svc-stream", "svc-auto-submit", "svc-signal-warning",
         "svc-scroll", "svc-matcher", "svc-matcher-warning", "svc-tolerance",
         "svc-tolerance-value", "svc-tolerance-label", "svc-key", "svc-label", "svc-max",

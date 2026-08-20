@@ -118,8 +118,9 @@ class ChatView(Protocol):
     # tool call - and a view that decides where to scroll per event ends such a
     # reply pinned at its LAST line, with the sentence the model opened with
     # already off the top. So the controller says where the reply starts and
-    # where it ends, and the view reveals it as a whole: the first widget's top
-    # at the top of the transcript, as much of the rest as fits below it.
+    # where it ends, and the view judges the reply as a whole: one too tall to
+    # be read at once is parked with its first line at the top of the
+    # transcript, one that fits leaves the view at the bottom and following.
     # Only the ingest path brackets - a follow-up note, an answer or a summary
     # is not a reply the user has just been handed - and a ``begin_reply`` whose
     # reply turns out empty is a no-op, so an unmatched pair costs nothing.

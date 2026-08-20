@@ -8,8 +8,10 @@ conversational beat (user/assistant message) re-applies the fit rule, and
 returning to the bottom resumes pinning.
 
 And the rule the per-event one cannot express (``begin_reply``/``reveal_reply``):
-one ingested reply is several events, and it is revealed from its FIRST one
-however many of them fit.
+one ingested reply is several events, so the same fit-or-park question is asked
+once more about the reply as a whole - a reply too tall for the view is revealed
+from its FIRST event, a reply that fits leaves the panel at the bottom, still
+following.
 
 The panel is exercised in a bare single-widget app: scroll geometry is the
 whole point here, so the harness gives the panel the full screen instead of
@@ -179,6 +181,27 @@ async def test_a_revealed_reply_holds_its_position_under_follow_up_noise() -> No
         await panel.add_note("→ results copied (900 chars)")
         await pilot.pause(0.3)
         assert panel.scroll_y == revealed_y
+
+
+async def test_a_reply_that_fits_leaves_the_panel_following_the_bottom() -> None:
+    """The other half of the reveal rule, and the reason it is a rule and not
+    an unconditional park: a short reply is on screen entire from the bottom
+    either way, so parking it would win nothing and would stop the transcript
+    following - every event of the next turn would land below the fold."""
+    app = _PanelApp()
+    async with app.run_test(size=(80, 24)) as pilot:
+        panel = _panel(app)
+        for i in range(30):  # a conversation already scrolled past the top
+            await panel.add_note(f"note {i}")
+        await _wait_for(pilot, lambda: _at_bottom(panel), "pinned before the reply")
+
+        await _ingest_reply(panel, SHORT_TEXT, calls=1)
+
+        await _wait_for(pilot, lambda: _at_bottom(panel), "still following after the short reply")
+        assert panel._reading is False
+        # And it keeps following: the next event is not held off screen.
+        await panel.add_note("→ results copied (900 chars)")
+        await _wait_for(pilot, lambda: _at_bottom(panel), "the follow-up event stayed visible")
 
 
 async def test_a_tall_reply_is_revealed_where_its_own_park_left_it() -> None:

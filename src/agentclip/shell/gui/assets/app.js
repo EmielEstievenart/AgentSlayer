@@ -525,7 +525,15 @@
   // rule above judges each of them alone - so a reply of small nodes ends
   // pinned at its LAST line with its opening scrolled off the top. The Python
   // side brackets the reply (ChatView.begin_reply/reveal_reply) and this is the
-  // other half: the same park a tall node gets, applied to the reply as a whole.
+  // other half: fit-or-park asked ONCE, about the reply as a whole. A reply is
+  // always the transcript's tail, so its height is everything from its first
+  // node down. Taller than the viewport, there is more of it than the user can
+  // see at once and where they start reading matters: park its first line at
+  // the first row, the same park a tall node gets. Shorter, the whole reply is
+  // on screen from the bottom anyway - so go to the bottom and resume
+  // following, because a park there would buy nothing and cost everything
+  // after it: every short reply would leave the panel frozen, with the next
+  // turn's output piling up below the fold.
   function revealReply(win) {
     var target = panel(win);
     var node = target.replyStart;
@@ -536,9 +544,15 @@
     // `append`: leave it pinned and let the first paint after it is shown do
     // the honest thing. A pruned node is likewise nothing to scroll to.
     if (!node || box.hidden || node.parentNode !== box) return;
-    box.scrollTop = node.offsetTop;
-    target.parked = true;
-    target.stick = false;
+    if (box.scrollHeight - node.offsetTop > box.clientHeight) {
+      box.scrollTop = node.offsetTop;
+      target.parked = true;
+      target.stick = false;
+      return;
+    }
+    box.scrollTop = box.scrollHeight;
+    target.stick = true;
+    target.parked = false;
   }
 
   function block(className, html) {

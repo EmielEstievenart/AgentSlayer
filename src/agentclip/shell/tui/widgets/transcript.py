@@ -15,8 +15,9 @@ One INGESTED REPLY is several of those events (prose, then a widget per tool
 call), and the per-event rule above cannot see that: a reply of small widgets
 ends pinned at its last line with its opening scrolled away. So the controller
 brackets the reply - ``begin_reply`` before the first event, ``reveal_reply``
-after the last - and the panel parks the view at the reply's FIRST widget, which
-is the same park a tall event gets, applied to the reply as a whole.
+after the last - and the panel asks the fit question once, about the reply as a
+whole: too tall to read at once, it parks at the reply's FIRST widget; small
+enough to be on screen entire, it stays pinned to the bottom.
 
 Children are pruned beyond MAX_EVENTS to bound layout cost. ``entries``
 mirrors every event as plain text - it is the assertion surface for the Pilot
@@ -142,15 +143,12 @@ class TranscriptPanel(VerticalScroll):
         self._await_reply_start = True
 
     def reveal_reply(self) -> None:
-        """Park the view at the top of the reply that just finished landing.
+        """Apply the fit-or-park rule to the reply that just finished landing.
 
         One reply is prose plus a widget per tool call, and ``_autoscroll``
         judges each of them alone - so a reply whose every widget fits ends
         pinned at its LAST line, with the sentence it opened with off the top.
-        This is the same park a single tall event gets, applied to the reply as
-        a whole: its first line at the first row, as much of the rest as fits
-        below it, and the parked rules from there (follow-up noise holds the
-        position, scrolling back to the bottom resumes pinning).
+        This asks the same question once, about the reply as a whole.
         """
         widget = self._reply_start
         self._reply_start = None
@@ -158,7 +156,29 @@ class TranscriptPanel(VerticalScroll):
         if widget is not None:
             # After the last event's own _autoscroll, which is queued ahead of
             # this one: the reply's start is where the view ends up.
-            self.call_after_refresh(self._park_at, widget)
+            self.call_after_refresh(self._reveal_at, widget)
+
+    def _reveal_at(self, widget: Widget) -> None:
+        """Fit-or-park for a whole reply, ``widget`` being its first event.
+
+        A reply is always the transcript's tail, so "does it fit" is just: with
+        the panel scrolled as far down as it goes, is the reply's first line
+        still on screen? If it is not, the reply is taller than the view and
+        where reading starts matters - park its first line at the first row,
+        exactly the park a single tall event gets, with the parked rules from
+        there (follow-up noise holds the position, scrolling back to the bottom
+        resumes pinning). If it is, parking would buy nothing - the whole reply
+        is on screen from the bottom either way - and would cost the pin, which
+        is what everything AFTER the reply rides on: a panel parked on a short
+        reply lets the next turn's events pile up below the fold unseen.
+        """
+        if not widget.is_mounted:  # pruned/cleared before the refresh landed
+            return
+        if widget.virtual_region.y < self.max_scroll_y:
+            self._park_at(widget)
+            return
+        self._reading = False
+        self.anchor()
 
     async def add_user(self, text: str) -> None:
         self._record("you", text)

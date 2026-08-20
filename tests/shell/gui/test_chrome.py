@@ -793,3 +793,28 @@ def test_the_run_panel_and_the_refocus_both_stand_off_a_live_selection() -> None
     assert js.count("draggedOutText()") == 3  # the definition and both guards
     toggle = js[js.index('el.run.addEventListener("click"') :]
     assert "if (draggedOutText()) return;" in toggle[: toggle.index("});")]
+
+
+# == revealing a finished reply ===============================================
+
+
+def test_revealing_a_reply_parks_only_when_it_outgrows_the_viewport() -> None:
+    """The GUI half of the TUI's ``_reveal_at`` (main-chat.md §6), which has no
+    JS runner to assert against - so the branch is pinned in the source.
+
+    Both cases matter and the second is the one that regressed: a reply that
+    fits has to leave the panel following the bottom, because a park there
+    would freeze the transcript for every event of the next turn.
+    """
+    js = (ASSETS / "app.js").read_text(encoding="utf-8")
+    body = js[js.index("function revealReply(win)") :]
+    body = body[: body.index("\n  }")]
+    # The reply is the transcript's tail, so its height is measured from the
+    # first node down rather than from any node's own offsetHeight.
+    assert "box.scrollHeight - node.offsetTop > box.clientHeight" in body
+    oversized, fitting = body.split("box.scrollHeight - node.offsetTop > box.clientHeight", 1)
+    assert "box.scrollTop = node.offsetTop;" in fitting[: fitting.index("return;")]
+    tail = fitting[fitting.index("return;") :]
+    assert "box.scrollTop = box.scrollHeight;" in tail
+    assert "target.stick = true;" in tail and "target.parked = false;" in tail
+    assert "box.hidden" in oversized  # the hidden-panel guard still comes first

@@ -1267,8 +1267,12 @@ def test_every_row_starts_in_the_middle_of_its_picture(editor: ServiceEditor) ->
     is what an untouched profile has to report."""
     for row in editor.state()["kinds"]:
         assert (row["click_x"], row["click_y"]) == (50, 50)
+    # The boxes are two bare number fields side by side, so the hover text is
+    # the only thing that says which one is which: each has to name its axis.
     labels = editor.state()["click_labels"]
     assert "%" in labels["x"] and "%" in labels["y"]
+    assert "horizontal" in labels["x"] and "left" in labels["x"]
+    assert "vertical" in labels["y"] and "top" in labels["y"]
 
 
 def test_a_click_point_is_written_to_the_store_immediately(

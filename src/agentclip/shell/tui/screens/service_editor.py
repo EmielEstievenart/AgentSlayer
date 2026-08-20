@@ -229,6 +229,12 @@ SNAP_BACK_LABEL = "focus back after send"
 # it reads as belonging to the same thing.
 ALERT_SOUND_LABEL = "beep when it stalls"
 AFTER_DELIVERY_TITLE = "AFTER DELIVERY"
+# The ranged-edit mode, for a host that cannot echo code back verbatim: the
+# model reads with a line-number gutter and edits by line range, so no find
+# block has to survive the trip. Worded as what it gives the model rather than
+# as the tool's name, which means nothing until it is on.
+EDIT_BY_LINES_LABEL = "edit by line numbers"
+EDIT_TITLE = "EDITING"
 # A ticked busy/idle entry whose appearance was never captured runs nothing at
 # all (config.py's checklist and the profile are ANDed). Silent dead weight is
 # exactly the failure that shows up as an auto-copy that never fires, so it is
@@ -646,6 +652,11 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
                     # otherwise reads as "continuously".
                     yield Static(Text("Alert repeat (seconds, 0 = once)"), classes="side-title")
                     yield Input(id="svc-alert-repeat", placeholder="e.g. 30", compact=True)
+                    # In THIS column, not the left one, for a geometry reason:
+                    # the left column is at its height ceiling and the
+                    # narrow-terminal Pilot tests fail the moment it grows.
+                    yield Static(Text(EDIT_TITLE), classes="side-title")
+                    yield Checkbox(EDIT_BY_LINES_LABEL, id="svc-edit-by-lines", compact=True)
                     # A little box rather than a line: a sentence of guidance
                     # does not fit in one row of this (flexible, often narrow)
                     # column, and a one-line Input scrolls its own text out of
@@ -872,6 +883,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
         self.query_one("#svc-auto-submit", Checkbox).value = shown.auto_submit
         self.query_one("#svc-snap-back", Checkbox).value = shown.snap_back
         self.query_one("#svc-alert-sound", Checkbox).value = shown.alert_sound
+        self.query_one("#svc-edit-by-lines", Checkbox).value = shown.edit_by_lines
         # The SCROLL radio follows the selection the same way the MATCHING one
         # below does - press the right one, the set unpresses the rest.
         self.query_one(f"#{scroll_radio_id(shown.scroll_action)}", RadioButton).value = True
@@ -1211,6 +1223,7 @@ class ServiceEditorScreen(ModalScreen["ServiceEdits | None"]):
             auto_submit=self.query_one("#svc-auto-submit", Checkbox).value,
             snap_back=self.query_one("#svc-snap-back", Checkbox).value,
             alert_sound=self.query_one("#svc-alert-sound", Checkbox).value,
+            edit_by_lines=self.query_one("#svc-edit-by-lines", Checkbox).value,
         )
         self._paint_signal_warning(self._profile(key))
 

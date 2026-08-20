@@ -361,6 +361,16 @@
               rows="3"
               placeholder="e.g. put a space between ] and ( in code"
             ></textarea>
+            <!-- The one tick in this column, and it is here rather than beside
+                 the other toggles on the left for the same reason the TUI puts
+                 it here: it belongs with the settings ABOUT the model rather
+                 than about the window, and the left column is already full. -->
+            <div class="side-title">EDITING</div>
+            <label class="svc-check"
+              ><input type="checkbox" id="svc-edit-by-lines" /><span
+                id="svc-edit-by-lines-label"
+              ></span
+            ></label>
             <div class="svc-error" id="svc-error"></div>
           </div>
 

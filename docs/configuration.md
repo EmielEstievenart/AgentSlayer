@@ -121,6 +121,7 @@ Built-ins can be edited but not deleted. Fields (all editable in the F2 service 
 | `extra_instructions` | `""` | Service-specific bootstrap text, armed with `r` |
 | `alert_sound` | `false` | Play the two-tone alert when the loop needs you (manual copy/insert) |
 | `alert_repeat_seconds` | `0` | 0 = alert once; N = repeat every N seconds while still waiting |
+| `edit_by_lines` | `false` | Add `replace_lines` (edit by line range) to the catalog and teach `read_file` its `numbered` gutter. For a host that cannot echo code back verbatim — M365 Copilot rewrites lambdas, so a find/replace edit can never match there. Costs ~900 chars of bootstrap |
 
 ## permissions.json — the rules
 
@@ -156,7 +157,7 @@ That block *is* the built-in default — a machine with no permissions.json beha
 | Kind | Gates | Pattern matches |
 |---|---|---|
 | `read` | `read_file` | file path |
-| `edit` | `write_file`, `edit_file`, `delete_file` | file path |
+| `edit` | `write_file`, `edit_file`, `replace_lines`, `delete_file` | file path |
 | `list` / `glob` / `grep` | the search tools | path / pattern |
 | `bash` | `run_command` | the whole command line |
 | `task` | `delegate` (sub-agents) | the task text |

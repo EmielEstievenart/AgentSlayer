@@ -56,6 +56,56 @@ def test_read_full_file_header_and_no_gutter(ctx: ToolContext, tmp_path: Path) -
     assert lines[1:] == ["alpha", "bravo", "charlie"]  # raw lines, no line-number gutter
 
 
+def test_read_numbered_adds_the_gutter_and_keeps_the_header(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    """The other shape of the same read: same header, every line prefixed."""
+    _write(tmp_path, "f.txt", "alpha\nbravo\ncharlie\n")
+    res = fs_tools.read_file(ctx, make_call("read_file", path="f.txt", numbered="yes"))
+    lines = res.body.split("\n")
+    assert lines[0] == "f.txt lines 1-3 of 3"
+    assert lines[1:] == ["1| alpha", "2| bravo", "3| charlie"]
+
+
+def test_read_numbered_gutter_is_right_aligned_and_starts_at_the_span(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    """Numbers are the file's, not the slice's, and the column is as wide as
+    the largest number in it - so a read of 8-12 lines up under itself."""
+    _write(tmp_path, "f.txt", "".join(f"line{i}\n" for i in range(1, 13)))
+    res = fs_tools.read_file(
+        ctx, make_call("read_file", path="f.txt", start="8", end="12", numbered="yes")
+    )
+    assert res.body.split("\n")[1:] == [
+        " 8| line8",
+        " 9| line9",
+        "10| line10",
+        "11| line11",
+        "12| line12",
+    ]
+
+
+def test_read_numbered_gutter_survives_an_empty_line(ctx: ToolContext, tmp_path: Path) -> None:
+    _write(tmp_path, "f.txt", "alpha\n\ncharlie\n")
+    res = fs_tools.read_file(ctx, make_call("read_file", path="f.txt", numbered="yes"))
+    assert res.body.split("\n")[2] == "2| "
+
+
+def test_read_numbered_is_capped_on_the_gutter_line_not_the_raw_one(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    """The gutter goes on BEFORE the char cap, so the cap counts what really
+    goes on the wire - otherwise a numbered read would quietly overshoot it."""
+    _write(tmp_path, "f.txt", "".join(f"{'x' * 20}\n" for _ in range(20)))
+    tight = make_ctx(tmp_path, limits=LimitsConfig(max_file_read_chars=100))
+    res = fs_tools.read_file(tight, make_call("read_file", path="f.txt", numbered="yes"))
+    content = [ln for ln in res.body.split("\n")[1:] if not ln.startswith("[")]
+    assert all("| " + "x" * 20 in ln for ln in content)
+    # The cap counted the gutter, so the delivered lines fit inside it.
+    assert sum(len(ln) + 1 for ln in content) <= 100
+    assert "char cap" in res.body  # ...and it said so
+
+
 def test_read_range_one_based_inclusive(ctx: ToolContext, tmp_path: Path) -> None:
     _write(tmp_path, "f.txt", "".join(f"line{i}\n" for i in range(1, 11)))
     res = fs_tools.read_file(ctx, make_call("read_file", path="f.txt", start="3", end="5"))
@@ -262,6 +312,111 @@ def test_edit_preserves_crlf(ctx: ToolContext, tmp_path: Path) -> None:
     res = fs_tools.edit_file(ctx, make_call("edit_file", path="w.txt", find="two", replace="2"))
     assert res.status == "ok"
     assert (tmp_path / "w.txt").read_bytes() == b"one\r\n2\r\n"
+
+
+# -- replace_lines --------------------------------------------------------------
+
+
+def _lines_call(**params: str) -> ToolCall:
+    return make_call("replace_lines", **params)
+
+
+def test_replace_lines_swaps_an_inclusive_range(ctx: ToolContext, tmp_path: Path) -> None:
+    _write(tmp_path, "u.py", "one\ntwo\nthree\nfour\n")
+    res = fs_tools.replace_lines(
+        ctx, _lines_call(path="u.py", start="2", end="3", replace="TWO\nAND\nTHREE")
+    )
+    assert res.status == "ok"
+    assert res.body == "replaced lines 2-3 of u.py (2 lines -> 3 lines)"
+    assert (tmp_path / "u.py").read_text(encoding="utf-8") == "one\nTWO\nAND\nTHREE\nfour\n"
+
+
+def test_replace_lines_with_an_empty_replace_deletes_the_range(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    _write(tmp_path, "u.py", "one\ntwo\nthree\n")
+    res = fs_tools.replace_lines(ctx, _lines_call(path="u.py", start="2", end="2", replace=""))
+    assert res.body == "replaced lines 2-2 of u.py (1 lines -> 0 lines)"
+    assert (tmp_path / "u.py").read_text(encoding="utf-8") == "one\nthree\n"
+
+
+def test_replace_lines_keeps_a_missing_final_newline_missing(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    _write(tmp_path, "u.py", "one\ntwo")
+    fs_tools.replace_lines(ctx, _lines_call(path="u.py", start="2", end="2", replace="TWO"))
+    assert (tmp_path / "u.py").read_text(encoding="utf-8") == "one\nTWO"
+
+
+def test_replace_lines_can_reach_the_last_line(ctx: ToolContext, tmp_path: Path) -> None:
+    """The trailing newline is not a line: 3 lines means 3, not 4."""
+    _write(tmp_path, "u.py", "one\ntwo\nthree\n")
+    res = fs_tools.replace_lines(ctx, _lines_call(path="u.py", start="3", end="3", replace="3"))
+    assert res.status == "ok"
+    assert (tmp_path / "u.py").read_text(encoding="utf-8") == "one\ntwo\n3\n"
+
+
+@pytest.mark.parametrize(
+    "start,end", [("0", "2"), ("2", "1"), ("1", "4"), ("4", "4")]
+)
+def test_replace_lines_refuses_a_range_the_file_has_not_got(
+    ctx: ToolContext, tmp_path: Path, start: str, end: str
+) -> None:
+    _write(tmp_path, "u.py", "one\ntwo\nthree\n")
+    res = fs_tools.replace_lines(ctx, _lines_call(path="u.py", start=start, end=end, replace="x"))
+    assert res.status == "error" and res.code == "bad_param"
+    assert (tmp_path / "u.py").read_text(encoding="utf-8") == "one\ntwo\nthree\n"
+
+
+def test_replace_lines_needs_all_four_params(ctx: ToolContext, tmp_path: Path) -> None:
+    _write(tmp_path, "u.py", "one\n")
+    res = fs_tools.replace_lines(ctx, _lines_call(path="u.py", start="1", end="1"))
+    assert res.status == "error" and res.code == "missing_param"
+    assert "replace" in res.body
+
+
+def test_replace_lines_refuses_an_empty_file(ctx: ToolContext, tmp_path: Path) -> None:
+    _write(tmp_path, "u.py", "")
+    res = fs_tools.replace_lines(ctx, _lines_call(path="u.py", start="1", end="1", replace="x"))
+    assert res.status == "error" and res.code == "bad_param"
+    assert "empty" in res.body
+
+
+def test_replace_lines_preserves_crlf(ctx: ToolContext, tmp_path: Path) -> None:
+    (tmp_path / "w.txt").write_bytes(b"one\r\ntwo\r\nthree\r\n")
+    res = fs_tools.replace_lines(ctx, _lines_call(path="w.txt", start="2", end="2", replace="2"))
+    assert res.status == "ok"
+    assert (tmp_path / "w.txt").read_bytes() == b"one\r\n2\r\nthree\r\n"
+
+
+def test_replace_lines_calls_the_backup_hook_before_writing(tmp_path: Path) -> None:
+    _write(tmp_path, "u.py", "a\nb\n")
+    seen: list[tuple[str, str]] = []
+    ctx = make_ctx(tmp_path, backup_hook=lambda rel, p, action: seen.append((rel, action)))
+    fs_tools.replace_lines(ctx, _lines_call(path="u.py", start="1", end="1", replace="A"))
+    assert seen == [("u.py", "write")]
+
+
+def test_replace_lines_honours_the_engine_s_expected_slice(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    """The apply-time guard: the engine promises what those lines said, and a
+    file that has moved since is refused rather than silently overwritten."""
+    _write(tmp_path, "u.py", "one\nMOVED\nthree\n")
+    ctx.numbered_slices[1] = "two"
+    res = fs_tools.replace_lines(ctx, _lines_call(path="u.py", start="2", end="2", replace="2"))
+    assert res.status == "error" and res.code == "stale_read"
+    assert (tmp_path / "u.py").read_text(encoding="utf-8") == "one\nMOVED\nthree\n"
+
+
+def test_replace_lines_passes_when_the_expected_slice_still_matches(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    _write(tmp_path, "u.py", "one\ntwo\nthree\n")
+    ctx.numbered_slices[1] = "two\nthree"
+    res = fs_tools.replace_lines(ctx, _lines_call(path="u.py", start="2", end="3", replace="2"))
+    assert res.status == "ok"
+    assert (tmp_path / "u.py").read_text(encoding="utf-8") == "one\n2\n"
 
 
 # -- delete_file ---------------------------------------------------------------
@@ -511,6 +666,28 @@ def test_preview_edit_failure_is_explained(ctx: ToolContext, tmp_path: Path) -> 
         ctx, make_call("edit_file", path="u.py", find="zz", replace="yy")
     )
     assert text.startswith("(edit will fail: match_not_found)")
+
+
+def test_preview_replace_lines_is_the_same_diff_the_write_makes(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    _write(tmp_path, "u.py", "a = 1\nb = 2\nc = 3\n")
+    call = _lines_call(path="u.py", start="2", end="2", replace="b = 3")
+    text = fs_tools.preview_replace_lines(ctx, call)
+    assert "--- a/u.py" in text and "+++ b/u.py" in text
+    assert "-b = 2" in text and "+b = 3" in text
+
+
+def test_preview_replace_lines_reads_the_same_expected_slice_as_the_write(
+    ctx: ToolContext, tmp_path: Path
+) -> None:
+    """Preview and handler share ctx.numbered_slices, so the drawer can never
+    show a diff for an edit the write is about to refuse."""
+    _write(tmp_path, "u.py", "a = 1\nMOVED\n")
+    ctx.numbered_slices[1] = "b = 2"
+    call = _lines_call(path="u.py", start="2", end="2", replace="b = 3")
+    assert fs_tools.preview_replace_lines(ctx, call).startswith("(edit will fail: stale_read)")
+    assert fs_tools.replace_lines(ctx, call).code == "stale_read"
 
 
 def test_preview_write_new_file_and_overwrite_diff(ctx: ToolContext, tmp_path: Path) -> None:

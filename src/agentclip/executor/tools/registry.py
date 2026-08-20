@@ -55,6 +55,15 @@ class ToolContext:
     courtesy channel, not a result: the model's copy of the output still comes
     back in the ToolResult, so nothing is lost when it is None (the default) or
     when the host cannot stream (ExecHandle.peek).
+
+    numbered_slices maps a planned call's id to the exact text the model was
+    SHOWN for the lines that call is about to overwrite - the engine fills it
+    while it builds the plan, from its record of the numbered reads that
+    survived into the previous payload (engine/numbered.py). replace_lines
+    compares it against the file at the instant of the write, which is the only
+    way to catch a file mutated by an earlier call in the SAME reply; empty (the
+    default) simply means nobody is making that promise, and the tool trusts the
+    range it was given.
     """
 
     workspace: Workspace
@@ -64,6 +73,7 @@ class ToolContext:
     backup_hook: Callable[[str, Path, str], None] | None = None
     cancel_event: threading.Event | None = None
     on_output: Callable[[int, str], None] | None = None
+    numbered_slices: dict[int, str] = field(default_factory=dict)
 
     def cancelled(self) -> bool:
         """True once the user asked to cancel the batch this call belongs to."""
@@ -122,6 +132,7 @@ def default_registry(
     role: Literal["master", "subagent"] = "master",
     allow_delegate: bool = False,
     mcp_specs: Sequence[ToolSpec] = (),
+    edit_by_lines: bool = False,
 ) -> ToolRegistry:
     """The built-in tools, in catalog order. When any model-invocable skills are
     discovered, a `skill` tool is inserted (after run_command, before the meta
@@ -145,15 +156,25 @@ def default_registry(
     capabilities this environment happens to have", so they read as one group
     behind the built-ins, while delegate/ask_user/task_done stay the catalog's
     closing "how to hand off and finish" block.
+
+    `edit_by_lines` is the per-service ranged-edit mode (config.ServicePreset).
+    On, it ADDS `replace_lines` behind `edit_file` - added, not swapped, because
+    find/replace is still the better edit wherever the host can carry code
+    faithfully - and swaps read_file's catalog entry for the one that teaches
+    `numbered`. Off, this function returns exactly what it returned before the
+    feature existed, character for character: the gutter is a liability on a
+    host that does not need it (it contaminates the find-blocks a model copies
+    back), and an unused catalog entry is bootstrap budget spent for nothing.
     """
     # Local imports: fs_tools/shell/meta/skills import helpers from this module.
     from agentclip.executor.tools import fs_tools, meta, shell
     from agentclip.executor.tools.skills import make_skill_spec
 
     specs: list[ToolSpec] = [
-        fs_tools.READ_FILE_SPEC,
+        fs_tools.READ_FILE_NUMBERED_SPEC if edit_by_lines else fs_tools.READ_FILE_SPEC,
         fs_tools.WRITE_FILE_SPEC,
         fs_tools.EDIT_FILE_SPEC,
+        *((fs_tools.REPLACE_LINES_SPEC,) if edit_by_lines else ()),
         fs_tools.DELETE_FILE_SPEC,
         fs_tools.LIST_DIR_SPEC,
         fs_tools.GLOB_SPEC,

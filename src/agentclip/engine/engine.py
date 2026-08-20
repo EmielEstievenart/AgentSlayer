@@ -39,14 +39,21 @@ from agentclip.engine.approval import (
     ApprovalPolicy,
     PermissionMode,
 )
+from agentclip.engine.numbered import (
+    ServedRead,
+    content_hash,
+    describe_ranges,
+    surviving_numbered_lines,
+)
 from agentclip.engine.results import fit_results
 from agentclip.engine.states import Decision, EngineStateError, Phase, can_transition
 from agentclip.engine.store.backups import BackupStore, UndoReport
 from agentclip.engine.store.session import SessionStore
 from agentclip.executor.hosts.base import Host
 from agentclip.executor.hosts.local import LocalHost
+from agentclip.executor.tools.fs_tools import numbered_requested, split_lines
 from agentclip.executor.tools.registry import ToolContext, ToolRegistry, ToolSpec, error_result
-from agentclip.executor.tools.sandbox import Workspace
+from agentclip.executor.tools.sandbox import SandboxViolation, Workspace
 from agentclip.protocol.composer import BudgetExceeded, Composer
 from agentclip.protocol.names import normalize_chat_name
 from agentclip.protocol.parser import normalize, normalized_hash, parse_reply
@@ -305,6 +312,11 @@ class _ExecState:
     done_result: str = ""
     results: list[ToolResult] = field(default_factory=list)
     failed_paths: set[str] = field(default_factory=set)
+    # (call id, path param) of every `read_file numbered: yes` that succeeded
+    # this turn. Collected here rather than re-derived at compose time because
+    # the plan - and with it the calls' params - is torn down before the payload
+    # is rendered.
+    numbered_reads: list[tuple[int, str]] = field(default_factory=list)
 
 
 def _norm_path(path: str) -> str:
@@ -368,6 +380,14 @@ class Engine:
         # outbounds live in the model's scrollback). Accepted replies are never
         # remembered - see ingest().
         self._outbound_hashes: deque[str] = deque(maxlen=20)
+        # Per file, the numbered lines that survived into the LAST results
+        # payload - the whole basis on which a `replace_lines` is allowed
+        # (engine/numbered.py). Keyed by _norm_path of the file's path inside
+        # the workspace, and replaced wholesale every time a results payload
+        # goes out, because "the results you were just given" has to mean
+        # literally that: a range read three turns ago has had three turns to
+        # stop pointing where the model thinks it does.
+        self._numbered_reads_served: dict[str, ServedRead] = {}
         self._reply: ParsedReply | None = None
         self._plan: list[_Planned] = []
         self._exec: _ExecState | None = None
@@ -951,6 +971,16 @@ class Engine:
 
     def _build_plan(self, reply: ParsedReply) -> list[_Planned]:
         plan: list[_Planned] = []
+        # Ranged edits accepted so far, per file, in reply order: what the
+        # bottom-to-top and non-overlap rules are checked against. Rebuilt every
+        # plan, because both rules are about ONE reply.
+        ranged: dict[str, list[tuple[int, int]]] = {}
+        # Handed to the tools through the context (see ToolContext.
+        # numbered_slices) and filled as the plan is built, so the preview that
+        # this same loop renders a few lines below already sees its own call's
+        # entry - gate diff and write can never be of different edits.
+        slices: dict[int, str] = {}
+        self._ctx.numbered_slices = slices
         for call in reply.calls:
             fatal = [i for i in call.issues if i.kind in _FATAL_ISSUES]
             if fatal:
@@ -982,6 +1012,22 @@ class Engine:
                     _Planned(call, spec, PendingAction(call, "auto", "", "handled by AgentClip"))
                 )
                 continue
+            if call.tool == "replace_lines":
+                # BEFORE the policy, deliberately: a call that is going to be
+                # refused must not first stop the turn at an approval gate and
+                # make the user read a diff of an edit that will never run.
+                refusal = self._ranged_edit_guard(call, ranged, slices)
+                if refusal is not None:
+                    plan.append(
+                        _Planned(
+                            call,
+                            spec,
+                            PendingAction(call, "auto", "", "pre-resolved unverified range"),
+                            pre_result=refusal,
+                        )
+                    )
+                    self._log_decision(call.id, "denied", "ranged-edit", None)
+                    continue
             verdict = self._policy.verdict(spec, call)
             if verdict in DENY_VERDICTS:
                 # A rule said no, or the permission mode did. Pre-resolved, not
@@ -1029,6 +1075,151 @@ class Engine:
                 )
             )
         return plan
+
+    # -- the ranged-edit guard ---------------------------------------------------
+    #
+    # `replace_lines` is the one tool that cannot check its own work: "lines
+    # 88-90" is true of every file with ninety lines, so a stale line number
+    # writes real code into the wrong place and reports success. Everything that
+    # makes it safe is here and in engine/numbered.py, in three layers:
+    #
+    #   record   at compose time, the numbered lines that SURVIVED into the
+    #            payload (post-truncation, verified against the file) plus the
+    #            file's hash - _record_numbered_reads;
+    #   plan     before the approval gate, four refusals: never read, read but
+    #            not this range, file since changed, and the ordering rules that
+    #            keep several edits to one file from renumbering each other -
+    #            _ranged_edit_guard;
+    #   apply    at the instant of the write, the served text is compared with
+    #            what is on disk, which is the only thing that catches a
+    #            run_command earlier in the SAME reply moving the file -
+    #            fs_tools._apply_replace_lines via ctx.numbered_slices.
+    #
+    # The refusals are pre-resolved errors, not exceptions: the rest of the turn
+    # still runs, and the model is told exactly which door shut and what to do -
+    # every hint here ends in "read it again with numbered: yes", because that
+    # is always the recovery and a guess is always the wrong one.
+
+    def _numbered_target(self, path_param: str) -> tuple[str, str] | None:
+        """(record key, current LF-normalised text) for a path, or None if unreadable.
+
+        The key is the workspace-relative path, so `./src/a.py` and `src/a.py`
+        are one file - the model that reads it one way and edits it the other
+        must not be refused for a spelling.
+        """
+        try:
+            abs_path = self._workspace.resolve_read(path_param)
+            raw = self._host.read_bytes(abs_path)
+            rel = abs_path.relative_to(self._workspace.root).as_posix()
+        except (SandboxViolation, OSError, ValueError):
+            return None
+        return _norm_path(rel), raw.decode("utf-8", errors="replace").replace("\r\n", "\n")
+
+    def _ranged_edit_guard(
+        self,
+        call: ToolCall,
+        ranged: dict[str, list[tuple[int, int]]],
+        slices: dict[int, str],
+    ) -> ToolResult | None:
+        """Refuse a replace_lines the model cannot possibly have verified, else
+        record its expected text and let it through."""
+        path_param = call.params.get("path", "")
+        try:
+            start = int(call.params["start"].strip())
+            end = int(call.params["end"].strip())
+        except (KeyError, ValueError, AttributeError):
+            return None  # missing/non-numeric params are the handler's error to give
+        if start < 1 or end < start:
+            return None  # ...and so is an inside-out range, which it words better
+        disp = path_param or "(no path)"
+        target = self._numbered_target(path_param)
+        served = self._numbered_reads_served.get(target[0]) if target else None
+        if served is None:
+            return error_result(
+                call,
+                "unverified_range",
+                f"replace_lines refused: nothing of {disp} was read with a line-number"
+                " gutter in the results you were just given.",
+                "call read_file with numbered: yes for the range you want, then send"
+                " the edit in your NEXT reply.",
+            )
+        if any(n not in served.lines for n in range(start, end + 1)):
+            return error_result(
+                call,
+                "unverified_range",
+                f"replace_lines refused: lines {start}-{end} are not inside what you"
+                f" were shown of {disp} (numbered lines: {describe_ranges(served.lines)}).",
+                "read_file that range with numbered: yes, then send the edit in your"
+                " NEXT reply.",
+            )
+        assert target is not None  # served is not None => the file was readable
+        if content_hash(target[1]) != served.content_hash:
+            return error_result(
+                call,
+                "stale_read",
+                f"replace_lines refused: {disp} has changed since you read it, so those"
+                " line numbers no longer point where you think.",
+                "read_file it again with numbered: yes, then resend the edit.",
+            )
+        key = target[0]
+        for prev_start, prev_end in ranged.get(key, ()):
+            if start >= prev_start:
+                return error_result(
+                    call,
+                    "bad_edit_order",
+                    f"replace_lines refused: this reply already edits {disp} at lines"
+                    f" {prev_start}-{prev_end}, and {start}-{end} is not BELOW it."
+                    " Edits to one file must go bottom to top.",
+                    "reorder the calls highest start first, so an applied edit can"
+                    " never renumber a range that has not run yet.",
+                )
+            if end >= prev_start:
+                return error_result(
+                    call,
+                    "bad_edit_order",
+                    f"replace_lines refused: lines {start}-{end} overlap the"
+                    f" {prev_start}-{prev_end} edit of {disp} earlier in this reply.",
+                    "merge the two into one call, or pick ranges that do not touch.",
+                )
+        ranged.setdefault(key, []).append((start, end))
+        slices[call.id] = "\n".join(served.lines[n] for n in range(start, end + 1))
+        return None
+
+    def _record_numbered_reads(self, payload: str, reads: Sequence[tuple[int, str]]) -> None:
+        """Replace the served-reads record with what THIS payload really carries.
+
+        Wholesale, never merged, for the reason given where the field is
+        declared. Two honesty rules decide what goes in:
+
+        - the lines come from the RENDERED payload, so anything truncation ate
+          is simply not there (engine/numbered.py explains why the read's own
+          header cannot be trusted for this);
+        - each surviving line is compared against the file as it stands NOW, at
+          the end of the turn, and dropped if it differs. A later call in the
+          same turn may have rewritten a file an earlier call read, and a record
+          that disagrees with the disk is worse than no record at all - it is a
+          promise the apply-time check would have to break.
+        """
+        served: dict[str, ServedRead] = {}
+        by_call = surviving_numbered_lines(payload, [cid for cid, _ in reads])
+        for call_id, path_param in reads:
+            shown = by_call.get(call_id)
+            if not shown:
+                continue
+            target = self._numbered_target(path_param)
+            if target is None:
+                continue
+            key, text = target
+            current, _ = split_lines(text)
+            kept = {n: t for n, t in shown.items() if 0 < n <= len(current) and current[n - 1] == t}
+            if not kept:
+                continue
+            record = served.get(key)
+            if record is None:
+                served[key] = ServedRead(content_hash(text), dict(kept))
+            else:
+                record.lines.update(kept)
+        self._numbered_reads_served = served
 
     def _denial(
         self, verdict: str, spec: ToolSpec, call: ToolCall
@@ -1264,6 +1455,11 @@ class Engine:
             result = p.spec.handler(self._ctx, call)
             if result.status == "error" and call.tool in _MUTATING_TOOLS:
                 exec_.failed_paths.add(_norm_path(call.params.get("path", "")))
+            if result.status == "ok" and numbered_requested(call):
+                # Noted, not yet trusted: what the model can actually SEE of it
+                # is only known once the payload has been rendered and fitted
+                # (_record_numbered_reads).
+                exec_.numbered_reads.append((call.id, call.params.get("path", "")))
             self._record(result)
         return self._finish_turn()
 
@@ -1297,7 +1493,9 @@ class Engine:
             # task_done reopens the session - protocol.md section 8).
             outbound = (
                 self._compose_results(
-                    results, notes + self._take_mode_note() + self._take_instructions_note()
+                    results,
+                    notes + self._take_mode_note() + self._take_instructions_note(),
+                    exec_.numbered_reads,
                 )
                 if results
                 else None
@@ -1305,7 +1503,9 @@ class Engine:
             self._set_phase(Phase.DONE)
             return Done(exec_.done_summary, outbound, exec_.done_result)
         outbound = self._compose_results(
-            results, notes + self._take_mode_note() + self._take_instructions_note()
+            results,
+            notes + self._take_mode_note() + self._take_instructions_note(),
+            exec_.numbered_reads,
         )
         self._set_phase(Phase.AWAITING_REPLY)
         return Send(outbound)
@@ -1330,7 +1530,12 @@ class Engine:
         text = self._config.preset().extra_instructions.strip()
         return [f"note: {_INSTRUCTIONS_NOTE_PREFIX} {text}"] if text else []
 
-    def _compose_results(self, results: list[ToolResult], notes: list[str]) -> Outbound:
+    def _compose_results(
+        self,
+        results: list[ToolResult],
+        notes: list[str],
+        numbered_reads: Sequence[tuple[int, str]] = (),
+    ) -> Outbound:
         capped = fit_results(results, self._config.limits.max_result_chars)
         next_turn = self._turn + 1
         try:
@@ -1343,6 +1548,10 @@ class Engine:
             per_result = max(120, (budget - 600) // max(len(capped), 1) - 150)
             outbound = self._composer.results(next_turn, fit_results(capped, per_result), notes)
         self._turn = next_turn
+        # After the fitting, never before: the record has to describe the text
+        # that is really going out, and the refit above can cut a body a second
+        # time (engine/numbered.py).
+        self._record_numbered_reads(_CHUNK_SEPARATOR.join(outbound.chunks), numbered_reads)
         self._register_outbound(outbound)
         return outbound
 

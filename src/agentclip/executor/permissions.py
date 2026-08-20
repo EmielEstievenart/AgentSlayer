@@ -411,6 +411,11 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "read_file": ("read", "path"),
     "write_file": ("edit", "path"),
     "edit_file": ("edit", "path"),
+    # The ranged edit answers to the same `edit` key as edit_file: it is the
+    # same act on the same resource, and a rule the user wrote to allow edits
+    # under src/ must not stop meaning that because a service turned
+    # edit_by_lines on.
+    "replace_lines": ("edit", "path"),
     "delete_file": ("edit", "path"),
     "list_dir": ("list", "path"),
     "glob": ("glob", "pattern"),

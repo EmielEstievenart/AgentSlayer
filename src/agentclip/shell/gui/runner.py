@@ -403,6 +403,9 @@ class GuiRunner:
     def svc_detection(self, state: dict[str, Any]) -> None:
         self.schedule_call(self.view.svc_detection, state)
 
+    def svc_edit_by_lines(self, on: bool) -> None:
+        self.schedule_call(self.view.svc_edit_by_lines, on)
+
     def svc_scroll(self, action: str) -> None:
         self.schedule_call(self.view.svc_scroll, action)
 

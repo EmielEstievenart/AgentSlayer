@@ -179,7 +179,7 @@ SECTION 5 - RULES OF ENGAGEMENT
 - NEVER modify files via run_command (no sed, no redirects, no rm). Use
   write_file / edit_file / delete_file so every change is backed up and
   reversible.
-- Read before you edit. Keep edit_file find-blocks small but unique.
+- Read before you edit. Keep edit_file find-blocks small but unique.{ranged_edit_rule}
 - Never ask the user to paste file contents or run commands for you - read
   and run things yourself with the tools above.
 - Some calls need user approval. status=denied means the user said no: do
@@ -197,6 +197,19 @@ _DONE_RULE_SUBAGENT = """\
 - When the task is complete and verified, send task_done with `result`
   carrying the full deliverable. Until then every reply must contain at least
   one tool call."""
+
+# Spliced into section 5 only for a service with ``edit_by_lines`` on, and
+# empty for every other one - the catalog with the toggle off has no
+# replace_lines to be a rule about, and section 5's budget is the bootstrap's
+# (see the headroom note in protocol.md section 2). It states the ONE thing the
+# per-tool doc cannot state as forcefully: ordering is a property of the reply,
+# not of any single call in it, so it belongs with the rules that are about
+# replies. Leading newline so the placeholder can sit at the end of the line
+# above and vanish without leaving a blank one.
+RANGED_EDIT_RULE = """
+- replace_lines only edits lines you were shown numbered in the results you
+  were just given; several ranges in one file go bottom to top."""
+
 
 SECTION_RULES = _RULES_HEAD + "\n" + _DONE_RULE
 SECTION_RULES_SUBAGENT = _RULES_HEAD + "\n" + _DONE_RULE_SUBAGENT
@@ -246,6 +259,7 @@ def render_spec(
         (SECTION_RULES_SUBAGENT if subagent else SECTION_RULES).format(
             batching_instruction=BATCHING_INSTRUCTION,
             max_calls=caps.advised_max_calls,
+            ranged_edit_rule=RANGED_EDIT_RULE if preset.edit_by_lines else "",
         ),
     ]
     extra = preset.extra_instructions.strip()

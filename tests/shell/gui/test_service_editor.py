@@ -286,6 +286,24 @@ def test_the_whole_toggle_group_folds_in_at_once(editor: ServiceEditor) -> None:
     assert preset.require_fenced_reply and preset.auto_submit
 
 
+def test_edit_by_lines_is_its_own_setter_not_part_of_the_detection_set(
+    editor: ServiceEditor,
+) -> None:
+    """The detection set is the LEFT column's toggles read together; this tick
+    lives in the form column and is about how the model EDITS, so it writes
+    only its own field (docs/design/ui-briefs/service-editor.md 6)."""
+    before = editor.services["chatgpt"]
+    editor.set_edit_by_lines(True)
+    after = editor.services["chatgpt"]
+    assert after.edit_by_lines is True
+    assert after == replace(before, edit_by_lines=True)
+    assert editor.state()["edit_by_lines"] is True
+    assert editor.state()["labels"]["edit_by_lines"]
+
+    editor.set_edit_by_lines(False)
+    assert editor.services["chatgpt"].edit_by_lines is False
+
+
 def test_the_toggles_apply_even_while_the_form_is_invalid(editor: ServiceEditor) -> None:
     """Independent of the form's validity, exactly as the brief says."""
     edit(editor, max="not a number")
@@ -1038,6 +1056,7 @@ def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
     api.svc_select("claude")
     api.svc_form({"label": "x"})
     api.svc_detection({"signals": ["stale"]})
+    api.svc_edit_by_lines(True)
     api.svc_scroll("end")
     api.svc_matcher("opencv")
     api.svc_tolerance(12)
@@ -1055,6 +1074,7 @@ def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
         "svc_select",
         "svc_form",
         "svc_detection",
+        "svc_edit_by_lines",
         "svc_scroll",
         "svc_matcher",
         "svc_tolerance",
@@ -1068,6 +1088,7 @@ def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
         "svc_forget",
         "svc_close",
     ]
+    assert ("svc_edit_by_lines", (True,)) in calls
     assert ("svc_tolerance", (12,)) in calls
     assert ("svc_capture", ("busy",)) in calls
     assert ("svc_next", ("busy",)) in calls

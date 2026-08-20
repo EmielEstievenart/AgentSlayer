@@ -81,6 +81,29 @@ def test_edit_file_preserves_crlf_through_the_host(ctx: ToolContext, host: FakeH
     assert host.text("/project/win.txt") == "a\r\nNEW\r\n"
 
 
+def test_replace_lines_rewrites_through_the_host(ctx: ToolContext, host: FakeHost) -> None:
+    host.add_file("/project/src/a.py", "one\ntwo\nthree\n")
+    res = fs_tools.replace_lines(
+        ctx, make_call("replace_lines", path="src/a.py", start="2", end="2", replace="TWO")
+    )
+    assert res.status == "ok"
+    assert host.text("/project/src/a.py") == "one\nTWO\nthree\n"
+
+
+def test_replace_lines_preserves_crlf_through_the_host(ctx: ToolContext, host: FakeHost) -> None:
+    host.add_file("/project/win.txt", "a\r\nOLD\r\n")
+    fs_tools.replace_lines(
+        ctx, make_call("replace_lines", path="win.txt", start="2", end="2", replace="NEW")
+    )
+    assert host.text("/project/win.txt") == "a\r\nNEW\r\n"
+
+
+def test_numbered_read_comes_off_the_host_too(ctx: ToolContext, host: FakeHost) -> None:
+    host.add_file("/project/src/a.py", "alpha\nbravo\n")
+    res = fs_tools.read_file(ctx, make_call("read_file", path="src/a.py", numbered="yes"))
+    assert res.body == "src/a.py lines 1-2 of 2\n1| alpha\n2| bravo"
+
+
 def test_delete_file_removes_it_from_the_host(ctx: ToolContext, host: FakeHost) -> None:
     host.add_file("/project/gone.txt", "x")
     res = fs_tools.delete_file(ctx, make_call("delete_file", path="gone.txt"))

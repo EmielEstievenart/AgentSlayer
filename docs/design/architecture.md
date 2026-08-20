@@ -104,7 +104,7 @@ src/agentclip/
 │   └── tools/
 │       ├── registry.py    # ToolRegistry: name → ToolSpec; render_catalog() for the bootstrap prompt
 │       ├── sandbox.py     # Workspace: project-root jail, host-resolved paths, exclusion rules
-│       ├── fs_tools.py    # read_file, write_file, edit_file, list_dir, glob, grep (pure-Python re scan)
+│       ├── fs_tools.py    # read_file, write_file, edit_file, replace_lines, list_dir, glob, grep (pure-Python re scan)
 │       ├── shell.py       # run_command: host.spawn + poll slices, timeout/cancel kill, combined output,
 │       │                  # per-slice peek() diff → ctx.on_output (the shells' live tail)
 │       └── meta.py        # ask_user, task_done (no side effects; engine interprets)
@@ -522,7 +522,7 @@ A rule is `(permission key, resource pattern, action)` with `action ∈ {allow, 
 - **Positional precedence**: the LAST matching rule wins — no specificity sorting. That is what lets a config say `"*": "ask"` and carve exceptions under it. No rule matching at all is an implicit `ask`.
 - **Effective ruleset, per mode** (`build_mode_rules`, later winning): `DEFAULT_CONFIG["permission"]` → the user's shared `permission` block → the mode's built-in overlay (`MODE_PERMISSIONS`) → `DEFAULT_CONFIG["agent"][mode]["permission"]` → the user's `agent.<mode>.permission` block. Two things fall out of that order: a config with no `permissions.json` anywhere evaluates *identically* to one whose file `/config` just created (the same blocks arrive twice in a row, and last-match-wins cannot notice), and the overlay outranks a block written for every mode while still being outrankable by one written *for* that mode — so loosening plan mode is possible, but only where it is unmistakably meant. OpenCode merges its agent overlay earlier, which lets a shared `{"edit": "allow"}` switch plan's denials off by accident.
 
-Tools map onto permission keys: `read_file→read`, `write_file`/`edit_file`/`delete_file→edit`, `list_dir→list`, `glob→glob`, `grep→grep`, `run_command→bash`, `skill→skill`, `delegate→task`, the MCP invoker→`mcp` (`mcp_schema` keeps its own name). The resource is the file path (workspace-relative, forward slashes), the pattern/name parameter, the composite MCP tool id, or the full command line. `ask_user`/`task_done` are AgentClip's own control flow and are never gated.
+Tools map onto permission keys: `read_file→read`, `write_file`/`edit_file`/`replace_lines`/`delete_file→edit`, `list_dir→list`, `glob→glob`, `grep→grep`, `run_command→bash`, `skill→skill`, `delegate→task`, the MCP invoker→`mcp` (`mcp_schema` keeps its own name). The resource is the file path (workspace-relative, forward slashes), the pattern/name parameter, the composite MCP tool id, or the full command line. `ask_user`/`task_done` are AgentClip's own control flow and are never gated.
 
 **The ruleset IS the permission system** — there is no second gate behind it and no "legacy mode" beside it. An install with no `permissions.json` runs on `DEFAULT_CONFIG` in full, so read-only tools, edits and commands are all judged by the same table:
 

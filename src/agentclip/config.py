@@ -270,6 +270,23 @@ class ServicePreset:
     # the smallest presets (protocol.md section 2, "Budget headroom"), and a
     # paragraph pasted in here is a session that never arms.
     extra_instructions: str = ""
+    # Does this service get the ranged-edit tool (`replace_lines`) alongside
+    # `edit_file`, and a `read_file` that can print a line-number gutter?
+    #
+    # OFF by default, and the default matters: gutters contaminate the
+    # find-blocks a model copies back into `edit_file` (protocol.md section 3),
+    # and an extra catalog entry is bootstrap characters spent on every session.
+    # With the toggle off the catalog is byte-identical to a build that never
+    # heard of the feature.
+    #
+    # It exists for one shape of host: one that cannot reproduce code
+    # VERBATIM. M365 Copilot rewrites lambdas and eats `](` sequences, so a
+    # find/replace edit can never match there - the file's own text has to
+    # round-trip through the lossy channel to be found again. A ranged edit
+    # sends only line numbers and the NEW code, so nothing that came out of the
+    # file ever has to survive the trip back. That is a fact about one service,
+    # so it is a per-service setting.
+    edit_by_lines: bool = False
     # After an auto-SENT payload, does the foreground come back to AgentClip?
     # On by default, which is what it has always done: the message is in the
     # box and already sent, so the next thing worth looking at is this window's
@@ -1114,6 +1131,13 @@ def load_config(
                 ctx,
                 warnings,
             ),
+            edit_by_lines=_take_bool(
+                table,
+                "edit_by_lines",
+                base.edit_by_lines if base else False,
+                ctx,
+                warnings,
+            ),
             snap_back=_take_bool(table, "snap_back", base.snap_back if base else True, ctx, warnings),
             alert_sound=_take_bool(
                 table, "alert_sound", base.alert_sound if base else False, ctx, warnings
@@ -1358,6 +1382,10 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
         # appears only for a user who actually wrote some.
         if preset.extra_instructions != (base.extra_instructions if base else ""):
             services_table[key]["extra_instructions"] = preset.extra_instructions
+        # Same rule again: no built-in ships with ranged edits, so the key
+        # appears only for a user who turned it on for a host that needs it.
+        if preset.edit_by_lines != (base.edit_by_lines if base else False):
+            services_table[key]["edit_by_lines"] = preset.edit_by_lines
         # The debug snap-back switch and the attention alert, same rule again:
         # a user who never turned either one off (or on) gets a file that does
         # not mention them.

@@ -1187,6 +1187,46 @@ async def test_the_require_fenced_tick_round_trips_into_the_saved_services(
         assert "gemini" not in raw["services"]
 
 
+async def test_the_edit_by_lines_tick_round_trips_into_the_saved_services(
+    tmp_path: Path, profile_root: Path
+) -> None:
+    """The ranged-edit mode (protocol.md 3.1). It sits in the FORM column, not
+    the left one: the left column is at its height ceiling and the narrow
+    terminal geometry tests below fail the moment it grows."""
+    app, global_path = _make_app(tmp_path, profile_root)
+    async with app.run_test(size=(120, 45)) as pilot:
+        main = app.main_screen
+        assert main is not None
+        await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
+        await _open_editor_via_f2(app, pilot)
+        editor = app.screen
+        assert isinstance(editor, ServiceEditorScreen)
+
+        editor.query_one("#svc-select", Select).value = "claude"
+        await pilot.pause()
+        # Off everywhere: the gutter contaminates find-blocks and the catalog
+        # entries cost bootstrap characters, so nothing ships with it on.
+        assert not editor.query_one("#svc-edit-by-lines", Checkbox).value
+
+        editor.query_one("#svc-edit-by-lines", Checkbox).value = True
+        await pilot.pause()
+        assert editor._services["claude"].edit_by_lines is True
+
+        # ...and it follows the selection rather than leaking onto the next one.
+        editor.query_one("#svc-select", Select).value = "gemini"
+        await pilot.pause()
+        assert not editor.query_one("#svc-edit-by-lines", Checkbox).value
+        assert editor._services["gemini"].edit_by_lines is False
+
+        await pilot.press("escape")
+        await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
+
+        assert app.app_config.services["claude"].edit_by_lines is True
+        raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+        assert raw["services"]["claude"]["edit_by_lines"] is True
+        assert "gemini" not in raw["services"]
+
+
 # -- SCROLL: how the auto-copy flow reaches the newest reply --------------------
 
 

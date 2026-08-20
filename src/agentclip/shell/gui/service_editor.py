@@ -139,6 +139,9 @@ HOVER_SCAN_LABEL = "hover-scan for copy icon"
 REQUIRE_FENCED_LABEL = "require fenced replies"
 STREAM_DELIVERY_LABEL = "paste the payload in chunks"
 AUTO_SUBMIT_LABEL = "press Enter after auto-paste"
+# The ranged-edit mode. Worded as what the model gets, not as the tool's name,
+# which means nothing to anyone who has not turned it on yet.
+EDIT_BY_LINES_LABEL = "edit files by line number"
 
 MATCHER_LABELS: dict[str, str] = {
     MATCHER_ANCHORS: "Anchors (built-in)",
@@ -463,12 +466,14 @@ class ServiceEditor:
                 "require_fenced": REQUIRE_FENCED_LABEL,
                 "stream": STREAM_DELIVERY_LABEL,
                 "auto_submit": AUTO_SUBMIT_LABEL,
+                "edit_by_lines": EDIT_BY_LINES_LABEL,
                 "tolerance": TOLERANCE_LABEL,
             },
             "hover_scan": shown.hover_scan,
             "require_fenced": shown.require_fenced_reply,
             "stream": shown.delivery == DELIVERY_STREAM,
             "auto_submit": shown.auto_submit,
+            "edit_by_lines": shown.edit_by_lines,
             "scroll": shown.scroll_action,
             "scrolls": [{"value": name, "label": SCROLL_LABELS[name]} for name in SCROLL_ACTIONS],
             "matcher": shown.matcher,
@@ -750,6 +755,20 @@ class ServiceEditor:
             require_fenced_reply=bool(require_fenced),
             auto_submit=bool(auto_submit),
         )
+
+    def set_edit_by_lines(self, on: bool) -> None:
+        """Does this service get replace_lines and a numbered read_file?
+
+        Its own setter rather than a member of ``set_detection``: that method
+        folds the LEFT column's toggles back as one set because they describe
+        one thing (how a finished reply is recognised and delivered), and this
+        describes the model's tool catalog. Writes only that field.
+        """
+        key = self._selected_key
+        self._reload = False
+        if key is None or key not in self._services:
+            return
+        self._services[key] = replace(self._services[key], edit_by_lines=bool(on))
 
     def set_scroll(self, action: str) -> None:
         """How the auto-copy flow reaches the newest reply. Writes only that field."""

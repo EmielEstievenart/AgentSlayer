@@ -1578,10 +1578,12 @@ class GuiView:
 
         With nothing calibrated (which is every GUI session in this slice) the
         delivery does the honest thing on its own: the payload is written to the
-        real clipboard, ``chatbox_region`` answers None, no click and no
+        real clipboard, ``verified_chatbox_target`` answers None, no click and no
         synthetic Ctrl+V happen, and the loop lands on ``MANUAL_INSERT`` with
         the "paste it yourself" banner up. That is the existing manual path,
-        reached without a second implementation of it.
+        reached without a second implementation of it - and it is the same
+        answer a fully calibrated session gets when the chat box is not on
+        screen, because a paste may only ever go into a box that was found.
         """
         await self._automation.copy_outbound(text)
 

@@ -2082,8 +2082,10 @@ class MainScreen(Screen[None]):
 
     async def copy_outbound(self, text: str) -> None:
         """ChatView: deliver one outbound payload (the controller's - see
-        ``AutomationController.copy_outbound``). Park it, click the chat box,
-        settle, paste or stream, and tap Enter for a service that opted in."""
+        ``AutomationController.copy_outbound``). Park it, click the chat box if
+        one is actually on screen, settle, paste or stream, and tap Enter for a
+        service that opted in - and with no chat box found, park it and stop
+        there, with the "paste it yourself" banner up."""
         await self._automation.copy_outbound(text)
 
     async def park_outbound(self, text: str) -> None:

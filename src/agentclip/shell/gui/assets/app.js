@@ -619,6 +619,15 @@
     el.runTail.scrollTop = el.runTail.scrollHeight;
   }
 
+  // Did the click that is being handled right now finish a text selection?
+  // A drag ending inside an element still fires `click` on it, so any handler
+  // that turns a whole panel of readable text into one big button has to ask
+  // this first or copying out of that panel is impossible.
+  function draggedOutText() {
+    var sel = window.getSelection && window.getSelection();
+    return !!(sel && !sel.isCollapsed && String(sel).length);
+  }
+
   function toggleRunOutput() {
     // Opening on a non-streaming row is a silent no-op, exactly as
     // RunPanel.toggle_output is; closing always works.
@@ -2023,8 +2032,20 @@
     // Never steal the caret out of a reject note being written: the state push
     // that lands mid-typing is the gate's own, and it would take the box away.
     // Nor out of the service editor, whose form is a dozen boxes deep and which
-    // is up for as long as somebody is configuring a service.
-    if (event.composer_enabled && !rejectOpen && !editorOpen && !modalUp()) el.composer.focus();
+    // is up for as long as somebody is configuring a service. Nor - the same
+    // rule, one surface wider - out of a selection somebody is making in the
+    // transcript: focusing a textarea collapses the document's selection, and a
+    // state push landing between the drag and the ctrl+c is not a reason to
+    // lose the words. The next click hands the caret back on its own.
+    if (
+      event.composer_enabled &&
+      !rejectOpen &&
+      !editorOpen &&
+      !modalUp() &&
+      !draggedOutText()
+    ) {
+      el.composer.focus();
+    }
     syncPopup();
     // ...and the five facts the key hint strip reads. Kept here rather than in
     // the footer's own code because this event IS the state: one snapshot, one
@@ -2987,7 +3008,14 @@
     // A click anywhere on the run panel is the same request as ctrl+o: the
     // panel is a few rows tall and its only interactive state is that one
     // toggle, so hunting for a disclosure triangle would be ceremony.
-    el.run.addEventListener("click", toggleRunOutput);
+    // The exception is a click that ENDED A DRAG: the open panel's tail is
+    // command output, which is exactly the kind of text people copy, and
+    // releasing the mouse at the end of selecting some of it must not slam the
+    // panel shut on the words just selected.
+    el.run.addEventListener("click", function () {
+      if (draggedOutText()) return;
+      toggleRunOutput();
+    });
 
     el.gateApprove = id("gate-approve");
     el.gateReject = id("gate-reject");

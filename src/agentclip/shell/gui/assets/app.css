@@ -143,6 +143,29 @@ body {
   height: 100%;
 }
 
+/* -- what may be selected --------------------------------------------------
+   Selection is ON for the window (shell.py's `text_select=True`; pywebview's
+   default would inject `body {user-select: none}` over this whole file), so the
+   default here is that anything the user READS can be dragged over and copied:
+   the transcripts and their code blocks, the gate preview, the run output, the
+   log pane, the sidebar's status lines, the modal bodies. That is the point -
+   a transcript you cannot copy an error message out of is half a transcript.
+
+   What follows is the exception list, and every entry earns it the same way: it
+   is a CLICK TARGET, so a drag across it is a mis-aimed click rather than an
+   attempt to keep the words, and a double-tap on it would paint a button label
+   blue for no reason. `.titlebar` and `.keyhints` say so at their own rules
+   further down, because for those two it is part of a longer story (a drag
+   region, and a strip that must not steal the caret). */
+.wintabs,
+button,
+.run-head,
+.ev details summary,
+.set-choice,
+.svc-check {
+  user-select: none;
+}
+
 /* -- header --------------------------------------------------------------- */
 
 .titlebar {

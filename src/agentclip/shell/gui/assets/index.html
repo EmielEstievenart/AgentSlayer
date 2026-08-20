@@ -355,11 +355,13 @@
 
           <div class="svc-col svc-col-appearance">
             <div class="side-title">APPEARANCE · what it looks like</div>
-            <!-- One row per TemplateKind, all seven always, whether or not
-                 anything is captured. The thumbnail is ONE image of the kind's
-                 stack as a PNG data URI, with an arrow either side to walk the
-                 rest - there is no coarse fallback tier here and no reason the
-                 column may not scroll (brief §7). -->
+            <!-- One card per TemplateKind, all seven always, whether or not
+                 anything is captured, flowing into as many columns as the lane
+                 has room for. Each card stacks: name and status, the picture
+                 with an arrow either side to walk the kind's stack, the click
+                 point, then Capture/Clear. The thumbnail is ONE image of that
+                 stack as a PNG data URI - there is no coarse fallback tier
+                 here and no reason the column may not scroll (brief §7). -->
             <ol class="svc-kinds" id="svc-kinds"></ol>
             <div class="side-status" id="svc-templates"></div>
             <button id="svc-forget" type="button">Forget appearance</button>

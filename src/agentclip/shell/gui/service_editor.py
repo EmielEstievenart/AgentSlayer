@@ -129,9 +129,9 @@ SIGNAL_TEMPLATE: dict[str, TemplateKind] = {
 }
 SIGNAL_UNCAPTURED = "ticked but not captured — it will be skipped"
 
-# The two click-point boxes on every appearance row. Titles rather than visible
-# labels - the boxes are three characters wide - so the sentence has room to say
-# what the number means and what 50 does.
+# The two click-point boxes on every appearance card. Titles rather than
+# visible labels - the line beside them has room for "click %" and no more - so
+# the sentence has room to say what the number means and what 50 does.
 CLICK_X_LABEL = "click point: % across the captured image (50 = the middle)"
 CLICK_Y_LABEL = "click point: % down the captured image (50 = the middle)"
 

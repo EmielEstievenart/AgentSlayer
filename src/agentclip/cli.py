@@ -42,6 +42,7 @@ from agentclip.shell.app.engine_launch import (
 )
 from agentclip.shell.app.link import Link, LocalLink, McpStatusLine, SkillReport
 from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLinkClient
+from agentclip.shell.app.sizes import fmt_tokens
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.graphics import probe_terminal
 
@@ -707,7 +708,22 @@ def main(argv: list[str] | None = None) -> int:
         for key in sorted(config.services):
             preset = config.services[key]
             marker = "*" if key == config.general.service else " "
-            print(f"{marker} {key:<16} {preset.max_paste_chars:>9,} chars  {preset.label}")
+            # Characters first (that is the unit the preset is CONFIGURED in, and
+            # the number somebody comparing presets would edit), the token
+            # estimate second, because that is the one that answers "will my
+            # task fit" - the same pairing the sidebar's caption uses.
+            #
+            # ASCII only, and deliberately: the sidebar spells this pairing with
+            # an "≈", but this line goes through a bare ``print`` to a stream
+            # that is NOT always a UTF-8 console. Redirect it (``--list-services
+            # > presets.txt``, or a pipe into ``more``) on a cp1252 Windows box
+            # and Python encodes with the locale codec, where "≈" is a hard
+            # UnicodeEncodeError - a listing that dies when you try to save it.
+            tokens = fmt_tokens(preset.max_paste_chars, config.general.chars_per_token)
+            print(
+                f"{marker} {key:<16} {preset.max_paste_chars:>9,} chars "
+                f"{'(' + tokens + ')':<16} {preset.label}"
+            )
         return 0
 
     # The session tree, for the launches that keep one HERE. A remote launch no

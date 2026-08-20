@@ -103,6 +103,7 @@ from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot, SlotCalibration, can_delegate, missing
 from agentclip.shell.app.link import McpStatusLine
+from agentclip.shell.app.sizes import fmt_budget
 
 _HINT = "F3 hides this column · F7 elements · F5 armed · F2 settings · F1 help"
 
@@ -513,9 +514,14 @@ class Sidebar(Vertical):
         preset = self._config.services.get(key or self._default_service())
         if not preset:
             return ""
+        # Both units, and characters first: these two numbers are the preset's
+        # CONFIGURED values (what a user would edit in the service editor or
+        # config.toml, both of which are in characters), and the token estimate
+        # beside each is what says whether the budget is big enough.
+        divisor = self._config.general.chars_per_token
         return (
-            f"{preset.label} · {preset.max_paste_chars:,} chars per paste "
-            f"· {preset.total_context_chars:,} chars context"
+            f"{preset.label} · {fmt_budget(preset.max_paste_chars, divisor)} per paste "
+            f"· {fmt_budget(preset.total_context_chars, divisor)} context"
         )
 
     @on(Select.Changed, "#service-select")

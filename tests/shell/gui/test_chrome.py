@@ -401,7 +401,12 @@ def test_the_sidebar_carries_every_block_the_column_draws(harness: Harness) -> N
     assert event["project"].endswith("project")
     assert [pair[0] for pair in event["services"]] == sorted(harness.view._config.services)
     assert event["service"] in harness.view._config.services
-    assert "chars per paste" in event["service_label"]
+    # Both units on the budget caption: characters because that is what the
+    # preset is configured in, the token estimate because that is what says
+    # whether the budget is big enough (``shell/app/sizes.py``).
+    assert "chars ≈ ~" in event["service_label"]
+    assert "tokens per paste" in event["service_label"]
+    assert "tokens context" in event["service_label"]
     assert event["profile_note"].startswith("appearance:")
     assert event["region"] == "not set - alt-tab to the chat yourself"
     assert event["slot_note"] == "the main agent's chat window"
@@ -793,6 +798,23 @@ def test_the_run_panel_and_the_refocus_both_stand_off_a_live_selection() -> None
     assert js.count("draggedOutText()") == 3  # the definition and both guards
     toggle = js[js.index('el.run.addEventListener("click"') :]
     assert "if (draggedOutText()) return;" in toggle[: toggle.index("});")]
+
+
+def test_a_transcript_note_keeps_the_line_breaks_the_controller_wrote() -> None:
+    """`/skills`, `/mcp` and `/config` all answer with a BLOCK of text - a header
+    and one indented row per thing. The node is filled by innerHTML from an
+    escaped string, so without an explicit white-space rule the browser folds
+    every one of those newlines into a space and the listing lands as a run-on
+    paragraph. Pinned in the source, the way ``revealReply``'s branch is: there
+    is no layout engine here to ask.
+
+    ``pre-wrap`` specifically, not ``pre``: a long description still has to wrap
+    inside the panel rather than push a horizontal scrollbar.
+    """
+    css = (ASSETS / "app.css").read_text(encoding="utf-8")
+    rule = css[css.index(".ev-note {") :]
+    rule = rule[: rule.index("}")]
+    assert "white-space: pre-wrap;" in rule
 
 
 # == revealing a finished reply ===============================================

@@ -143,6 +143,10 @@ async def test_every_transcript_add_produces_its_own_event(harness: Harness) -> 
     assert events[2]["raw"].startswith("CALL run_command")
     assert events[5]["payload"] == "payload"
     assert events[5]["turn"] == 2
+    # The size crosses ALREADY RENDERED, in tokens: the divisor behind it is
+    # configuration and the page never learns it (``shell/app/sizes.py``).
+    assert events[5]["size"] == "~2 tokens"
+    assert events[5]["note"] == "→ results (~2 tokens)"
 
 
 async def test_an_ingested_reply_is_bracketed_so_the_page_can_reveal_it(harness: Harness) -> None:

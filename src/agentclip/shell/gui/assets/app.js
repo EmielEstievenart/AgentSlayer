@@ -643,7 +643,9 @@
           '<div class="ev-summary">' +
             note +
             "</div>" +
-            details("outbound turn " + event.turn + " (" + event.chars + " chars)", event.payload)
+            // ``size`` arrives already rendered ("~4.2k tokens"): the divisor
+            // behind it is configuration, and this page never learns it.
+            details("outbound turn " + event.turn + " (" + event.size + ")", event.payload)
         ),
         false
       );

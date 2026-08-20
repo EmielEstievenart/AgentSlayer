@@ -26,7 +26,7 @@ In-app changes (service editor, theme pickers, saved remote targets) are persist
 |---|---|---|
 | `service` | `"chatgpt-attach"` | Active service preset for the master window |
 | `subagent_service` | `""` | Preset for the sub-agent window (`""` = same as master) |
-| `chars_per_token` | `3` | Token-estimate divisor, 1–10 |
+| `chars_per_token` | `3` | Token-estimate divisor, 1–10. Sizes in the UI are shown as `~N tokens` — this is what they are divided by |
 | `theme` | `"textual-dark"` | TUI theme: `textual-light`, `textual-dark`, `claude-warm`, `claude-dark` |
 
 ### [clipboard]

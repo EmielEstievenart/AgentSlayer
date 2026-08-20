@@ -117,31 +117,43 @@ Header: "MATCHING · how it is found".
 
 ### 2.7 Appearance column (right)
 
-Header: "APPEARANCE · what it looks like". One fixed-height row per
-`TemplateKind` (7 rows, declaration order — see §6 for the full list),
-each row containing:
+Header: "APPEARANCE · what it looks like". One **card** per `TemplateKind`
+(7 cards, declaration order — see §6 for the full list). A
+card is a strict vertical stack: side by side, a picture, the arrows that
+walk its stack, a coordinate pair and two buttons need more unshrinkable
+width than this lane has at any window size, and it is the buttons that
+fall off the end. Stacked, a card is about half a lane wide, so the cards
+flow into as many columns as the lane can hold — two in the three-lane
+layout, more once the lanes stack (§7) and this one has the modal's full
+width. Top to bottom, a card holds:
 
-1. **Thumbnail** (`svc-tpl-preview-<kind>`) — a picture of *one* captured
-   image for that kind — the one the row is currently **showing** — or blank
-   if none. Rendered as a sixel bitmap when the terminal supports it, else as
-   a 12×2 half-block-cell approximation (TUI-only distinction — see §7). In a
-   GUI frontend this is simply an `<img>`.
-2. **Two arrows**, one either side of the thumbnail, that step the shown
-   variant back and forward through that kind's stack, **wrapping** at both
-   ends. Disabled (not hidden — the column must not reflow when a second
-   capture lands) while the kind holds fewer than two images. Which variant
-   is shown is state of the editor, not of the row's widget: it is
-   reconciled — clamped — against the folder every time the profile is
-   re-read. *TUI: not implemented; the Textual editor shows the first
-   variant only (§7).*
-3. **Name + status**, stacked:
+1. **Name + status**, stacked, as the card's heading:
    - kind label (e.g. "Busy indicator")
    - status line `svc-tpl-<kind>`: `"not captured"` / `"<w>×<h> · captured"`
      / `"<w>×<h> · N/M"` — the position of the shown variant in the stack,
      and its dimensions, since variants of one control are routinely
      different sizes. (TUI: `"<w>×<h> · N images"`, the first image's size,
      `service_editor.py:363-376`.)
-4. **Actions**, stacked:
+2. **Thumbnail** (`svc-tpl-preview-<kind>`) — a picture of *one* captured
+   image for that kind — the one the card is currently **showing** — or blank
+   if none. Rendered as a sixel bitmap when the terminal supports it, else as
+   a 12×2 half-block-cell approximation (TUI-only distinction — see §7). In a
+   GUI frontend this is simply an `<img>`, as wide as the card has room for
+   and of a fixed height, so a row of cards stays level.
+3. **Two arrows**, one either side of the thumbnail — on the same line as
+   it, the one thing on the card that is not a row of its own — that step the
+   shown variant back and forward through that kind's stack, **wrapping** at
+   both ends. Disabled (not hidden — the column must not reflow when a second
+   capture lands) while the kind holds fewer than two images. Which variant
+   is shown is state of the editor, not of the card's widget: it is
+   reconciled — clamped — against the folder every time the profile is
+   re-read. *TUI: not implemented; the Textual editor shows the first
+   variant only (§7).*
+4. **Click point** — one labelled line under the picture it aims into:
+   "click %" and two number boxes with a `×` between them (x then y, 0-100,
+   default 50/50 — behaviour in §5.5). Three characters wide each, so what
+   the number means is on the boxes' tooltips rather than beside them.
+5. **Actions**, side by side along the bottom of the card:
    - Button `svc-capture-<kind>-btn` — "Capture"
    - Button `svc-clear-<kind>-btn` — "Clear" (disabled while that kind has
      nothing captured)

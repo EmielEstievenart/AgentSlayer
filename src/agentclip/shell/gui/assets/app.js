@@ -1601,8 +1601,9 @@
     box.max = "100";
     box.step = "1";
     box.id = id;
-    // The whole explanation of the pair lives here: the boxes are three
-    // characters wide and the row has no room for a label beside them.
+    // The line says "click %"; what 50 means, and which of the two is across
+    // and which is down, is more than three characters of label can carry, so
+    // the sentence lives on the box itself.
     box.title = title || "";
     return box;
   }
@@ -1628,9 +1629,9 @@
     });
     svcScrolls = svcRadios(el.svcScroll, "svc-scroll-set", event.scrolls, "svc_scroll");
     svcMatchers = svcRadios(el.svcMatcher, "svc-matcher-set", event.matchers, "svc_matcher");
-    // One row per TemplateKind, the kind's own value as the id, so one pair of
-    // handlers serves all seven and an eighth appearance is an enum member and
-    // nothing else.
+    // One card per TemplateKind, the kind's own value as the id, so one pair
+    // of handlers serves all seven and an eighth appearance is an enum member
+    // and nothing else.
     svcKinds = {};
     el.svcKinds.innerHTML = "";
     (event.kinds || []).forEach(function (kind) {
@@ -1680,16 +1681,21 @@
       text.appendChild(name);
       text.appendChild(status);
 
-      // The two click-point boxes. They send on "change" rather than on every
-      // keystroke - "5" on its way to "50" is not a click point anybody asked
-      // for - and the model clamps whatever arrives, so a box is never a way
-      // to aim outside the picture.
+      // The two click-point boxes, on their own line under the picture they
+      // aim into. They send on "change" rather than on every keystroke - "5"
+      // on its way to "50" is not a click point anybody asked for - and the
+      // model clamps whatever arrives, so a box is never a way to aim outside
+      // the picture.
       var click = document.createElement("div");
       click.className = "svc-click";
+      var clickLabel = document.createElement("span");
+      clickLabel.className = "svc-click-label";
+      clickLabel.textContent = "click %";
       var clickX = svcClickBox("svc-click-x-" + kind.kind, (event.click_labels || {}).x);
       var times = document.createElement("span");
       times.textContent = "×";
       var clickY = svcClickBox("svc-click-y-" + kind.kind, (event.click_labels || {}).y);
+      click.appendChild(clickLabel);
       click.appendChild(clickX);
       click.appendChild(times);
       click.appendChild(clickY);
@@ -1721,8 +1727,11 @@
       actions.appendChild(capture);
       actions.appendChild(clear);
 
-      item.appendChild(stack);
+      // Top to bottom, one card: which appearance this is, the picture and the
+      // arrows that walk its stack, where in that picture the click goes, and
+      // the two buttons that make or unmake it.
       item.appendChild(text);
+      item.appendChild(stack);
       item.appendChild(click);
       item.appendChild(actions);
       el.svcKinds.appendChild(item);

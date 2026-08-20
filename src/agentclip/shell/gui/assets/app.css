@@ -1552,9 +1552,11 @@ button:not(:disabled) {
   display: grid;
   /* The two outer lanes are still fixed-looking at any comfortable width; the
      minmax() only lets them give ground before the modal starts overflowing
-     its own scrim. Under the narrow breakpoint (end of file) the three lanes
-     stack instead. */
-  grid-template-columns: minmax(200px, 260px) minmax(220px, 1fr) minmax(240px, 320px);
+     its own scrim. The appearance lane is the wider of the two because its
+     cards flow into columns - 380px is two of them side by side, and the form
+     in the middle is still the roomiest thing in the modal. Under the narrow
+     breakpoint (end of file) the three lanes stack instead. */
+  grid-template-columns: minmax(200px, 260px) minmax(220px, 1fr) minmax(260px, 380px);
   gap: 18px;
   min-height: 0;
   overflow: auto;
@@ -1659,18 +1661,52 @@ button:not(:disabled) {
   font-size: 11.5px;
 }
 
+/* Every appearance is a CARD, not a row. Four things belong to one kind - a
+   picture, the arrows that walk its stack, a coordinate pair and two buttons -
+   and side by side they need some 350px of unshrinkable width, which is more
+   than this lane has at any window size: the buttons fell off the end and the
+   label was squeezed to nothing. Stacked, the card is only as wide as its
+   widest line - the click-point pair - which is about half a lane.
+
+   The cards then FLOW into as many columns as the lane can hold, so seven of
+   them are never a seven-deep tower: two columns in the lane below, more when
+   the modal stacks its lanes and this one gets the full width. */
 .svc-kinds {
-  margin: 0;
+  display: grid;
+  /* 165px is the click-point line - the widest of the four - plus the card's
+     own padding. A column narrower than its content is what the old row was. */
+  grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
+  gap: 8px;
+  margin: 0 0 10px;
   padding: 0;
   list-style: none;
 }
 
 .svc-kind {
   display: flex;
-  gap: 10px;
-  align-items: center;
-  padding: 6px 0;
-  border-bottom: 1px solid var(--line);
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* The card's heading: which appearance this is, and what is on file for it. */
+.svc-kind-text {
+  min-width: 0;
+}
+
+.svc-kind-name {
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.svc-kind-status {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 /* The crop box and the two arrows that walk its stack, as one unit: the arrows
@@ -1678,26 +1714,28 @@ button:not(:disabled) {
    landing cannot reflow the column under the pointer. */
 .svc-variants {
   display: flex;
-  flex: none;
-  gap: 2px;
+  gap: 4px;
   align-items: center;
 }
 
 .svc-arrow {
+  flex: none;
   padding: 3px 5px;
   font-size: 12px;
   line-height: 1;
 }
 
 /* The crop box is drawn whether or not it holds a picture, so a capture
-   landing cannot walk every row below it down the column. */
+   landing cannot walk every card below it down the lane. It takes whatever
+   width the card has left over between the arrows; the height is fixed, which
+   is what keeps a row of cards level. */
 .svc-thumb {
   display: flex;
   align-items: center;
   justify-content: center;
-  flex: none;
-  width: 64px;
-  height: 34px;
+  flex: 1;
+  min-width: 0;
+  height: 38px;
   border: 1px solid var(--line);
   border-radius: 4px;
   background: var(--bg);
@@ -1710,51 +1748,64 @@ button:not(:disabled) {
   image-rendering: pixelated;
 }
 
-.svc-kind-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.svc-kind-name {
-  font-size: 12.5px;
-}
-
-.svc-kind-status {
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
 /* Where inside the matched picture the click goes, x then y, as percentages.
-   Side by side and narrow: the pair has to read as ONE setting about the row it
-   sits in, and the × between them is what says the two numbers are coordinates
-   rather than two independent knobs. */
+   One labelled line under the picture: the pair has to read as ONE setting
+   about the card it sits in, and the × between them is what says the two
+   numbers are coordinates rather than two independent knobs. */
 .svc-click {
   display: flex;
-  flex: none;
-  gap: 3px;
+  gap: 4px;
   align-items: center;
   color: var(--text-dim);
   font-family: var(--mono);
   font-size: 11px;
 }
 
+/* The one thing on the line that may give. It is the same label on every card,
+   so the boxes line up down a column of them with nothing spacing them. */
+.svc-click-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .svc-click input {
-  width: 3.4em;
+  flex: none;
+  width: 3.6em;
   padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
   font-family: var(--mono);
   font-size: 11px;
   text-align: right;
 }
 
+/* A number box comes with a pair of spin buttons the engine draws INSIDE it on
+   hover; in a box three characters wide they land on top of the digits. The
+   arrow keys still step the value, which is the only stepping this pair was
+   ever going to get. */
+.svc-click input::-webkit-inner-spin-button,
+.svc-click input::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+/* Pushed to the bottom of the card so the buttons of a row of cards line up
+   even where one kind's name wrapped onto a second line. */
 .svc-kind-actions {
   display: flex;
-  flex: none;
   gap: 6px;
+  margin-top: auto;
 }
 
 .svc-kind-actions button {
-  padding: 3px 8px;
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
   font-size: 11.5px;
 }
 

@@ -866,10 +866,41 @@ against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
   deferred since increment 1. Per window because the cap is about how much DOM
   one scroll carries; the Python-side event list is untouched, so `l` still
   exports everything that ever happened.
-- Help, settings, the payload block and every blocking prompt reuse the **one**
+- Help, settings, the user guide, the payload block and every blocking prompt
+  reuse the **one**
   modal element. A parked flow always wins it — F1/F4 are inert while a prompt
   is up, which is the same "a modal owns all key input" rule the TUI gets from
   its screen stack.
+- **The user guide is a fourth rider on that element, and the titlebar's only
+  button.** `docs/commands.md` and `docs/configuration.md` — the user-facing
+  manual — are read at run time (`shell/gui/docs.py`) and pushed whole on a
+  `docs` event, `commands`' twin: once per page load, because it is something
+  the page needs to HAVE. The files stay the source of truth; nothing copies
+  them into `assets/` and nothing pre-renders them, so the two documents and
+  what the window shows cannot drift. The viewer is the modal in a `docs`
+  class — a switcher (Commands / Configuration) that stays put over a body that
+  scrolls — and Esc closes it through the same `closePageModal` every page
+  screen uses. A BUTTON and no binding: F1–F8 are all taken and a bare letter
+  belongs to the main screen's session keys, so the affordance is the button
+  plus a "User guide" action on F1's sheet. The F1 sheet stays what it was —
+  the cheatsheet drawn from the page's own `KEYS` table and the command
+  registry; this is the prose neither of those can carry.
+  - `app.js`'s markdown renderer grew what the guide uses and the transcripts
+    never did: pipe tables (GFM's escaped `\|`, resolved by the table before any
+    inline rule, so `[on\|off]` inside a code span in a cell works), code spans
+    by backtick RUN (the configuration page writes a literal backtick as a
+    double-tick span), backslash escapes (`\<name\>` in a heading), block quotes
+    and links. HTML is still escaped FIRST and never unescaped — both documents
+    are full of literal `<project>` and `<key>` — and the whole renderer stays
+    pure, which is what lets one of them serve a transcript block and a
+    reference manual.
+  - Packaging follows the assets' rule one package up: the files are collected
+    to `agentclip/docs`, which is where `files("agentclip") / "docs"` looks —
+    `packaging/agentclip.spec` for the frozen exe (§5) and a `force-include` in
+    `pyproject.toml` for a wheel. A source checkout needs neither: the reader
+    walks up to the repo's own `docs/`. Nowhere at all is not an error — the
+    viewer shows a note saying where the guide lives — which is exactly why
+    `--gui-smoke` reads it back out of a build and fails there instead.
 
 Two decisions recorded rather than smuggled:
 
@@ -1060,8 +1091,17 @@ the thing this section predicted:
   the `gui` extra; naming them guarantees that whatever the build box has gets
   collected instead of skipped, and the per-distro question stays open
   (`docs/design/remote-executor.md` §5).
+- **The user guide is collected the same way**, and it is the only `datas` of
+  ours that is not already package data in a checkout: `docs/commands.md` and
+  `docs/configuration.md` live at the REPO ROOT, not under `src/`. They go to
+  `agentclip/docs` because that is where `files("agentclip") / "docs"` looks
+  (`shell/gui/docs.py`), and `pyproject.toml` force-includes them at the same
+  path so a wheel answers the reader identically. Losing them does not crash
+  anything — the GUI's "docs" button opens a note saying the build carries no
+  guide — which is precisely why the check below reads them too.
 - **`--gui-smoke` is what keeps this honest** (`cli.py`, hidden, beside
-  `--pick-region`). It imports pywebview, READS all three assets back through
+  `--pick-region`). It imports pywebview, READS all three assets and both guide
+  pages back through
   `importlib.resources`, runs `webview2_missing()` and prints
   `gui-smoke: ok renderer=<edgechromium|missing|n/a>`. A build box without the
   WebView2 runtime still exits 0 — the check is on the FREEZE, not the machine —

@@ -98,6 +98,7 @@ from agentclip.shell.app.link import Link, NoSkills, SkillReport
 from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.gui.bridge import Bridge
+from agentclip.shell.gui.docs import load_doc_pages
 from agentclip.shell.gui.remote import (
     ConnectDialog,
     RemoteConnect,
@@ -864,6 +865,7 @@ class GuiView:
         self._push_sidebar()
         self._push_commands()
         self._push_settings()
+        self._push_docs()
         self._remember_own_window()
         # Nothing is drawn yet, so this starts no worker - but it is the only
         # writer of the DETECTION block, and the block has to name the window it
@@ -927,11 +929,13 @@ class GuiView:
         self._push_tabs()
         self._push_sidebar()
         self._push_mcp()
-        # The registry and the appearance: both are page state a reload wipes,
-        # and both are read off Python (the commands from
-        # ``agentclip.shell.app.commands``, the theme from the config).
+        # The registry, the appearance and the user guide: all three are page
+        # state a reload wipes, and all three are read off Python (the commands
+        # from ``agentclip.shell.app.commands``, the theme from the config, the
+        # guide from ``docs/*.md``).
         self._push_commands()
         self._push_settings()
+        self._push_docs()
         # A fresh page draws the ELEMENTS column hidden, whatever it was doing
         # before the load, so the encoder is told the truth before the rows go
         # out - a reload is the one moment this flag can be stale.
@@ -2019,6 +2023,25 @@ class GuiView:
             "settings",
             theme=self._config.gui.theme,
             themes=[{"value": value, "label": label} for value, label in THEME_CHOICES],
+        )
+
+    def _push_docs(self) -> None:
+        """The user guide, as markdown, for the titlebar's "docs" button.
+
+        ``commands``' twin, and pushed beside it for the same reason: it is
+        something the page needs to HAVE rather than to be told about, and a
+        reload has nothing of its own to rebuild it from. What crosses is the
+        text of ``docs/*.md`` verbatim - the files are the source of truth and
+        nothing between here and the page edits them (``gui/docs.py``); the
+        rendering is the page's own markdown renderer, the one the transcripts
+        already use.
+        """
+        self._bridge.send(
+            "docs",
+            pages=[
+                {"name": page.name, "title": page.title, "text": page.text, "found": page.found}
+                for page in load_doc_pages()
+            ],
         )
 
     def set_theme(self, theme: str) -> None:

@@ -74,6 +74,17 @@ build = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentclip"]
 
+# The user guide, which the GUI's "docs" button renders (shell/gui/docs.py reads
+# it, app.js renders it). The files live at the repo root - they are documents
+# first and package data second - so a wheel would otherwise ship an app whose
+# help button has nothing to open. Copied to `agentclip/docs`, where
+# ``files("agentclip") / "docs"`` looks; packaging/agentclip.spec puts them at
+# the same path for the frozen exe. A source checkout needs neither: the reader
+# walks up to the repo's own docs/ when the package carries none.
+[tool.hatch.build.targets.wheel.force-include]
+"docs/commands.md" = "agentclip/docs/commands.md"
+"docs/configuration.md" = "agentclip/docs/configuration.md"
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

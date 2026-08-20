@@ -120,8 +120,8 @@ def test_every_key_the_page_binds_is_a_row_of_the_one_table() -> None:
     way the two can drift is a binding that bypasses the table - a stray
     ``ev.key === "..."`` in the app-wide handler - so that is what this looks
     for. The composer's own handler is exempt and named: its keys (Enter,
-    Shift+Enter, the arrows, Esc) belong to the textarea, are a different
-    dispatcher, and the help sheet describes them as prose.
+    Shift+Enter, Ctrl+J, the arrows, Esc) belong to the textarea, are a
+    different dispatcher, and the help sheet describes them as prose.
     """
     handler = APP_JS[APP_JS.index("function onDocumentKey(ev)") :]
     handler = handler[: handler.index("\n  }\n")]
@@ -169,13 +169,16 @@ def test_every_row_is_described_and_filed_under_a_section() -> None:
     assert 'var KEY_SECTIONS = ["App", "Approval", "Session"];' in APP_JS
 
 
-def test_the_gui_documents_its_own_divergences_not_the_tuis() -> None:
-    """The sheet shown must be THIS shell's bindings, recorded divergences and
-    all - not a copy of the TUI's table. The newline key is the tell: the help
-    says Shift+Enter and names Ctrl+J only as the difference, and no row of the
-    key table binds Ctrl+J at all."""
+def test_the_newline_chord_is_both_shift_enter_and_ctrl_j() -> None:
+    """Shift+Enter is the web-native newline; Ctrl+J is the TUI's, honored here
+    too so the muscle memory transfers between shells. Both live in the
+    composer's OWN handler - no row of the key table binds Ctrl+J, because a
+    newline outside the composer means nothing."""
     assert "Shift+Enter inserts a newline" in APP_JS
-    assert "the TUI uses Ctrl+J" in APP_JS
+    assert "so does Ctrl+J" in APP_JS
+    handler = APP_JS[APP_JS.index("function onComposerKey(ev)") :]
+    handler = handler[: handler.index("\n  }\n")]
+    assert '(ev.key === "j" || ev.key === "J") && ev.ctrlKey' in handler
     assert not any("ctrl+j" in entry["keys"].lower() for entry in key_entries())
 
 

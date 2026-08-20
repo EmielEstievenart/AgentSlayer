@@ -300,10 +300,11 @@ every later increment is built on:
 
 ### Three GUI-side decisions the TUI has no equivalent for
 
-- **Enter sends, Shift+Enter is a newline.** The TUI uses `ctrl+j` for the
-  newline because Enter is its send key inside a Textual `TextArea`; the GUI
-  uses the web-native convention every chat composer has. A deliberate
-  shell-idiom difference, recorded here so it is not read as drift.
+- **Enter sends, Shift+Enter is a newline — and so is `ctrl+j`.** The TUI uses
+  `ctrl+j` because Enter is its send key inside a Textual `TextArea`; the GUI
+  leads with the web-native convention every chat composer has, but honors
+  `ctrl+j` too so the muscle memory transfers between shells. The hint strings
+  name only Shift+Enter (one chord per hint; `ctrl+j` is the help sheet's job).
 - **`AutomationHost.park_off_clipboard` has no OSC-52 to fall back to.** The
   TUI writes the terminal escape (§0); a WebView2 window has nothing like it,
   and writing back through the page's own clipboard would be the same refused

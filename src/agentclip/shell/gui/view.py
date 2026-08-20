@@ -3487,10 +3487,9 @@ class GuiView:
     def _composer_mode(self, view: SessionView | None) -> tuple[str, str, bool]:
         """The brief's precedence table, first match wins (main-chat.md §3).
 
-        The one deliberate divergence is the newline key: the TUI says Ctrl+J
-        because Enter is its send key inside a ``TextArea``; the GUI says
-        Shift+Enter, which is what every web composer means. A shell idiom, not
-        drift - recorded in gui.md §2.
+        The newline key: the GUI hint says Shift+Enter, which is what every web
+        composer means, but Ctrl+J (the TUI's newline key) inserts one too so
+        the muscle memory transfers - recorded in gui.md §2.
         """
         if self._awaiting_new_session:
             return "task", "Describe the task · Enter starts the session · Shift+Enter newline", True

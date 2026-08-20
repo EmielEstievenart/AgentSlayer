@@ -1,6 +1,6 @@
 # Commands
 
-Slash commands are typed in the chat box. Keyboard shortcuts work when the chat box is *not* focused (press Esc in an empty box to get there). Both shells share the commands; the key list below is the TUI's.
+Slash commands are typed in the chat box: Enter sends, and a newline is `ctrl+j` (both shells) or `shift+enter` (GUI). Keyboard shortcuts work when the chat box is *not* focused (press Esc in an empty box to get there). Both shells share the commands; the key list below is the TUI's.
 
 ## Slash commands
 

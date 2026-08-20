@@ -1275,9 +1275,9 @@
   var HELP_PROSE = [
     [
       "Chat box (bottom of the window)",
-      "Type a message and press Enter to send it. Shift+Enter inserts a newline " +
-        "(the TUI uses Ctrl+J; this is the web convention and a deliberate " +
-        "difference). Up/Down walk back through what you have already sent this " +
+      "Type a message and press Enter to send it. Shift+Enter inserts a newline, " +
+        "and so does Ctrl+J (the TUI's newline key, honored here too). " +
+        "Up/Down walk back through what you have already sent this " +
         "run, newest first, and Down past the newest hands back whatever you " +
         "were half-way through typing - but only from the FIRST/LAST line of " +
         "the box, so in a multi-line message they still move the caret, and the " +
@@ -2863,10 +2863,9 @@
   }
 
   // The composer's own dispatcher, and the first three stages of the Esc
-  // chain. Enter sends, Shift+Enter is a newline: the TUI uses ctrl+j because
-  // Enter is its send key inside a TextArea, and this is the web-native
-  // convention - a deliberate shell-idiom difference (docs/design/gui.md 2),
-  // not drift.
+  // chain. Enter sends; Shift+Enter is a newline (the web-native convention)
+  // and so is Ctrl+J (the TUI's newline key, honored here too so the muscle
+  // memory transfers between shells - docs/design/gui.md 2).
   function onComposerKey(ev) {
     // The popup owns five keys and only while it is open, checked FIRST -
     // ahead of Enter and ahead of Esc's own stages, exactly as
@@ -2918,6 +2917,15 @@
         recallSent(recalled);
         return;
       }
+    }
+    // Ctrl+J = newline, same as Shift+Enter. execCommand keeps the textarea's
+    // own undo stack and input events alive; setRangeText is the fallback.
+    if ((ev.key === "j" || ev.key === "J") && ev.ctrlKey && !ev.altKey && !ev.metaKey) {
+      ev.preventDefault();
+      if (!document.execCommand || !document.execCommand("insertText", false, "\n")) {
+        el.composer.setRangeText("\n", el.composer.selectionStart, el.composer.selectionEnd, "end");
+      }
+      return;
     }
     if (ev.key === "Enter" && !ev.shiftKey && !ev.ctrlKey) {
       ev.preventDefault();

@@ -263,7 +263,20 @@ class EngineBuilder:
             self._os_name,
             session_chat_name,
         )
-        workspace = Workspace(self._project_root, cfg.excluded_names(), host=self._host)
+        # The skill folders ride into the jail as read-only carve-outs, which is
+        # what makes a SKILL.md saying "run scripts/check.py" mean anything
+        # (executor/tools/sandbox.py, extra_read_roots). The paths need no
+        # translation and cannot go stale across a link: discovery ran on the
+        # machine the ENGINE runs on, through this builder's host, and the
+        # Workspace being built here runs on that same machine - so in a remote
+        # session both halves are the target's, by construction rather than by
+        # agreement.
+        workspace = Workspace(
+            self._project_root,
+            cfg.excluded_names(),
+            host=self._host,
+            extra_read_roots=tuple(skill.source.parent for skill in self._skills),
+        )
         session = SessionStore(
             self._project_root, service=cfg.general.service, data_root=self._data_root
         )

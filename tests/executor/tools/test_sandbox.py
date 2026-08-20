@@ -165,6 +165,115 @@ def test_is_excluded_helper(ws: Workspace) -> None:
     assert not ws.is_excluded(ws.root)
 
 
+# -- extra read roots (the skill-folder carve-out) -----------------------------
+
+
+@pytest.fixture
+def skills(tmp_path: Path) -> Path:
+    """A skill folder OUTSIDE the project root, as a home-rooted one always is."""
+    folder = tmp_path / "home" / ".claude" / "skills" / "deploy"
+    (folder / "scripts").mkdir(parents=True)
+    (folder / "SKILL.md").write_text("---\nname: deploy\n---\nship it\n", encoding="utf-8")
+    (folder / "reference.md").write_text("ref\n", encoding="utf-8")
+    (folder / "scripts" / "check.py").write_text("print(1)\n", encoding="utf-8")
+    return folder
+
+
+@pytest.fixture
+def carved(tmp_path: Path, skills: Path) -> Workspace:
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "utils.py").write_text("x = 1\n", encoding="utf-8")
+    return Workspace(root, Config().excluded_names(), extra_read_roots=(skills,))
+
+
+def test_absolute_read_inside_an_extra_root_is_allowed(carved: Workspace, skills: Path) -> None:
+    """The whole point: a skill saying "run scripts/check.py" is now actionable."""
+    assert carved.resolve_read(str(skills / "scripts" / "check.py")) == (
+        skills / "scripts" / "check.py"
+    ).resolve()
+    assert carved.resolve_read(str(skills / "reference.md")) == (skills / "reference.md").resolve()
+
+
+def test_the_extra_root_itself_resolves(carved: Workspace, skills: Path) -> None:
+    assert carved.resolve_read(str(skills)) == skills.resolve()
+
+
+def test_relative_paths_still_mean_the_project_root(carved: Workspace) -> None:
+    """A skill folder never shadows a project file: only ABSOLUTE reaches it."""
+    assert carved.resolve_read("src/utils.py") == carved.root / "src" / "utils.py"
+    # `reference.md` exists in the skill folder and nowhere else; relative, it
+    # still resolves to the project's own (missing) file, which the caller then
+    # reports as file_not_found.
+    assert carved.resolve_read("reference.md") == carved.root / "reference.md"
+
+
+def test_dotdot_out_of_an_extra_root_rejected(carved: Workspace, skills: Path) -> None:
+    """Containment is asked of the RESOLVED path, so the carve-out is not a tunnel."""
+    with pytest.raises(SandboxViolation):
+        carved.resolve_read(str(skills / ".." / ".." / ".." / "secret.txt"))
+
+
+@needs_symlinks
+def test_symlink_out_of_an_extra_root_rejected(carved: Workspace, skills: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("s\n", encoding="utf-8")
+    os.symlink(outside, skills / "link_out", target_is_directory=True)
+    with pytest.raises(SandboxViolation):
+        carved.resolve_read(str(skills / "link_out" / "secret.txt"))
+
+
+def test_sealed_names_hold_inside_an_extra_root(carved: Workspace, skills: Path) -> None:
+    """The hard floor is not the project root's alone."""
+    (skills / ".agentclip").mkdir()
+    (skills / ".agentclip" / "notes.txt").write_text("n\n", encoding="utf-8")
+    with pytest.raises(SandboxViolation):
+        carved.resolve_read(str(skills / ".agentclip" / "notes.txt"))
+    with pytest.raises(SandboxViolation):
+        carved.resolve_read(str(skills / ".agentclip.toml"))
+
+
+def test_an_unrelated_absolute_path_is_still_refused(carved: Workspace, tmp_path: Path) -> None:
+    (tmp_path / "loose.txt").write_text("l\n", encoding="utf-8")
+    with pytest.raises(SandboxViolation):
+        carved.resolve_read(str(tmp_path / "loose.txt"))
+    with pytest.raises(SandboxViolation):
+        carved.resolve_read("/etc/passwd")
+
+
+def test_writes_into_an_extra_root_say_why(carved: Workspace, skills: Path) -> None:
+    """write/edit/delete all land on resolve_write, and it names the reason."""
+    for target in (skills / "reference.md", skills / "new.txt", skills / "scripts" / "check.py"):
+        with pytest.raises(SandboxViolation) as exc_info:
+            carved.resolve_write(str(target))
+        assert "read-only" in exc_info.value.detail
+
+
+def test_traversal_does_not_extend_into_extra_roots(carved: Workspace, skills: Path) -> None:
+    """list_dir/glob/grep resolve through resolve_scan, which knows no carve-out."""
+    with pytest.raises(SandboxViolation):
+        carved.resolve_scan(str(skills))
+    assert carved.is_excluded(skills / "reference.md")  # and a sweep would skip it anyway
+
+
+def test_a_vanished_extra_root_is_dropped_not_raised(tmp_path: Path) -> None:
+    """A skill folder deleted between discovery and session start costs the
+    carve-out, never the session."""
+    root = tmp_path / "proj"
+    root.mkdir()
+    ws = Workspace(root, frozenset(), extra_read_roots=(tmp_path / "gone",))
+    assert ws.extra_read_roots == ()
+    with pytest.raises(SandboxViolation):
+        ws.resolve_read(str(tmp_path / "gone" / "x.md"))
+
+
+def test_without_extra_roots_absolute_reads_refuse_exactly_as_before(ws: Workspace) -> None:
+    with pytest.raises(SandboxViolation) as exc_info:
+        ws.resolve_read("/etc/passwd")
+    assert "absolute paths are not allowed" in exc_info.value.detail
+
+
 # -- symlinks -----------------------------------------------------------------
 
 

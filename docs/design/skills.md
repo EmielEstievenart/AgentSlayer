@@ -56,8 +56,9 @@ Mirroring both ecosystems, skills are surfaced cheaply and loaded on demand:
    skills are dropped with a `(+N more …)` footer — because the bootstrap has no
    truncation fallback and must not be overflowable by a large skills library.
    The `skill` tool is omitted entirely when no skills are discovered.
-2. **On demand (full):** the model calls `skill(name=...)` and the result body
-   is the skill's full `SKILL.md` body, which it then follows.
+2. **On demand (full):** the model calls `skill(name=...)` and the result opens
+   with a short header — the skill's absolute folder, and what is beside
+   `SKILL.md` in it — followed by the full body, which it then follows.
 
 The `skill` tool is read-only and auto-approved (no gate) — loading instructions
 is harmless; any actions the skill prescribes still flow through AgentClip's
@@ -65,6 +66,52 @@ normal gated tools (`edit_file`, `run_command`, …). Name lookup is
 case-insensitive and accepts either the frontmatter `name` or the directory
 name. An unknown name returns `error code=unknown_skill` listing what is
 available.
+
+## Bundled side files
+
+A skill that ships a `scripts/` or a `references/` beside its `SKILL.md` works.
+The tool result's header is what makes it work:
+
+```
+folder: /home/u/.claude/skills/deploy
+files: reference.md, scripts/check.py
+(read a side file with read_file on its full path, /home/u/.claude/skills/deploy/<file>;
+ run its scripts through run_command as usual)
+
+<the SKILL.md body, verbatim>
+```
+
+Two halves, deliberately:
+
+- **The listing IS the discovery surface.** `glob`/`grep`/`list_dir` do not
+  reach into skill folders (below), so the result names what is there instead.
+  It is bounded — 3 levels deep, ≤50 entries, ≤400 chars, with an honest
+  `and N more` tail — because it rides in every result the tool returns.
+- **The session's `Workspace` carries each discovered skill folder as an
+  `extra_read_roots` entry** (`executor/tools/sandbox.py`): an **absolute** path
+  resolving inside one is readable. Only absolute — a relative path still means
+  "under the project root", so a skill folder can never shadow a project file by
+  name. Containment is checked on the *resolved* path, so a symlink or a `..`
+  inside a skill folder is not a tunnel; `HARD_EXCLUDED_NAMES` still seals
+  `.agentclip` there; and writes, edits and deletes are refused with *"skill
+  folders are read-only"*. Traversal does not extend into them
+  (`Workspace.resolve_scan`, which `list_dir`/`glob`/`grep` use instead of
+  `resolve_read`).
+
+The header rides in the **result**, never in the catalog: the bootstrap has
+~150 chars of slack and no truncation fallback (`protocol.md` §2, "Budget
+headroom"), and a folder path is of no use until a skill is actually loaded.
+
+For permissions, an absolute skill-folder path reaches the matcher **as
+written** — it has no workspace-relative form, and an invented one would be a
+second spelling for a rule to miss. Nothing is bypassed by that: `*` crosses
+slashes in the wildcard matcher, so the shipped `read: {"*.env": "ask"}` still
+asks about `<skill folder>/.env`.
+
+Wiring: `engine/link/factory.py` passes `tuple(skill.source.parent for skill in
+discovered_skills)` when it builds the `Workspace`. Discovery and the workspace
+run on the same machine through the same `Host`, so in a remote session both
+halves are the target's — the paths agree by construction, not by agreement.
 
 ## Frontmatter fields read
 
@@ -88,16 +135,15 @@ and nested maps are not interpreted.
   command through `run_command`.
 - **No `$ARGUMENTS` substitution.** Skills are loaded as standing instructions,
   not parameterized commands.
-- **Bundled side files are not readable.** A skill's `scripts/`, `references/`,
-  etc. live outside the sandboxed project root, so the workspace-scoped file
-  tools cannot read them. Only `SKILL.md` is surfaced.
 - **Discovered once per process.** There is no live re-scan; add a skill and
   restart to pick it up.
 
 ## Wiring
 
-`cli.py` calls `discover_skills(project_root)` once and passes the result to
-`default_registry(skills)`, which inserts the `skill` tool (built by
-`executor/tools/skills.py:make_skill_spec`) after `run_command` and before the meta
-tools. Everything lives in the `agentclip.executor.tools` layer so the import direction
-in `architecture.md` is preserved.
+`engine/link/factory.py` calls `discover_skills(project_root)` once per builder
+and passes the result to `default_registry(skills)`, which inserts the `skill`
+tool (built by `executor/tools/skills.py:make_skill_spec`) after `run_command`
+and before the meta tools — and passes the same skills' folders to the
+`Workspace` as read-only carve-outs (above). Everything the tools need lives in
+the `agentclip.executor.tools` layer so the import direction in
+`architecture.md` is preserved; only the wiring is engine-side.

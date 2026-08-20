@@ -25,6 +25,7 @@ from agentclip.engine.link.factory import (
     _MCP_TASK_FALLBACK,
     EngineRequest,
 )
+from agentclip.engine.states import Decision
 from agentclip.executor.mcp.client import McpManager
 from agentclip.executor.tools.registry import default_registry
 from agentclip.protocol.spec import render_spec
@@ -474,3 +475,111 @@ def test_the_session_log_records_role_and_parent(tmp_path: Path) -> None:
     assert session_event["role"] == "subagent"
     assert session_event["chat_name"] == "teal-otter"
     assert session_event["parent_chat_name"] == "amber-falcon"
+
+
+# -- the skill-folder carve-out, end to end ------------------------------------
+
+
+def _skill_project(tmp_path: Path, *side_files: str) -> tuple[Path, Path, Path]:
+    """(project root, home, skill folder) - the skill lives in HOME, which is
+    the case the carve-out exists for: outside the project root entirely."""
+    root = tmp_path / "project"
+    root.mkdir()
+    home = tmp_path / "home"
+    folder = home / ".claude" / "skills" / "deploy"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(
+        "---\nname: deploy\ndescription: ship it.\n---\nRun scripts/check.py\n", encoding="utf-8"
+    )
+    for rel in side_files:
+        path = folder / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("print('CHECKED')\n", encoding="utf-8")
+    return root, home, folder
+
+
+def _skill_engine(root: Path, home: Path) -> tuple[LinkFactory, Engine]:
+    factory = make_engine_factory(
+        lambda: load_config(root, global_config_path=root / "nope.toml", home=home),
+        root,
+        chat_name=PINNED_CHAT,
+        os_name="TestOS",
+        home=home,
+    )
+    return factory, _engines(factory)("claude")
+
+
+def _run(engine: Engine, tool: str, **params: str) -> str:
+    body = "".join(f"{k}: {v}\n" for k, v in params.items())
+    engine.ingest(
+        f"===CLIP:CALL id=1 tool={tool}===\n{body}===CLIP:END===\n"
+        f"===CLIP:EOM calls=1 chat={PINNED_CHAT}===\n"
+    )
+    return engine.execute().outbound.chunks[0]
+
+
+def test_a_session_can_read_a_skills_side_file(tmp_path: Path) -> None:
+    """The carve-out, end to end: the skill result names the folder and its
+    files, and the very next call opens one of them.
+
+    Discovery and the Workspace are built by the same builder through the same
+    host, so the absolute path the model is handed is one the sandbox
+    recognises - in a remote session both halves are the target's.
+    """
+    root, home, folder = _skill_project(tmp_path, "scripts/check.py")
+    factory, engine = _skill_engine(root, home)
+    try:
+        engine.start_task("deploy the thing")
+        loaded = _run(engine, "skill", name="deploy")
+        assert f"folder: {folder}" in loaded
+        assert "files: scripts/check.py" in loaded
+        assert "print('CHECKED')" in _run(
+            engine, "read_file", path=str(folder / "scripts" / "check.py")
+        )
+    finally:
+        factory.close()
+
+
+def test_a_session_may_not_write_into_a_skill_folder(tmp_path: Path) -> None:
+    """Read-only, and the refusal says so rather than leaving the model to guess."""
+    root, home, folder = _skill_project(tmp_path)
+    factory, engine = _skill_engine(root, home)
+    try:
+        engine.start_task("t")
+        engine.ingest(
+            "===CLIP:CALL id=1 tool=delete_file===\n"
+            f"path: {folder / 'SKILL.md'}\n"
+            "===CLIP:END===\n"
+            f"===CLIP:EOM calls=1 chat={PINNED_CHAT}===\n"
+        )
+        # The gate is not what stops this - the user approving would change
+        # nothing, which is the point of testing it approved.
+        (pending,) = engine.pending()
+        engine.decide(pending.call.id, Decision.APPROVE)
+        payload = engine.execute().outbound.chunks[0]
+        assert "code=path_outside_workspace" in payload
+        assert "read-only" in payload
+        assert (folder / "SKILL.md").exists()
+    finally:
+        factory.close()
+
+
+def test_a_skill_folder_dotenv_still_asks(tmp_path: Path) -> None:
+    """The dotenv carve-out is basename-shaped, and the wildcard matcher's `*`
+    crosses slashes - so it bites an ABSOLUTE skill-folder path unchanged, with
+    no workspace-relative form to invent (executor/permissions.py, _relative).
+    An ordinary side file, read a line above, is not gated at all."""
+    root, home, folder = _skill_project(tmp_path, ".env")
+    factory, engine = _skill_engine(root, home)
+    try:
+        engine.start_task("t")
+        engine.ingest(
+            "===CLIP:CALL id=1 tool=read_file===\n"
+            f"path: {folder / '.env'}\n"
+            "===CLIP:END===\n"
+            f"===CLIP:EOM calls=1 chat={PINNED_CHAT}===\n"
+        )
+        (pending,) = engine.pending()  # asked, not silently allowed
+        assert pending.call.tool == "read_file"
+    finally:
+        factory.close()

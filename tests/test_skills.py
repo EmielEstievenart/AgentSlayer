@@ -262,7 +262,7 @@ def test_skill_tool_returns_body(tmp_path: Path) -> None:
     call = ToolCall(id=1, tool="skill", params={"name": "greet"}, raw="")
     result = spec.handler(_ctx(tmp_path), call)
     assert result.status == "ok"
-    assert result.body == "Greet warmly."
+    assert result.body == f"folder: {Path('x') / '.claude' / 'skills' / 'greet'}\n\nGreet warmly."
 
 
 def test_skill_tool_is_auto_with_no_preview() -> None:
@@ -293,7 +293,7 @@ def test_skill_tool_resolves_dir_name_alias_and_casefold(tmp_path: Path) -> None
     spec = make_skill_spec([_skill("Pretty-Name", "BODY")])  # dir is "Pretty-Name"
     for name in ("Pretty-Name", "pretty-name", "PRETTY-NAME"):
         call = ToolCall(id=1, tool="skill", params={"name": name}, raw="")
-        assert spec.handler(_ctx(tmp_path), call).body == "BODY"
+        assert spec.handler(_ctx(tmp_path), call).body.endswith("\n\nBODY")
 
 
 def test_skill_tool_missing_name_param(tmp_path: Path) -> None:
@@ -310,7 +310,9 @@ def _named(name: str, dir_name: str, body: str) -> Skill:
 
 
 def _load(spec, ctx: ToolContext, name: str) -> str:
-    return spec.handler(ctx, ToolCall(id=1, tool="skill", params={"name": name}, raw="")).body
+    """The BODY of a loaded skill: everything after the folder header."""
+    body = spec.handler(ctx, ToolCall(id=1, tool="skill", params={"name": name}, raw="")).body
+    return body.split("\n\n", 1)[1]
 
 
 def test_skill_tool_resolves_directory_name_alias(tmp_path: Path) -> None:
@@ -356,7 +358,7 @@ def test_disabled_skill_unreachable_through_registry_handler(tmp_path: Path) -> 
     result = spec.handler(_ctx(tmp_path), ToolCall(id=1, tool="skill", params={"name": "off"}, raw=""))
     assert result.status == "error"
     assert result.code == "unknown_skill"  # the body marked disabled is never loadable
-    assert spec.handler(_ctx(tmp_path), ToolCall(id=1, tool="skill", params={"name": "on"}, raw="")).body == "ONBODY"
+    assert _load(spec, _ctx(tmp_path), "on") == "ONBODY"
 
 
 def test_unknown_skill_code_is_in_closed_error_set(tmp_path: Path) -> None:
@@ -365,6 +367,95 @@ def test_unknown_skill_code_is_in_closed_error_set(tmp_path: Path) -> None:
     spec = make_skill_spec([_skill("greet", "x")])
     result = spec.handler(_ctx(tmp_path), ToolCall(id=1, tool="skill", params={"name": "no"}, raw=""))
     assert result.code in ERROR_CODES  # the emitted code honors the documented closed set
+
+
+# -- the folder header a loaded skill opens with -------------------------------
+
+
+def _on_disk_skill(tmp_path: Path, name: str = "deploy", *side_files: str) -> Skill:
+    """A skill whose folder really exists, so the handler can list what is in it."""
+    folder = tmp_path / "home" / ".claude" / "skills" / name
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text(f"---\nname: {name}\n---\nBODY\n", encoding="utf-8")
+    for rel in side_files:
+        path = folder / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n", encoding="utf-8")
+    return Skill(name=name, description="d", body="BODY", source=folder / "SKILL.md")
+
+
+def _result(tmp_path: Path, skill: Skill) -> str:
+    spec = make_skill_spec([skill])
+    call = ToolCall(id=1, tool="skill", params={"name": skill.name}, raw="")
+    return spec.handler(_ctx(tmp_path), call).body
+
+
+def test_result_names_the_folder_and_lists_the_side_files(tmp_path: Path) -> None:
+    """A SKILL.md saying "run scripts/check.py" is an instruction to nowhere
+    unless the result says which folder, and that the folder is reachable."""
+    skill = _on_disk_skill(tmp_path, "deploy", "reference.md", "scripts/check.py")
+    body = _result(tmp_path, skill)
+    header, rest = body.split("\n\n", 1)
+    lines = header.split("\n")
+    assert lines[0] == f"folder: {skill.source.parent}"
+    assert lines[1] == "files: reference.md, scripts/check.py"
+    assert "read_file" in lines[2] and "run_command" in lines[2]
+    assert rest == "BODY"  # the body follows verbatim
+
+
+def test_the_listing_omits_skill_md_itself(tmp_path: Path) -> None:
+    skill = _on_disk_skill(tmp_path, "deploy", "reference.md")
+    assert "SKILL.md" not in _result(tmp_path, skill)
+
+
+def test_a_skill_without_side_files_gets_no_listing_line(tmp_path: Path) -> None:
+    skill = _on_disk_skill(tmp_path, "bare")
+    header, rest = _result(tmp_path, skill).split("\n\n", 1)
+    assert header == f"folder: {skill.source.parent}"
+    assert rest == "BODY"
+
+
+def test_a_folder_that_is_not_there_still_loads_the_body(tmp_path: Path) -> None:
+    """An unreadable folder costs the listing, never the skill."""
+    header, rest = _result(tmp_path, _skill("ghost", "BODY")).split("\n\n", 1)
+    assert header.startswith("folder: ")
+    assert "files:" not in header
+    assert rest == "BODY"
+
+
+def test_the_listing_is_capped_with_an_honest_tail(tmp_path: Path) -> None:
+    import re
+
+    skill = _on_disk_skill(tmp_path, "big", *(f"f{i:03d}.txt" for i in range(120)))
+    files_line = next(
+        line for line in _result(tmp_path, skill).split("\n") if line.startswith("files: ")
+    )
+    match = re.search(r", and (\d+) more$", files_line)
+    assert match is not None
+    listed = files_line[len("files: ") : match.start()].split(", ")
+    assert len(listed) + int(match.group(1)) == 120  # the tail is a real count
+    assert len(listed) <= 50
+    assert len(files_line) < 600  # ...and the line stays a line
+
+
+def test_sealed_names_are_never_advertised(tmp_path: Path) -> None:
+    """read_file refuses these inside a skill folder too, so listing them would
+    only invite a wasted call."""
+    skill = _on_disk_skill(tmp_path, "sealed", "keep.md", ".agentclip.toml")
+    (skill.source.parent / ".agentclip").mkdir()
+    (skill.source.parent / ".agentclip" / "x.txt").write_text("x", encoding="utf-8")
+    body = _result(tmp_path, skill)
+    assert "files: keep.md" in body
+    assert ".agentclip" not in body
+
+
+def test_the_folder_teaching_never_reaches_the_bootstrap(tmp_path: Path) -> None:
+    """It rides in the RESULT: the bootstrap has ~150 chars of slack and no
+    truncation fallback (docs/design/protocol.md, "Budget headroom")."""
+    with_files = _on_disk_skill(tmp_path, "loaded", "reference.md", "scripts/check.py")
+    without = _skill("loaded", "BODY")
+    assert make_skill_spec([with_files]).catalog_doc == make_skill_spec([without]).catalog_doc
+    assert "folder" not in make_skill_spec([with_files]).catalog_doc
 
 
 # -- registry wiring ----------------------------------------------------------

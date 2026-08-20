@@ -464,7 +464,16 @@ def permission_target(tool: str, params: dict[str, str], approval_kind: str = "a
 def _relative(resource: str) -> str:
     """Forward slashes, no leading ``./`` - the worktree-relative form OpenCode
     matches paths in. Paths that escape the workspace never get here: the
-    sandbox rejects them before a rule could allow them."""
+    sandbox rejects them before a rule could allow them.
+
+    With ONE exception, and it needs no special case: an absolute path into a
+    discovered skill folder, which read_file accepts (sandbox.py's
+    ``extra_read_roots``). It is passed through as written, and the dotenv
+    carve-out still bites it, because a wildcard ``*`` crosses slashes here -
+    ``*.env`` matches ``/home/u/.claude/skills/deploy/.env`` exactly as it
+    matches ``config/.env``. Normalising it to something workspace-relative
+    would be the dangerous move: it has no workspace-relative form, and any
+    invented one would be a second spelling for a rule to miss."""
     text = resource.strip().replace("\\", "/")
     while text.startswith("./"):
         text = text[2:]

@@ -15,6 +15,13 @@ tools here are the mechanism only - the guarantee that a range was actually
 READ before it is written is the engine's (engine/numbered.py), because only
 the engine knows what the previous payload really contained.
 
+Two resolvers, not one: read_file asks the Workspace for `resolve_read`, which
+also reaches the discovered skill folders when handed an absolute path, while
+list_dir/glob/grep ask for `resolve_scan`, which never does. A named read of a
+side file is the whole point of that carve-out (executor/tools/skills.py); a
+sweep pointed at a skill folder is not, and `_rel_display` below would have
+nothing to render its hits relative to.
+
 Every byte read, byte written and directory listed goes through ctx.host - the
 tools themselves know nothing about which machine they run on. What stays here
 is the part that is the same everywhere: decoding, the caps, the diff, the edit
@@ -598,7 +605,7 @@ def list_dir(ctx: ToolContext, call: ToolCall) -> str:
     path_param = call.params.get("path", ".")
     depth = int_param(call, "depth", 1)
     clamped_depth = min(max(depth, 1), 3)
-    base = ctx.workspace.resolve_read(path_param)
+    base = ctx.workspace.resolve_scan(path_param)
     base_stat = ctx.host.stat(base)
     if base_stat is None:
         raise ToolError(
@@ -761,7 +768,7 @@ def _dir_suffix(ctx: ToolContext, path: Path) -> str:
 def glob(ctx: ToolContext, call: ToolCall) -> str:
     (pattern,) = require(call, "pattern")
     root_param = call.params.get("root", ".")
-    base = ctx.workspace.resolve_read(root_param)
+    base = ctx.workspace.resolve_scan(root_param)
     base_stat = ctx.host.stat(base)
     if base_stat is None or not base_stat.is_dir:
         raise ToolError(
@@ -862,7 +869,7 @@ def grep(ctx: ToolContext, call: ToolCall) -> str:
         cap = min(cap, max_p)
 
     path_param = call.params.get("path", ".")
-    target = ctx.workspace.resolve_read(path_param)
+    target = ctx.workspace.resolve_scan(path_param)
     if ctx.host.stat(target) is None:
         raise ToolError(
             "file_not_found",

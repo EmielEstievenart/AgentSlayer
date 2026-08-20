@@ -23,6 +23,7 @@ Slash commands are typed in the chat box: Enter sends, and a newline is `ctrl+j`
 
 Notes:
 
+- A skill that bundles side files (`scripts/`, `references/`) works: loading it tells the model the skill's folder and what is in it, and those files are readable — read-only, by full path. Nothing else outside the project is.
 - `/config local` and `/config local reset` refuse in a remote session — the project's rules live on the target; edit them there.
 - Unknown `/command` warns and lists the real ones; the box is cleared either way.
 - Typing `/` pops an autocomplete list (nothing preselected on a bare `/` — a stray `/` + Enter can never fire a command). Enter/Tab completes; the next Enter sends.

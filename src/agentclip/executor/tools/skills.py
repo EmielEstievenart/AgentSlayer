@@ -19,10 +19,17 @@ reads the simple top-level `key: value` scalars skills use in practice; block
 scalars and nested maps are not interpreted. A missing/blank description falls
 back to the body's first paragraph, as Claude Code does.
 
-Not (yet) supported, by design: dynamic context injection (`` !`cmd` ``),
-`$ARGUMENTS` substitution, and reading a skill's bundled side files (those live
-outside the sandboxed project root). The model gets the SKILL.md body verbatim
-and drives any commands through the normal gated tools.
+A skill that ships side files works: the tool result opens with the skill's
+absolute folder and a listing of what is beside SKILL.md, and the session's
+Workspace carries those folders as read-only carve-outs (sandbox.py,
+``extra_read_roots``), so `read_file <folder>/scripts/check.py` resolves. That
+teaching rides in the RESULT and never in the catalog - the bootstrap has ~150
+chars of slack (docs/design/protocol.md, "Budget headroom"), and a folder path
+nobody needs until a skill is actually loaded is the last thing to spend it on.
+
+Not (yet) supported, by design: dynamic context injection (`` !`cmd` ``) and
+`$ARGUMENTS` substitution. The model gets the SKILL.md body verbatim and drives
+any commands through the normal gated tools.
 """
 
 from __future__ import annotations
@@ -40,12 +47,24 @@ from agentclip.executor.tools.registry import (
     require,
     tool_handler,
 )
+from agentclip.executor.tools.sandbox import HARD_EXCLUDED_NAMES
 from agentclip.protocol.types import ToolCall
 
 # A listed description is one line, clipped so the bootstrap stays inside the
 # paste budget; the full body still loads on demand via the skill tool. The
 # whole listing is additionally bounded by a total budget (see skill_listing).
 _MAX_DESCRIPTION_CHARS = 200
+
+# The side-file listing's three bounds. A skill folder is normally three files,
+# so these never bite in practice - they are here because this listing rides in
+# a RESULT, and a folder someone checked a node_modules into must not become the
+# payload. Depth, because nesting is how a big tree hides from a count; the
+# scan cap, so the walk itself is bounded and not just its rendering; and the
+# char cap, because fifty long paths are still too many characters.
+_MAX_SIDE_FILE_DEPTH = 3
+_MAX_SIDE_FILES_SCANNED = 500
+_MAX_SIDE_FILES_LISTED = 50
+_MAX_SIDE_FILE_CHARS = 400
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +277,96 @@ def skill_listing(skills: Sequence[Skill], *, max_chars: int | None = None) -> s
     return "\n".join(lines)
 
 
+# -- the folder header a loaded skill opens with -------------------------------
+
+
+def _side_files(host: Host, folder: Path) -> tuple[tuple[str, ...], bool]:
+    """Everything beside SKILL.md in a skill folder, as folder-relative POSIX
+    paths, plus whether the walk ran into its own cap.
+
+    Reads go through the Host for the reason discovery does: in a remote session
+    the skill folder is on the TARGET, and so is the Workspace that will be asked
+    to open these files. Unreadable directories are skipped rather than raised
+    on - a listing is a courtesy, and a skill whose body still loads is worth
+    more than an error about one subfolder's permissions.
+    """
+    found: list[str] = []
+    truncated = False
+
+    def walk(directory: Path, prefix: str, depth: int) -> None:
+        nonlocal truncated
+        try:
+            entries = host.listdir(directory)
+        except OSError:
+            return
+        # Files before directories, then by name: the flat listing a small
+        # folder wants, with the nested paths trailing it.
+        for entry in sorted(entries, key=lambda e: (e.is_dir, e.name)):
+            if len(found) >= _MAX_SIDE_FILES_SCANNED:
+                truncated = True
+                return
+            # Sealed names are never advertised: read_file would refuse them
+            # inside a skill folder exactly as it does inside the project, and a
+            # listing that names an unreadable file only invites a wasted call.
+            if entry.name in HARD_EXCLUDED_NAMES:
+                continue
+            rel = prefix + entry.name
+            if entry.is_dir:
+                # A symlinked directory is not descended into: a link back up
+                # the tree would walk forever, and the sandbox would refuse
+                # whatever came out of it anyway.
+                if depth < _MAX_SIDE_FILE_DEPTH and not entry.is_symlink:
+                    walk(directory / entry.name, rel + "/", depth + 1)
+                    if truncated:
+                        return
+                continue
+            if rel != "SKILL.md":  # the body is already in this result
+                found.append(rel)
+
+    walk(folder, "", 1)
+    return tuple(found), truncated
+
+
+def _render_side_files(names: Sequence[str], truncated: bool) -> str:
+    """The `files:` line: a comma-joined listing with an honest "and N more"."""
+    shown: list[str] = []
+    used = 0
+    for name in names[:_MAX_SIDE_FILES_LISTED]:
+        if shown and used + len(name) + 2 > _MAX_SIDE_FILE_CHARS:
+            break
+        shown.append(name)
+        used += len(name) + 2
+    text = ", ".join(shown)
+    more = len(names) - len(shown)
+    if more > 0:
+        # "+" where the WALK stopped early: the number is then a floor, and
+        # saying so is cheaper than pretending to a count nobody made.
+        text += f", and {more}{'+' if truncated else ''} more"
+    return text
+
+
+def skill_header(host: Host, skill: Skill) -> str:
+    """What a loaded skill's result says before its body.
+
+    A SKILL.md that says "run scripts/check.py" is an instruction to nowhere
+    unless the model learns two things: which folder it is in, and that the
+    folder's files are reachable. Both are here, in at most three lines, and the
+    listing is what saves a traversal tool from having to reach into a skill
+    folder at all - the tools cannot glob there (sandbox.py), so this listing IS
+    the discovery surface.
+    """
+    folder = skill.source.parent
+    lines = [f"folder: {folder}"]
+    names, truncated = _side_files(host, folder)
+    if names:
+        lines.append(f"files: {_render_side_files(names, truncated)}")
+        lines.append(
+            f"(read a side file with read_file on its full path, {folder}/<file>;"
+            " run its scripts through run_command as usual)"
+        )
+    return "\n".join(lines)
+
+
 _SKILL_DOC = """\
 skill(name*)
   Load a reusable skill and follow it: the result body is the skill's full
@@ -272,7 +381,9 @@ name: {example}
 
 def make_skill_spec(listable: Sequence[Skill], *, max_listing_chars: int | None = None) -> ToolSpec:
     """Build the `skill` ToolSpec over the model-invocable skills. The handler
-    returns a skill's body; the catalog_doc lists what is available."""
+    returns a skill's folder header plus its body; the catalog_doc lists what is
+    available, and deliberately says nothing about folders or side files - see
+    the module docstring on where that teaching rides."""
     if not listable:
         raise ValueError("make_skill_spec requires at least one skill")
     # Two passes so a canonical name is never shadowed by another skill's
@@ -299,6 +410,7 @@ def make_skill_spec(listable: Sequence[Skill], *, max_listing_chars: int | None 
                 f"no skill named {name.strip()!r}",
                 f"call skill with one of: {available}.",
             )
-        return skill.body or skill.description or f"(skill {skill.name!r} has no instructions)"
+        body = skill.body or skill.description or f"(skill {skill.name!r} has no instructions)"
+        return f"{skill_header(ctx.host, skill)}\n\n{body}"
 
     return ToolSpec("skill", "auto", handler, None, doc)

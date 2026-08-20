@@ -421,7 +421,9 @@ class Workspace:
     root: Path                               # Path(root).resolve(strict=True) at startup
     excludes: frozenset[str]                 # paths.exclude | hard_excludes: traversal + writes
     hard_excludes: frozenset[str]            # the sealed names: reads are checked against ONLY these
+    extra_read_roots: tuple[Path, ...]       # skill folders: absolute READS only, never writes
     def resolve_read(self, rel: str) -> Path      # raises SandboxViolation; hard names only
+    def resolve_scan(self, rel: str) -> Path      # resolve_read minus the carve-out: traversal's base
     def resolve_write(self, rel: str) -> Path     # parent-resolving variant (file may not exist)
     def is_excluded(self, p: Path) -> bool        # traversal predicate: the full merged set
 
@@ -755,6 +757,8 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
    - **Traversal** (`list_dir`, `glob`, `grep`) silently skips the *full merged* set instead of erroring, so an excluded tree never floods a listing or a sweep — it has to be asked for by name.
 
    `HARD_EXCLUDED_NAMES` is defined in `executor/tools/sandbox.py`, next to the `Workspace` that enforces it, and folded into `excludes` at construction — a caller passing a bare `paths.exclude` still gets a jail that seals `.agentclip`. `config.Config.excluded_names()` therefore returns exactly what the user configured.
+
+**The one carve-out: `extra_read_roots`.** The session's discovered skill folders (`docs/design/skills.md`) are handed to the `Workspace` at construction, and an **absolute** path resolving inside one is readable. Only absolute, so a relative path never stops meaning "under the project root"; containment is asked of the *resolved* path exactly as step 3 does, so a `..` or a symlink inside a skill folder is not a tunnel; the `HARD_EXCLUDED_NAMES` floor applies there too; writes/edits/deletes are refused with *"skill folders are read-only"* (`resolve_write` consults the roots only to pick which refusal the model is told, and can never reach the read resolver); and traversal does not extend into them — `list_dir`/`glob`/`grep` resolve their base through `resolve_scan`, which knows no carve-out, because the skill tool's own `files:` listing is the discovery surface. For permissions, such a path reaches the matcher **as written**: it has no workspace-relative form, and `*` crosses slashes, so `read: {"*.env": "ask"}` still asks.
 
 `SandboxViolation` is reported back to the LLM as a tool error result (`error: path outside project root`), not hidden — the model can self-correct. `run_command` is *not* path-sandboxed (it runs with `cwd=root`; the `bash` rules + the approval gate are its control) — document this honestly rather than pretending subprocesses are containable.
 

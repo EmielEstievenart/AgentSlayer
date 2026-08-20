@@ -238,6 +238,24 @@ def test_permission_target_maps_tools_to_keys_and_resources() -> None:
     assert permission_target("mystery", {}, "auto") == ("mystery", "*")
 
 
+def test_an_absolute_skill_folder_read_is_matched_as_written(case_sensitive: None) -> None:
+    """The one path the sandbox lets out of the workspace (a discovered skill
+    folder's side file) reaches the matcher ABSOLUTE, because it has no
+    workspace-relative form and an invented one would be a second spelling for
+    a rule to miss. Nothing crashes, and the dotenv carve-out still bites:
+    `*` crosses slashes here, so `*.env` is basename-shaped in practice."""
+    abs_env = "/home/u/.claude/skills/deploy/.env"
+    key, resource = permission_target("read_file", {"path": abs_env})
+    assert (key, resource) == ("read", abs_env)
+
+    rules = default_rules()
+    assert evaluate(key, resource, rules).action == "ask"
+    assert evaluate("read", "/home/u/.claude/skills/deploy/scripts/check.py", rules).action == "allow"
+    # A Windows spelling of the same folder meets the pattern in the middle.
+    win = permission_target("read_file", {"path": r"C:\Users\u\.claude\skills\deploy\.env"})
+    assert evaluate(*win, rules).action == "ask"
+
+
 @pytest.mark.parametrize(
     ("command", "expected"),
     [

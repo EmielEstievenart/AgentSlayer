@@ -4082,14 +4082,16 @@ class MainScreen(Screen[None]):
             root = str(self._project_root)
         # "mcp 2/3" = connected servers over enabled ones (disabled entries are
         # a config statement, not a runtime hope, so they are out of both
-        # numbers' way). Empty - which hides the segment - exactly when the app
-        # has no manager: an install without MCP gets the bar it always had.
+        # numbers' way - and so is an entry the loader refused, which never
+        # became a server to hope for). Empty - which hides the segment -
+        # exactly when the app has no manager: an install without MCP gets the
+        # bar it always had.
         mcp = ""
         if self._mcp_manager is not None:
             statuses = self._mcp_manager.statuses()
             if statuses:
                 connected = sum(1 for s in statuses if s.state == "connected")
-                enabled_total = sum(1 for s in statuses if s.state != "disabled")
+                enabled_total = sum(1 for s in statuses if s.state not in ("disabled", "invalid"))
                 mcp = f"mcp {connected}/{enabled_total}"
         bar.update_segments(
             mode=f"MODE:{mode}",

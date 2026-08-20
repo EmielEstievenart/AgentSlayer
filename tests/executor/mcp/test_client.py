@@ -23,7 +23,13 @@ from typing import Any
 import pytest
 
 from agentclip.executor.mcp.client import McpCallError, McpManager
-from agentclip.executor.mcp.types import McpLocalServer, McpRemoteServer, McpServerStatus, tool_id
+from agentclip.executor.mcp.types import (
+    McpLocalServer,
+    McpRejectedServer,
+    McpRemoteServer,
+    McpServerStatus,
+    tool_id,
+)
 
 # Generous enough that a slow CI machine does not flake, short enough that a
 # genuinely stuck connect fails the test instead of hanging it.
@@ -285,6 +291,71 @@ def test_disabled_server_never_connects(managers: list[McpManager], tmp_path: Pa
     assert off.tool_count == 0
     assert demo.state == "connected"
     assert {t.server for t in manager.tools()} == {"demo"}
+
+
+# -- entries the config loader refused -----------------------------------------
+
+
+def test_rejected_entries_are_invalid_rows_from_the_first_statuses_call(
+    managers: list[McpManager], tmp_path: Path
+) -> None:
+    """A refused entry has no config to spawn or dial, so it is never a server -
+    only a row. Like `disabled`, its state is decided before anything is
+    attempted, which makes the mount paint the ONLY surface it ever gets: no
+    transition, no hook, and nothing that could later move it off `invalid`.
+    """
+    seen: list[McpServerStatus] = []
+    manager = McpManager(
+        [entry("demo")],
+        tmp_path,
+        rejected=[
+            McpRejectedServer(name="typo", reason='config: /x/permissions.json: mcp.typo: type must be "local" or "remote"; ignored')
+        ],
+        _inproc_targets={"demo": demo_server()},
+    )
+    managers.append(manager)
+    manager.set_status_hook(seen.append)
+
+    # Before ensure_started: the row is already there, which is the point.
+    typo, demo = manager.statuses()
+    assert (typo.name, typo.state, typo.tool_count) == ("typo", "invalid", 0)
+    assert "type must be" in typo.detail
+    assert demo.state == "pending"
+
+    manager.ensure_started()
+    assert manager.wait_ready(READY_S) is True
+
+    typo, demo = manager.statuses()
+    assert typo.state == "invalid"  # untouched by the connect round
+    assert demo.state == "connected"
+    # Never a connect candidate, and never announced as a transition: every
+    # state the hook carries belongs to the one real server.
+    assert {s.name for s in seen} == {"demo"}
+    assert {t.server for t in manager.tools()} == {"demo"}
+
+
+def test_a_manager_of_nothing_but_rejects_still_answers_every_call(
+    tmp_path: Path,
+) -> None:
+    """The all-refused config, which used to produce no manager at all and so
+    "MCP is not configured" from `/mcp`. It connects nothing - there is nothing
+    to connect - but it lists what the user wrote and why it was refused."""
+    manager = McpManager(
+        [], tmp_path, rejected=[McpRejectedServer(name="broken", reason="mcp.broken: no url")]
+    )
+    manager.ensure_started()
+
+    (row,) = manager.statuses()
+    assert (row.name, row.state, row.detail) == ("broken", "invalid", "mcp.broken: no url")
+    assert manager.tools() == ()
+    assert manager.wait_ready(0.1) is True
+    # Nothing was scheduled, so no loop was ever started - and a call is
+    # refused with a code from section 8 rather than an internal, exactly as it
+    # is on an SDK-less install.
+    with pytest.raises(McpCallError) as excinfo:
+        manager.call("broken_anything", {})
+    assert excinfo.value.code == "mcp_unavailable"
+    manager.close()
 
 
 # -- the one real subprocess ---------------------------------------------------

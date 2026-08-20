@@ -197,6 +197,7 @@ _MCP_STATE_LABEL: dict[str, str] = {
     "connecting": "connecting",
     "connected": "connected",
     "disabled": "disabled",
+    "invalid": "invalid config",
     "failed": "failed",
     "needs_auth": "needs auth",
     "missing_sdk": "no mcp sdk",
@@ -209,14 +210,17 @@ def mcp_row_id(index: int) -> str:
 
 def mcp_line(status: McpStatusLine) -> str:
     """One server's line: name + human state (+ tools when connected, + the
-    detail on the two states that are questions until it is read). A 30-cell
+    detail on the three states that are questions until it is read). A 30-cell
     column cuts long details mid-sentence (CSS ellipsis); the full text is
     `/mcp`'s job, and this line is what tells the user to go ask."""
     label = _MCP_STATE_LABEL.get(status.state, status.state)
     parts = [status.name, label]
     if status.state == "connected":
         parts.append(f"{status.tool_count} tool{'' if status.tool_count == 1 else 's'}")
-    if status.state in ("failed", "needs_auth") and status.detail:
+    # `invalid` belongs with the two failures rather than with `disabled`: the
+    # state alone says the entry was refused, and the detail is the only thing
+    # that says WHY - which is the entire reason the row exists.
+    if status.state in ("failed", "needs_auth", "invalid") and status.detail:
         parts.append(status.detail)
     return " · ".join(parts)
 

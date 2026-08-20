@@ -161,12 +161,14 @@ def inproc_mcp(monkeypatch: pytest.MonkeyPatch) -> None:
             project_root: Path,
             *,
             remote_target: str = "",
+            rejected: Any = (),
             _inproc_targets: Any = None,
         ) -> None:
             super().__init__(
                 servers,
                 project_root,
                 remote_target=remote_target,
+                rejected=rejected,
                 _inproc_targets={"demo": _demo_server()},
             )
 
@@ -389,6 +391,63 @@ def test_all_disabled_servers_add_no_catalog_text(tmp_path: Path, factories) -> 
     assert [s.state for s in factory.statuses()] == ["disabled"]
     assert engine.build_warnings == ()
     assert engine._registry.names() == default_registry().names()
+
+
+# == entries the config loader refused =========================================
+#
+# The gate in `EngineBuilder._mcp` decides something the user sees: `cli._mcp_source`
+# hands a Shell a status source only when `statuses()` is non-empty, so a
+# builder that declines to make a manager is also a `/mcp` that answers "MCP is
+# not configured". A config whose every entry is malformed used to land exactly
+# there - denying the block existed, to a user looking straight at it.
+
+
+def test_a_config_of_nothing_but_broken_entries_still_reports_them(
+    tmp_path: Path, factories
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    _project_with_servers(
+        root,
+        polarion={"type": "remote"},  # no url
+        notes={"type": "sse", "url": "https://example.com/mcp"},  # unknown type
+    )
+    factory = factories(root)
+
+    rows = factory.statuses()
+    assert {r.name for r in rows} == {"polarion", "notes"}
+    assert {r.state for r in rows} == {"invalid"}
+    # The loader's own sentence, so the row says what the startup toast said.
+    assert all(f"mcp.{r.name}" in r.detail for r in rows)
+
+
+def test_refused_entries_add_no_catalog_text_either(tmp_path: Path, factories) -> None:
+    """Degradation step 1 covers them for `disabled`'s reason, one step
+    earlier: an entry that never typed can never produce a tool to describe, so
+    the manager exists only to be looked at and the bootstrap is pre-MCP."""
+    root = _tuned_root(tmp_path, room=6_000)
+    _project_with_servers(root, broken={"type": "local", "command": []})
+    factory = factories(root)
+    engine = _engines(factory)("tuned")
+    assert [s.state for s in factory.statuses()] == ["invalid"]
+    assert engine.build_warnings == ()
+    assert engine._registry.names() == default_registry().names()
+
+
+def test_a_refused_entry_leads_the_servers_that_loaded(
+    tmp_path: Path, inproc_mcp, factories
+) -> None:
+    """A config the runtime could not even read comes first: it is what a user
+    scanning the list has to see before the servers that did load."""
+    root = tmp_path / "project"
+    root.mkdir()
+    _project_with_servers(root, demo=DEMO_SERVER, broken={"type": "remote", "url": ""})
+    factory = factories(root)
+
+    assert [(s.name, s.state) for s in factory.statuses()] == [
+        ("broken", "invalid"),
+        ("demo", "connected"),
+    ]
 
 
 def test_the_session_log_records_role_and_parent(tmp_path: Path) -> None:

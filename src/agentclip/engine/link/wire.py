@@ -787,7 +787,7 @@ def encode_mcp_status(value: McpServerStatus) -> dict[str, Any]:
 
 def decode_mcp_status(value: Any, what: str = "mcp_status") -> McpServerStatus:
     data = _mapping(value, what)
-    # Strict against the lifecycle's seven names: a state this side has never
+    # Strict against the lifecycle's own names: a state this side has never
     # heard of would be painted as a status line nobody can act on, which is
     # exactly the guess a protocol boundary must not make.
     state: McpServerState = _literal_at(data, "state", _MCP_STATES, what)

@@ -1440,8 +1440,12 @@ button:not(:disabled) {
   color: var(--ok);
 }
 
+/* `invalid` joins the two failure states rather than the greyed-out look
+   `disabled` gets: the user did not ask for it, and the row exists only to be
+   noticed and acted on. */
 .mcp-row.failed,
-.mcp-row.needs_auth {
+.mcp-row.needs_auth,
+.mcp-row.invalid {
   color: var(--warn);
 }
 

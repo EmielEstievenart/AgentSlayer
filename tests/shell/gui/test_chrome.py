@@ -369,11 +369,13 @@ def test_a_sub_agent_run_rebadges_the_whole_watch_segment(harness: Harness) -> N
 
 def test_the_mcp_segment_counts_connected_over_enabled(harness: Harness) -> None:
     """Disabled entries are a config statement rather than a runtime hope, so
-    they are out of both numbers' way."""
+    they are out of both numbers' way - and so is an entry the config loader
+    refused, which never became a server anyone is waiting on."""
     harness.view._mcp_manager = FakeMcp(
         FakeStatus("a", "connected", 2),
         FakeStatus("b", "failed"),
         FakeStatus("c", "disabled"),
+        FakeStatus("d", "invalid", detail="mcp.d: url must be a non-empty string"),
     )
     harness.view.render_state(session_view())
     assert segments(harness)["mcp"]["text"] == "mcp 1/2"
@@ -469,6 +471,30 @@ def test_the_mcp_block_is_one_row_per_server_in_config_order(harness: Harness) -
     assert rows[0]["line"] == "fs · connected · 1 tool"
     assert rows[1]["line"] == "gh · needs auth · run /mcp"
     assert rows[2]["line"] == "off · disabled"
+
+
+def test_a_refused_entry_is_an_invalid_row_that_carries_its_reason(
+    harness: Harness,
+) -> None:
+    """A config the loader refused is drawn like the failures, not like
+    `disabled`: the user did not ask for it, the state alone does not say why,
+    and the reason is the only actionable thing on the row. The page puts the
+    raw state on as a CSS class, which is where app.css's warn colour hangs.
+
+    It reaches the block through the ordinary paint and nothing else - it was
+    decided at load time, so no hook fires for it and no toast is raised.
+    """
+    reason = "config: /home/u/permissions.json: mcp.polarion: url must be a non-empty string"
+    harness.view._mcp_manager = FakeMcp(
+        FakeStatus("polarion", "invalid", detail=reason),
+        FakeStatus("fs", "connected", 1),
+    )
+    harness.view._push_mcp()
+    recorder = harness.flush()
+    rows = recorder.last("mcp")["rows"]
+    assert rows[0]["state"] == "invalid"
+    assert rows[0]["line"] == f"polarion · invalid config · {reason}"
+    assert recorder.of_type("toast") == []
 
 
 def test_a_status_transition_repaints_the_block_and_still_toasts(harness: Harness) -> None:

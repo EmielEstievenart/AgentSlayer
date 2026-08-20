@@ -252,8 +252,10 @@ def test_mcp_status_round_trips_with_every_field() -> None:
 
 @pytest.mark.parametrize("state", get_args(McpServerState))
 def test_every_mcp_state_survives(state: McpServerState) -> None:
-    """All seven of the lifecycle, including the two that are not failures -
-    `disabled` and `missing_sdk` are healthy states a status pane must show."""
+    """Every name the lifecycle has, read off the Literal so a state added to
+    the runtime is covered here the same day - including the ones that are not
+    failures (`disabled`, `missing_sdk`) and the one decided before the runtime
+    ever sees the server (`invalid`), all of which a status pane must show."""
     status = McpServerStatus(name="demo", state=state, detail="", tool_count=0)
     assert wire.decode_mcp_status(wire.encode_mcp_status(status)).state == state
 

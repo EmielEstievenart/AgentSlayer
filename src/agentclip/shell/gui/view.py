@@ -357,6 +357,7 @@ _MCP_STATE_LABEL: dict[str, str] = {
     "connecting": "connecting",
     "connected": "connected",
     "disabled": "disabled",
+    "invalid": "invalid config",
     "failed": "failed",
     "needs_auth": "needs auth",
     "missing_sdk": "no mcp sdk",
@@ -396,14 +397,17 @@ def _service_options(config: Config) -> list[list[str]]:
 
 def _mcp_line(status: Any) -> str:
     """One server's row: name + human state (+ tools when connected, + the detail
-    on the two states that are questions until it is read)."""
+    on the three states that are questions until it is read)."""
     state = str(getattr(status, "state", ""))
     parts = [str(getattr(status, "name", "")), _MCP_STATE_LABEL.get(state, state)]
     if state == "connected":
         count = int(getattr(status, "tool_count", 0) or 0)
         parts.append(f"{count} tool{'' if count == 1 else 's'}")
     detail = str(getattr(status, "detail", "") or "")
-    if state in ("failed", "needs_auth") and detail:
+    # `invalid` sits with the failures, not with `disabled`: the label says the
+    # entry was refused and only the detail says why, which is what the row is
+    # for. The column ellipses it; `/mcp` prints the whole sentence.
+    if state in ("failed", "needs_auth", "invalid") and detail:
         parts.append(detail)
     return " · ".join(parts)
 
@@ -3744,9 +3748,13 @@ class GuiView:
         """``connected`` over ``enabled`` - or ``None`` when there is no manager.
 
         Disabled entries are a config statement rather than a runtime hope, so
-        they are out of both numbers' way. ``None`` hides the segment and the
-        whole sidebar block: an install with no MCP servers gets exactly the bar
-        it always had.
+        they are out of both numbers' way - and an entry the loader REFUSED is
+        the same kind of statement, one step earlier: it never became a server,
+        so counting it as one still-to-connect would leave the denominator
+        permanently un-reachable. Its row says `invalid config` instead, which
+        is where that fact belongs. ``None`` hides the segment and the whole
+        sidebar block: an install with no MCP servers gets exactly the bar it
+        always had.
         """
         if self._mcp_manager is None:
             return 0, None
@@ -3754,7 +3762,9 @@ class GuiView:
         if not statuses:
             return 0, None
         connected = sum(1 for s in statuses if getattr(s, "state", "") == "connected")
-        enabled = sum(1 for s in statuses if getattr(s, "state", "") != "disabled")
+        enabled = sum(
+            1 for s in statuses if getattr(s, "state", "") not in ("disabled", "invalid")
+        )
         return connected, enabled
 
     def _mcp_rows(self) -> Sequence[Any]:

@@ -80,6 +80,7 @@ McpServerState = Literal[
     "connecting",
     "connected",
     "disabled",  # enabled=false in config
+    "invalid",  # the loader refused the entry; detail carries the reason
     "failed",  # spawn/connect/handshake error; detail says what
     "needs_auth",  # remote answered 401/403 and phase 1 has no OAuth
     "missing_sdk",  # the [mcp] extra is not installed
@@ -123,12 +124,34 @@ class McpConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class McpRejectedServer:
+    """One entry the loader refused, kept so the user can still SEE it.
+
+    A dropped entry used to leave exactly one trace - a line in
+    ``Config.warnings``, shown as a startup toast that is gone eight seconds
+    later - and after that the server was simply absent from ``/mcp`` and the
+    sidebar, which reads as "AgentClip never noticed my config" rather than
+    "AgentClip read it and said no". The name and the reason travel here so the
+    refusal becomes a standing row instead of a moment.
+
+    ``reason`` is the *whole* warning text, ctx and all, so the row and the
+    toast are the same sentence: a user who half-read the toast recognises it.
+    """
+
+    name: str
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class McpServers:
-    """What the config loader hands the runtime: the parsed server list plus
-    where it came from ("" when no file contributed any)."""
+    """What the config loader hands the runtime: the parsed server list, the
+    entries it refused, plus where it all came from ("" when no file
+    contributed any)."""
 
     servers: tuple[McpServerConfig, ...] = ()
     source: str = ""
+    # Never overlaps `servers` by name: an entry either typed or it did not.
+    rejected: tuple[McpRejectedServer, ...] = ()
 
     def enabled_servers(self) -> tuple[McpServerConfig, ...]:
         return tuple(s for s in self.servers if s.enabled)

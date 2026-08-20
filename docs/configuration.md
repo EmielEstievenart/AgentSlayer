@@ -204,7 +204,8 @@ Declared in the `mcp` block of the same permissions.json files (global first, pr
 }
 ```
 
-- `{env:VAR}` reads the **target machine's** environment (empty if unset); `{file:path}` reads a file, relative paths anchored to the config file that declared the entry.
+- `{env:VAR}` reads the **target machine's** environment (empty if unset); `{file:path}` reads a file, relative paths anchored to the config file that declared the entry. `${VAR}` is **not** expanded — it travels verbatim (straight into your `Authorization` header, where it reads as a 401). AgentClip warns when it sees one.
 - `{"enabled": false}` with no `type` is a legal disable-patch onto a server declared in the other layer.
+- An entry AgentClip cannot read — no `type`, a `remote` without `url`, a `local` without a `command` list — is not silently dropped: `/mcp` and the sidebar list it as `invalid`, with the reason on the row.
 - Local (stdio) servers are refused in remote sessions — a remote target only gets `remote` servers.
 - MCP tool calls gate under the `mcp` permission kind; listing schemas only needs `mcp_schema`.

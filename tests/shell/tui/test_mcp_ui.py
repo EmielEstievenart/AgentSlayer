@@ -309,3 +309,53 @@ async def test_the_mcp_command_lists_every_server_in_the_transcript(
         note = next(entry for entry in main.transcript.entries if "MCP servers:" in entry)
         assert "alpha · connected · 12 tools" in note
         assert "beta · failed · connect timed out after 30000 ms" in note
+
+
+async def test_an_entry_the_config_loader_refused_is_a_visible_invalid_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected entry (executor/mcp/config.py) reaches the screen the way a
+    refused stdio server does: decided at load time, so the mount paint is its
+    whole reporting - no hook fires for it, and it must not toast or note.
+
+    It already toasted once, as a config warning at startup; the point of the
+    row is that it is still there when the user comes back and asks. So the
+    sidebar carries it (with the reason, which is the only thing that makes it
+    actionable), the statusbar leaves it out of the denominator - an entry that
+    never became a server is not a connection anyone is waiting for - and
+    `/mcp` prints the whole sentence the 30-cell column had to cut.
+    """
+    toasts: list[str] = []
+    monkeypatch.setattr(
+        MainScreen,
+        "notify",
+        lambda self, message, *args, **kwargs: toasts.append(message),
+    )
+    reason = (
+        'config: /home/u/.config/agentclip/permissions.json: mcp.polarion: type must be '
+        '"local" or "remote"; ignored'
+    )
+    manager = FakeMcpManager(
+        McpServerStatus("polarion", "invalid", detail=reason),
+        McpServerStatus("alpha", "pending"),
+    )
+    app = _make_app(tmp_path, manager)
+    async with app.run_test(size=(110, 55)) as pilot:
+        main = await _ready(app, pilot)
+
+        assert _row_text(main, 0).startswith("polarion · invalid config · config:")
+        assert _row_text(main, 1) == "alpha · pending"
+        assert str(_seg(main).render()) == "mcp 0/1"  # the invalid row is not a hope
+
+        await send_composer(app, pilot, "/mcp")
+        await _wait_for(
+            pilot,
+            lambda: any("MCP servers:" in entry for entry in main.transcript.entries),
+            "the /mcp listing",
+        )
+        note = next(entry for entry in main.transcript.entries if "MCP servers:" in entry)
+        assert f"polarion · invalid · {reason}" in note  # the whole reason, uncut
+
+        await pilot.pause(0.2)
+        assert not any("polarion" in entry for entry in main.transcript.entries[:-1])
+        assert toasts == []

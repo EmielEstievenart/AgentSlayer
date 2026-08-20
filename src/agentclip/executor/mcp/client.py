@@ -52,6 +52,7 @@ from typing import Any, Literal
 
 from agentclip.executor.mcp.types import (
     McpLocalServer,
+    McpRejectedServer,
     McpRemoteServer,
     McpServerConfig,
     McpServerState,
@@ -178,6 +179,7 @@ class McpManager:
         project_root: Path,
         *,
         remote_target: str = "",
+        rejected: Sequence[McpRejectedServer] = (),
         _inproc_targets: Mapping[str, object] | None = None,
     ) -> None:
         """`remote_target` names the machine the project (and this config) is
@@ -187,6 +189,17 @@ class McpManager:
         describe that machine and the only machine this manager can spawn on is
         this one; and an HTTP server that fails to connect says who dialed it,
         because the config came from over there while the socket did not.
+
+        `rejected` is the entries the config loader refused
+        (:class:`McpRejectedServer`). They are NOT servers - there is no typed
+        config to spawn or dial, only a name and the sentence explaining the
+        refusal - so they never become records: they are pre-baked status rows,
+        served ahead of the real ones by :meth:`statuses` and touched by
+        nothing else in this class. That is deliberate. A user who wrote a
+        server down and got silence cannot tell "AgentClip refused my entry"
+        from "AgentClip never read my file", and a row that says `invalid` with
+        the reason on it answers that question every time they ask, rather than
+        once in a startup toast.
 
         `_inproc_targets` is a TEST SEAM and nothing else
         (docs/design/mcp.md section 7): it maps a server *name* to an object
@@ -201,6 +214,12 @@ class McpManager:
         self._inproc_targets: Mapping[str, object] = dict(_inproc_targets or {})
         self._lock = threading.Lock()
         self._records: tuple[_Record, ...] = tuple(_Record(entry=s) for s in servers)
+        # Immutable and finished the moment they are built: a refusal is a fact
+        # about a file that was read once, so nothing can move these off
+        # `invalid` and they need no lock, no hook and no place in any sweep.
+        self._rejected: tuple[McpServerStatus, ...] = tuple(
+            McpServerStatus(name=row.name, state="invalid", detail=row.reason) for row in rejected
+        )
         # The two verdicts that are already in before anything is attempted: a
         # disabled entry, and - in a remote session - a stdio one. Both get
         # their terminal state here rather than pending->...->it, and both are
@@ -697,10 +716,18 @@ class McpManager:
 
     def statuses(self) -> tuple[McpServerStatus, ...]:
         """One entry per configured server, in config order, including disabled
-        ones. Never blocks and never waits on a connect."""
+        ones. Never blocks and never waits on a connect.
+
+        The loader's rejected entries lead, and they are here from the very
+        first call - like `disabled` and a refused stdio server, an `invalid`
+        row precedes every transition, so this is the only surface that ever
+        shows it. First because a config the runtime could not even read is
+        what a user scanning the list needs to see before any of the servers
+        that did load.
+        """
         with self._lock:
             self._refresh_shadows_locked()
-            return tuple(rec.status() for rec in self._records)
+            return self._rejected + tuple(rec.status() for rec in self._records)
 
     def tools(self) -> tuple[McpToolInfo, ...]:
         """Every connected server's cached tools, config order, deduped.

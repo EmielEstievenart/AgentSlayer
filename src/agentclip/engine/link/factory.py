@@ -368,7 +368,7 @@ class EngineBuilder:
         Nothing connects at construction: ``ensure_started`` schedules and
         returns (the design's "lazy but eager-on-arm"), and every configured
         server goes in - disabled ones too, so ``statuses()`` can say
-        "disabled".
+        "disabled", and refused ones too, so it can say "invalid".
         """
         with self._mcp_lock:
             if self._mcp_settled or self._closed:
@@ -377,15 +377,24 @@ class EngineBuilder:
             if not self._mcp_enabled:
                 return None
             cfg = self._get_config()
-            # With no servers (or [mcp] enabled=false, which loads none) there
-            # is NO manager at all: every session this builder makes is
-            # byte-identical to a pre-MCP one.
-            if not (cfg.mcp.enabled and cfg.mcp_servers.servers):
+            # With nothing at all in the mcp block (or [mcp] enabled=false,
+            # which never opens the file) there is NO manager: every session
+            # this builder makes is byte-identical to a pre-MCP one.
+            #
+            # Entries the loader REFUSED count as something, though - they are
+            # the case this gate used to get most wrong. A config whose every
+            # server is malformed produced no manager, and `/mcp` then said
+            # "MCP is not configured" to a user looking straight at their
+            # configured servers. A manager with nothing but `invalid` rows
+            # connects nothing and adds no catalog text (_sized_registry), so
+            # it costs a session nothing and buys the listing its answer.
+            if not (cfg.mcp.enabled and (cfg.mcp_servers.servers or cfg.mcp_servers.rejected)):
                 return None
             manager = McpManager(
                 cfg.mcp_servers.servers,
                 self._project_root,
                 remote_target=self._mcp_remote_target,
+                rejected=cfg.mcp_servers.rejected,
             )
             if self._status_hook is not None:
                 manager.set_status_hook(self._status_hook)
@@ -457,9 +466,11 @@ def _sized_registry(
         edit_by_lines=edit_by_lines,
     )
     # No manager: MCP is unconfigured and this build is byte-identical to a
-    # pre-MCP one. All-disabled servers keep the manager for status display but
-    # add no catalog text (design section 5, degradation step 1).
-    if manager is None or all(s.state == "disabled" for s in manager.statuses()):
+    # pre-MCP one. Servers that are all disabled - or all refused by the config
+    # loader - keep the manager for status display but add no catalog text
+    # (design section 5, degradation step 1): both states are the config
+    # saying "not this run", and neither can ever produce a tool to describe.
+    if manager is None or all(s.state in ("disabled", "invalid") for s in manager.statuses()):
         return base, ()
     # Eager-on-arm (design section 3): the builder kicked the connects off the
     # moment its manager was made; this covers a manager handed straight in

@@ -168,6 +168,30 @@ def test_mcp_without_a_source_says_mcp_is_not_configured(
     assert any("MCP is not configured" in message for message in view.toasts())
 
 
+def test_mcp_switched_off_in_config_says_so_rather_than_not_configured(
+    project: Path, app_config: Config, view: FakeChatView
+) -> None:
+    """`[mcp] enabled = false` never opens permissions.json, so the listing is
+    empty for a reason that has nothing to do with the servers in it. Telling
+    that user to go and add servers sends them to edit a file that already has
+    the ones they want; the dial they actually turned off is named instead.
+
+    The only case this layer can tell apart, and it needs no wire op to do it:
+    the config a controller holds is the SESSION's, which ``rebind`` replaces
+    with the target's on a remote connect.
+    """
+    off = replace(app_config, mcp=replace(app_config.mcp, enabled=False))
+    controller = SessionController(off, make_factory(project), project, view=view)
+    view.controller = controller
+
+    controller.submit_message("/mcp")
+
+    assert view.events == []
+    (toast,) = view.toasts()
+    assert "MCP is disabled" in toast
+    assert "enabled = true" in toast
+
+
 async def test_mcp_lists_every_server_with_state_tools_and_detail(
     project: Path, app_config: Config, view: FakeChatView
 ) -> None:

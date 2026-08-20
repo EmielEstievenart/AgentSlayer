@@ -365,7 +365,9 @@ def test_every_session_a_server_hosts_shares_one_mcp_runtime(
     made: list[Any] = []
 
     class _StubManager:
-        def __init__(self, servers: Any, root: Path, *, remote_target: str = "") -> None:
+        def __init__(
+            self, servers: Any, root: Path, *, remote_target: str = "", rejected: Any = ()
+        ) -> None:
             made.append((servers, root, remote_target))
 
         def statuses(self) -> tuple[McpServerStatus, ...]:

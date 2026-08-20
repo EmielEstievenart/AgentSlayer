@@ -284,6 +284,145 @@ def test_entry_that_is_not_a_table_warns_and_is_skipped(tmp_path: Path) -> None:
     assert warnings == [f"config: {path}: mcp.bad must be a table; ignored"]
 
 
+# -- skipped entries stay VISIBLE ----------------------------------------------
+#
+# The warnings above are a moment - one startup toast - and the question they
+# answer ("why is my server not in the list?") is asked long after it is gone.
+# So every refusal above also comes back as a row `/mcp` can show for the life
+# of the process, carrying the same sentence the toast did.
+
+
+@pytest.mark.parametrize(
+    ("name", "entry", "fragment"),
+    [
+        ("weird", {"type": "sse", "url": "https://x"}, "unknown type 'sse'"),
+        ("mystery", {"command": ["x"]}, 'type must be "local" or "remote"'),
+        ("gh", {"type": "remote"}, "url must be a non-empty string"),
+        ("fs", {"type": "local", "command": []}, "command must be a non-empty list"),
+    ],
+)
+def test_a_refused_entry_becomes_a_rejection_row_with_its_reason(
+    tmp_path: Path, name: str, entry: dict, fragment: str
+) -> None:
+    path = write(tmp_path / "permissions.json", {"mcp": {name: entry}})
+    warnings: list[str] = []
+
+    servers = load_mcp_servers([path], warnings)
+
+    assert servers.servers == ()
+    (row,) = servers.rejected
+    assert row.name == name
+    assert fragment in row.reason
+    # The same sentence in both places, so the row is recognisably the toast.
+    assert warnings == [row.reason]
+    assert f"mcp.{name}" in row.reason  # the name is in the reason too, for /mcp
+
+
+def test_an_entry_that_is_not_a_table_is_a_rejection_row_too(tmp_path: Path) -> None:
+    """The one refusal decided before the merge, per FILE rather than per name -
+    and the servers that DID load are untouched by it."""
+    path = write(
+        tmp_path / "permissions.json",
+        {"mcp": {"bad": "npx server", "fs": {"type": "local", "command": ["fs"]}}},
+    )
+    warnings: list[str] = []
+
+    servers = load_mcp_servers([path], warnings)
+
+    assert [s.name for s in servers.servers] == ["fs"]
+    assert [(r.name, r.reason) for r in servers.rejected] == [
+        ("bad", f"config: {path}: mcp.bad must be a table; ignored")
+    ]
+
+
+def test_a_bare_disable_is_not_a_rejection(tmp_path: Path) -> None:
+    """`{"enabled": false}` with no type is the user getting what they asked
+    for, not a refusal - it warns about nothing, so it must show as nothing.
+    An `invalid` row here would accuse the config of a mistake it did not make.
+    """
+    path = write(tmp_path / "permissions.json", {"mcp": {"gone": {"enabled": False}}})
+    warnings: list[str] = []
+
+    servers = load_mcp_servers([path], warnings)
+
+    assert servers.servers == ()
+    assert servers.rejected == ()
+    assert warnings == []
+
+
+def test_a_name_a_later_layer_declares_properly_is_not_also_rejected(tmp_path: Path) -> None:
+    """The not-a-table arm runs per file, so a name it refuses in the global
+    layer can still be declared properly by the project one. A server that
+    loaded must not ALSO carry a row saying it did not: the two rows would
+    contradict each other in the same listing."""
+    first = write(tmp_path / "global.json", {"mcp": {"fs": "npx server"}})
+    second = write(tmp_path / "project.json", {"mcp": {"fs": {"type": "local", "command": ["fs"]}}})
+    warnings: list[str] = []
+
+    servers = load_mcp_servers([first, second], warnings)
+
+    assert [s.name for s in servers.servers] == ["fs"]
+    assert servers.rejected == ()
+    assert len(warnings) == 1  # the warning still stands; it happened
+
+
+def test_a_dollar_brace_value_warns_that_agentclip_does_not_expand_it(tmp_path: Path) -> None:
+    """`${VAR}` is shell/OpenCode muscle memory and this reader's syntax is
+    `{env:VAR}`. Nothing matches, so the literal text travels on as a header
+    and the server answers 401 - a spelling mistake that looks like a
+    credential one. One hint per SERVER, not per header, and the value is still
+    sent verbatim: `${` is legal inside a real value."""
+    path = write(
+        tmp_path / "permissions.json",
+        {
+            "mcp": {
+                "polarion": {
+                    "type": "remote",
+                    "url": "https://example.com/mcp",
+                    "headers": {
+                        "Authorization": "Bearer ${POLARION_PAT}",
+                        "X-Other": "${POLARION_PAT}",
+                    },
+                }
+            }
+        },
+    )
+    warnings: list[str] = []
+
+    servers = load_mcp_servers([path], warnings)
+
+    (server,) = servers.servers
+    assert servers.rejected == ()  # a hint, not a refusal
+    assert dict(server.headers)["Authorization"] == "Bearer ${POLARION_PAT}"
+    assert len(warnings) == 1
+    assert "${...}" in warnings[0]
+    assert "{env:VAR}" in warnings[0]
+    assert "mcp.polarion" in warnings[0]
+
+
+def test_a_real_placeholder_alone_draws_no_dollar_brace_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENTCLIP_TEST_TOKEN", "s3cret")
+    path = write(
+        tmp_path / "permissions.json",
+        {
+            "mcp": {
+                "gh": {
+                    "type": "remote",
+                    "url": "https://example.com/mcp",
+                    "headers": {"Authorization": "Bearer {env:AGENTCLIP_TEST_TOKEN}"},
+                }
+            }
+        },
+    )
+    warnings: list[str] = []
+
+    load_mcp_servers([path], warnings)
+
+    assert warnings == []
+
+
 # -- merging across layers -----------------------------------------------------
 
 

@@ -18,6 +18,12 @@ Like :func:`agentclip.config._load_permission_rules`, nothing here raises: a
 missing file is silent (most machines have none), a file that exists but
 cannot be understood costs exactly one warning, and a single bad entry costs
 that entry and nothing else.
+
+A refused *entry* costs it twice over, though: the warning above AND a
+:class:`McpRejectedServer` row on the result. The warning is a moment - one
+startup toast - while "why is my server not listed?" is a question asked long
+afterwards, so the refusal is also carried forward as something ``/mcp`` can
+show for the life of the process (see :func:`_refuse`).
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ from pathlib import Path
 from agentclip.executor.mcp.types import (
     DEFAULT_TIMEOUT_MS,
     McpLocalServer,
+    McpRejectedServer,
     McpRemoteServer,
     McpServerConfig,
     McpServers,
@@ -97,6 +104,10 @@ def load_mcp_servers(
 
     ``target`` says which machine ``paths`` (and the files and variables they
     point at) live on; omitted, it is this PC.
+
+    Entries that cannot be typed come back on ``McpServers.rejected`` as well
+    as in ``warnings`` - a server the user wrote down is worth a visible row
+    saying why it is not running, not only a toast at launch.
     """
     target = target if target is not None else McpTarget()
     merged: dict[str, dict] = {}
@@ -106,6 +117,11 @@ def load_mcp_servers(
     # look the way it does.
     blame: dict[str, Path] = {}
     sources: list[str] = []
+    # Keyed by name because a rejection row IS a configured name: two layers
+    # that both got the same entry wrong are one broken server, not two, and
+    # the later file is the one whose author saw the final shape (as with
+    # `blame`).
+    rejected: dict[str, McpRejectedServer] = {}
 
     for path in paths:
         block = _read_mcp_block(path, warnings, target)
@@ -114,7 +130,12 @@ def load_mcp_servers(
         contributed = False
         for name, entry in block.items():
             if not isinstance(entry, dict):
-                warnings.append(f"config: {path}: mcp.{name} must be a table; ignored")
+                _refuse(
+                    name,
+                    f"config: {path}: mcp.{name} must be a table; ignored",
+                    warnings,
+                    rejected,
+                )
                 continue
             previous = merged.get(name)
             merged[name] = _deep_merge(previous, entry) if previous is not None else dict(entry)
@@ -126,7 +147,7 @@ def load_mcp_servers(
     servers: list[McpServerConfig] = []
     for name, entry in merged.items():
         ctx = f"config: {blame[name]}: mcp.{name}"
-        server = _parse_entry(name, entry, ctx, warnings)
+        server = _parse_entry(name, entry, ctx, warnings, rejected)
         if server is not None:
             # The blame file's directory anchors relative {file:...} paths -
             # OpenCode resolves them against the config file being parsed, and
@@ -135,7 +156,31 @@ def load_mcp_servers(
             # file anchors: per-field origins are gone after the raw merge,
             # and the later file is the one whose author saw the final shape.)
             servers.append(_substitute(server, ctx, blame[name].parent, warnings, target))
-    return McpServers(servers=tuple(servers), source=", ".join(sources))
+    # A name only reaches `rejected` from the not-a-table arm, which runs per
+    # FILE and so can fire for a name a later layer then declares properly.
+    # A server that loaded is not also a refusal - the row would contradict the
+    # one beside it - so the surviving names win.
+    loaded = {server.name for server in servers}
+    return McpServers(
+        servers=tuple(servers),
+        source=", ".join(sources),
+        rejected=tuple(row for name, row in rejected.items() if name not in loaded),
+    )
+
+
+def _refuse(
+    name: str, message: str, warnings: list[str], rejected: dict[str, McpRejectedServer]
+) -> None:
+    """Drop one entry, and record the drop on both surfaces that report it.
+
+    The warning is the launch-time surface (one toast, eight seconds) and the
+    row is the standing one (`/mcp`, the sidebar). Neither replaces the other:
+    the toast catches a user who is watching, the row answers the user who
+    comes back an hour later asking where their server went. Same text in both,
+    so the second is recognisably the first.
+    """
+    warnings.append(message)
+    rejected[name] = McpRejectedServer(name=name, reason=message)
 
 
 # -- reading ------------------------------------------------------------------
@@ -192,10 +237,15 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 
 def _parse_entry(
-    name: str, entry: dict, ctx: str, warnings: list[str]
+    name: str,
+    entry: dict,
+    ctx: str,
+    warnings: list[str],
+    rejected: dict[str, McpRejectedServer],
 ) -> McpServerConfig | None:
-    """One merged entry as a typed server, or None (with a warning, unless the
-    entry is a bare disable) when it cannot be trusted.
+    """One merged entry as a typed server, or None (with a warning and a
+    rejection row, unless the entry is a bare disable) when it cannot be
+    trusted.
 
     Unknown keys inside an entry are ignored in silence: OpenCode's schema
     grows, and warning about a key this version has not learned yet would train
@@ -208,21 +258,31 @@ def _parse_entry(
         # layer - and if such a layer existed, the raw-dict merge already
         # applied it there, so a type-less entry reaching here means nobody
         # declared the server at all. Nothing to disable, nothing to warn
-        # about: the user got exactly what they asked for.
+        # about, and nothing to show as invalid either: the user got exactly
+        # what they asked for, so this is the one refusal that leaves no trace.
         if entry.get("enabled") is False:
             return None
-        warnings.append(f'{ctx}: type must be "local" or "remote"; ignored')
+        _refuse(name, f'{ctx}: type must be "local" or "remote"; ignored', warnings, rejected)
         return None
     if kind == "local":
-        return _parse_local(name, entry, ctx, warnings)
+        return _parse_local(name, entry, ctx, warnings, rejected)
     if kind == "remote":
-        return _parse_remote(name, entry, ctx, warnings)
-    warnings.append(f'{ctx}: unknown type {kind!r}; expected "local" or "remote"; ignored')
+        return _parse_remote(name, entry, ctx, warnings, rejected)
+    _refuse(
+        name,
+        f'{ctx}: unknown type {kind!r}; expected "local" or "remote"; ignored',
+        warnings,
+        rejected,
+    )
     return None
 
 
 def _parse_local(
-    name: str, entry: dict, ctx: str, warnings: list[str]
+    name: str,
+    entry: dict,
+    ctx: str,
+    warnings: list[str],
+    rejected: dict[str, McpRejectedServer],
 ) -> McpLocalServer | None:
     command = entry.get("command")
     if (
@@ -233,7 +293,12 @@ def _parse_local(
         # The whole server dies with its command, rather than defaulting to
         # something plausible: this is the argv THIS PC will execute, and a
         # guess is the one failure mode with teeth (docs/design/mcp.md 1).
-        warnings.append(f"{ctx}: command must be a non-empty list of strings; server ignored")
+        _refuse(
+            name,
+            f"{ctx}: command must be a non-empty list of strings; server ignored",
+            warnings,
+            rejected,
+        )
         return None
     return McpLocalServer(
         name=name,
@@ -246,11 +311,15 @@ def _parse_local(
 
 
 def _parse_remote(
-    name: str, entry: dict, ctx: str, warnings: list[str]
+    name: str,
+    entry: dict,
+    ctx: str,
+    warnings: list[str],
+    rejected: dict[str, McpRejectedServer],
 ) -> McpRemoteServer | None:
     url = entry.get("url")
     if not isinstance(url, str) or not url.strip():
-        warnings.append(f"{ctx}: url must be a non-empty string; server ignored")
+        _refuse(name, f"{ctx}: url must be a non-empty string; server ignored", warnings, rejected)
         return None
     return McpRemoteServer(
         name=name,
@@ -367,6 +436,24 @@ def _substitute(
 def _expand(value: str, ctx: str, base_dir: Path, warnings: list[str], target: McpTarget) -> str:
     if "{" not in value:  # the overwhelmingly common case; skip the regex
         return value
+    if "${" in value:
+        # Shell muscle memory writes `${TOKEN}`, and this module's syntax is
+        # `{env:TOKEN}`. The mistake is invisible in the worst way: nothing
+        # here matches, so the placeholder travels on verbatim as an
+        # Authorization header and the server answers 401 - which reads as a
+        # credential problem when it is really a spelling one.
+        #
+        # A hint, not a refusal: `${` is legal inside a real value (a JSON
+        # template, a jq filter), so the value still goes through verbatim.
+        hint = (
+            f"{ctx}: a value contains '${{...}}', which AgentClip does not expand - "
+            "use {env:VAR} or {file:path}"
+        )
+        # Once per server, not once per header: `ctx` names the server, so an
+        # identical line already present is this server's, and three headers
+        # pasted from the same shell script are one mistake to report.
+        if hint not in warnings:
+            warnings.append(hint)
 
     def _one(match: re.Match[str]) -> str:
         kind, arg = match.group(1), match.group(2)

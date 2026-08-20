@@ -11,7 +11,7 @@ Slash commands are typed in the chat box: Enter sends, and a newline is `ctrl+j`
 | `/abort` | End a **sub-agent delegation** in flight (contrast `ctrl+x`, which only cancels the tool calls running right now) |
 | `/identify` | Draw boxes where AgentClip sees the chat window's parts — calibration aid, touches nothing |
 | `/log` | Toggle the harness decision-log pane |
-| `/mcp` | List MCP servers: state, tools, errors |
+| `/mcp` | List MCP servers: state, tools, errors — including entries whose config was refused (`invalid`, with the reason) |
 | `/skills` | List loaded skills and the folder each came from |
 | `/armed [on\|off]` | May AgentClip touch the screen at all (click/paste/scroll). Same as F5. A machine property — survives `/new` |
 | `/mode [build\|plan]` | Set the permission mode; bare `/mode` reports it. Same dial as `shift+tab` |

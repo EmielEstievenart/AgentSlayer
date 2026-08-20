@@ -1203,14 +1203,38 @@ class SessionController:
         """Render whichever rows were read into one transcript note (or a toast
         when there are none). The one renderer both sources share."""
         if not statuses:
-            self._view.notify(
-                "MCP is not configured - add servers to the mcp block of "
-                "permissions.json (/config says where it lives)",
-                severity="information",
-            )
+            self._view.notify(self._mcp_empty_message(), severity="information")
             return
         listing = "\n".join(_mcp_server_line(status) for status in statuses)
         self._view.spawn(self._view.add_note(f"MCP servers:\n{listing}"))
+
+    def _mcp_empty_message(self) -> str:
+        """What "no rows at all" means - told apart in the one case it can be.
+
+        Nothing else can produce an empty listing now that a server the loader
+        REFUSED still comes back as an `invalid` row: the list is empty only
+        when no server was declared, or when the subsystem is switched off
+        entirely. Those two want opposite advice, and telling a user who set
+        `enabled = false` to go and add servers sends them to edit a file that
+        already has the servers they want.
+
+        The config read here is the SESSION's - :meth:`rebind` hands over the
+        one read off the target, since that is the machine whose engine owns
+        the MCP runtime (docs/design/remote-executor.md section 2.7) - so a
+        remote session answers for the target, and no wire op is needed to ask.
+        The one window this cannot speak for is a remote launch before its
+        first connect, where the config on hand is still this PC's; there it
+        falls back to the generic line, which is never wrong, only vaguer.
+        """
+        if not self._config.mcp.enabled:
+            return (
+                "MCP is disabled - set enabled = true in the [mcp] block of the "
+                "config file (/config says where it lives)"
+            )
+        return (
+            "MCP is not configured - add servers to the mcp block of "
+            "permissions.json (/config says where it lives)"
+        )
 
     def _cmd_skills(self) -> None:
         """`/skills`: list the loaded skills and the folder each came from.

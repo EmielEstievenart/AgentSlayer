@@ -55,6 +55,12 @@ agentclip = "agentclip.cli:main"
 # speaks the JSON-lines wire over its stdio (docs/design/remote-executor.md
 # section 2.6). Nothing is pushed to the target at connect time.
 agentclip-engine = "agentclip.engine.link.__main__:main"
+# The MONITOR half, as a named executable (docs/design/ui-monitor.md 6.5). It
+# runs on the machine whose SCREEN shows the chat - a VM, or this PC in split
+# mode - and serves that screen, mouse, keyboard and clipboard to a brain over
+# the JSON-lines monitor wire. A standing process: it keeps polling whether or
+# not a brain is attached, and accepts a redial (2.8).
+agentclip-monitor = "agentclip.driver.monitor.__main__:main"
 
 [dependency-groups]
 dev = [

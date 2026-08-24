@@ -1,0 +1,397 @@
+"""The monitor wire's codecs, one round trip each.
+
+docs/design/ui-monitor.md §2.7 and §6.5. Everything here is the same assertion
+said about a different value: *encode then decode is identity*. That is the only
+property a codec on a two-machine seam owes, and it is the one a hand-written
+``decode`` silently loses the day somebody adds a field to the dataclass and not
+to the reader.
+
+Two things are pinned beyond the round trips, because both are places a wire
+goes wrong quietly rather than loudly:
+
+* **The table covers the Protocol.** ``test_every_verb_round_trips`` iterates
+  :data:`~agentclip.driver.monitor.wire.VERBS` rather than a list written out
+  here, so a verb added to ``UIMonitor`` and to the table is exercised the same
+  day, and a verb added to one of them and not the other fails.
+* **Three-state sightings survive.** ``absent`` (never searched), ``None``
+  (searched, not on screen) and a rectangle are three different facts, and the
+  first is the one a naive mapping loses.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
+
+import pytest
+
+from agentclip.driver.monitor.protocol import ElementClick, Located, MonitorSpec, Tick
+from agentclip.driver.monitor.wire import (
+    OURS,
+    VERBS,
+    Versions,
+    WireError,
+    WireVersionError,
+    call_frame,
+    clip_frame,
+    decode_busy_probe,
+    decode_kind,
+    decode_line,
+    decode_located,
+    decode_params,
+    decode_region,
+    decode_result,
+    decode_spec,
+    decode_stale_probe,
+    decode_tick,
+    encode_busy_probe,
+    encode_kind,
+    encode_line,
+    encode_located,
+    encode_params,
+    encode_region,
+    encode_result,
+    encode_spec,
+    encode_stale_probe,
+    encode_tick,
+    error_frame,
+    hello_ack_frame,
+    hello_frame,
+    read_call,
+    read_clip,
+    read_error,
+    read_hello,
+    read_hello_ack,
+    read_result,
+    read_tick,
+    result_frame,
+    tick_frame,
+)
+from agentclip.driver.screen.busy import BusyProbe, BusyState
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.stale import StaleProbe, StaleState
+
+COPY = TemplateKind.COPY
+CHATBOX = TemplateKind.CHATBOX_ONGOING
+
+# Deliberately not at the origin, and deliberately negative in one axis: a
+# monitor to the LEFT of the primary one has negative origins, and this wire
+# carries virtual-screen coordinates.
+REGION = ScreenRegion(-1200, 40, 640, 480)
+
+SPEC = MonitorSpec(
+    service="claude",
+    region=REGION,
+    finish_signals=("busy", "stale"),
+    stable_seconds=1.5,
+    tolerance=24,
+    matcher="opencv",
+    hover_scan=True,
+    scroll_action="wheel",
+    snap_back=True,
+    delivery="paste",
+    auto_submit=False,
+    send_arm_min_diff=0.02,
+    send_arm_ticks=2,
+    send_gate_timeout_ticks=240,
+    send_gate_seen_timeout_ticks=20,
+)
+
+TICK = Tick(
+    seq=7,
+    generation=3,
+    at=1234.5,
+    captured=True,
+    busy=BusyProbe(BusyState.CHANGED, 0.4, generating_now=True),
+    idle=BusyProbe(BusyState.MATCH, None),
+    stale=StaleProbe(StaleState.STALE, 0.0, 4),
+    # All three states of the map at once: found, searched-and-absent, and (by
+    # omission) never searched at all.
+    sightings={COPY: ScreenRegion(10, 20, 30, 40), CHATBOX: None},
+    active_detectors=("busy", "stale"),
+    stale_arm_streak=2,
+    changed_streak=1,
+)
+
+
+# == the value codecs ==========================================================
+
+
+def test_a_region_round_trips_with_signed_origins() -> None:
+    assert decode_region(encode_region(REGION)) == REGION
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        BusyProbe(BusyState.MATCH, 0.125, generating_now=True),
+        BusyProbe(BusyState.ERROR, None),
+        BusyProbe(BusyState.CHANGED, 1.0),
+    ],
+)
+def test_a_busy_probe_round_trips(probe: BusyProbe) -> None:
+    """Including the ERROR case, whose ``diff`` is None - the reading with no
+    frame behind it, which is exactly the one a lazy codec turns into 0.0."""
+    assert decode_busy_probe(encode_busy_probe(probe)) == probe
+
+
+@pytest.mark.parametrize(
+    "probe",
+    [
+        StaleProbe(StaleState.STALE, 0.0, 5),
+        StaleProbe(StaleState.CHANGING, 0.3, 0),
+        StaleProbe(StaleState.ERROR, None, 0),
+    ],
+)
+def test_a_stale_probe_round_trips(probe: StaleProbe) -> None:
+    assert decode_stale_probe(encode_stale_probe(probe)) == probe
+
+
+def test_every_template_kind_round_trips() -> None:
+    """By VALUE, because the value is the identity ``profile_store`` already
+    writes to disk - the wire and the store say the same word."""
+    for kind in TemplateKind:
+        assert decode_kind(encode_kind(kind)) is kind
+
+
+def test_a_spec_round_trips_whole() -> None:
+    assert decode_spec(encode_spec(SPEC)) == SPEC
+
+
+def test_a_spec_with_no_region_round_trips() -> None:
+    """The configured-but-idle state (§2.10): a service named, nowhere to look."""
+    idle = replace(SPEC, region=None)
+    assert decode_spec(encode_spec(idle)) == idle
+
+
+@pytest.mark.parametrize(
+    "located",
+    [
+        Located(region=REGION, ambiguous=False, best_miss=None),
+        Located(region=REGION, ambiguous=True, best_miss=None),
+        Located(region=None, ambiguous=False, best_miss=0.42),
+        Located(region=None, ambiguous=False, best_miss=None),
+    ],
+)
+def test_a_located_round_trips(located: Located) -> None:
+    """All four shapes, because the whole point of the three fields is that a
+    caller with only ``region`` cannot tell the failures apart."""
+    assert decode_located(encode_located(located)) == located
+
+
+def test_a_tick_round_trips_whole() -> None:
+    assert decode_tick(encode_tick(TICK)) == TICK
+
+
+def test_a_tick_keeps_the_three_states_of_a_sighting() -> None:
+    """Found, searched-and-absent, never-searched. The third is the one a
+    mapping that only carried "where things are" would lose."""
+    back = decode_tick(encode_tick(TICK))
+    assert back.locate(COPY) == ScreenRegion(10, 20, 30, 40)
+    assert back.searched(CHATBOX) and back.present(CHATBOX) is False
+    assert not back.searched(TemplateKind.NEW_CHAT)
+    assert back.present(TemplateKind.NEW_CHAT) is None
+
+
+def test_a_failed_capture_tick_round_trips() -> None:
+    """A frame that failed searched nothing, so the map is empty - and empty is
+    not the same as absent-field."""
+    blind = Tick(
+        seq=1, generation=1, at=0.0, captured=False,
+        busy=None, idle=None, stale=None, sightings={}, active_detectors=(),
+    )
+    assert decode_tick(encode_tick(blind)) == blind
+
+
+# == the per-verb table ========================================================
+
+# One sample call and one sample return per verb. Written out rather than
+# generated, because the point is to state what each verb's shapes ARE - and the
+# test below fails if a verb appears in the table with no row here, which is how
+# a new verb gets noticed.
+CALLS: dict[str, dict[str, Any]] = {
+    "configure": {"spec": SPEC},
+    "suspend": {},
+    "resume": {},
+    "close": {},
+    "focus_window": {"handle": 12345},
+    "foreground_window": {},
+    "click": {"region": REGION, "settle_s": 0.25},
+    "move_cursor": {"x": -40, "y": 900},
+    "scroll": {"region": REGION, "detents": -3},
+    "scroll_key": {"key": "page_down", "taps": 4},
+    "send_paste": {},
+    "send_enter": {},
+    "read_clipboard": {},
+    "write_clipboard": {"text": "a reply\nwith a newline"},
+    "watch_clipboard": {"on": True},
+    "find_all": {"kind": COPY},
+    "locate": {"kind": COPY, "exclude_kinds": (CHATBOX, TemplateKind.SEND_READY)},
+    "click_element": {"kind": COPY, "settle_s": None},
+    "hover_scan": {"kind": COPY},
+    "snap_to_bottom": {"action": "wheel"},
+}
+
+RETURNS: dict[str, Any] = {
+    "configure": 4,
+    "suspend": None,
+    "resume": None,
+    "close": None,
+    "focus_window": True,
+    "foreground_window": 99887,
+    "click": False,
+    "move_cursor": True,
+    "scroll": True,
+    "scroll_key": False,
+    "send_paste": True,
+    "send_enter": False,
+    "read_clipboard": "what was on the clipboard",
+    "write_clipboard": None,
+    "watch_clipboard": True,
+    "find_all": (REGION, ScreenRegion(0, 0, 4, 4)),
+    "locate": Located(region=REGION, ambiguous=True, best_miss=None),
+    "click_element": ElementClick.AMBIGUOUS,
+    "hover_scan": REGION,
+    "snap_to_bottom": None,
+}
+
+
+@pytest.mark.parametrize("verb", VERBS)
+def test_every_verb_round_trips(verb: str) -> None:
+    """Params and result, both directions, for every verb the table carries.
+
+    Parametrised over ``VERBS`` itself: a verb added to ``UIMonitor`` and to the
+    table is covered the same day it lands, and one added to the table with no
+    sample here fails on the KeyError rather than passing vacuously.
+    """
+    kwargs = CALLS[verb]
+    assert decode_params(verb, encode_params(verb, **kwargs)) == kwargs
+    value = RETURNS[verb]
+    assert decode_result(verb, encode_result(verb, value)) == value
+
+
+def test_an_omitted_default_is_still_written_in_full() -> None:
+    """The far side never has to know what the near side's default was."""
+    params = encode_params("scroll_key", key="end")
+    assert params == {"key": "end", "taps": 1}
+    assert decode_params("scroll_key", params) == {"key": "end", "taps": 1}
+
+
+def test_an_unknown_verb_is_refused_in_both_directions() -> None:
+    with pytest.raises(WireError):
+        encode_params("teleport", where="mars")
+    with pytest.raises(WireError):
+        decode_result("teleport", None)
+
+
+def test_an_unknown_parameter_is_refused() -> None:
+    with pytest.raises(WireError):
+        encode_params("scroll_key", key="end", speed=3)
+    with pytest.raises(WireError):
+        decode_params("scroll_key", {"key": "end", "taps": 1, "speed": 3})
+
+
+def test_a_missing_parameter_is_refused() -> None:
+    with pytest.raises(WireError):
+        decode_params("scroll_key", {"taps": 1})
+
+
+def test_a_boolean_is_never_an_integer_on_this_wire() -> None:
+    """``True`` is an int in Python and never one here: a detent count that
+    decoded ``true`` into 1 would scroll a window nobody asked to scroll."""
+    with pytest.raises(WireError):
+        decode_params("scroll", {"region": encode_region(REGION), "detents": True})
+
+
+# == lines and frames ==========================================================
+
+
+def test_a_line_is_one_line_even_with_newlines_in_it() -> None:
+    line = encode_line(clip_frame("two\nlines\r\nand a tab\t"))
+    assert line.endswith("\n") and line.count("\n") == 1
+    assert read_clip(decode_line(line)) == "two\nlines\r\nand a tab\t"
+
+
+def test_text_rides_as_itself_rather_than_as_escapes() -> None:
+    assert "em—dash" in encode_line(clip_frame("em—dash"))
+
+
+def test_a_line_that_is_not_a_json_object_is_refused() -> None:
+    for bad in ("not json at all", "[1,2,3]", '{"no":"type"}'):
+        with pytest.raises(WireError):
+            decode_line(bad)
+
+
+def test_the_handshake_round_trips() -> None:
+    assert read_hello(decode_line(encode_line(hello_frame()))) == OURS
+    ack = read_hello_ack(decode_line(encode_line(hello_ack_frame("srv-1", "copykitten"))))
+    assert (ack.server_id, ack.versions, ack.clipboard_kind) == ("srv-1", OURS, "copykitten")
+
+
+def test_a_monitor_with_no_clipboard_says_so_in_the_handshake() -> None:
+    """``None`` and ``"manual"`` are different machines and the client answers
+    ``watch_clipboard`` off exactly this field."""
+    assert read_hello_ack(hello_ack_frame("srv-1", None)).clipboard_kind is None
+    assert read_hello_ack(hello_ack_frame("srv-1", "manual")).clipboard_kind == "manual"
+
+
+def test_a_version_mismatch_names_both_installs() -> None:
+    with pytest.raises(WireVersionError) as caught:
+        read_hello({"type": "hello", "version": 99, "package": "9.9.9"})
+    error = caught.value
+    assert error.peer == Versions(wire=99, package="9.9.9")
+    assert error.ours == OURS
+    # Both numbers AND both package versions, because the half a human can act
+    # on is the install, not the protocol integer.
+    assert "99" in str(error) and "9.9.9" in str(error) and OURS.package in str(error)
+
+
+def test_a_call_frame_round_trips() -> None:
+    frame = call_frame(11, "scroll_key", encode_params("scroll_key", key="end"))
+    call = read_call(decode_line(encode_line(frame)))
+    assert (call.id, call.verb) == (11, "scroll_key")
+    assert decode_params(call.verb, call.params) == {"key": "end", "taps": 1}
+
+
+def test_a_call_frame_refuses_an_unknown_verb_on_both_sides() -> None:
+    with pytest.raises(WireError):
+        call_frame(1, "teleport", {})
+    with pytest.raises(WireError):
+        read_call({"type": "call", "id": 1, "verb": "teleport", "params": {}})
+
+
+def test_a_result_frame_round_trips() -> None:
+    frame = result_frame(11, encode_result("locate", RETURNS["locate"]))
+    call_id, value = read_result(decode_line(encode_line(frame)))
+    assert call_id == 11
+    assert decode_result("locate", value) == RETURNS["locate"]
+
+
+def test_an_error_frame_carries_a_null_id_for_a_connection_level_failure() -> None:
+    """Which is what the second brain's refusal is: it answers no call (§2.8)."""
+    frame = error_frame(None, "busy", "already attached from 127.0.0.1:5001")
+    error = read_error(decode_line(encode_line(frame)))
+    assert (error.id, error.kind) == (None, "busy")
+    assert "127.0.0.1:5001" in error.message
+
+
+def test_an_error_frame_carries_the_call_it_answers() -> None:
+    error = read_error(decode_line(encode_line(error_frame(3, "internal", "boom"))))
+    assert (error.id, error.kind, error.message) == (3, "internal", "boom")
+
+
+def test_an_unknown_error_kind_is_refused() -> None:
+    with pytest.raises(WireError):
+        error_frame(1, "weather", "raining")
+    with pytest.raises(WireError):
+        read_error({"type": "error", "id": 1, "kind": "weather", "message": "raining"})
+
+
+def test_a_tick_frame_round_trips() -> None:
+    assert read_tick(decode_line(encode_line(tick_frame(TICK)))) == TICK
+
+
+def test_an_unknown_frame_type_is_refused() -> None:
+    with pytest.raises(WireError):
+        read_tick({"type": "telemetry"})

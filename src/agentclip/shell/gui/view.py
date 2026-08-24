@@ -795,7 +795,6 @@ class GuiView:
             accepts=looks_like_protocol,
             on_clipboard_captured=self._clipboard_captured,
             has_appearance=self._live_has,
-            on_fire=self._fire_auto_copy,
         )
         # Whether the sub-agent window was ready last time anything readiness
         # depends on changed, so the "you must /new for it" toast fires once
@@ -900,6 +899,12 @@ class GuiView:
         # DETECTION block, and the block has to name the window it is about from
         # the first frame rather than after the first calibration.
         self._start_detector_worker()
+        # ...and then the automation's own task, which is what turns a tick into
+        # a decision (ui-monitor.md §6.2). Scheduled rather than called, for the
+        # reason the retarget above is: the task has to be created ON the loop it
+        # will run on, and it goes on AFTER the configure so the first recipe
+        # observes a monitor that has already been pointed at a window.
+        self._schedule(self._start_automation_loop())
         if self._mcp_manager is not None:
             # Hook first, paint second, so no transition can fall in the gap.
             self._mcp_manager.set_status_hook(self._mcp_status_hook)
@@ -925,6 +930,16 @@ class GuiView:
             return
         self._start_controller()
 
+    async def _start_automation_loop(self) -> None:
+        """Start the one task that walks the recipes (``recipes/loop.py``).
+
+        This shell is its only starter: nothing below picks the loop up on its
+        own, so a shell that owns a loop owns saying when it begins. Idempotent,
+        and it lives on this side of ``_schedule`` because ``start_loop`` needs a
+        running loop to create the task on.
+        """
+        self._automation.start_loop()
+
     def _start_controller(self) -> None:
         """Start the session flow, once. Idempotent: a cancelled connect from a
         ``--gui --ssh`` launch reaches this the second time round."""
@@ -939,8 +954,9 @@ class GuiView:
         The GUI's ``MainScreen.on_unmount``, and the half of it that needs no
         event loop - the clipboard watcher is stopped through a synchronous
         monitor verb and the alarm is a thread of the automation's own. The
-        poller is the other half: ``UIMonitor.close`` is a coroutine by
-        contract, so it is :meth:`close`, which the runner awaits on the loop
+        poller and the recipe loop are the other half: ``UIMonitor.close`` is a
+        coroutine by contract and a task may only be cancelled from the loop it
+        runs on, so both are :meth:`close`, which the runner awaits on the loop
         before it cancels everything left on it. Cancelling the session worker
         is the RUNNER's half too (it owns the loop the flows run on), exactly as
         Textual's unmount cancels workers.
@@ -955,10 +971,16 @@ class GuiView:
         self._automation.stop_alert()
 
     async def close(self) -> None:
-        """Stop the monitor's threads for good. Idempotent, like the verb below
-        it - both the window's ``closing`` event and ``run_gui``'s ``finally``
-        reach the runner that calls this."""
+        """Stop the recipe loop and the monitor's threads for good. Idempotent,
+        like the verb below it - both the window's ``closing`` event and
+        ``run_gui``'s ``finally`` reach the runner that calls this.
+
+        The loop first: it is what still asks the monitor for observations, and
+        cancelling it before the machine goes away means no recipe is left
+        awaiting a tick nothing will ever push.
+        """
         self._monitor_closing = True
+        self._automation.stop_loop()
         await self._monitor.close()
 
     # == what the page asks for (js_api, already on the loop) ==================
@@ -3222,14 +3244,6 @@ class GuiView:
         """Has the LIVE window's service a capture of ``kind``? Called on the
         POLLER thread, so it reads immutable state and nothing else."""
         return self.profile_for(self._automation.live_slot).has(kind)
-
-    def _fire_auto_copy(self) -> None:
-        """The finish decision says the model stopped: harvest the reply.
-
-        Called on the poller thread, so it only SCHEDULES - the bracket that
-        suspends evaluation for the flow's duration is the controller's.
-        """
-        self._schedule(self._automation.run_auto_copy_flow(self._automation.auto_copy_flow))
 
     # == MCP: the sidebar block, the status segment, and a toast per transition =
 

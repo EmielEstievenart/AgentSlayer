@@ -527,7 +527,7 @@ async def test_the_bracket_shuts_the_window_a_raising_harvest_left_open(
     hand the next thing the USER copies the reply's treatment."""
 
     async def explode() -> None:
-        flow._prose_window = True
+        flow._ctx.prose_window = True
         raise RuntimeError("the browser vanished")
 
     with pytest.raises(RuntimeError):

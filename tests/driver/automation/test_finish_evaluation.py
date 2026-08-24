@@ -52,8 +52,9 @@ with them rather than being weakened:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pytest
 
@@ -74,12 +75,15 @@ from agentclip.driver.automation.finish import (
     SendGate,
 )
 from agentclip.driver.automation.loop_state import LoopState
+from agentclip.driver.automation.recipes import loop as loop_mod
+from agentclip.driver.automation.recipes.context import RecipeContext
+from agentclip.driver.automation.recipes.outcomes import Outcome
 from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
-from .conftest import FakeAutomationView, feed_probe, parked, settle
+from .conftest import FakeAutomationView, feed_probe, fire_count, parked, settle
 
 # The harvest is stubbed for every test in this file: a scenario about the
 # DECISION must not then drive a mouse across an imaginary screen, and the recipe
@@ -101,12 +105,18 @@ def _stop_loops() -> Iterator[None]:
 
 @dataclass
 class Harness:
-    """One controller, the machine under it, its view, and what it fired at."""
+    """One controller, the machine under it, and its view."""
 
     controller: AutomationController
     monitor: FakeUIMonitor
     view: FakeAutomationView
-    fires: list[None] = field(default_factory=list)
+
+    @property
+    def fires(self) -> int:
+        """How many times the harvest has been fired - the transitions INTO
+        ``AUTO_COPY``, read off the harness log (``conftest.fires``). Entering
+        that state IS the fire since phase 6.2; there is no callback to count."""
+        return fire_count(self.controller)
 
     # -- the probes, in the shape a poll tick pushes them ---------------------
 
@@ -194,13 +204,11 @@ async def build(
     a tick. False leaves it in ``IDLE`` - where nothing observes at all, which is
     what "no reply is outstanding" now MEANS.
     """
-    fires: list[None] = []
     monitor = FakeUIMonitor()
     controller = AutomationController(
         view=view,
         monitor=monitor,
         has_appearance=lambda kind: kind in captures,
-        on_fire=lambda: fires.append(None),
     )
     controller.active_detectors = detectors
     if not armed:
@@ -211,7 +219,7 @@ async def build(
     controller.start_loop()
     _RUNNING.append(controller)
     await settle(2)
-    return Harness(controller, monitor, view, fires)
+    return Harness(controller, monitor, view)
 
 
 # -- arming: the two kinds of evidence, and what each is worth ----------------
@@ -304,10 +312,10 @@ async def test_the_trigger_fires_on_two_consecutive_finished_ticks(
 
     await h.busy(BusyState.MATCH)  # generating -> armed
     await h.busy(BusyState.CHANGED)
-    assert h.fires == []  # one finished tick is not enough
+    assert h.fires == 0  # one finished tick is not enough
 
     await h.busy(BusyState.CHANGED)
-    assert h.fires == [None]
+    assert h.fires == 1
     assert h.controller.loop_state is LoopState.AUTO_COPY
     # Firing IS the harvest: the reply that was outstanding is being collected
     # right now, so the watch that held the arm is gone with it.
@@ -323,10 +331,10 @@ async def test_a_generating_tick_between_two_finished_ones_restarts_the_count(
     await h.busy(BusyState.CHANGED)
     await h.busy(BusyState.MATCH)  # still going after all
     await h.busy(BusyState.CHANGED)
-    assert h.fires == []
+    assert h.fires == 0
 
     await h.busy(BusyState.CHANGED)
-    assert h.fires == [None]
+    assert h.fires == 1
 
 
 async def test_a_capture_error_breaks_the_streak_without_disarming(
@@ -338,12 +346,12 @@ async def test_a_capture_error_breaks_the_streak_without_disarming(
     await h.busy(BusyState.MATCH)
     await h.busy(BusyState.CHANGED)
     await h.busy(BusyState.ERROR)
-    assert h.fires == []
+    assert h.fires == 0
     assert h.armed is True  # the arm survived the blind frame
 
     await h.busy(BusyState.CHANGED)
     await h.busy(BusyState.CHANGED)
-    assert h.fires == [None]
+    assert h.fires == 1
 
 
 async def test_the_fire_happens_exactly_once_even_on_a_second_finished_tick(
@@ -366,7 +374,7 @@ async def test_the_fire_happens_exactly_once_even_on_a_second_finished_tick(
     await h.busy(BusyState.MATCH)
     await h.busy(BusyState.CHANGED)
     await h.busy(BusyState.CHANGED)
-    assert h.fires == [None]
+    assert h.fires == 1
     assert h.controller.flow_running is True
     # The structural half, and the whole claim: with the one task inside the
     # harvest recipe there is nothing parked in an ``observe`` at all, so the
@@ -376,33 +384,39 @@ async def test_the_fire_happens_exactly_once_even_on_a_second_finished_tick(
     # Two more finished ticks land while the harvest is still running.
     await h.busy(BusyState.CHANGED, watched=False)
     await h.busy(BusyState.CHANGED, watched=False)
-    assert h.fires == [None]
+    assert h.fires == 1
 
 
-async def test_a_tick_from_inside_the_fire_cannot_fire_again(
-    view: FakeAutomationView,
+async def test_a_tick_from_inside_the_harvest_cannot_fire_again(
+    view: FakeAutomationView, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The same guarantee from the nastiest direction: the fire callback itself
-    pushing one more finished tick through the monitor - a shell that repaints
-    and pumps its loop before returning - must not double-harvest."""
-    fires: list[None] = []
+    """The same guarantee from the nastiest direction: the harvest itself pushing
+    one more finished tick through the monitor - a recipe whose very first act
+    scrolls a page the poller is watching - must not double-harvest.
+
+    This is where the fire callback used to be injected. With ``on_fire`` gone
+    the injection point is the recipe: the AUTO_COPY entry in the table is the
+    fire, so a stub that feeds a finished tick and then parks IS "a tick arriving
+    from inside the fire".
+    """
     monitor = FakeUIMonitor()
 
-    def fire() -> None:
-        fires.append(None)
-        # Straight into the monitor, from inside the fire, exactly as a tick that
-        # was already in flight would arrive.
+    async def harvest_that_feeds(_ctx: RecipeContext) -> Outcome:
+        # Straight into the monitor, from inside the harvest, exactly as a tick
+        # that was already in flight would arrive.
         monitor.feed(
             monitor.make_tick(
                 busy=BusyProbe(BusyState.CHANGED, 0.2, False), changed_streak=2
             )
         )
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")  # pragma: no cover
 
+    monkeypatch.setitem(loop_mod.RECIPES, LoopState.AUTO_COPY, harvest_that_feeds)
     controller = AutomationController(
         view=view,
         monitor=monitor,
         has_appearance=lambda kind: kind is TemplateKind.COPY,
-        on_fire=fire,
     )
     controller.active_detectors = ("busy",)
     controller.set_loop_state(LoopState.WAIT_SEND, "the payload was pasted into the chat box")
@@ -410,14 +424,14 @@ async def test_a_tick_from_inside_the_fire_cannot_fire_again(
     controller.start_loop()
     _RUNNING.append(controller)
     await settle(2)
-    h = Harness(controller, monitor, view, fires)
+    h = Harness(controller, monitor, view)
 
     await h.busy(BusyState.MATCH)
     await h.busy(BusyState.CHANGED)
     await h.busy(BusyState.CHANGED)
     await settle()
 
-    assert fires == [None]
+    assert h.fires == 1
 
 
 # -- one tick, one fold --------------------------------------------------------
@@ -462,14 +476,14 @@ async def test_both_detectors_must_agree_before_it_fires(view: FakeAutomationVie
     for _ in range(3):
         await h.busy(BusyState.CHANGED)
         await h.stale(StaleState.CHANGING)  # stale still says generating
-    assert h.fires == []
+    assert h.fires == 0
 
     await h.busy(BusyState.CHANGED)
     await h.stale(StaleState.STALE)  # both agree: one tick of the run
-    assert h.fires == []
+    assert h.fires == 0
 
     await h.busy(BusyState.CHANGED)  # ...and two
-    assert h.fires == [None]
+    assert h.fires == 1
 
 
 async def test_a_detector_that_never_reported_neither_vetoes_nor_fakes(
@@ -486,7 +500,7 @@ async def test_a_detector_that_never_reported_neither_vetoes_nor_fakes(
     await h.busy(BusyState.CHANGED)
     await h.busy(BusyState.CHANGED)
 
-    assert h.fires == [None]
+    assert h.fires == 1
 
 
 # -- the session gate under all of it ------------------------------------------
@@ -508,7 +522,7 @@ async def test_nothing_arms_while_no_reply_is_outstanding(view: FakeAutomationVi
 
     assert h.controller.reply is None
     assert h.controller.loop_state is LoopState.IDLE
-    assert h.fires == []
+    assert h.fires == 0
     # ...but the readout ran the whole time.
     assert len(h.view.detection_lines) >= 3
 
@@ -528,14 +542,14 @@ async def test_a_running_harvest_is_never_re_armed_by_its_own_mouse_work(
     await h.busy(BusyState.MATCH)
     await h.busy(BusyState.CHANGED)
     await h.busy(BusyState.CHANGED)
-    assert h.fires == [None]
+    assert h.fires == 1
     assert h.controller.flow_running is True
     decided = len(h.view.log_entries)
 
     await h.busy(BusyState.MATCH, watched=False)  # the flow's own scrolling
     await h.busy(BusyState.MATCH, watched=False)
 
-    assert h.fires == [None]
+    assert h.fires == 1
     assert len(h.view.log_entries) == decided  # nothing was decided by either
 
     resets = h.monitor.resets
@@ -556,7 +570,7 @@ async def test_a_finish_with_no_captured_copy_button_is_the_users_to_harvest(
     await h.busy(BusyState.CHANGED)
     await h.busy(BusyState.CHANGED)
 
-    assert h.fires == []
+    assert h.fires == 0
     assert h.controller.loop_state is LoopState.MANUAL_COPY
     assert h.view.logged("no copy button is captured for this service")
     # Display only: the trigger stays exactly as armed as it was, and the reply
@@ -576,7 +590,7 @@ async def test_a_finish_while_disarmed_is_reached_shown_and_never_clicked(
     await h.busy(BusyState.CHANGED)
     await h.busy(BusyState.CHANGED)
 
-    assert h.fires == []
+    assert h.fires == 0
     assert h.controller.loop_state is LoopState.MANUAL_COPY
     assert any("disarmed" in message for message, _ in h.view.notifications)
     assert h.armed is True
@@ -639,7 +653,7 @@ async def test_a_held_gate_vetoes_every_arm_and_fire(view: FakeAutomationView) -
     await h.stale(StaleState.STALE)
     await h.stale(StaleState.STALE)
 
-    assert h.fires == []
+    assert h.fires == 0
     assert h.armed is False
     assert h.controller.loop_state is LoopState.WAIT_SEND  # still waiting for the send
 

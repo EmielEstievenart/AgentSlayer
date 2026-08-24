@@ -7,24 +7,33 @@
 > `remote-executor.md` did: when a phase lands, its section gets an "as built"
 > note and its status flips. Until then everything here is intent.
 >
-> **Exception: §2.12, §6.0, §6.1, §6.3, §6.4 and §6.5 are built, and binding.** Phase 0
-> shipped on 2026-08-24: the default shell is the GUI, the TUI is behind
-> `--tui` and frozen, and every phase-0 row in §7 is applied. Phase 1 shipped
-> the same day, in its **Driver half only** — `driver/monitor/` exists, the
-> controller consumes a `UIMonitor` instead of owning the poller, and §6.3's
-> `describe()` is written and tested. The SHELL half is not in those commits;
-> §6.1's status note is the ledger of what that rewire still owes, and until it
-> lands the shell suites do not run. §3's interface listing is the shipped
-> `driver/monitor/protocol.py`. §6.2 and everything from §6.4 on is still
-> plan, **except §6.4 and §6.5**, which both shipped on 2026-08-24 (see their
-> own status notes) and take their phase-4 and phase-5 rows in §7 with them.
-> §6.5 is the RPC and the split-mode brain — the wire, the standing server, the
-> client, `SwitchableMonitor`, `LoopState.DISCONNECTED` and `--monitor
-> host:port`; §5's auth question stays OPEN and is named in §6.5's note.
-> **§6.6 is built in its first bullet only** (2026-08-24): the Textual TUI is
-> deleted, `textual` is out of `pyproject.toml`, `--tui` is a stub that says so
-> and exits 2, and §8's "Textual removal timing" is closed. Its second bullet —
-> the `SshHost` per-call path — is still owed.
+> **Exception: every section is now built, and binding.** Where each one landed:
+>
+> - **§2.12, §6.0** (2026-08-24) — the default shell is the GUI, the TUI is
+>   behind `--tui`, and every phase-0 row in §7 is applied.
+> - **§6.1** — the Driver half on 2026-08-24 (`driver/monitor/` exists, the
+>   controller consumes a `UIMonitor` instead of owning the poller); the SHELL
+>   half followed in the same wave (`1931e05` for the GUI), so both shells build
+>   one `LocalUIMonitor` and neither mentions `_BUSY_POLL_S`, `build_detector` or
+>   `ScreenOps`. §3's interface listing is the shipped
+>   `driver/monitor/protocol.py`.
+> - **§6.2** (2026-08-24/25) — the inversion: one recipe per state under
+>   `driver/automation/recipes/`, one pure `TRANSITIONS` table, one asyncio task
+>   that pulls. `controller.py` went 3121 → 593 lines and every §4 invariant has
+>   a test (`tests/driver/automation/test_invariants.py`). See its status note.
+> - **§6.3** (2026-08-24) — `describe()`, and both shells read their label from
+>   it.
+> - **§6.4, §6.5** (2026-08-24) — the calibration window, then the RPC and the
+>   split-mode brain: the wire, the standing server, the client,
+>   `SwitchableMonitor`, `LoopState.DISCONNECTED` and `--monitor host:port`.
+>   §5's auth question stays OPEN and is named in §6.5's note.
+> - **§6.6** — its first bullet on 2026-08-24 (the Textual TUI is deleted,
+>   `textual` is out of `pyproject.toml`, `--tui` is a stub that says so and
+>   exits 2, and §8's "Textual removal timing" is closed) and its second on
+>   2026-08-25 (the `SshHost` per-call path is deleted; `SshHost` is a
+>   connection, not a `Host`).
+>
+> Every row in §7 is applied. What is left open is §8 and nothing else.
 >
 > **Where this document overrides others** — say it here so no two docs
 > disagree:
@@ -136,7 +145,12 @@ monitor; `DISARMED` and `NOT_CALIBRATED` are refusals the recipe layer makes
   (controller.py:842–844). Phase 2 promotes it: the new table is authoritative
   and the old one is derived from it (or deleted).
 - One loop, roughly eight lines: look up the recipe for the current state,
-  run it, look up `(state, outcome)`, set the new state, repeat.
+  run it, look up `(state, outcome)`, set the new state, repeat. It is
+  **pre-emptible**: a shell can move the loop itself (`set_loop_state` — a
+  session reset, a link dropping, a harvested reply being ingested), which drops
+  whatever recipe is running and carries on from the state the shell put it in;
+  the two stretches that are *driving the machine* (a paste, a harvest's ingest)
+  are exempt and run to the end with their outcome thrown away instead.
 
 ### 2.5 Two machines stay two machines
 
@@ -538,7 +552,143 @@ controller; neither shell mentions `_BUSY_POLL_S`, `build_detector` or
 `ScreenOps`; the harness log for the existing controller test scenarios is
 unchanged; suite green.
 
-### 6.2 Split decide from do — recipes, transitions, loop
+### 6.2 Split decide from do — recipes, transitions, loop — **AS BUILT**
+
+> **Status: BUILT and binding (2026-08-24/25).** The inversion happened: the
+> poller no longer pushes into a consumer, one asyncio task pulls
+> (`tick = await ui.observe()`), and `AutomationController` went **3121 → 593
+> lines**. The paragraphs under this note are the plan it shipped from; what
+> follows is what shipped, deviations included.
+>
+> **The recipes** — `driver/automation/recipes/`, one `async def run(ctx) ->
+> Outcome` per `LoopState`, and the map in `recipes/loop.py` is TOTAL over the
+> enum (a state with no recipe is a state the loop parks in for ever):
+>
+> | Recipe | Lifted from | Outcomes it can return |
+> |---|---|---|
+> | `idle.py` | the outbound mailbox | `PAYLOAD_READY` |
+> | `auto_insert.py` | `deliver` + the clipboard I/O block | `PASTED`, `NOT_PASTED` |
+> | `manual_insert.py` | the banner's watch | `SEND_PROVEN`, `GENERATING` |
+> | `wait_send.py` | the send-gate block | `SENT`, `GENERATING` |
+> | `wait_generate.py` | `evaluate_finish`'s policy half | `FINISHED`, `NO_HARVEST` |
+> | `auto_copy.py` | `auto_copy_flow` / `run_auto_copy_flow` | `HARVESTED`, `NOT_HARVESTED` |
+> | `manual_copy.py` | the attention-alarm branch of `set_loop_state` | none — it parks |
+> | `interpreting.py` | the turn, waiting on the mailbox | `PAYLOAD_READY` |
+> | `disconnected.py` | §2.9, new at phase 5 | none — it parks |
+>
+> `outcomes.py` is the ten-member `Outcome` enum and the default sentence each
+> move is narrated with; a recipe with something more specific to say overrides
+> it for one return (`ctx.say`), which is how one `NOT_PASTED` tells four
+> stories. Beside the nine recipes sit the pieces they share: `context.py`
+> (`RecipeContext` — the window onto the controller plus the RUN's own state:
+> the mailbox, the `ReplyWatch`, `flow_running`, the prose window, the pre-empt
+> event), `acts.py`, `chatbox.py`, `park.py`, `reply.py`, `windows.py`.
+>
+> **The transitions** — `recipes/transitions.py` is the authority and it has
+> **12 rows**, one per `(state, outcome)` pair any recipe can produce.
+> `SHELL_EDGES` beside it names the three moves that are *not* a recipe's
+> outcome (the user's own copy landing, a turn ending, a redial), and `_LINK_LOST`
+> the one that happens TO every state. `LOOP_TRANSITIONS` is **derived** from
+> those by `legal_next()` — imported at the bottom of `loop_state.py`, where
+> `LoopState` is already bound — and the derived map is identical, key for key,
+> to the hand-written one it replaced. Nothing reads it back to make a decision;
+> it is the STATE rail's brightness and nothing else.
+>
+> **The loop** — `recipes/loop.py`, one task, owned by the controller and
+> started and stopped there and nowhere else (`start_loop` / `stop_loop`). It is
+> **pre-emptible** (§2.4): `set_loop_state` raises `ctx.preempt`, and the loop
+> drops the recipe it is running and carries on from the state the shell put it
+> in. The exception is a recipe inside `ctx.acting_on_the_machine()` — the
+> delivery's click-settle-paste, the harvest's scroll-click-ingest — which is let
+> run to the end and has its outcome thrown away instead: cancelling half a paste
+> leaves a caret in somebody's chat box behind half a payload. A recipe that
+> raises does not kill the loop and is not re-run either; it is logged and the
+> loop waits for the shell.
+>
+> **What is left in `controller.py`** — the loop task, the slot pointers and
+> their calibration, `os_armed`, the view/host/monitor wiring, and the narration.
+> Four siblings took the rest: `armed.py` (`ArmedSwitch` — the arm and the
+> clipboard watcher it takes away and gives back), `narration.py`
+> (`LoopNarration` — the rail, the harness log and the attention alarm moved
+> together or not at all, through one door that demands a reason), `readout.py`
+> (the two paint functions) and `machine.py` (the `MonitorLike` Protocol the
+> automation names at its own call site, plus the answers a controller nobody
+> wired anything into gives).
+>
+> **`copy_armed` moved onto `ReplyWatch`** (`recipes/reply.py`), with the send
+> gate and the detector verdicts. One object per outstanding reply, opened by the
+> state that has one to wait for and dropped the moment the harvest starts —
+> which is exactly the old `awaiting_pasted_reply` flag, spelled as the thing it
+> was always guarding. `controller.reply is None` is how "no reply is
+> outstanding" is now read, and a trigger armed for one reply cannot survive into
+> the next.
+>
+> **The readout hooks stayed** (`monitor.subscribe` / `on_frame`), and they are
+> the one thing still delivered on the monitor's own thread. They PAINT and
+> decide nothing — which is precisely what the `AutomationView` contract has
+> always allowed (§4.7) — so the loop is not woken to redraw three lines of
+> DETECTION.
+>
+> **`on_fire` is gone.** The finish callback was the old push path's last
+> survivor and it shipped for one release as a legacy notification; it is now
+> deleted from the constructor, from `RecipeContext`, from the AUTO_COPY recipe
+> and from the GUI (`_fire_auto_copy`). Entering `AUTO_COPY` *is* the fire, and
+> because a transition cannot reach the rail without reaching the harness log,
+> the log is what the suites count fires off (`conftest.fire_count`).
+> `run_auto_copy_flow` survives as the bracket door for a caller that is not the
+> loop, without the "a loop is alive, do nothing" shim the callback needed.
+>
+> **The GUI starts and stops the loop explicitly.** `GuiView.start` schedules
+> `start_loop()` onto the loop thread (after the first `configure`, so the first
+> recipe observes a monitor already pointed at a window) and `GuiView.close`
+> cancels it before the monitor's threads go, so no recipe is left awaiting a
+> tick nothing will push. It is deliberately not picked up implicitly by
+> `forget_verdicts` any more: a shell that owns a loop owns starting it.
+>
+> **§4 is enforced, not intended** — `tests/driver/automation/test_invariants.py`
+> is one test per invariant, three of them by reading the source (a behavioural
+> test for "nobody took a lock" passes happily when somebody takes one and gets
+> away with it):
+>
+> | Invariant | Test |
+> |---|---|
+> | §4.1 the fire is one-shot | `test_the_fire_is_one_shot_however_many_finished_ticks_arrive` |
+> | §4.2 ghost ticks are dropped | `test_a_tick_from_a_dead_run_never_reaches_a_recipe` |
+> | §4.3 trackers are swapped, not mutated | `test_a_recipe_reaches_the_monitor_only_through_the_wire_able_contract` (AST: every `ctx.monitor.X` a recipe names is on the wire-able contract, never the local-only tier) |
+> | §4.4 no lock across an await | `test_the_brain_holds_no_lock_and_owns_no_tick_thread` (source: no `import threading`, no `Lock(`) |
+> | §4.5 `os_armed` gates every OS action | `test_a_disarmed_brain_never_asks_the_machine_to_do_anything` |
+> | §4.6 no blind paste | `test_nothing_is_pasted_into_a_chat_box_nobody_verified` |
+> | §4.7 the paint contract | `test_the_brain_holds_no_lock_and_owns_no_tick_thread` (the structural half) + `test_every_paint_a_tick_causes_comes_from_the_loop_task` (which TASK painted, not merely which thread) |
+> | §4.8 harness log parity | `test_the_recorded_scenarios_are_still_pinned_line_by_line` — it guards the guard: six scenarios and 39 literal lines, asserted by AST so nobody can relax a pin into a substring probe |
+>
+> One more beside them, and everything else stands on it:
+> `test_every_outcome_a_recipe_can_return_has_a_row`, checked from both sides —
+> every pair a recipe can produce has a row, and every row is reachable.
+>
+> **The one `threading` carve-out is `alerts.py`.** §4.4's test refuses the
+> import everywhere in `driver/automation` except there, because a repeating
+> "your move" tone is a sleep loop and the event loop may not sleep. It is a
+> carve-out only while the alarm stays a LEAF: the same test asserts `alerts.py`
+> imports nothing from `driver.automation`, so nothing on the tick path can reach
+> the thread behind it.
+>
+> **Deviations worth naming:**
+>
+> - **`feed_probe` is a coroutine now.** The suites' one door onto a reading used
+>   to be a push into the controller's consumer; there is no consumer, so it
+>   waits until the loop is actually parked in an `observe()`, pushes the tick and
+>   then gives the loop the turns it needs to fold it. Every suite that drives
+>   readings is `async` for that reason — the reading and its consequence are two
+>   different event-loop turns.
+> - **`LOOP_TRANSITIONS` was promoted rather than deleted** — §2.4 allowed
+>   either. Keeping the name meant the rail's one reader did not change at all.
+> - **`disconnected.py` exists**, which the plan's file list does not name: §2.9's
+>   state arrived with phase 5, before this phase landed, and it needs a recipe
+>   like every other state.
+>
+> **Done when, checked:** every §4 invariant has a passing test; the 39 pinned
+> harness lines are unchanged; `controller.py` is 593 lines; no `threading` import
+> in `driver/automation` outside the `alerts.py` carve-out; suite green.
 
 The real work. Today the poller thread *pushes*: `loop()` → `consume_*` →
 `evaluate_finish` → `_on_fire()` synchronously in its own call stack
@@ -743,8 +893,8 @@ green; exe and monitor exe rebuilt.
 
 ### 6.6 Delete
 
-> **Status: the TUI half is BUILT and binding (2026-08-24). The `SshHost` half
-> is still owed.** What shipped, part A:
+> **Status: BUILT and binding — both halves.** The TUI half shipped 2026-08-24,
+> the `SshHost` half 2026-08-25. What shipped, part A:
 >
 > - **`src/agentclip/shell/tui/` and `tests/shell/tui/` are gone** — 26 modules
 >   and 44 Pilot suites, 31,064 lines, deleted whole. Nothing under `src/` imports `textual`,
@@ -791,12 +941,55 @@ green; exe and monitor exe rebuilt.
   becomes "historical, not binding"; the `--tui` flag prints a one-line
   "removed" message for one release, then goes.
 - The `SshHost` per-call path, exactly as `remote-executor.md` §2.8 specifies
-  (its increment 5): `SshExec`, `wrap_command`, `spawn`, `run_blocking`,
-  `run_detached`, the `Host` filesystem primitives in `ssh.py:757–864`, the
-  `host=` parameter of `make_engine_factory` / `make_engine_builder`, and the
-  pin test `tests/test_launch_remote.py:593–626`. Keep: connect/auth/reconnect,
-  `open_link_channel` / `LinkChannel` / `_ChannelReader` / `_ChannelWriter`.
-  Amend `remote-ssh.md` as §2.8 says.
+  (its increment 5).
+
+**AS BUILT, part B (2026-08-25).** `ssh.py` lost 328 lines and gained 145:
+
+- **Deleted:** `SshExec` (the `ExecHandle` over an exec channel — `wait`/`peek`/
+  `kill`/`drain` and the connection-lost verdict), `wrap_command` (the
+  `setsid`/pidfile kill-tree wrapper), `spawn`, `run_blocking`, `run_detached`,
+  and the `Host` filesystem primitives `write_bytes`, `delete`, `mkdir`,
+  `rmdir`, `lstat`, `listdir` (plus the `_mkdirs`/`_stat_mode` helpers). Kept
+  exactly as the bullet said: connect/auth/reconnect, `open_link_channel`,
+  `LinkChannel`, `_ChannelReader`, `_ChannelWriter`.
+- **`SshHost` is not a `Host` any more** — it is the dialled **connection**, and
+  `executor/hosts/connect.py` is its only real consumer. That is §2.8's own
+  answer ("a connection/dialler object, not a Host"), and it made one type
+  honest: `cli.Launch.host` / `GuiRuntime.host` are now `Host | SshHost`, which
+  is the union they have always actually held. Both shells already read the
+  slot through `getattr` (`target`, `connected`, `reconnects`, `reconnect`,
+  `close`), so nothing else moved.
+- **The connect sequence keeps working, on a much smaller surface.** §6.6's
+  bullet named `ssh.py:757–864` — the whole SFTP block — but three of those
+  primitives are what connect steps 4 and 6 ARE (`realpath`/`stat` check the
+  remote root; `read_bytes` is how `load_config(host=…)` reads the target's
+  `.agentclip.toml` and `permissions.json`, which remote-executor.md §2.12
+  keeps as "what the shell still keeps locally"). Those three survive as
+  read-only connect plumbing, which is what §2.8's prose asks for — "the SFTP
+  side survives only as connect/auth plumbing … no file is pushed to the target
+  at connect time". Likewise `run_blocking` was deleted but its two callers
+  (`probe_os`, and `printenv` for step 5) are connect steps, so it came back
+  half the size and under a name that cannot be mistaken for a tool path:
+  **`probe_command`** — one bare `bash -lc` on its own channel, merged stderr,
+  read to the exit status, no pidfile, no `setsid`, no handle, never raising.
+- **The config layer stopped asking for a `Host`.** `load_config` only ever used
+  `name` + `read_bytes`, so `hosts/base.py` carves those two out as
+  `FileReader` and `Host` inherits it. That is what lets a connection satisfy
+  the config read without pretending to be a machine tools run on.
+- **`host=` is gone from `make_engine_factory` / `make_engine_builder` /
+  `EngineBuilder`**, and with it `mcp_remote_target` (remote-executor.md §2.7
+  said it goes in the same increment): an engine runs on the machine its process
+  runs on, and `EngineBuilder` now just builds a `LocalHost`. `McpManager`'s own
+  `remote_target` parameter is left in place, defaulted and now unreachable.
+- **Tests.** The pin test `test_the_legacy_assembly_still_builds_a_whole_session_over_one_host`
+  is deleted with its section header, and `tests/test_launch_remote.py` is
+  purely the flip now. `test_ssh_host.py` lost the wrapper, `spawn`, peek/kill,
+  the write/traverse primitives and the in-flight-command verdict (506 → 359
+  lines) and gained three `probe_command` tests (login shell, dead link answers
+  rather than raises, channel closed). `test_ssh_real.py` was rewritten around
+  the connection and the connect probes. `test_link_channel.py` and
+  `test_connect.py` needed only the `run_blocking` → `probe_command` rename in
+  their fakes.
 
 ## 7. Document amendments
 
@@ -813,7 +1006,7 @@ green; exe and monitor exe rebuilt.
 | 1 | `docs/design/gui.md`, `docs/design/tui.md` | **applied**: pointers where the monitor took `ScreenOps`, the delivery beats and the cadence out from under them |
 | 4 | `docs/design/ui-briefs/elements-panel.md`, `service-editor.md` | name the calibration window as their host — **applied**, as a status note at the top of each |
 | 5 | `docs/configuration.md`, `docs/commands.md` | `--monitor`, `--calibrate`, `agentclip-monitor` — **applied**, with §5's security note in both |
-| 6 | `docs/design/tui.md`, `remote-ssh.md` | historical headers |
+| 6 | `docs/design/tui.md`, `remote-ssh.md` | historical headers — **both applied** (`tui.md` 2026-08-24, `remote-ssh.md` 2026-08-25) |
 
 Phase 6's `tui.md` row is **applied**: the document opens with a "HISTORICAL,
 NOT BINDING — the TUI was deleted 2026-08-24" header that points a reader at the
@@ -823,11 +1016,14 @@ header, `gui.md` gained one saying there is one shell and that every "the TUI
 does X" below it is history (its parity policy is now closed rather than
 amended), and `AGENTS.md`, `README.md`, `docs/commands.md` and
 `docs/configuration.md` name one shell and describe `--tui` as the stub it is.
-The `remote-ssh.md` row belongs to §6.6's second bullet and is still owed.
+The `remote-ssh.md` row belongs to §6.6's second bullet and is **applied**
+(2026-08-25): the document opens with a "HISTORICAL, NOT BINDING" header that
+names what survives in the code (the connect/auth/reconnect machinery, the link
+channel, the connect sequence, decisions 1/4/6 and "the target owns its policy")
+and what was deleted, and the four superseded markers that used to say "the
+per-call machinery is still in the code" now say it is gone.
 
-All **phase 0**, **phase 1**, **phase 4** and **phase 5** rows are applied
-(§6.0's, §6.1's, §6.4's and §6.5's as-built notes), and phase 6's first row with
-them.
+**Every row in this table is applied**, and every phase of §6 is as built.
 
 ## 8. Open points (**OPEN**)
 
@@ -841,7 +1037,18 @@ them.
   clipboard. On a VM that is the VM's clipboard — the brain's GUI can show the
   text to paste, but the operator pastes it *there*. Confirm the attention
   alarm and the GUI copy still make sense, or park manual states as
-  unsupported in split mode.
+  unsupported in split mode. **Still open with phases 2 and 5 built**: both
+  states have a recipe that parks and an alarm that nags, and neither knows
+  which machine the human is sitting at.
+- **Chat regions are not persisted on the monitor** (§6.4's note, restated by
+  §6.5's). A box drawn in the calibration window reaches a brain through
+  `on_calibration` and dies with the process; standalone (`--calibrate`) there
+  is nobody to hand it to at all. A monitor that outlives its brain (§2.8) is
+  exactly the deployment where that hurts — a restarted monitor is re-targeted
+  by the brain's next `configure`, but a region the operator drew over there has
+  to be drawn again. Where it should live (the monitor's own store, beside the
+  `ServiceProfile` PNGs? the brain's config, re-sent on every connect?) is
+  undecided.
 - ~~**Tick cadence on the wire.**~~ **RESOLVED** at phase 5: drop-to-latest.
   `latest` is a field the newest tick overwrites and `observe()` only ever
   wants the newest, so nothing is queued and nothing is replayed — a link that

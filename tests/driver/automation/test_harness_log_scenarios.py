@@ -29,9 +29,10 @@ a state entry losing its reason - is the regression §4.8 exists to catch.
 Every scenario also pins the ``LoopState`` sequence the view was painted with,
 because the rail and the log are one act (the narration writes both through one
 door) and a refactor that keeps one while dropping the other is exactly the
-half-done inversion phase 2 risks. And ``on_fire`` is a recorder in every
-scenario, so the one-shot fire of §4.1 is pinned alongside: exactly one fire on
-every path that reaches the harvest, and none on the paths that do not.
+half-done inversion phase 2 risks. The one-shot fire of §4.1 is pinned alongside,
+counted off those same moves (``conftest.fire_count`` - entering ``AUTO_COPY`` IS
+the fire): exactly one on every path that reaches the harvest, and none on the
+paths that do not.
 
 **What phase 2 changed here is the DRIVING, and nothing else.** The literals
 below are the same literals, taken at ``c341a82``. What moved is who consumes a
@@ -47,7 +48,7 @@ mouse across an imaginary screen, which is exactly what the old
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pytest
 
@@ -63,7 +64,7 @@ from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
-from .conftest import FakeAutomationView, feed_probe, settle
+from .conftest import FakeAutomationView, feed_probe, fire_count, settle
 
 # The two appearances any of this turns on: a copy button is what a finish has
 # to click, a send button is what makes a gate exist at all.
@@ -94,7 +95,6 @@ class Scenario:
     controller: AutomationController
     monitor: FakeUIMonitor
     view: FakeAutomationView
-    fires: list[None] = field(default_factory=list)
 
     async def start(self) -> None:
         """Run the loop. Everything below is a tick into a parked recipe."""
@@ -138,6 +138,12 @@ class Scenario:
     # -- what the pins read ---------------------------------------------------
 
     @property
+    def fires(self) -> int:
+        """How many harvests this run started - the moves INTO ``AUTO_COPY``,
+        which is what a fire IS since phase 6.2 (``conftest.fire_count``)."""
+        return fire_count(self.controller)
+
+    @property
     def lines(self) -> list[str]:
         return [entry.text for entry in self.controller.harness_log]
 
@@ -173,16 +179,14 @@ def scenario(
     captures: tuple[TemplateKind, ...] = (COPY,),
 ) -> Scenario:
     """A controller wired the way a shell wires it, minus the screen."""
-    fires: list[None] = []
     monitor = FakeUIMonitor()
     controller = AutomationController(
         view=view,
         monitor=monitor,
         has_appearance=lambda kind: kind in captures,
-        on_fire=lambda: fires.append(None),
     )
     controller.active_detectors = detectors
-    return Scenario(controller, monitor, view, fires)
+    return Scenario(controller, monitor, view)
 
 
 # -- the two roads to an arm ---------------------------------------------------
@@ -214,7 +218,7 @@ async def test_an_icon_finish_narrates_paste_arm_and_one_fire(view: FakeAutomati
         LoopState.WAIT_GENERATE,
         LoopState.AUTO_COPY,
     ]
-    assert s.fires == [None]
+    assert s.fires == 1
     s.assert_mirrored()
 
 
@@ -249,7 +253,7 @@ async def test_a_stale_only_service_narrates_the_streak_that_armed_it(
         LoopState.WAIT_GENERATE,
         LoopState.AUTO_COPY,
     ]
-    assert s.fires == [None]
+    assert s.fires == 1
     s.assert_mirrored()
 
 
@@ -293,7 +297,7 @@ async def test_the_send_gate_narrates_hold_then_sighting_then_release(
         LoopState.WAIT_GENERATE,
         LoopState.AUTO_COPY,
     ]
-    assert s.fires == [None]
+    assert s.fires == 1
     s.assert_mirrored()
 
 
@@ -333,7 +337,7 @@ async def test_a_send_button_that_never_appears_times_the_gate_out_and_says_so(
         LoopState.WAIT_GENERATE,
         LoopState.AUTO_COPY,
     ]
-    assert s.fires == [None]
+    assert s.fires == 1
     s.assert_mirrored()
 
 
@@ -378,7 +382,7 @@ async def test_ticks_from_a_dead_poller_run_narrate_nothing_at_all(
         LoopState.WAIT_GENERATE,
         LoopState.AUTO_COPY,
     ]
-    assert s.fires == [None]
+    assert s.fires == 1
     s.assert_mirrored()
 
 
@@ -432,5 +436,5 @@ async def test_a_manual_insert_proved_by_the_send_button_ends_in_manual_copy(
         LoopState.MANUAL_COPY,
     ]
     # Finished, and nothing to click: the flow never starts.
-    assert s.fires == []
+    assert s.fires == 0
     s.assert_mirrored()

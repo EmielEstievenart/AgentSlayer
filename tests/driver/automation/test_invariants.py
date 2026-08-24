@@ -41,7 +41,7 @@ from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 
-from .conftest import FakeAutomationView, feed_probe, settle
+from .conftest import FakeAutomationView, feed_probe, fire_count, settle
 
 pytestmark = pytest.mark.usefixtures("no_harvest")
 
@@ -115,20 +115,21 @@ async def test_the_fire_is_one_shot_however_many_finished_ticks_arrive(
     view: FakeAutomationView, monitor: FakeUIMonitor, loops: list[AutomationController]
 ) -> None:
     """§4.1. The old shape set ``_flow_running`` before calling ``on_fire`` inside
-    the tick lock; the new one does not need a flag to be safe, because the loop
-    is ONE task: the ``WAIT_GENERATE`` recipe returns exactly one outcome, and
-    nothing else is running to return a second.
+    the tick lock; the new one does not need a flag - or a callback - to be safe,
+    because the loop is ONE task: the ``WAIT_GENERATE`` recipe returns exactly one
+    outcome, and nothing else is running to return a second.
+
+    The fire is counted off the harness log (``conftest.fire_count``), because
+    entering ``AUTO_COPY`` is now the whole of what a fire IS.
 
     Driven the way a real over-eager screen would drive it: the model finishes,
     and then keeps looking finished. Every one of those later ticks lands on a
     loop that is inside the harvest, so it reaches no fold at all.
     """
-    fires: list[None] = []
     controller = AutomationController(
         view=view,
         monitor=monitor,
         has_appearance=lambda kind: kind is TemplateKind.COPY,
-        on_fire=lambda: fires.append(None),
     )
     controller.set_loop_state(LoopState.WAIT_SEND, "the payload was pasted into the chat box")
     controller.open_reply_gate()
@@ -138,14 +139,14 @@ async def test_the_fire_is_one_shot_however_many_finished_ticks_arrive(
     await feed_probe(monitor, "busy", BusyProbe(BusyState.CHANGED, 0.2, False))
     await feed_probe(monitor, "busy", BusyProbe(BusyState.CHANGED, 0.2, False))
     assert controller.loop_state is LoopState.AUTO_COPY
-    assert fires == [None]
+    assert fire_count(controller) == 1
 
     # ...and now three more ticks that say exactly the same thing.
     for _ in range(3):
         monitor.feed(monitor.make_tick(busy=BusyProbe(BusyState.CHANGED, 0.2, False)))
         await settle()
 
-    assert fires == [None]
+    assert fire_count(controller) == 1
 
 
 # -- §4.2 ghost ticks are dropped ---------------------------------------------

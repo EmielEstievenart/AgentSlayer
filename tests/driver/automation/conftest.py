@@ -47,7 +47,7 @@ import pytest
 
 from agentclip.driver.automation.controller import AutomationController
 from agentclip.driver.automation.finish import SEND_ARM_MIN_DIFF
-from agentclip.driver.automation.harness_log import HarnessEntry
+from agentclip.driver.automation.harness_log import KIND_STATE, HarnessEntry
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.automation.recipes import loop as loop_mod
 from agentclip.driver.automation.recipes.context import RecipeContext
@@ -312,9 +312,8 @@ async def feed_probe(
     await settle()
 
 
-async def stub_harvest(ctx: RecipeContext) -> Outcome:
-    """The AUTO_COPY recipe as a suite about the DECISION wants it: the fire, and
-    then nothing at all.
+async def stub_harvest(_ctx: RecipeContext) -> Outcome:
+    """The AUTO_COPY recipe as a suite about the DECISION wants it: nothing at all.
 
     The seam ``run_auto_copy_flow(flow=...)`` used to be, one delegation above the
     real body: a scenario that is pinning how the loop REACHES the harvest must
@@ -322,9 +321,21 @@ async def stub_harvest(ctx: RecipeContext) -> Outcome:
     that is the harvest's own. Parks rather than returning an outcome, so the loop
     stays in ``AUTO_COPY`` and the story ends where the scenario ends.
     """
-    ctx.fire()
     await asyncio.Event().wait()
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def fire_count(controller: AutomationController) -> int:
+    """How many harvests this loop has started, counted off the harness log.
+
+    There is no fire CALLBACK any more (ui-monitor.md §6.2): entering
+    ``AUTO_COPY`` IS the fire, and a transition cannot reach the rail without
+    reaching the log (``harness_log``), so the log is the honest register of how
+    often it happened. Reading it back rather than recording it at a seam is also
+    what keeps the count true for a fire nobody wired anything to.
+    """
+    move = f"→ {LoopState.AUTO_COPY.name} — "
+    return sum(1 for e in controller.harness_log if e.kind == KIND_STATE and move in e.text)
 
 
 @pytest.fixture

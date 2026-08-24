@@ -58,7 +58,6 @@ from agentclip.driver.automation.machine import (
     MonitorLike,
     accept_all,
     drop_capture,
-    no_fire,
     nothing_captured,
     uncut,
 )
@@ -94,7 +93,6 @@ class AutomationController:
         on_clipboard_captured: Callable[[str], None] | None = None,
         crop_elements: CropFn | None = None,
         has_appearance: Callable[[TemplateKind], bool] | None = None,
-        on_fire: Callable[[], None] | None = None,
         alarm: AttentionAlarm | None = None,
     ) -> None:
         self._view = view
@@ -119,15 +117,11 @@ class AutomationController:
         self._on_capture: Callable[[str], None] = (
             on_clipboard_captured if on_clipboard_captured is not None else drop_capture
         )
-        # The only two questions the loop cannot answer for itself: what the LIVE
-        # window's service has a capture of, and what a shell wants told when the
-        # harvest starts. ``on_fire`` is the legacy half - the AUTO_COPY recipe IS
-        # the fire now, and calls this for one release so a shell that scheduled
-        # its own flow off it keeps working (that flow finds this one running).
+        # The one question the loop cannot answer for itself: what the LIVE
+        # window's service has a capture of.
         self._has_appearance: Callable[[TemplateKind], bool] = (
             has_appearance if has_appearance is not None else nothing_captured
         )
-        self._on_fire: Callable[[], None] = on_fire if on_fire is not None else no_fire
         self._crop_elements: CropFn = crop_elements if crop_elements is not None else uncut
         # Which FINISH detectors the run reports, as the shell's retarget last
         # answered. Readout only since phase 2: the fold reads a tick's probes.
@@ -174,10 +168,6 @@ class AutomationController:
     def has_appearance(self, kind: TemplateKind) -> bool:
         """Has the LIVE window's service a capture of ``kind``?"""
         return self._has_appearance(kind)
-
-    def fire(self) -> None:
-        """Tell a shell that passed ``on_fire=`` that the harvest has started."""
-        self._on_fire()
 
     # == the loop task ========================================================
 
@@ -357,13 +347,7 @@ class AutomationController:
 
     def forget_verdicts(self) -> None:
         """Drop everything a rebuilt detector set makes obsolete - the verdicts,
-        not the arm (recapturing a button does not un-observe a generation).
-
-        It is also where the loop is picked up. A shell's retarget is the one call
-        it makes ON THE EVENT LOOP both at startup and at every window move, and
-        ``start_loop`` is idempotent - so the task starts itself the first time
-        there is a loop to start it on, and no shell has to know it exists."""
-        self.start_loop()
+        not the arm (recapturing a button does not un-observe a generation)."""
         if self._ctx.reply is not None:
             self._ctx.reply.forget_verdicts()
         self._active_detectors = ()
@@ -563,11 +547,8 @@ class AutomationController:
 
     async def run_auto_copy_flow(self, flow: Callable[[], Awaitable[None]] | None = None) -> None:
         """One harvest, inside the flow-suspension bracket - for a caller that is
-        not the loop. With a loop running there is nothing to do: its own
-        AUTO_COPY recipe IS the harvest, and a shell still scheduling one off
-        ``on_fire`` would be a second click on the same copy button."""
-        if self._loop_task is not None and not self._loop_task.done():
-            return
+        not the loop. With a loop running nobody calls this: the AUTO_COPY recipe
+        IS the harvest, and it brings its own bracket (``recipes/auto_copy.py``)."""
         self._ctx.flow_running = True
         try:
             if flow is None:

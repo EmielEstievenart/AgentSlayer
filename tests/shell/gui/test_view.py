@@ -192,7 +192,9 @@ async def test_clearing_the_transcript_resets_the_automation_too(harness: Harnes
     await view.clear_transcript()
 
     assert not view.has_transcript_events()
-    assert view.automation.awaiting_pasted_reply is False
+    # No watch outstanding is what "the reply gate is shut" IS since phase 6.2
+    # (``recipes/reply.py``): the flag became the object it used to guard.
+    assert view.automation.reply is None
     assert view.automation.loop_state is LoopState.IDLE
     assert harness.flush().of_type("transcript_clear")
 
@@ -681,16 +683,30 @@ async def test_an_outbound_with_nothing_calibrated_takes_the_manual_path(
     is drawn (the GUI has no calibration surface yet) and the manual provider
     refuses the write, so the delivery lands exactly where it should - the
     payload shown for a hand copy, no click, no synthetic Ctrl+V, and the
-    "paste it yourself" banner up."""
-    await harness.view.copy_outbound("===CLIP:TASK===\nhello\n")
+    "paste it yourself" banner up.
 
-    recorder = harness.flush()
-    assert recorder.last("payload")["text"].startswith("===CLIP:TASK===")
-    assert recorder.last("flash")["show"] is True
-    assert recorder.last("flash")["retry"] is True
-    assert harness.view.automation.loop_state is LoopState.MANUAL_INSERT
-    # ...and the reply gate is open, because the payload is out either way.
-    assert harness.view.automation.awaiting_pasted_reply is True
+    The loop runs for this one, because half of what is asserted is the loop's:
+    the refused delivery earns ``MANUAL_INSERT``, and the reply gate is opened by
+    the recipe THAT state runs (``recipes/manual_insert.py``), not by the delivery
+    itself. Started by hand here because the harness's ``schedule`` is a recorder
+    - in the real app ``GuiView.start`` is what puts the task on the loop.
+    """
+    automation = harness.view.automation
+    automation.start_loop()
+    try:
+        await settle()
+        await harness.view.copy_outbound("===CLIP:TASK===\nhello\n")
+        await settle()
+
+        recorder = harness.flush()
+        assert recorder.last("payload")["text"].startswith("===CLIP:TASK===")
+        assert recorder.last("flash")["show"] is True
+        assert recorder.last("flash")["retry"] is True
+        assert automation.loop_state is LoopState.MANUAL_INSERT
+        # ...and the reply gate is open, because the payload is out either way.
+        assert automation.reply is not None
+    finally:
+        automation.stop_loop()
 
 
 def test_park_off_clipboard_shows_the_payload_rather_than_swallowing_it(
@@ -899,7 +915,7 @@ async def test_a_harvest_inside_the_window_goes_in_as_prose(harness: Harness) ->
     verified click is the whole permission, and ``accept_prose`` is what tells
     the session this text is known to be the reply."""
     spy = _harvest_ready(harness, PROSE_HARVEST)
-    harness.view.automation._prose_window = True
+    harness.view.automation._ctx.prose_window = True
 
     await harness.view.ingest_harvest()
 
@@ -922,7 +938,7 @@ async def test_a_protocol_shaped_harvest_is_left_to_the_watcher(harness: Harness
     """The watcher ingests protocol traffic on its own; reading it here too
     would be a double ingest of every normal reply."""
     spy = _harvest_ready(harness, PROTOCOL_HARVEST)
-    harness.view.automation._prose_window = True
+    harness.view.automation._ctx.prose_window = True
 
     await harness.view.ingest_harvest()
 
@@ -931,7 +947,7 @@ async def test_a_protocol_shaped_harvest_is_left_to_the_watcher(harness: Harness
 
 async def test_an_empty_harvest_ingests_nothing(harness: Harness) -> None:
     spy = _harvest_ready(harness, "")
-    harness.view.automation._prose_window = True
+    harness.view.automation._ctx.prose_window = True
 
     await harness.view.ingest_harvest()
 

@@ -60,7 +60,7 @@ Four seams carry the split, and they are deliberately not one object (docs/desig
 
 The `ScreenOps` seam **deepens** into `UIMonitor` (docs/design/ui-monitor.md §3): the OS adapter is one tier inside the object that also owns the poll loop, the trackers, the ghost stamp and the clipboard watcher, and the controller reaches the machine only through it. `AutomationView` and `AutomationHost` are untouched by that split.
 
-`executor/hosts` is the **OS seam** the whole Executor is built on: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`mkdir`/`rmdir`/`stat`/`lstat`/`listdir`/`realpath`, plus the `case_sensitive` fact), carried on `ToolContext`. `LocalHost` is this PC; `SshHost` is a machine over SSH (docs/design/remote-ssh.md), chosen once at launch in `cli.py` and shared by the workspace jail, the tool context, the backup store and the engine — one session is one machine. Rule for new tools: write against Host primitives and it works everywhere. Process execution is `spawn` + an `ExecHandle` the caller polls (`wait`/`peek`/`kill`/`drain`), because cancellation, timeouts and the live output tail are policy above the seam, not OS access.
+`executor/hosts` is the **OS seam** the whole Executor is built on: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`mkdir`/`rmdir`/`stat`/`lstat`/`listdir`/`realpath`, plus the `case_sensitive` fact), carried on `ToolContext`. `LocalHost` is the machine the engine's process runs on, and since remote-executor.md §2.8 (2026-08-25) it is the only implementation: a remote session runs its whole Executor on the target, so there is no host to choose. One `LocalHost` is shared by the workspace jail, the tool context, the backup store and the engine — one session is one machine. (`SshHost` still exists, but it is a *connection*, not a Host: the dial the engine's link channel is opened on — docs/design/remote-ssh.md's header.) Rule for new tools: write against Host primitives and it works everywhere. Process execution is `spawn` + an `ExecHandle` the caller polls (`wait`/`peek`/`kill`/`drain`), because cancellation, timeouts and the live output tail are policy above the seam, not OS access.
 
 ---
 
@@ -100,7 +100,7 @@ src/agentclip/
 │   ├── hosts/             # the OS seam: every file byte and every command goes through a Host
 │   │   ├── base.py        # Host + ExecHandle Protocols (wait/peek/kill/drain), FileStat/DirEntry/ExecResult
 │   │   ├── local.py       # LocalHost: subprocess/os/pathlib, kill-tree per platform, reader thread → peek()
-│   │   ├── ssh.py         # SshHost: one Paramiko connection, exec channels + SFTP, lazy reconnect
+│   │   ├── ssh.py         # SshHost: one Paramiko connection (NOT a Host) — auth, lazy reconnect, the engine's link channel
 │   │   ├── connect.py     # the remote CONNECT SEQUENCE both shells drive: resolve → dial+auth →
 │   │   │                  #   probe → root → home/env → remote config. Prompts and progress are
 │   │   │                  #   injected (getpass+stderr for the CLI, modals+a checklist for the GUI);
@@ -117,20 +117,44 @@ src/agentclip/
 │
 ├── driver/                # THE DRIVER: what AgentClip does TO the desktop chat app it
 │   │                      #   operates. Imports config and NOTHING above (gui.md §1)
-│   ├── automation/        # UI-agnostic screen automation: shell/app's sibling, shared by
-│   │   │                  #   both UI shells. Imports screen/clip/config only
-│   │   ├── controller.py  # AutomationController: the armed switch, the slot pointers, the
-│   │   │                  #   clipboard watcher + detector poller threads, the probe consumer,
-│   │   │                  #   the finish decision, the OS-acting sequences, the delivery path
+│   ├── automation/        # UI-agnostic screen automation: shell/app's sibling, driving the
+│   │   │                  #   one UI shell. Imports monitor/screen/clip/config only
+│   │   ├── controller.py  # AutomationController: the loop TASK, the slot pointers and their
+│   │   │                  #   calibration, os_armed, the view/host/monitor wiring, the
+│   │   │                  #   narration. Every DECISION is a recipe's (ui-monitor.md §6.2)
+│   │   ├── recipes/       # one file per LoopState, plus the table and the loop between them
+│   │   │   ├── loop.py    # run_loop: the one asyncio task — recipe, outcome, transition,
+│   │   │   │              #   repeat; pre-emptible, except while a recipe drives the machine
+│   │   │   ├── transitions.py # TRANSITIONS: the pure (state, outcome) -> state table (the
+│   │   │   │              #   authority; loop_state.LOOP_TRANSITIONS is derived from it)
+│   │   │   ├── outcomes.py    # Outcome + the default sentence each move is narrated with
+│   │   │   ├── context.py     # RecipeContext: the controller's half, and the RUN's own state
+│   │   │   │              #   (the outbound mailbox, the ReplyWatch, the pre-empt event)
+│   │   │   ├── idle.py / interpreting.py / disconnected.py   # the three that park
+│   │   │   ├── auto_insert.py / manual_insert.py             # the delivery, ours and theirs
+│   │   │   ├── wait_send.py / wait_generate.py               # the send gate; the finish
+│   │   │   ├── auto_copy.py / manual_copy.py                 # the harvest, ours and theirs
+│   │   │   ├── reply.py       # ReplyWatch: one outstanding reply — the gate, the verdicts,
+│   │   │   │              #   copy_armed. "No watch" IS "no reply outstanding"
+│   │   │   └── acts.py / chatbox.py / park.py / windows.py   # what the recipes share
+│   │   ├── machine.py     # MonitorLike: the UIMonitor contract as the automation names it at
+│   │   │                  #   its own call site, + the answers a controller with no shell gives
+│   │   ├── armed.py       # ArmedSwitch: the arm, and the clipboard watcher it takes away
+│   │   ├── narration.py   # LoopNarration: the STATE rail, the harness log and the attention
+│   │   │                  #   alarm moved together or not at all, through one door
+│   │   ├── readout.py     # the DETECTION paints: what a tick SAYS, deciding nothing — the one
+│   │   │                  #   thing still delivered on the monitor's thread
+│   │   ├── alerts.py      # AttentionAlarm: the audible "your move". A LEAF, and the only
+│   │   │                  #   module in this package allowed to import threading
 │   │   ├── view.py        # AutomationView Protocol: the PAINT-only port (paint_loop_state,
 │   │   │                  #   paint_detection/stale/elements/armed, paste flash, notify).
-│   │   │                  #   Callable from the poller/watcher threads: never blocking
+│   │   │                  #   Callable from the monitor's thread: never blocking
 │   │   ├── host.py        # AutomationHost Protocol: what only a shell can answer (live
 │   │   │                  #   preset/profile, find_all, verified copy click, prose ingest,
 │   │   │                  #   detector rebuild, park_off_clipboard). Event-loop thread only
 │   │   ├── ops.py         # ElementClick: what one find-then-click can come to (ScreenOps
 │   │   │                  #   itself is the monitor's now, ui-monitor.md §6.1)
-│   │   ├── describe.py    # describe(Phase, LoopState) -> the one state label both shells show
+│   │   ├── describe.py    # describe(Phase, LoopState) -> the one state label the shell shows
 │   │   ├── finish.py      # the finish vocabulary: SendGate, the verdict folds, the phrasing
 │   │   ├── flow.py        # the auto-copy flow's geometry: lowest_match, above_chatbox, snap
 │   │   ├── delivery.py    # the paste banner's four wordings and the delivery beats

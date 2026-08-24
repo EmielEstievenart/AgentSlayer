@@ -183,10 +183,6 @@ class RecipeContext:
     def reset_trackers(self) -> None:
         self._controller.reset_trackers()
 
-    def fire(self) -> None:
-        """Tell a shell that passed ``on_fire=`` that the harvest has started."""
-        self._controller.fire()
-
     def end_flow(self) -> None:
         """The harvest is over: lift the suspension and forget the frames it
         produced itself."""

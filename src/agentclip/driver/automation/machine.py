@@ -12,9 +12,9 @@ the CALLER's requirement and not the wire's, and spelled out once so mypy checks
 one Protocol instead of two.
 
 The rest is the answers a controller nobody wired anything into gives: no
-clipboard filter, no capture sink, no crop renderer, no captured appearances, no
-fire callback. Each is the honest reading of "no shell", and each makes the
-recipes refuse rather than guess.
+clipboard filter, no capture sink, no crop renderer, no captured appearances.
+Each is the honest reading of "no shell", and each makes the recipes refuse
+rather than guess.
 """
 
 from __future__ import annotations
@@ -114,7 +114,3 @@ def nothing_captured(_kind: TemplateKind) -> bool:
     """Appearance lookup for a controller nobody handed one to: a service with no
     captures at all - no send gate, and a finish that lands on MANUAL_COPY."""
     return False
-
-
-def no_fire() -> None:
-    """Fire callback for a controller nobody handed one to."""

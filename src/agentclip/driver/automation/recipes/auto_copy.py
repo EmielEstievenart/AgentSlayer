@@ -46,11 +46,6 @@ CHATBOX_KINDS: tuple[TemplateKind, ...] = (
 
 async def run(ctx: RecipeContext) -> Outcome:
     """The harvest, inside the flow-suspension bracket."""
-    # The legacy notification, for one release: a shell that passed ``on_fire=``
-    # is told the decision was reached. The loop does not depend on it - the
-    # harvest below IS the fire now - and a shell that also schedules its own
-    # flow off it finds this one already running and returns (``flow_running``).
-    ctx.fire()
     try:
         # Uncancellable for the same reason the delivery is: the middle of this
         # is a scroll, a click and a session ingest.

@@ -10,6 +10,7 @@ NOT move.
 from __future__ import annotations
 
 from agentclip.driver.automation.controller import AutomationController
+from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 
@@ -93,5 +94,7 @@ def test_the_services_snapshot_is_safe_to_write_through(
 
 def test_services_can_be_seeded_at_construction(view: FakeAutomationView) -> None:
     """How the shell hands its configured defaults down at startup."""
-    controller = AutomationController(view=view, services={"m1": "claude"})
+    controller = AutomationController(
+        view=view, monitor=FakeUIMonitor(), services={"m1": "claude"}
+    )
     assert controller.service_of("m1") == "claude"

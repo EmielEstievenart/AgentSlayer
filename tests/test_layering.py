@@ -197,6 +197,22 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
+    # automation.describe: the ONE label both shells show is a function of the
+    # engine's Phase (where the task is) and the loop's LoopState (where the
+    # round trip is) - docs/design/ui-monitor.md §2.5. engine/states.py is a
+    # stdlib-only enum leaf, so this single module may read it; first match
+    # wins, so the allowance is this file's alone and the Driver stays
+    # engine-free otherwise.
+    (
+        "agentclip.driver.automation.describe",
+        frozenset(
+            {
+                "agentclip",
+                "agentclip.driver.automation",
+                "agentclip.engine.states",
+            }
+        ),
+    ),
     # driver.automation: the Driver's core, which both UI shells drive (Textual
     # today, a pywebview GUI later). It IS the loop that watches and clicks the
     # chat window, so it needs driver.screen/driver.clip the way tui and cli do -

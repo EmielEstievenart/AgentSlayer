@@ -45,11 +45,12 @@ from agentclip.driver.automation.finish import (
     SEND_GATE_TIMEOUT_TICKS,
 )
 from agentclip.driver.automation.loop_state import LoopState
+from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
-from .conftest import FakeAutomationView
+from .conftest import FakeAutomationView, feed_probe
 
 # The two appearances any of this turns on: a copy button is what a finish has
 # to click, a send button is what makes a gate exist at all.
@@ -69,13 +70,15 @@ PASTE_MISSED = "the chat box was focused but the synthetic Ctrl+V did not go thr
 class Scenario:
     """One controller, its view, and everything it fired at.
 
-    Only synchronous mutators are ever called on it: ``feed_probe`` (the poll
-    loop's own seam) plus the handful of bookkeeping calls a shell makes from
-    the UI thread. Nothing here touches the OS-acting coroutines, so a scenario
-    is a few microseconds of pure state and reproduces exactly.
+    Only synchronous mutators are ever called on it: ``feed_probe`` (the seam
+    the monitor's tick push sits behind) plus the handful of bookkeeping calls a
+    shell makes from the UI thread. Nothing here touches the OS-acting
+    coroutines, so a scenario is a few microseconds of pure state and reproduces
+    exactly.
     """
 
     controller: AutomationController
+    monitor: FakeUIMonitor
     view: FakeAutomationView
     fires: list[None] = field(default_factory=list)
 
@@ -84,13 +87,13 @@ class Scenario:
     def busy(self, state: BusyState) -> None:
         """One busy-appearance probe, its per-frame evidence honest to the
         verdict (the disagreement is ``test_finish_evaluation``'s subject)."""
-        self.controller.feed_probe("busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
+        feed_probe(self.monitor, "busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
 
     def stale(self, state: StaleState, *, diff: float = 0.001) -> None:
-        self.controller.feed_probe("stale", StaleProbe(state, diff, 0))
+        feed_probe(self.monitor, "stale", StaleProbe(state, diff, 0))
 
     def send_ready(self, found: bool | None) -> None:
-        self.controller.feed_probe("send_ready", found)
+        feed_probe(self.monitor, "send_ready", found)
 
     def big_delta(self) -> None:
         """One tick of the sustained large-delta run the stale detector arms on."""
@@ -135,13 +138,15 @@ def scenario(
 ) -> Scenario:
     """A controller wired the way a shell wires it, minus the screen."""
     fires: list[None] = []
+    monitor = FakeUIMonitor()
     controller = AutomationController(
         view=view,
+        monitor=monitor,
         has_appearance=lambda kind: kind in captures,
         on_fire=lambda: fires.append(None),
     )
     controller.active_detectors = detectors
-    return Scenario(controller, view, fires)
+    return Scenario(controller, monitor, view, fires)
 
 
 # -- the two roads to an arm ---------------------------------------------------
@@ -307,11 +312,11 @@ def test_ticks_from_a_dead_poller_run_narrate_nothing_at_all(
 
     s.paste_landed()
     dead = s.controller.detector_generation
-    s.controller.retarget_detectors()
+    s.monitor.retarget()
     # Everything a live run would have said, stamped with the run that ended.
-    s.controller.feed_probe("busy", BusyProbe(BusyState.MATCH, 0.2, True), dead)
-    s.controller.feed_probe("busy", BusyProbe(BusyState.CHANGED, 0.2, False), dead)
-    s.controller.feed_probe("send_ready", True, dead)
+    feed_probe(s.monitor, "busy", BusyProbe(BusyState.MATCH, 0.2, True), dead)
+    feed_probe(s.monitor, "busy", BusyProbe(BusyState.CHANGED, 0.2, False), dead)
+    feed_probe(s.monitor, "send_ready", True, dead)
 
     s.busy(BusyState.MATCH)
     s.busy(BusyState.CHANGED)

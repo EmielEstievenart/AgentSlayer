@@ -12,9 +12,9 @@ The shape of a scenario, three lines every time: say which detectors the poller
 would be reporting (``active_detectors`` - the fixed busy -> idle -> stale build
 order, whose LAST entry closes a tick), open the reply gate (nothing may arm or
 fire unless an outbound is actually waiting for an answer), then feed probes.
-``feed_probe`` is the seam the poll loop's own ``consume_*`` calls sit behind -
-same call, same thread rules, stamped with the live run unless a test says
-otherwise - so feeding a probe IS a tick completing.
+``feed_probe`` (``tests/driver/automation/conftest.py``) is the seam the monitor's
+own tick push sits behind - same readings, same thread rules, stamped with the
+live run unless a test says otherwise - so feeding a probe IS a tick completing.
 
 Covered: the two ways the trigger arms (a busy/idle icon on the frame just
 probed - proof; a sustained large delta - inference), the two-consecutive-ticks
@@ -47,18 +47,20 @@ from agentclip.driver.automation.finish import (
     SendGate,
 )
 from agentclip.driver.automation.loop_state import LoopState
+from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
-from .conftest import FakeAutomationView
+from .conftest import FakeAutomationView, feed_probe
 
 
 @dataclass
 class Harness:
-    """One controller, its view, and what it fired at."""
+    """One controller, the machine under it, its view, and what it fired at."""
 
     controller: AutomationController
+    monitor: FakeUIMonitor
     view: FakeAutomationView
     fires: list[None] = field(default_factory=list)
 
@@ -75,19 +77,19 @@ class Harness:
         """
         if evidence is None:
             evidence = state is BusyState.MATCH
-        self.controller.feed_probe("busy", BusyProbe(state, 0.2, evidence))
+        feed_probe(self.monitor, "busy", BusyProbe(state, 0.2, evidence))
 
     def idle(self, state: BusyState, *, evidence: bool | None = None) -> None:
         """The same, inverted: for an idle appearance CHANGED is "generating"."""
         if evidence is None:
             evidence = state is BusyState.CHANGED
-        self.controller.feed_probe("idle", BusyProbe(state, 0.2, evidence))
+        feed_probe(self.monitor, "idle", BusyProbe(state, 0.2, evidence))
 
     def stale(self, state: StaleState, *, diff: float = 0.001, ticks: int = 0) -> None:
-        self.controller.feed_probe("stale", StaleProbe(state, diff, ticks))
+        feed_probe(self.monitor, "stale", StaleProbe(state, diff, ticks))
 
     def send_ready(self, found: bool | None) -> None:
-        self.controller.feed_probe("send_ready", found)
+        feed_probe(self.monitor, "send_ready", found)
 
     # -- the sequences the rules are made of ----------------------------------
 
@@ -115,8 +117,10 @@ def build(
     finish has anything to click (COPY).
     """
     fires: list[None] = []
+    monitor = FakeUIMonitor()
     controller = AutomationController(
         view=view,
+        monitor=monitor,
         has_appearance=lambda kind: kind in captures,
         on_fire=lambda: fires.append(None),
     )
@@ -125,7 +129,7 @@ def build(
         controller.set_os_armed(False)
     if open_gate:
         controller.open_reply_gate()
-    return Harness(controller, view, fires)
+    return Harness(controller, monitor, view, fires)
 
 
 # -- arming: the two kinds of evidence, and what each is worth ----------------
@@ -284,14 +288,16 @@ def test_a_re_entrant_tick_from_inside_the_fire_cannot_fire_again(
     evaluating again (a shell that repaints, pumps its loop and lets one more
     probe through before returning) must not double-harvest."""
     fires: list[None] = []
+    monitor = FakeUIMonitor()
     controller = AutomationController(
         view=view,
+        monitor=monitor,
         has_appearance=lambda kind: kind is TemplateKind.COPY,
         on_fire=lambda: (fires.append(None), controller.evaluate_finish())[0],
     )
     controller.active_detectors = ("busy",)
     controller.open_reply_gate()
-    h = Harness(controller, view, fires)
+    h = Harness(controller, monitor, view, fires)
 
     h.busy(BusyState.MATCH)
     h.busy(BusyState.CHANGED)
@@ -439,7 +445,7 @@ def test_a_probe_from_a_finished_poller_run_is_dropped(view: FakeAutomationView)
     """
     h = build(view)
     stale_generation = h.controller.detector_generation
-    h.controller.retarget_detectors()
+    h.monitor.retarget()
     h.controller.active_detectors = ("busy",)
 
     h.controller.consume_busy_probe(BusyProbe(BusyState.MATCH, 0.2, True), stale_generation)
@@ -607,9 +613,9 @@ def test_a_send_probe_from_a_dead_run_cannot_release_the_new_windows_gate(
     h = build(view, captures=(TemplateKind.COPY, TemplateKind.SEND_READY))
     h.send_ready(True)
     dead = h.controller.detector_generation
-    h.controller.retarget_detectors()
+    h.monitor.retarget()
 
-    h.controller.feed_probe("send_ready", False, dead)
+    feed_probe(h.monitor, "send_ready", False, dead)
 
     assert h.controller.send_gate is SendGate.SEEN
 
@@ -733,8 +739,8 @@ def test_recognised_crops_are_routed_through_but_never_read(view: FakeAutomation
     h = build(view)
     crops: dict[TemplateKind, object] = {TemplateKind.COPY: object()}
 
-    h.controller.feed_probe("elements", crops)
+    feed_probe(h.monitor, "elements", crops)
     assert h.view.element_paints == [crops]
 
-    h.controller.feed_probe("elements", crops, h.controller.detector_generation - 1)
+    feed_probe(h.monitor, "elements", crops, h.controller.detector_generation - 1)
     assert len(h.view.element_paints) == 1  # a dead run's pictures are not this window's

@@ -7,41 +7,40 @@ can drive the identical loop. It talks to the UI only through the
 :class:`~agentclip.driver.automation.view.AutomationView` port and therefore imports no
 Textual (docs/design/gui.md §1).
 
-It is being filled one slice at a time; today it holds the state that everything
-else in the loop is read against, plus both of the polling threads:
+Since phase 6.1 of docs/design/ui-monitor.md it owns no thread and no pixels.
+Everything on the far side of the screen - the poll loop, the trackers and their
+swap discipline, the generation stamp, the mouse, the keyboard and the clipboard
+- is one object below it, the :class:`~agentclip.driver.monitor.protocol.UIMonitor`,
+handed in at construction. What is left here is *meaning*: what a tick means,
+what may act on it, and what the shell is told about it.
 
 **The armed flag.** ``/armed`` and F5. DISARMED means the tool stops ACTING on
 the machine - no clicks, no synthetic paste, no cursor moves, no focus stealing,
-no clipboard watching - while every read-only half (capture, the finish
-detectors, the whole sidebar readout) stays live. It lives *below* both shells
-rather than inside one, because with two of them a view-owned flag is a flag
-that drifts. The consequences it owns *itself* are the ones made of state down
-here: the clipboard watcher a disarm stops and the memory of what that watcher
-was doing. The rest - the three remaining chokepoints, the toasts, the status
-bar - is still the shell's, which is why ``set_os_armed`` returns the state now
-in force.
+no clipboard watching - while every read-only half (the monitor's own polling,
+the whole sidebar readout) stays live. It lives *below* both shells rather than
+inside one, because with two of them a view-owned flag is a flag that drifts.
+The consequence it owns *itself* is the one made of state down here: whether the
+monitor is watching the clipboard, and the memory of what that watcher was doing
+when a disarm took it away. The rest - the three remaining chokepoints, the
+toasts, the status bar - is still the shell's, which is why ``set_os_armed``
+returns the state now in force.
 
-**The clipboard watcher.** One plain ``threading.Thread`` running
-:func:`agentclip.driver.clip.watcher.watch`, which was always thread-agnostic - a
-blocking poll loop taking ``should_stop``/``on_capture`` callbacks - so only its
-OWNER moved down here. Captures leave the thread through the
-``on_clipboard_captured`` callback the shell hands in at construction (the
-Textual shell posts a message from it; the GUI will enqueue onto its bridge),
-which is the same non-blocking, thread-safe contract every ``AutomationView``
-method has.
+**The clipboard, at arm's length.** The watcher thread, the poll interval, the
+provider and the self-write register are all the monitor's (ui-monitor.md
+§2.11); this object asks for one with ``watch_clipboard`` and hears what it
+caught through the ``on_clip`` hook it registers at construction. Captures leave
+that hook through the ``on_clipboard_captured`` callback the shell hands in
+(the Textual shell posts a message from it; the GUI enqueues onto its bridge),
+which carries the same non-blocking, thread-safe contract every
+``AutomationView`` method has.
 
-**The detector poller.** The second thread: the loop that captures the live
-chat window once per tick, hands that one frame to one
-:class:`~agentclip.driver.screen.detector.ScreenDetector`, and - since slice 5b - feeds
-the answers straight into its own consumer, in the same call stack.
-
-**The probe consumer**, which is what those answers MEAN. The per-detector
+**The probe consumer**, which is what a tick MEANS. One ``subscribe`` hook
+unpacks the :class:`~agentclip.driver.monitor.protocol.Tick` and calls the five
+``consume_*`` methods in the fixed busy -> idle -> stale -> send-ready ->
+elements order the message pump used to serialize; the per-detector
 bookkeeping, the readout, the ready-to-send gate, the loop's narration and the
-combined finish verdict are the five ``consume_*`` methods and everything under
-them, and the poll loop calls them itself: probe, bookkeeping, gates,
-evaluation, fire - one call stack per tick, in the busy -> idle -> stale ->
-send-ready -> elements order the message pump used to serialize. The tick-closing
-rule is trivially true now, because there is no queue between the producer and
+combined finish verdict are what they do. One call stack per tick, so the
+tick-closing rule is trivially true: there is no queue between the producer and
 the consumer to reorder anything (docs/design/gui.md §1).
 
 Two things the fold cannot answer for itself stay the shell's, and cross as
@@ -51,26 +50,21 @@ shell's Config) and ``on_fire`` (what to launch when the verdict says
 "finished"). Everything else it needs it owns, which is why the trigger, both
 gates, ``LoopState`` and the harness log all live here now.
 
-Which is why the run's ``generation`` stamp is here. Stopping a poller is a
-flag, not a join: the loop it interrupts still finishes the tick it was in and
-consumes those probes, so they are read after the automation may already have
-been retargeted at another browser window. The stamp is what makes that
-decidable - ``retarget_detectors`` opens a new run, every probe carries the run
-it was taken in, and ``is_ghost`` compares.
-
-The composition is deliberately split in three calls, because the shell has
-paints to interleave: ``retarget_detectors`` (stop, and bump the counter - even
-when nothing new starts), ``detector_loop`` (compose this run's loop around a
-detector the shell built) and ``start_detectors`` (run it on a thread).
+**Ghosts.** A tick carries the ``generation`` it was captured under, the monitor
+bumps that on every ``configure`` and drops anything older before a subscriber
+ever sees it (ui-monitor.md §4.2). The stamp is still compared here, because the
+five ``consume_*`` methods are a public seam a shell may call with a stamp of
+its own - a verdict about the window the automation was driving before a
+delegation started must not arm the trigger against the new one.
 
 **The slot pointers.** Which chat window is being configured and which one is
 being driven, plus the drawn box and the service key behind each. Two pointers,
 independent on purpose: *calibrating* is the slot behind the selected window tab
 - what the sidebar's region picker writes into - and *live* is the slot the
-automation (paste click, detector poller, auto-copy) is driving right now. The
-user must be able to draw the sub-agent's window while the master chat is
-mid-turn, and a delegation must be able to retarget the automation without
-dragging the user's view along with it.
+automation (paste click, monitor, auto-copy) is driving right now. The user must
+be able to draw the sub-agent's window while the master chat is mid-turn, and a
+delegation must be able to retarget the automation without dragging the user's
+view along with it.
 
 What is emphatically NOT here is the *content* behind those pointers. A
 :class:`~agentclip.driver.screen.profile.ServiceProfile` - what a service LOOKS like -
@@ -87,32 +81,35 @@ choreography of clicks, scrolls and settles with awaits between them - and this
 object is allowed an event-loop-facing surface for exactly the reason
 ``SessionController`` is. What a shell keeps is the SCHEDULING (Textual puts the
 harvest on a ``run_worker``) and the handful of answers only it has, which cross
-as :class:`~agentclip.driver.automation.host.AutomationHost`. The machine itself is
-reached through :class:`~agentclip.driver.automation.ops.ScreenOps`, which is
-``agentclip.driver.screen`` behind one substitutable object - deliberately NOT on the
-paint port (docs/design/gui.md §1).
+as :class:`~agentclip.driver.automation.host.AutomationHost`. Every one of those
+acts is now ``await self._monitor.click(...)`` and its siblings. What has NOT
+crossed yet is the pixel work those sequences do for themselves - the copy-icon
+hunt, the chat-box verification, the hover scan - which still reads frames
+through the monitor's local-only ``ops``; those verdicts move down in phase 2.
 
-**Threading, as of this slice.** Two threads now write the state below: the UI
-thread (a paste, a slot move, a modal, ``/new``) and the poller thread (a tick).
-``_tick_lock`` is what keeps them from interleaving. It is a ``RLock`` because
-consumption is re-entrant - ``consume_stale_probe`` reaches ``evaluate_finish``
-reaches ``close_reply_gate`` - and it is held for exactly one probe's
-consumption, which is the same grain the message pump gave this code when each
-probe was a message of its own: a retarget landing mid-tick could always drop the
-REST of that tick, and still can. What it may not do, and what the lock forbids,
-is land in the MIDDLE of one probe's bookkeeping, between the ghost check and the
-verdict it guards.
+**Threading, as of this phase.** Two threads still write the state below: the UI
+thread (a paste, a slot move, a modal, ``/new``) and whichever thread the
+monitor pushes a tick from. ``_tick_lock`` is what keeps them from interleaving.
+It is a ``RLock`` because consumption is re-entrant - ``consume_stale_probe``
+reaches ``evaluate_finish`` reaches ``close_reply_gate`` - and it is held for
+exactly one probe's consumption, which is the same grain the message pump gave
+this code when each probe was a message of its own: a retarget landing mid-tick
+could always drop the REST of that tick, and still can. What it may not do, and
+what the lock forbids, is land in the MIDDLE of one probe's bookkeeping, between
+the ghost check and the verdict it guards.
+
+It is also the one reason ``threading`` is still imported here, and it goes in
+phase 2: once the loop pulls (``tick = await ui.observe()``) instead of being
+pushed into, every writer below is on the event-loop thread and there is nothing
+left to serialize (ui-monitor.md §6.2, "no ``threading`` import outside
+``driver/monitor``").
 
 Held across bookkeeping, not across work. Every paint leaves through the view
-port, which is non-blocking by contract, and the two expensive halves of a tick
-- ``capture`` and ``detector.observe`` - happen OUTSIDE it: a UI thread waiting
-on a template search would be the stall this whole split exists to remove. The
-one call under it that can touch a disk is ``has_appearance`` on a cold profile
-cache, which is the shell's own read of its own file and is why the port's
-contract asks for it to be cheap.
-
-The other piece of state each thread shares with the loop it started is a
-``threading.Event``, which is what makes "stop" a flag rather than a lock.
+port, which is non-blocking by contract, and the expensive halves of a tick -
+the capture and the template search - happen inside the monitor, nowhere near
+it. The one call under it that can touch a disk is ``has_appearance`` on a cold
+profile cache, which is the shell's own read of its own file and is why the
+port's contract asks for it to be cheap.
 """
 
 from __future__ import annotations
@@ -121,8 +118,8 @@ import asyncio
 import threading
 import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import cast
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from typing import Any, Protocol
 
 from agentclip.config import (
     DELIVERY_STREAM,
@@ -186,10 +183,11 @@ from agentclip.driver.automation.host import AutomationHost, NullHost
 from agentclip.driver.automation.loop_state import ATTENTION_STATES, LoopState
 from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.automation.view import AutomationView
-from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
+from agentclip.driver.clip.base import ClipboardUnavailable
 from agentclip.driver.clip.chunking import split_for_stream
-from agentclip.driver.clip.watcher import SelfWriteSet, watch, write_via
+from agentclip.driver.clip.watcher import SelfWriteSet
 from agentclip.driver.monitor.ops import ScreenOps
+from agentclip.driver.monitor.protocol import MonitorSpec, Tick
 from agentclip.driver.screen.busy import BusyProbe
 from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.detector import ScreenDetector, Sighting
@@ -202,21 +200,78 @@ from agentclip.driver.screen.slot import AgentSlot, SlotCalibration, new_slots
 from agentclip.driver.screen.stale import StaleProbe, StaleTracker
 from agentclip.driver.screen.template import CandidateSource, RegionMatch, Template, match_rect
 
-# The two things one poll tick needs handed in. Both are called FROM the poller
-# thread, so an implementation must be non-blocking and thread-safe - the same
-# contract the ``AutomationView`` port carries.
-CaptureFn = Callable[[ScreenRegion], RegionImage]
 # The tick's recognitions, cut down to pictures. Sizing a crop depends on which
-# renderer the shell can drive, so the CUT is the shell's - but it happens here,
-# on the thread that captured the frame, because what crosses to a UI is then one
-# small picture per appearance rather than a whole chat window. What comes back
-# is opaque (``AutomationView.paint_elements`` takes ``object``), and a shell
-# that hands nothing in gets the sightings themselves, uncut.
+# renderer the shell can drive, so the CUT is the shell's - but it happens on the
+# monitor's thread, the one that captured the frame, because what crosses to a UI
+# is then one small picture per appearance rather than a whole chat window. What
+# comes back is opaque (``AutomationView.paint_elements`` takes ``object``), and a
+# shell that hands nothing in gets the sightings themselves, uncut.
 CropFn = Callable[
     [RegionImage, Mapping[TemplateKind, Sighting | None]], Mapping[TemplateKind, object]
 ]
-# What one probe can be, for the ``feed_probe`` test seam's single door.
-Probe = BusyProbe | StaleProbe | bool | Mapping[TemplateKind, object] | None
+# One captured frame and what was recognised in it - the monitor's local-only
+# frame hook (ui-monitor.md §2.2: pixels are a calibration surface, so they never
+# ride the wire and never ride a ``Tick``). No stamp on it, unlike a tick: it is
+# delivered on the monitor's own thread immediately after the tick it belongs to,
+# so the run it describes is the one the monitor is in.
+FrameHook = Callable[[RegionImage, Mapping[TemplateKind, Sighting | None]], None]
+
+
+class MonitorLike(Protocol):
+    """The :class:`~agentclip.driver.monitor.protocol.UIMonitor` this phase needs,
+    which is that contract PLUS the local-only tier (ui-monitor.md §3).
+
+    Declared here rather than in ``driver/monitor/protocol.py`` because it is
+    this object's requirement and not the wire's: the four members under "the
+    local-only tier" below are pixels and Python objects, they will never cross
+    a socket, and a ``RemoteUIMonitor`` will never answer them. Everything above
+    that line is the real contract, spelled out again only so mypy checks one
+    Protocol at the call site instead of two.
+
+    It shrinks in phase 2. The pixel work still routed through ``ops`` - the
+    copy-icon hunt, the chat-box verification, the hover scan - becomes monitor
+    verdicts, and the trackers stop being anybody's business but the monitor's.
+    """
+
+    # -- the contract (driver/monitor/protocol.py) -------------------------
+    @property
+    def spec(self) -> MonitorSpec | None: ...
+    @property
+    def generation(self) -> int: ...
+    async def configure(self, spec: MonitorSpec) -> int: ...
+    async def suspend(self) -> None: ...
+    async def resume(self) -> None: ...
+    def subscribe(self, hook: Callable[[Tick], None]) -> Callable[[], None]: ...
+    def on_clip(self, hook: Callable[[str], None]) -> Callable[[], None]: ...
+    async def focus_window(self, handle: int) -> bool: ...
+    async def foreground_window(self) -> int | None: ...
+    async def click(self, region: ScreenRegion, *, settle_s: float | None = None) -> bool: ...
+    async def move_cursor(self, x: int, y: int) -> bool: ...
+    async def scroll(self, region: ScreenRegion, detents: int) -> bool: ...
+    async def scroll_key(self, key: str, taps: int = 1) -> bool: ...
+    async def send_paste(self) -> bool: ...
+    async def send_enter(self) -> bool: ...
+    async def read_clipboard(self) -> str | None: ...
+    async def write_clipboard(self, text: str) -> None: ...
+    def watch_clipboard(self, on: bool) -> bool: ...
+    @property
+    def clipboard_kind(self) -> str | None: ...
+
+    # -- the local-only tier -----------------------------------------------
+    @property
+    def ops(self) -> ScreenOps: ...
+    @property
+    def self_writes(self) -> SelfWriteSet: ...
+    def on_frame(self, hook: FrameHook) -> Callable[[], None]: ...
+    def reset_trackers(self) -> None: ...
+    @property
+    def detector(self) -> ScreenDetector | None: ...
+    @property
+    def busy_tracker(self) -> PresenceTracker | None: ...
+    @property
+    def idle_tracker(self) -> PresenceTracker | None: ...
+    @property
+    def stale_tracker(self) -> StaleTracker | None: ...
 
 
 def _accept_all(_text: str) -> bool:
@@ -251,13 +306,19 @@ def _no_fire() -> None:
 
 
 class DetectorPoller:
-    """One running poll loop: the thread, and the flag that ends it.
+    """VESTIGIAL. One running poll loop: the thread, and the flag that ends it.
 
-    Handed back by ``start_detectors`` so a shell can mirror the run in its own
-    chrome and a test can join it. ``cancel``/``is_cancelled`` keep the
-    vocabulary the Textual worker this replaced had, because "cancelled" is what
-    the loop's own tick check reads and what a caller asks about after a
-    retarget - the thread outlives the cancel by one tick, deliberately.
+    Everything this described - the loop, the thread, the stop flag - moved into
+    the monitor in phase 6.1, and nothing in this module builds one any more. It
+    survives here for exactly one reason and for exactly as long as that reason
+    does: **both shells import this name at module scope**
+    (``shell/tui/screens/main.py``, ``shell/gui/view.py``), and the root
+    ``tests/conftest.py`` imports the TUI screen to install the OS gate - so
+    deleting it makes the whole suite un-collectable, this phase's own tests
+    included, before the shells have been rewired.
+
+    The phase that rewires them deletes it: the shells stop mirroring a poller in
+    their own chrome and ask the monitor instead.
     """
 
     def __init__(self, thread: threading.Thread, stop: threading.Event) -> None:
@@ -266,13 +327,9 @@ class DetectorPoller:
 
     @property
     def is_cancelled(self) -> bool:
-        """Has this run been told to end? True the instant ``cancel`` is called,
-        which is up to one tick before the thread actually finishes."""
         return self._stop.is_set()
 
     def cancel(self) -> None:
-        """End the run. Idempotent, and never a join: the caller is the UI
-        thread and the loop only notices between ticks."""
         self._stop.set()
 
 
@@ -283,31 +340,25 @@ class AutomationController:
         self,
         view: AutomationView,
         *,
+        monitor: MonitorLike,
         host: AutomationHost | None = None,
-        ops: ScreenOps | None = None,
         services: Mapping[str, str] | None = None,
-        clipboard: ClipboardProvider | None = None,
-        self_writes: SelfWriteSet | None = None,
-        poll_interval_ms: int = 300,
         accepts: Callable[[str], bool] | None = None,
         on_clipboard_captured: Callable[[str], None] | None = None,
         crop_elements: CropFn | None = None,
         has_appearance: Callable[[TemplateKind], bool] | None = None,
         on_fire: Callable[[], None] | None = None,
-        send_arm_ticks: int = SEND_ARM_TICKS,
-        send_arm_min_diff: float = SEND_ARM_MIN_DIFF,
-        send_gate_timeout_ticks: int = SEND_GATE_TIMEOUT_TICKS,
-        send_gate_seen_timeout_ticks: int = SEND_GATE_SEEN_TIMEOUT_TICKS,
         alarm: AttentionAlarm | None = None,
     ) -> None:
         self._view = view
         # The other half of the seam: what the OS-acting sequences still have to
-        # ASK the shell (agentclip.driver.automation.host), and the hand this object
-        # puts on the machine (agentclip.driver.automation.ops). Neither is on the paint
-        # port, deliberately - the second one IS ``agentclip.driver.screen``, and it is
-        # an object only so a shell can hand in shims its own suites can stub.
+        # ASK the shell (agentclip.driver.automation.host), and the machine they act on
+        # (agentclip.driver.monitor). Neither is on the paint port, deliberately - the
+        # second one is a whole process boundary in waiting (ui-monitor.md §3), and in
+        # local mode it is the object that owns the poll thread, the trackers, the
+        # mouse, the keyboard and the clipboard.
         self._host: AutomationHost = host if host is not None else NullHost()
-        self._ops = ops if ops is not None else ScreenOps()
+        self._monitor = monitor
         # True is every version of this app before the switch existed, and it
         # stays the default: the tool is useful precisely because it acts.
         self._os_armed = True
@@ -327,62 +378,40 @@ class AutomationController:
         # conversation the user steers, something cheap and fast for delegated
         # sub-tasks.
         self._services: dict[str, str] = dict(services or {})
-        # -- the clipboard watcher ---------------------------------------------
-        # The backend is CONSTRUCTED by the shell (cli.py picks it at startup and
-        # hands it down) and only driven here: which clipboard exists is a
-        # startup question about the machine, not an automation decision. None
-        # means a controller nobody wired one into - the headless tests - and
-        # behaves exactly like the manual provider: nothing to poll.
-        self._clipboard = clipboard
-        # Hashes of what WE put on the clipboard, so the watcher cannot ingest
-        # our own outbound back as a reply. Owned here since the delivery path
-        # came down (slice 7): the same object is the watcher's filter and the
-        # writer's register, and both ends are now this controller's. It can
-        # still be handed IN, for the one case that has to see both ends at once
-        # - a test that writes a payload the way the delivery would and then
-        # asserts the watcher ignored it.
-        self._self_writes = self_writes if self_writes is not None else SelfWriteSet()
-        self._poll_interval_ms = poll_interval_ms
+        # -- the clipboard, at arm's length ------------------------------------
+        # The backend, the poll interval, the watcher thread and the self-write
+        # register are all the monitor's (ui-monitor.md §2.11). What is left here
+        # is whether one is wanted, and the two callbacks either side of it.
+        #
         # The protocol pre-filter, passed in for the same reason ``watch`` takes
         # it: ``agentclip.protocol`` is above this layer (tests/test_layering.py),
-        # and a watcher that accepted everything would drive a turn off any copy.
+        # and a hook that accepted everything would drive a turn off any copy.
+        # The monitor applies its own copy of it to what it captures; this one is
+        # what keeps the ingest honest whoever fed the hook.
         self._accepts: Callable[[str], bool] = accepts if accepts is not None else _accept_all
         self._on_capture: Callable[[str], None] = (
             on_clipboard_captured if on_clipboard_captured is not None else _drop_capture
         )
-        # The running watcher and its stop flag, or None/None when nothing is
-        # polling. They move together and only on the UI thread.
-        self._watcher: threading.Thread | None = None
-        self._watcher_stop: threading.Event | None = None
+        # Whether a watcher is polling right now, as the monitor last answered.
+        # Moved only through ``_watch``, and only on the UI thread.
+        self._watching = False
         # What the watcher was doing when a disarm took it away, so re-arming
         # restores THAT rather than a guess: a user who paused it themselves,
         # disarmed and re-armed does not get handed back a watcher they switched
         # off. Written on transitions only - see ``set_os_armed``.
         self._watch_before_disarm = False
-        # -- the detector poller ------------------------------------------------
-        # The one thing a tick still asks the shell for on its way to the
+        # -- the tick consumer --------------------------------------------------
+        # The one thing a frame still asks the shell for on its way to the
         # consumer: cut this tick's matches down to panel-sized pictures. Handed
         # in at construction like the clipboard sink above and for the same
         # reason - it is the shell's, and it does not change for this lifetime.
         self._crop_elements: CropFn = crop_elements if crop_elements is not None else _uncut
-        # What keeps the poller thread's consumption from interleaving with the
-        # UI thread's writes to the very same bookkeeping. See the module
-        # docstring for the grain: one probe, never a whole tick.
+        # What keeps the monitor's thread's consumption from interleaving with
+        # the UI thread's writes to the very same bookkeeping. See the module
+        # docstring for the grain: one probe, never a whole tick - and for why
+        # this one ``threading`` import outlives the rest of them until phase 2
+        # turns the push into a pull.
         self._tick_lock = threading.RLock()
-        # Which poller RUN a probe belongs to: bumped by every
-        # ``retarget_detectors``, stamped into everything the loop pushes, and
-        # compared by whoever consumes it. The module docstring says why the
-        # counter is here and the comparison is not.
-        self._detector_generation = 0
-        # The current run's stop flag - replaced per run rather than cleared, so
-        # a cancelled loop's flag stays set forever and that loop can only end.
-        self._detector_stop = threading.Event()
-        self._detector_poller: DetectorPoller | None = None
-        # The detector the current run polls through, remembered by
-        # ``detector_loop``. It is the object that holds the live trackers, so a
-        # reset that swaps a tracker has to reach it or the poller keeps folding
-        # into the one that was replaced (``reset_trackers``).
-        self._detector: ScreenDetector | None = None
         # -- the probe consumer ------------------------------------------------
         # What the shell still answers for the decisions below. Two callbacks and
         # nothing else, because those are the only two questions the fold cannot
@@ -397,14 +426,6 @@ class AutomationController:
             has_appearance if has_appearance is not None else _nothing_captured
         )
         self._on_fire: Callable[[], None] = on_fire if on_fire is not None else _no_fire
-        # The tunables, injected rather than read off the module: the Pilot
-        # suites patch the shell module's copies of these names (a test that had
-        # to sit out a two-minute gate budget would not be a test), so whoever
-        # constructs this decides what its clocks are.
-        self._send_arm_ticks = send_arm_ticks
-        self._send_arm_min_diff = send_arm_min_diff
-        self._send_gate_timeout_ticks = send_gate_timeout_ticks
-        self._send_gate_seen_timeout_ticks = send_gate_seen_timeout_ticks
         # Latest verdict per detector: True = finished, False = generating,
         # None = capture error. ``_seen`` is what makes a detector count toward
         # the combined verdict, so a detector that has never reported cannot
@@ -436,10 +457,9 @@ class AutomationController:
         # detector has SEEN, and that is a per-tracker act.
         # ``_active_detectors`` is which of them the current run reports, in the
         # fixed busy -> idle -> stale order - the seam that says which probe
-        # closes a tick (``finish_tick_closed_by``).
-        self._busy_tracker: PresenceTracker | None = None
-        self._idle_tracker: PresenceTracker | None = None
-        self._stale_tracker: StaleTracker | None = None
+        # closes a tick (``finish_tick_closed_by``). The trackers themselves are
+        # the monitor's now; the properties below are a window onto them, for the
+        # shells that still install one and the resets that still swap them.
         self._active_detectors: tuple[str, ...] = ()
         # True from the moment ``evaluate_finish`` fires the auto-copy flow until
         # the flow's finally: evaluation is suspended meanwhile, because the
@@ -513,6 +533,64 @@ class AutomationController:
         # comes through, and passable in so a suite can hear the alarm without
         # the machine making a sound.
         self._alarm = alarm if alarm is not None else AttentionAlarm()
+        # -- and the three hooks that make this object the monitor's consumer ---
+        # Registered last, so nothing can arrive before the state above exists.
+        # One subscription for the whole tick (``_on_tick`` unpacks it into the
+        # five ``consume_*`` calls in the fixed order), one for the frame behind
+        # it (pixels, local-only tier), one for the clipboard. Never unhooked:
+        # this object and its monitor share a lifetime, and a controller that
+        # stopped listening would be a screen nobody reads.
+        monitor.subscribe(self._on_tick)
+        monitor.on_frame(self._on_frame)
+        monitor.on_clip(self._on_clip)
+
+    # == what the monitor was configured with =================================
+    # The send gate's four budgets. They used to be constructor arguments,
+    # because the Pilot suites patch the shell module's copies of them (a test
+    # that had to sit out a two-minute gate budget would not be a test). They are
+    # ``MonitorSpec`` fields now (ui-monitor.md §2.10): the budgets are counted in
+    # TICKS, the monitor is what a tick is, so the monitor is what carries them.
+    # Until a spec is set there is nothing to read, and the module's own defaults
+    # are the honest answer - a controller nobody configured is a controller with
+    # no window to watch, and the gate it never opens is measured in the same
+    # numbers it always was.
+
+    @property
+    def _send_arm_ticks(self) -> int:
+        spec = self._monitor.spec
+        return SEND_ARM_TICKS if spec is None else spec.send_arm_ticks
+
+    @property
+    def _send_arm_min_diff(self) -> float:
+        spec = self._monitor.spec
+        return SEND_ARM_MIN_DIFF if spec is None else spec.send_arm_min_diff
+
+    @property
+    def _send_gate_timeout_ticks(self) -> int:
+        spec = self._monitor.spec
+        return SEND_GATE_TIMEOUT_TICKS if spec is None else spec.send_gate_timeout_ticks
+
+    @property
+    def _send_gate_seen_timeout_ticks(self) -> int:
+        spec = self._monitor.spec
+        return SEND_GATE_SEEN_TIMEOUT_TICKS if spec is None else spec.send_gate_seen_timeout_ticks
+
+    def _schedule(self, work: Coroutine[Any, Any, Any]) -> None:
+        """Put one monitor coroutine on the running loop and do not wait for it.
+
+        The bridge between a shell's synchronous chrome (a modal opening, a
+        window closing) and a contract that is coroutines all the way down. With
+        no loop running there is nothing to put it on and nothing to await it
+        either, so the coroutine is closed rather than left to warn about never
+        having been awaited - which is exactly the state a synchronous test is
+        in, and it is asking for a suspend that has nothing to suspend.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            work.close()
+            return
+        loop.create_task(work)
 
     # == the ARMED switch =====================================================
 
@@ -563,31 +641,39 @@ class AutomationController:
             armed = self._os_armed
             if armed and not was_armed:
                 if self._watch_before_disarm:
-                    self.start_watching()  # no-ops in manual mode, and if already up
+                    self._watch(True)  # no-ops in manual mode, and if already up
                 self._watch_before_disarm = False
             elif was_armed and not armed:
                 self._watch_before_disarm = self.watching
-                self.stop_input()
+                self._watch(False)
             self._view.paint_armed(armed)
             return armed
 
     # == the clipboard watcher =================================================
+    # The thread is the monitor's (ui-monitor.md §2.11). What is left here is the
+    # three questions only this object can answer: does a session want one, may
+    # it have one, and what did it catch.
 
     @property
     def watching(self) -> bool:
-        """Is a watcher thread polling the clipboard right now?"""
-        return self._watcher is not None
+        """Is the monitor polling the clipboard right now?"""
+        return self._watching
 
-    @property
-    def watcher_thread(self) -> threading.Thread | None:
-        """The watcher thread itself, or None. For shells that mirror its
-        existence into their own chrome, and for tests that join it."""
-        return self._watcher
+    def _watch(self, on: bool) -> None:
+        """Ask for a watcher, or ask for it to stop, and record what came back.
+
+        The single door, because "asked for" and "running" are not the same
+        thing: a machine with no clipboard backend, or with the write-only
+        manual one, honours neither request and says so - and everything that
+        reads ``watching`` (the status bar, the re-arm's memory) has to see that
+        rather than our intention.
+        """
+        self._watching = self._monitor.watch_clipboard(on)
 
     def start_input(self) -> None:
         """A session wants the clipboard watched (``ChatView.start_input``).
 
-        Three answers, and only one of them starts a thread. Disarmed: the
+        Three answers, and only one of them starts anything. Disarmed: the
         session still WANTS a watcher, so the request is *remembered* and the
         next re-arm honours it - this is the one place the remembered state is
         set from an intention rather than from an observation, and without it a
@@ -598,7 +684,7 @@ class AutomationController:
         if not self._os_armed:
             self._watch_before_disarm = True
             return
-        if self._clipboard is not None and self._clipboard.name == "manual":
+        if self._monitor.clipboard_kind == "manual":
             self._view.notify(
                 "manual clipboard mode: press i and paste the model's reply into the box; "
                 "outbound payloads go out via the terminal's OSC-52 copy",
@@ -606,215 +692,70 @@ class AutomationController:
                 timeout=10,
             )
             return
-        self.start_watching()
-
-    def start_watching(self) -> None:
-        """Start the poll loop, unless there is nothing to poll or it is already
-        running. The raw start behind ``start_input``, the re-arm and the shell's
-        pause/resume key alike - no arming check of its own, because each of
-        those callers has already made that decision."""
-        if self._watcher is not None or self._clipboard is None:
-            return
-        if self._clipboard.name == "manual":
-            return
-        stop = threading.Event()
-        provider = self._clipboard
-        interval = self._poll_interval_ms
-        accepts = self._accepts
-        on_capture = self._on_capture
-        self_writes = self._self_writes
-
-        def loop() -> None:
-            watch(
-                provider,
-                interval,
-                should_stop=stop.is_set,
-                accepts=accepts,
-                on_capture=on_capture,
-                self_writes=self_writes,
-            )
-
-        thread = threading.Thread(target=loop, name="agentclip-clipwatch", daemon=True)
-        self._watcher = thread
-        self._watcher_stop = stop
-        thread.start()
+        self._watch(True)
 
     def stop_input(self) -> None:
         """Stop watching (``ChatView.stop_input``), without waiting for it.
 
-        Deliberately no join: the caller is the UI thread and the loop only
-        notices between ticks, so joining would freeze the interface for up to a
-        poll interval. Dropping the handles makes "stopped" true immediately for
-        everything that asks, and the thread it leaves finishing its last tick
-        holds nothing anyone else waits on - a capture that lands in that window
-        is a real capture the user really made, exactly as it was when a Textual
-        worker's ``cancel()`` owned this.
+        Deliberately no join anywhere under this: the caller is the UI thread and
+        the loop only notices between ticks, so joining would freeze the
+        interface for up to a poll interval. "Stopped" is true immediately for
+        everything that asks, and a capture that lands in the window the last
+        tick leaves open is a real capture the user really made.
         """
-        if self._watcher_stop is not None:
-            self._watcher_stop.set()
-        self._watcher = None
-        self._watcher_stop = None
+        self._watch(False)
 
-    # == the detector poller ===================================================
+    def _on_clip(self, text: str) -> None:
+        """One clipboard change the watcher accepted, on its way to the shell.
+
+        Called from the monitor's own thread, so everything it touches carries
+        the ``AutomationView`` port's contract: non-blocking and thread-safe. The
+        filter is applied again here for the reason it is passed in at all - the
+        protocol lives above this layer, and this object is where "is that a
+        reply?" is answered on behalf of both shells.
+        """
+        if self._accepts(text):
+            self._on_capture(text)
+
+    # == the monitor's run =====================================================
+    # What used to be the poller section. The loop, the thread, the stop flag and
+    # the generation counter all moved down (ui-monitor.md §6.1); the three calls
+    # left here are the ones the shells still make, and the shell-rewiring phase
+    # replaces each with the monitor call beside it.
 
     @property
     def detector_generation(self) -> int:
-        """Which poller run is the live one. Stamped into every probe."""
-        return self._detector_generation
+        """Which run of the monitor the live window is being watched in.
 
-    @property
-    def detectors_running(self) -> bool:
-        """Is a poll loop watching the live window right now?"""
-        return self._detector_poller is not None
-
-    @property
-    def detector_poller(self) -> DetectorPoller | None:
-        """The running poller, or None. For shells that mirror it into their own
-        chrome, and for tests that join its thread."""
-        return self._detector_poller
+        Stamped into every tick and compared by everything that consumes one.
+        The counter is the monitor's - only ``configure`` moves it - and this is
+        the read the bookkeeping below phrases itself in.
+        """
+        return self._monitor.generation
 
     def retarget_detectors(self) -> int:
-        """Close the current poller run and open a new one; returns its stamp.
+        """The automation moved; hand back the run it moved into.
 
-        The first of the three calls a rebuild is made of, and the only one that
-        always happens: a rebuild that finds nothing to watch (no drawn window,
-        nothing calibrated) still ENDS the run that was watching the old one,
-        and still has to invalidate the probes that run has in flight. Bumping
-        the counter here rather than at the start of a loop is what makes that
-        true - "the automation moved" and "a new loop exists" are different
-        events, and only the first one is the question a probe is asking.
-
-        The stop is the same flag-not-join as ``stop_input``'s, for the same
-        reason: the caller is the UI thread. So the loop this ends is still free
-        to finish the tick it was in, and the probes it consumes carry the OLD
-        stamp - which is the whole point.
-
-        Under ``_tick_lock``, because the counter this bumps is the one the
-        poller thread is reading in ``is_ghost``: without it a retarget could
-        land between a probe's ghost check and the bookkeeping that check
-        guards, and the tick would half-belong to each run.
+        A shim, and deliberately a thin one. Retargeting IS ``await
+        monitor.configure(spec)`` now: it is the call that rebuilds the trackers
+        fresh, bumps the generation and makes every tick in flight a ghost. What
+        is left here is the answer the shells read back, so the phase that
+        rewires them is a one-line change at each call site rather than a
+        rewrite of both.
         """
         with self._tick_lock:
-            self.stop_detectors()
-            self._detector_generation += 1
-            self._detector_stop = threading.Event()
-            return self._detector_generation
-
-    def detector_loop(
-        self,
-        detector: ScreenDetector,
-        region: ScreenRegion,
-        *,
-        capture: CaptureFn,
-        poll_seconds: float,
-    ) -> Callable[[], None]:
-        """Compose the current run's poll loop, ready to be handed to a thread.
-
-        ONE capture per tick, handed to ONE detector. That is not only cheaper:
-        every verdict then describes the same instant of a moving screen rather
-        than four moments of it, and a failed capture reaches all of them as the
-        same ERROR instead of some seeing a frame and others not.
-
-        What the detector searches for was decided when the SHELL built it (from
-        one window's calibration - ``screen.detector.build_detector``), and the
-        loop hands the answers straight to this object's own consumer, in the
-        fixed busy -> idle -> stale order the tick-closing rule reads, then the
-        send button and the pictures. One call stack per tick: the probe, its
-        bookkeeping, the gates, the fold and - if it comes to that - the fire all
-        happen before the next capture, which is what makes "the LAST detector
-        closes the tick" a fact about the code rather than about a queue.
-
-        Everything is read once, here: the region, the detector, the cadence and
-        the stamp all describe the window this run was started for, and a run
-        that re-read them mid-flight would drift onto another one. ``capture``
-        is passed in rather than imported for the same reason the clipboard
-        provider is - and because the shell's test suites stub the capture at
-        their own call site.
-        """
-        stop = self._detector_stop
-        generation = self._detector_generation
-        # Remembered, not only closed over: ``reset_trackers`` swaps a tracker
-        # rather than clearing it in place, and the object that has to end up
-        # holding the replacement is this one - the poller reads its trackers
-        # through ``detector.busy``/``.idle``/``.stale`` every tick.
-        self._detector = detector
-
-        def loop() -> None:
-            while not stop.is_set():
-                try:
-                    scene: RegionImage | None = capture(region)
-                except CaptureError:
-                    scene = None  # every detector hears about it the same way
-                tick = detector.observe(scene)
-                if tick.busy is not None:
-                    self.consume_busy_probe(tick.busy, generation)
-                if tick.idle is not None:
-                    self.consume_idle_probe(tick.idle, generation)
-                if tick.stale is not None:
-                    self.consume_stale_probe(tick.stale, generation)
-                # The send button, every tick it is captured - it closes no tick
-                # and folds into no verdict, and the gate that consumes it
-                # ignores it whenever it is not holding. Three-valued: on
-                # screen, not on screen, or no answer because the capture failed.
-                if detector.searches(TemplateKind.SEND_READY):
-                    self.consume_send_ready(tick.present(TemplateKind.SEND_READY), generation)
-                # One pass for the whole tick's pictures, after the verdicts they
-                # illustrate, out of the very frame the matches were verified
-                # against - and cut HERE, on the thread that captured it. A failed
-                # capture recognised nothing and says nothing: an empty map would
-                # blank rows a dropped frame is no evidence about, so the tick
-                # simply says nothing.
-                if scene is not None and tick.sightings:
-                    self.consume_elements(self._crop_elements(scene, tick.sightings), generation)
-                # Sleep in short increments so cancellation lands promptly.
-                remaining = poll_seconds
-                while remaining > 0 and not stop.is_set():
-                    step = min(0.05, remaining)
-                    time.sleep(step)
-                    remaining -= step
-
-        return loop
-
-    def start_detectors(self, loop: Callable[[], None]) -> DetectorPoller:
-        """Run a composed loop on a fresh ``agentclip-detector`` thread.
-
-        The last of the three calls, and the only one that touches a thread - so
-        a shell (or a test) that wants the composition without the polling stops
-        here and never calls it. Daemon, like the watcher: an exit must never
-        wait on a poll interval.
-
-        It runs the loop of the run ``retarget_detectors`` opened, and shares
-        that run's stop flag with it: starting a loop composed for a run that
-        has since been stopped hands back a poller that ends on its first check,
-        which is what a caller skipping the retarget is asking for.
-        """
-        thread = threading.Thread(target=loop, name="agentclip-detector", daemon=True)
-        poller = DetectorPoller(thread, self._detector_stop)
-        self._detector_poller = poller
-        thread.start()
-        return poller
+            return self._monitor.generation
 
     def stop_detectors(self) -> None:
-        """End the running poller, without waiting for it.
+        """Suspend the monitor's polling, without waiting for it.
 
-        Deliberately no join, exactly like ``stop_input``: the caller is the UI
-        thread and the loop only notices between ticks. Dropping the handle
-        makes "stopped" true immediately for everything that asks, and the tick
-        the thread it leaves is still finishing pushes probes stamped with a run
-        that is no longer the live one.
-
-        This is also the SUSPEND a shell reaches for when a modal takes the
-        screen (the service editor's capture overlay is a sustained large delta
-        over the very window the detectors watch, which is what arms the
-        auto-copy on staleness alone). Deliberately the same call and
-        deliberately no generation bump: nothing has moved, and the rebuild that
-        resumes it opens the new run. The resume itself cannot live here -
-        putting the poller back means rebuilding the detector around whatever
-        the calibration says NOW, and composing that is the shell's.
+        The SUSPEND a shell reaches for when a modal takes the screen (the
+        service editor's capture overlay is a sustained large delta over the very
+        window the detectors watch, which is what arms the auto-copy on staleness
+        alone). Deliberately no generation bump: nothing has moved, and the
+        rebuild that resumes it opens the new run.
         """
-        if self._detector_poller is not None:
-            self._detector_poller.cancel()
-        self._detector_poller = None
+        self._schedule(self._monitor.suspend())
 
     # == the loop's narration ==================================================
 
@@ -941,30 +882,24 @@ class AutomationController:
 
     @property
     def busy_tracker(self) -> PresenceTracker | None:
-        """The current run's busy-appearance tracker, or None."""
-        return self._busy_tracker
+        """The current run's busy-appearance tracker, or None.
 
-    @busy_tracker.setter
-    def busy_tracker(self, tracker: PresenceTracker | None) -> None:
-        self._busy_tracker = tracker
+        Read-only, and the monitor's object: ``configure`` is what builds a set
+        of them, so there is nothing up here to install one with any more. The
+        window survives for the shells that MIRROR a tracker in their own chrome,
+        and it closes with them.
+        """
+        return self._monitor.busy_tracker
 
     @property
     def idle_tracker(self) -> PresenceTracker | None:
         """The current run's idle-appearance tracker, or None."""
-        return self._idle_tracker
-
-    @idle_tracker.setter
-    def idle_tracker(self, tracker: PresenceTracker | None) -> None:
-        self._idle_tracker = tracker
+        return self._monitor.idle_tracker
 
     @property
     def stale_tracker(self) -> StaleTracker | None:
         """The current run's staleness tracker, or None."""
-        return self._stale_tracker
-
-    @stale_tracker.setter
-    def stale_tracker(self, tracker: StaleTracker | None) -> None:
-        self._stale_tracker = tracker
+        return self._monitor.stale_tracker
 
     def reset_trackers(self) -> None:
         """Make every live tracker forget the frames it has seen.
@@ -974,42 +909,15 @@ class AutomationController:
         the auto-copy flow) has just PRODUCED the frames behind that streak
         itself.
 
-        **Swap, not clear.** Every caller is on the UI thread and the tracker
-        being cleared is being polled on the detector thread, which reads the
-        streak, spends a template search or a frame diff, and writes the streak
-        back - so an in-place ``reset()`` landing inside that search is undone
-        by the write that follows it, and the frames the paste or the flow
-        produced stay in history. That is the one thing ``_tick_lock`` cannot
-        fix at its own grain: the expensive halves of a tick are deliberately
-        OUTSIDE it (module docstring), and a UI thread waiting on a template
-        search is precisely the stall this split exists to remove. So each
-        tracker is replaced by a ``fresh()`` one of the same calibration, and
-        the poll still in flight folds its frame into an object nobody will read
-        again.
-
-        The replacement has to reach the DETECTOR, because that is what the
-        poller reads its trackers through; this object's three slots are the
-        same instances under their own names. The identity guard is what keeps a
-        test that installed a tracker of its own from having the detector's
-        overwritten with it.
+        **Swap, not clear**, and that is the monitor's job (ui-monitor.md §4.3):
+        the tracker being cleared is being polled on the monitor's own thread,
+        which reads the streak, spends a template search or a frame diff, and
+        writes the streak back - so an in-place ``reset()`` landing inside that
+        search is undone by the write that follows it, and the frames the paste
+        or the flow produced stay in history. What this object contributes is
+        WHEN, which is the only half of it that was ever a decision.
         """
-        with self._tick_lock:
-            detector = self._detector
-            if self._busy_tracker is not None:
-                spare = self._busy_tracker.fresh()
-                if detector is not None and detector.busy is self._busy_tracker:
-                    detector.busy = spare
-                self._busy_tracker = spare
-            if self._idle_tracker is not None:
-                spare = self._idle_tracker.fresh()
-                if detector is not None and detector.idle is self._idle_tracker:
-                    detector.idle = spare
-                self._idle_tracker = spare
-            if self._stale_tracker is not None:
-                stale_spare = self._stale_tracker.fresh()
-                if detector is not None and detector.stale is self._stale_tracker:
-                    detector.stale = stale_spare
-                self._stale_tracker = stale_spare
+        self._monitor.reset_trackers()
 
     def forget_verdicts(self) -> None:
         """Drop everything a rebuilt detector set makes obsolete.
@@ -1026,14 +934,12 @@ class AutomationController:
             # A half-built large-delta run belongs to the tracker that produced it.
             self._stale_diff = None
             self._stale_arm_streak = 0
-            self._busy_tracker = None
-            self._idle_tracker = None
-            self._stale_tracker = None
             self._active_detectors = ()
-            # The detector those trackers belonged to goes with them: it
-            # describes a composition that no longer exists, and the shell calls
-            # this immediately before building the one that replaces it.
-            self._detector = None
+            # The trackers those verdicts came out of, and the detector holding
+            # them, are not dropped here any more: they are the monitor's, and
+            # the ``configure`` that follows this builds a fresh set and swaps
+            # them in (§4.3). What is left here is the verdicts themselves,
+            # which is all this call was ever about.
 
     def reset_finish_trigger(self) -> None:
         """Forget every detector verdict and the auto-copy arm.
@@ -1244,7 +1150,7 @@ class AutomationController:
         Dropping a verdict is always safe: a detector that is still running is
         simply refreshed by the next tick, a poll interval later.
         """
-        if generation != self._detector_generation:
+        if generation != self._monitor.generation:
             return True
         return detector not in self._active_detectors
 
@@ -1308,7 +1214,7 @@ class AutomationController:
         sub-agent's.
         """
         with self._tick_lock:
-            if generation != self._detector_generation:
+            if generation != self._monitor.generation:
                 return
             self._view.paint_elements(crops)
 
@@ -1342,7 +1248,7 @@ class AutomationController:
         mean holding a session open on a button that is already gone.
         """
         with self._tick_lock:
-            if generation != self._detector_generation:
+            if generation != self._monitor.generation:
                 return
             gate = self._send_gate
             if gate is None:
@@ -1383,34 +1289,65 @@ class AutomationController:
             if self._send_gate_ticks >= budget:
                 self.time_out_send_gate(seen=gate is SendGate.SEEN)
 
-    # -- the test seam ---------------------------------------------------------
+    # -- one tick, unpacked ----------------------------------------------------
 
-    def feed_probe(self, detector: str, probe: Probe = None, generation: int | None = None) -> None:
-        """Consume one probe as the poll loop would have. The suites' one door.
+    def _on_tick(self, tick: Tick) -> None:
+        """Consume one observation of the chat window (``UIMonitor.subscribe``).
 
-        There is no message to inject any more - the loop calls the consumer in
-        its own call stack - so this is what a test posted ``BusyProbed(...)``
-        for: one named reading, stamped with the run it belongs to. The stamp
-        defaults to the LIVE one, because "speak as the current poller" is what
-        nearly every caller wants; pass it explicitly to speak as a run that has
-        been retargeted away (a ghost) or as one that does not exist yet.
+        The whole of this object's share of a tick, in the fixed order the
+        tick-closing rule reads: busy -> idle -> stale, then the send button.
+        Each probe is skipped when the configuration has no such detector, which
+        is what ``None`` means on the tick; the send button is asked about only
+        when it was SEARCHED for, because "not on screen" and "never looked" are
+        different answers and only the first one may run a gate's clock down.
 
-        ``detector`` is the same vocabulary ``active_detectors`` and ``is_ghost``
-        use, plus the two readings that are not finish detectors at all.
+        Ghosts never get here - the monitor drops a tick captured under an older
+        generation before any subscriber sees it (ui-monitor.md §4.2) - but the
+        stamp still rides along, because the ``consume_*`` methods below are a
+        public seam and their ghost check is what makes them safe to call.
+
+        Called from the monitor's thread, so everything under it obeys the same
+        rules the poll loop's own call stack did: one probe at a time, each one
+        whole, under ``_tick_lock``.
         """
-        stamp = self._detector_generation if generation is None else generation
-        if detector == "busy":
-            self.consume_busy_probe(cast("BusyProbe", probe), stamp)
-        elif detector == "idle":
-            self.consume_idle_probe(cast("BusyProbe", probe), stamp)
-        elif detector == "stale":
-            self.consume_stale_probe(cast("StaleProbe", probe), stamp)
-        elif detector == "send_ready":
-            self.consume_send_ready(cast("bool | None", probe), stamp)
-        elif detector == "elements":
-            self.consume_elements(cast("Mapping[TemplateKind, object]", probe), stamp)
-        else:
-            raise ValueError(f"no such detector: {detector!r}")
+        generation = tick.generation
+        if tick.busy is not None:
+            self.consume_busy_probe(tick.busy, generation)
+        if tick.idle is not None:
+            self.consume_idle_probe(tick.idle, generation)
+        if tick.stale is not None:
+            self.consume_stale_probe(tick.stale, generation)
+        # The send button, every tick it is captured - it closes no tick and
+        # folds into no verdict, and the gate that consumes it ignores it
+        # whenever it is not holding. Three-valued: on screen, not on screen, or
+        # no answer because the capture failed - and that last one is why the
+        # dropped frame is asked about too. A tick that captured nothing searched
+        # nothing, so its map is empty and ``searched`` says no; the gate still
+        # has to hear about it, or a browser that has stopped being capturable
+        # would hold the session open for ever.
+        if tick.searched(TemplateKind.SEND_READY) or not tick.captured:
+            self.consume_send_ready(tick.present(TemplateKind.SEND_READY), generation)
+
+    def _on_frame(
+        self, scene: RegionImage, sightings: Mapping[TemplateKind, Sighting | None]
+    ) -> None:
+        """One tick's pictures (``UIMonitor.on_frame``, the local-only tier).
+
+        Beside the tick rather than on it, because a crop is pixels and a tick
+        carries none (ui-monitor.md §2.2). After it, because the pictures
+        illustrate verdicts that have already been folded. A frame that
+        recognised nothing says nothing: an empty map would blank rows this tick
+        is no evidence about, so a failed capture simply never arrives here.
+
+        The stamp is read rather than carried: the frame arrives on the monitor's
+        own thread the instant after the tick it belongs to, so the run it
+        describes is the run the monitor is in.
+        """
+        if not sightings:
+            return
+        self.consume_elements(
+            self._crop_elements(scene, sightings), self._monitor.generation
+        )
 
     # -- the reply gate --------------------------------------------------------
 
@@ -1965,7 +1902,7 @@ class AutomationController:
         handle = self._own_window
         if handle is None:
             return False
-        return await asyncio.to_thread(self._ops.focus_window, handle)
+        return await self._monitor.focus_window(handle)
 
     async def snap_back_after_click(self) -> bool:
         """Let a click in the browser register, then take the foreground back.
@@ -1985,7 +1922,7 @@ class AutomationController:
         """
         if self._own_window is None:
             return False
-        await asyncio.sleep(self._ops.snap_back_settle())
+        await asyncio.sleep(self._monitor.ops.snap_back_settle())
         return await self.snap_focus_back()
 
     async def _await_browser_activation(self) -> bool:
@@ -2008,11 +1945,11 @@ class AutomationController:
         handle = self._own_window
         if handle is None:
             return False
-        for _ in range(self._ops.activation_attempts()):
-            current = await asyncio.to_thread(self._ops.foreground_window)
+        for _ in range(self._monitor.ops.activation_attempts()):
+            current = await self._monitor.foreground_window()
             if current is not None and current != handle:
                 return True
-            await asyncio.sleep(self._ops.activation_poll())
+            await asyncio.sleep(self._monitor.ops.activation_poll())
         return False
 
     # -- the two clicks every sequence is built out of -------------------------
@@ -2027,7 +1964,7 @@ class AutomationController:
         box itself (a caret in the input field is the point), while a keyboard
         scroll wants anywhere but (see ``flow.above_chatbox``).
         """
-        clicked = await asyncio.to_thread(self._ops.click, target)
+        clicked = await self._monitor.click(target)
         if not clicked and not self._region_click_warned:
             self._region_click_warned = True  # once, not on every copy
             self._view.notify(
@@ -2086,13 +2023,13 @@ class AutomationController:
             return []
         if scene is None:
             try:
-                scene = await asyncio.to_thread(self._ops.capture, region)
+                scene = await asyncio.to_thread(self._monitor.ops.capture, region)
             except CaptureError:
                 return []
         tolerance, matcher = self.live_search()
         return await asyncio.to_thread(
             element_rects,
-            self._ops.all_matches,
+            self._monitor.ops.all_matches,
             templates,
             scene,
             region,
@@ -2202,7 +2139,7 @@ class AutomationController:
         if region is None:
             return None
         try:
-            scene: RegionImage | None = await asyncio.to_thread(self._ops.capture, region)
+            scene: RegionImage | None = await asyncio.to_thread(self._monitor.ops.capture, region)
         except CaptureError:
             return region, None
         for kind in (TemplateKind.CHATBOX_ONGOING, TemplateKind.CHATBOX_INITIAL):
@@ -2258,7 +2195,7 @@ class AutomationController:
         # the middle of a control is only the right pixel until a service draws
         # one whose middle is a label and whose left third is the button.
         target = click_point_region(found[0], *profile.click_point(kind))
-        clicked = await asyncio.to_thread(self._ops.click, target, settle_s=settle_s)
+        clicked = await self._monitor.click(target, settle_s=settle_s)
         return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
 
     # -- what the live window is, for the sequences that read it ---------------
@@ -2350,15 +2287,15 @@ class AutomationController:
         cannot see is not a scan that found nothing.
         """
         for x, y in hover_scan_points(region):
-            if not self._ops.move_cursor(x, y):
+            if not self._monitor.ops.move_cursor(x, y):
                 return None
-            time.sleep(self._ops.hover_step_delay())
+            time.sleep(self._monitor.ops.hover_step_delay())
             try:
-                scene = self._ops.capture(region)
+                scene = self._monitor.ops.capture(region)
             except CaptureError:
                 return None
             found = lowest_match(
-                self._ops.lowest_match,
+                self._monitor.ops.lowest_match,
                 templates,
                 scene,
                 max_diff=TemplateKind.COPY.max_diff,
@@ -2382,11 +2319,11 @@ class AutomationController:
         either), and the settle belongs to the caller, which pays it per round.
         """
         if scroll_action == SCROLL_PAGE_DOWN:
-            await asyncio.to_thread(self._ops.scroll_key, "page_down", PAGE_DOWN_TAPS)
+            await self._monitor.scroll_key("page_down", PAGE_DOWN_TAPS)
         elif scroll_action == SCROLL_END:
-            await asyncio.to_thread(self._ops.scroll_key, "end")
+            await self._monitor.scroll_key("end")
         else:
-            await asyncio.to_thread(self._ops.scroll, region, SNAP_WHEEL_DETENTS)
+            await self._monitor.scroll(region, SNAP_WHEEL_DETENTS)
 
     async def verified_copy_click(self, target: ScreenRegion) -> bool:
         """Click where the copy button was found, retrying at slightly offset
@@ -2407,43 +2344,23 @@ class AutomationController:
         just spam clicks with no way to tell if any of them worked).
         """
         try:
-            before = await asyncio.to_thread(self._read_clipboard)
+            before = await self._monitor.read_clipboard()
         except ClipboardUnavailable:
-            await asyncio.to_thread(self._ops.click, target, settle_s=0.05)
+            await self._monitor.click(target, settle_s=0.05)
             return True
 
         for dx, dy in COPY_CLICK_OFFSETS:
             shifted = ScreenRegion(target.left + dx, target.top + dy, target.width, target.height)
-            await asyncio.to_thread(self._ops.click, shifted, settle_s=0.05)
+            await self._monitor.click(shifted, settle_s=0.05)
             for _ in range(COPY_VERIFY_READS):
                 await asyncio.sleep(COPY_VERIFY_INTERVAL_S)
                 try:
-                    after: str | None = await asyncio.to_thread(self._read_clipboard)
+                    after: str | None = await self._monitor.read_clipboard()
                 except ClipboardUnavailable:
                     after = None
                 if after != before:
                     return True
         return False
-
-    def _read_clipboard(self) -> str | None:
-        """The provider's text, or ``ClipboardUnavailable`` when a controller was
-        wired up without one - which is the same answer a backend that cannot
-        read gives, and is handled by the same branch."""
-        if self._clipboard is None:
-            raise ClipboardUnavailable("no clipboard provider")
-        return self._clipboard.read_text()
-
-    def _write_clipboard(self, text: str) -> None:
-        """Put ``text`` on the clipboard and register it as OUR write, so the
-        watcher polling the very same clipboard cannot ingest our own outbound
-        back as if it were a reply (``clip.watcher.write_via``).
-
-        Raises ``ClipboardUnavailable`` on a controller wired up without a
-        provider, exactly as ``_read_clipboard`` does and into the same branch.
-        """
-        if self._clipboard is None:
-            raise ClipboardUnavailable("no clipboard provider")
-        write_via(self._clipboard, self._self_writes, text)
 
     # == the delivery ==========================================================
     # The outbound half of the loop, and the mirror of the harvest below: a
@@ -2456,9 +2373,14 @@ class AutomationController:
 
     @property
     def self_writes(self) -> SelfWriteSet:
-        """Hashes of every clipboard write this controller made. The watcher's
-        filter and the delivery's register are one object, and this is it."""
-        return self._self_writes
+        """Hashes of every clipboard write the monitor made on our behalf.
+
+        The watcher's filter and the delivery's register are one object, and it
+        lives with the clipboard it is about (ui-monitor.md §2.11): the write and
+        the tagging that stops the watcher ingesting it back have to happen on
+        the same side of the seam or there is a window between them.
+        """
+        return self._monitor.self_writes
 
     @property
     def pending_insert(self) -> str | None:
@@ -2484,7 +2406,7 @@ class AutomationController:
         aimed at.
         """
         try:
-            await asyncio.to_thread(self._write_clipboard, text)
+            await self._monitor.write_clipboard(text)
         except ClipboardUnavailable:
             self._host.park_off_clipboard(text)
             self._view.notify(
@@ -2683,14 +2605,14 @@ class AutomationController:
             # below too, since that is the same first Ctrl+V into the same fresh
             # focus.
             await self._await_browser_activation()
-            await asyncio.sleep(self._ops.paste_settle())
+            await asyncio.sleep(self._monitor.ops.paste_settle())
             # Streaming needs a clipboard to write each chunk through, so a
             # service that asks for it still falls back to the single burst when
             # there is no backend - whatever the shell parked is all there is.
             if self._live_preset().delivery == DELIVERY_STREAM and clipboard_ok:
                 pasted = await self._stream_outbound(text)
             else:
-                pasted = await asyncio.to_thread(self._ops.send_paste)
+                pasted = await self._monitor.send_paste()
         # The auto-insert resolved: the payload is in the box awaiting the
         # user's Enter, or it never landed and the Ctrl+V is theirs to do. Four
         # reasons, not one, because "the Ctrl+V is yours" has four very different
@@ -2710,8 +2632,8 @@ class AutomationController:
                 # the only thing that moves the loop to WAIT_GENERATE, exactly
                 # as for a human Enter. If the tap did not take, the gate times
                 # out as ever, and the flash below says whose Enter it is now.
-                await asyncio.sleep(self._ops.submit_settle())
-                auto_sent = await asyncio.to_thread(self._ops.send_enter)
+                await asyncio.sleep(self._monitor.ops.submit_settle())
+                auto_sent = await self._monitor.send_enter()
                 self.log_harness(
                     KIND_GATE,
                     "auto-submit tapped Enter after the paste"
@@ -2842,7 +2764,7 @@ class AutomationController:
         clicked = await self.focus_click(target)
         if not clicked:
             return False
-        await asyncio.sleep(self._ops.focus_click_gap())
+        await asyncio.sleep(self._monitor.ops.focus_click_gap())
         await self.focus_click(target)
         return True
 
@@ -2871,21 +2793,21 @@ class AutomationController:
         # The size is read off ``ScreenOps`` rather than defaulted so the whole
         # cadence - chunk size and inter-chunk beat - is one pair a shell's
         # suites can shrink without pasting a real payload's worth of bursts.
-        chunks = split_for_stream(text, self._ops.stream_chunk_chars())
+        chunks = split_for_stream(text, self._monitor.ops.stream_chunk_chars())
         total = len(chunks)
         for index, chunk in enumerate(chunks, start=1):
             self._view.show_paste_flash(stream_flash_text(index, total))
             try:
-                await asyncio.to_thread(self._write_clipboard, chunk)
+                await self._monitor.write_clipboard(chunk)
             except ClipboardUnavailable:
                 landed = False
             else:
-                landed = await asyncio.to_thread(self._ops.send_paste)
+                landed = await self._monitor.send_paste()
             if not landed:
                 await self._restore_after_partial_stream(text, index, total)
                 return False
             if index < total:
-                await asyncio.sleep(self._ops.stream_chunk_settle())
+                await asyncio.sleep(self._monitor.ops.stream_chunk_settle())
         return True
 
     async def _restore_after_partial_stream(self, text: str, index: int, total: int) -> None:
@@ -2895,7 +2817,7 @@ class AutomationController:
         for must paste the message, not a fragment of it), and the toast says
         the chat box is the part only the user can fix."""
         try:
-            await asyncio.to_thread(self._write_clipboard, text)
+            await self._monitor.write_clipboard(text)
         except ClipboardUnavailable:
             self._host.park_off_clipboard(text)
         self._view.notify(
@@ -3023,7 +2945,7 @@ class AutomationController:
                 target = above_chatbox(box, region) or target
             await self.focus_click(target)
         await asyncio.sleep(0.15)
-        await asyncio.to_thread(self._ops.move_cursor, *region.center)
+        await self._monitor.move_cursor(*region.center)
         await asyncio.sleep(0.1)  # let the page's hover tracking register it
 
         tolerance, matcher = self.live_search()
@@ -3034,7 +2956,7 @@ class AutomationController:
             await asyncio.sleep(SNAP_SETTLE_S)  # let the page render what it scrolled to
 
             try:
-                scene = await asyncio.to_thread(self._ops.capture, region)
+                scene = await asyncio.to_thread(self._monitor.ops.capture, region)
             except CaptureError as exc:
                 self._view.notify(
                     f"could not capture the chat region: {exc}", severity="error"
@@ -3047,7 +2969,7 @@ class AutomationController:
                 return
             found, miss = await asyncio.to_thread(
                 lowest_match_scored,
-                self._ops.lowest_match,
+                self._monitor.ops.lowest_match,
                 templates,
                 scene,
                 max_diff=TemplateKind.COPY.max_diff,
@@ -3230,7 +3152,7 @@ class AutomationController:
         self._view.hide_paste_flash()
         self._host.rebuild_detectors()  # baseline + regions from the new live slot
         # Let the fresh chat render its (centred) input box.
-        await asyncio.sleep(self._ops.new_chat_settle())
+        await asyncio.sleep(self._monitor.ops.new_chat_settle())
         return True
 
     def end_browser_chat(self) -> None:

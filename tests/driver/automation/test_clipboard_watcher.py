@@ -1,12 +1,19 @@
-"""The clipboard watcher thread, driven for real - no Textual, no OS clipboard.
+"""The controller's half of the clipboard watcher - no thread, no OS clipboard.
 
-The loop itself (``agentclip.driver.clip.watcher.watch``) has its own unit tests; what
-is asserted here is the half that just moved down from ``MainScreen``:
-*ownership*. Who starts a thread and who does not, what a capture does on its way
-out of it, what a disarm does to it, and that a stop actually ends it - the last
-one with a genuine ``join``, because a watcher that only *looks* stopped is
-exactly the bug this slice could introduce and the one a mocked thread would
-hide. So the threads are real and every test joins its own.
+The thread itself moved down to the monitor in docs/design/ui-monitor.md phase
+6.1 (§2.11: "the clipboard is a monitor resource"), and so did the provider, the
+poll interval and the self-write register. Its own tests go with it, to
+``tests/driver/monitor``; the loop under all of it
+(``agentclip.driver.clip.watcher.watch``) has had unit tests all along.
+
+What is asserted here is what the CONTROLLER still decides, which is the half
+that cannot live below it:
+
+* who asks for a watcher and who does not - a session, a re-arm, and the three
+  answers ``start_input`` gives (armed, manual mode, no backend at all);
+* what a disarm does to one, and what a re-arm puts back;
+* what a capture does on its way out - the accept filter this layer owns
+  because ``agentclip.protocol`` is above it (tests/test_layering.py).
 
 The Pilot suite in ``tests/shell/tui/test_armed_ui.py`` stays as the wiring check -
 that the real screen is still plugged into this.
@@ -14,193 +21,129 @@ that the real screen is still plugged into this.
 
 from __future__ import annotations
 
-import threading
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 import pytest
 
 from agentclip.driver.automation.controller import AutomationController
-from agentclip.driver.clip.base import ClipboardProvider, ManualOnlyProvider
+from agentclip.driver.clip.base import ManualOnlyProvider
 from agentclip.driver.clip.fake import FakeClipboard
-from agentclip.driver.clip.watcher import SelfWriteSet, write_via
+from agentclip.driver.monitor.fake import FakeUIMonitor
 
 from .conftest import FakeAutomationView
 
-# Fast enough that a test never waits on a poll, slow enough to still be a poll.
-TICK_MS = 1
-TIMEOUT_S = 5.0
-
-
-def _wait_until(predicate: Callable[[], bool], what: str, timeout: float = TIMEOUT_S) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        time.sleep(0.005)
-    raise AssertionError(f"timed out waiting for {what}")
-
 
 class Wiring:
-    """One controller wired to an in-memory clipboard, plus what came out of it."""
+    """One controller, the machine under it, and what came out of the hook."""
 
-    def __init__(self, automation: AutomationController, captures: list[str]) -> None:
+    def __init__(
+        self,
+        automation: AutomationController,
+        monitor: FakeUIMonitor,
+        captures: list[str],
+    ) -> None:
         self.automation = automation
+        self.monitor = monitor
         self.captures = captures
+
+    def watch_calls(self) -> list[bool]:
+        """Every ``watch_clipboard`` the controller made, in order - the whole
+        of what it asks the machine for, and the only thing it can ask."""
+        return [
+            bool(args[0]) for verb, args in self.monitor.calls if verb == "watch_clipboard"
+        ]
 
 
 @pytest.fixture
-def wire(view: FakeAutomationView) -> Iterator[Callable[..., Wiring]]:
-    """Build wired controllers, and make sure none of them outlives the test.
+def wire(view: FakeAutomationView) -> Callable[..., Wiring]:
+    """Build a controller over a machine with (or without) a clipboard.
 
-    The teardown is the point: these are real threads polling a real (in-memory)
-    provider, so a test that forgot to stop one would leak it into every test
-    after it. Stopping is asked for here even when the test already did it -
-    ``stop_input`` is idempotent - and then joined, so a watcher that ignored its
-    stop flag fails the test that started it rather than some later one.
+    No teardown any more, and that is the point of the phase: there is no thread
+    to leak. ``FakeUIMonitor.watching`` is a flag it raises when asked, exactly
+    as the real one raises a thread.
     """
-    started: list[tuple[AutomationController, list[threading.Thread]]] = []
 
     def build(
-        clipboard: ClipboardProvider | None = None,
+        clipboard: object = None,
         *,
+        has_clipboard: bool = True,
         accepts: Callable[[str], bool] | None = None,
-        self_writes: SelfWriteSet | None = None,
     ) -> Wiring:
         captures: list[str] = []
+        monitor = FakeUIMonitor(clipboard=clipboard, has_clipboard=has_clipboard)  # type: ignore[arg-type]
         automation = AutomationController(
             view=view,
-            clipboard=clipboard,
-            self_writes=self_writes,
-            poll_interval_ms=TICK_MS,
+            monitor=monitor,
             accepts=accepts,
             on_clipboard_captured=captures.append,
         )
-        threads: list[threading.Thread] = []
-        started.append((automation, threads))
-        return Wiring(automation, captures)
+        return Wiring(automation, monitor, captures)
 
-    yield build
-
-    for automation, threads in started:
-        thread = automation.watcher_thread
-        if thread is not None:
-            threads.append(thread)
-        automation.stop_input()
-        for leftover in threads:
-            leftover.join(timeout=TIMEOUT_S)
-            assert not leftover.is_alive(), "a watcher thread outlived its test"
+    return build
 
 
-# == what starts a thread, and what does not ===================================
+# == who asks for a watcher, and who does not ==================================
 
 
-def test_nothing_polls_until_a_session_asks(wire: Callable[..., Wiring]) -> None:
-    """Construction wires a watcher up; it does not run one. The clipboard is the
-    user's until a session says otherwise."""
+def test_nothing_is_watched_until_a_session_asks(wire: Callable[..., Wiring]) -> None:
+    """Construction wires a watcher up; it does not ask for one. The clipboard
+    is the user's until a session says otherwise."""
     wiring = wire(FakeClipboard())
     assert wiring.automation.watching is False
-    assert wiring.automation.watcher_thread is None
+    assert wiring.watch_calls() == []
 
 
-def test_start_input_starts_one_thread_and_start_again_does_not(
+def test_start_input_asks_once_and_asking_again_is_idempotent(
     wire: Callable[..., Wiring],
 ) -> None:
+    """The request is idempotent at the seam rather than guarded here: "is one
+    already running" is a fact about the machine, and the machine is where it
+    is now kept."""
     wiring = wire(FakeClipboard())
     wiring.automation.start_input()
-    thread = wiring.automation.watcher_thread
-    assert thread is not None and thread.is_alive()
+    assert wiring.automation.watching is True
 
     wiring.automation.start_input()
-    wiring.automation.start_watching()
-    assert wiring.automation.watcher_thread is thread
+    assert wiring.watch_calls() == [True, True]
+    assert wiring.monitor.watching is True
 
 
-def test_manual_mode_explains_itself_instead_of_polling(
+def test_manual_mode_explains_itself_instead_of_asking(
     wire: Callable[..., Wiring], view: FakeAutomationView
 ) -> None:
     """There is no clipboard to poll, so the session is told how to work by hand -
-    once, from here, rather than by each shell inventing its own wording."""
+    once, from here, rather than by each shell inventing its own wording. And
+    nothing is asked of the machine at all: the refusal is this object's."""
     wiring = wire(ManualOnlyProvider())
     wiring.automation.start_input()
 
     assert wiring.automation.watching is False
+    assert wiring.watch_calls() == []
     assert view.notifications and view.notifications[-1][1] == "warning"
     assert "manual clipboard mode" in view.notifications[-1][0]
 
 
-def test_a_controller_with_no_clipboard_at_all_stays_quiet(
+def test_a_machine_with_no_clipboard_at_all_stays_quiet(
     wire: Callable[..., Wiring], view: FakeAutomationView
 ) -> None:
-    """A shell that never handed one in (the headless tests) gets no thread - and
-    no toast either, because nothing about a clipboard was ever promised."""
-    wiring = wire(None)
+    """A machine that never had one (the headless tests) gets no watcher - and
+    no toast either, because nothing about a clipboard was ever promised. The
+    request is still made; the machine is what refuses it."""
+    wiring = wire(has_clipboard=False)
     wiring.automation.start_input()
 
     assert wiring.automation.watching is False
+    assert wiring.watch_calls() == [True]
     assert view.notifications == []
 
 
-# == the capture path ==========================================================
-
-
-def test_a_copy_reaches_the_callback(wire: Callable[..., Wiring]) -> None:
-    """The whole point of the thread: something else copied, and the shell hears
-    about it on the callback it handed in."""
-    clipboard = FakeClipboard()
-    wiring = wire(clipboard)
+def test_stop_input_asks_for_the_watcher_to_stop(wire: Callable[..., Wiring]) -> None:
+    wiring = wire(FakeClipboard())
     wiring.automation.start_input()
-
-    clipboard.set_text("the model's reply")
-    _wait_until(lambda: wiring.captures == ["the model's reply"], "the capture")
-
-
-def test_only_what_accepts_says_yes_to_is_captured(wire: Callable[..., Wiring]) -> None:
-    """The protocol pre-filter is passed in (this layer may not import
-    ``agentclip.protocol``), and it decides - a watcher that captured every copy
-    would drive a turn off a stray Ctrl+C."""
-    clipboard = FakeClipboard()
-    wiring = wire(clipboard, accepts=lambda text: text.startswith("REPLY"))
-    wiring.automation.start_input()
-
-    clipboard.set_text("a shopping list")
-    clipboard.set_text("REPLY: here you go")
-    _wait_until(lambda: wiring.captures == ["REPLY: here you go"], "the accepted capture")
-
-
-def test_our_own_writes_are_never_captured_back(wire: Callable[..., Wiring]) -> None:
-    """The outbound payload IS protocol-shaped, so nothing but the self-write
-    registry stops the tool from ingesting its own message as a reply. The
-    registry is shared with the shell that does the writing."""
-    clipboard = FakeClipboard()
-    self_writes = SelfWriteSet()
-    wiring = wire(clipboard, self_writes=self_writes)
-    wiring.automation.start_input()
-
-    write_via(clipboard, self_writes, "===CLIP:TASK=== ours")
-    clipboard.set_text("theirs")
-    _wait_until(lambda: "theirs" in wiring.captures, "the foreign capture")
-    assert "===CLIP:TASK=== ours" not in wiring.captures
-
-
-def test_a_stopped_watcher_really_stops(wire: Callable[..., Wiring]) -> None:
-    """``stop_input`` returns before the thread does (joining would freeze a UI
-    thread for up to a poll interval), so the guarantee is that it ends *soon* -
-    and this is the test that would catch a stop flag nobody reads."""
-    clipboard = FakeClipboard()
-    wiring = wire(clipboard)
-    wiring.automation.start_input()
-    thread = wiring.automation.watcher_thread
-    assert thread is not None
-
     wiring.automation.stop_input()
-    assert wiring.automation.watching is False  # true for every reader at once
-    thread.join(timeout=TIMEOUT_S)
-    assert not thread.is_alive()
 
-    clipboard.set_text("copied after the stop")
-    time.sleep(0.05)
-    assert wiring.captures == []
+    assert wiring.automation.watching is False
+    assert wiring.watch_calls() == [True, False]
 
 
 def test_stopping_twice_is_harmless(wire: Callable[..., Wiring]) -> None:
@@ -211,26 +154,44 @@ def test_stopping_twice_is_harmless(wire: Callable[..., Wiring]) -> None:
     assert wiring.automation.watching is False
 
 
-def test_a_restarted_watcher_captures_again(wire: Callable[..., Wiring]) -> None:
-    """The `w` key's pause/resume, at this level: a fresh thread with a fresh stop
-    flag, not a resurrected one - the old thread's flag is set forever."""
-    clipboard = FakeClipboard()
-    wiring = wire(clipboard)
+# == the capture path ==========================================================
+
+
+def test_a_copy_reaches_the_callback(wire: Callable[..., Wiring]) -> None:
+    """The whole point of the hook: something else copied, the monitor's watcher
+    caught it, and the shell hears about it on the callback it handed in."""
+    wiring = wire(FakeClipboard())
     wiring.automation.start_input()
-    first = wiring.automation.watcher_thread
-    assert first is not None
-    wiring.automation.stop_input()
-    # Joined only so the count below is about the NEW thread: a stop is
-    # deliberately not a join in production (see ``stop_input``), so the old
-    # loop is still free to finish the tick it was in.
-    first.join(timeout=TIMEOUT_S)
 
-    wiring.automation.start_watching()
-    second = wiring.automation.watcher_thread
-    assert second is not None and second is not first
+    wiring.monitor.push_clip("the model's reply")
 
-    clipboard.set_text("after the resume")
-    _wait_until(lambda: wiring.captures == ["after the resume"], "the capture after resuming")
+    assert wiring.captures == ["the model's reply"]
+
+
+def test_only_what_accepts_says_yes_to_is_captured(wire: Callable[..., Wiring]) -> None:
+    """The protocol pre-filter is passed in (this layer may not import
+    ``agentclip.protocol``), and it decides - a hook that forwarded every copy
+    would drive a turn off a stray Ctrl+C."""
+    wiring = wire(FakeClipboard(), accepts=lambda text: text.startswith("REPLY"))
+    wiring.automation.start_input()
+
+    wiring.monitor.push_clip("a shopping list")
+    wiring.monitor.push_clip("REPLY: here you go")
+
+    assert wiring.captures == ["REPLY: here you go"]
+
+
+def test_a_capture_still_arrives_when_nobody_asked_for_a_watcher(
+    wire: Callable[..., Wiring],
+) -> None:
+    """The hook is registered for the controller's whole lifetime, deliberately:
+    who is polling is the monitor's business, and a controller that unsubscribed
+    and resubscribed around every session would be one more thing to get out of
+    step with it. Nothing pushes when nothing is watching, so this only says the
+    wiring has no on/off of its own."""
+    wiring = wire(FakeClipboard())
+    wiring.monitor.push_clip("out of the blue")
+    assert wiring.captures == ["out of the blue"]
 
 
 # == the armed switch's watcher half ===========================================
@@ -241,21 +202,17 @@ def test_disarming_stops_the_watcher_and_re_arming_starts_it_again(
 ) -> None:
     """Watching a clipboard the user has not offered us is an action too - it is
     the one that ingests, and ingesting drives a whole turn. So it stops."""
-    clipboard = FakeClipboard()
-    wiring = wire(clipboard)
+    wiring = wire(FakeClipboard())
     wiring.automation.start_input()
     assert wiring.automation.watching is True
-    stopped = wiring.automation.watcher_thread
-    assert stopped is not None
 
     wiring.automation.set_os_armed(False)
     assert wiring.automation.watching is False
-    stopped.join(timeout=TIMEOUT_S)  # so the capture below is provably the new one
+    assert wiring.monitor.watching is False
 
     wiring.automation.set_os_armed(True)
     assert wiring.automation.watching is True
-    clipboard.set_text("after the re-arm")
-    _wait_until(lambda: wiring.captures == ["after the re-arm"], "the capture after re-arming")
+    assert wiring.watch_calls() == [True, False, True]
 
 
 def test_re_arming_restores_the_watcher_the_user_had_not_the_one_they_paused(
@@ -303,6 +260,9 @@ def test_a_session_started_while_disarmed_gets_its_watcher_on_re_arm(
 
     wiring.automation.set_os_armed(True)
     assert wiring.automation.watching is True
+    # The disarm's own stop is unconditional (it always was) - what the session
+    # asked for is remembered, not re-asked, until the re-arm honours it.
+    assert wiring.watch_calls() == [False, True]
 
 
 def test_re_arming_without_a_session_starts_nothing(wire: Callable[..., Wiring]) -> None:
@@ -311,6 +271,7 @@ def test_re_arming_without_a_session_starts_nothing(wire: Callable[..., Wiring])
     wiring.automation.set_os_armed(False)
     wiring.automation.set_os_armed(True)
     assert wiring.automation.watching is False
+    assert wiring.watch_calls() == [False]  # the disarm's stop, and nothing else
 
 
 def test_the_watcher_is_settled_before_the_view_is_painted(

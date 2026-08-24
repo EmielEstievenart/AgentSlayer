@@ -8,11 +8,12 @@ Pilot suites in ``tests/shell/tui`` stay as the wiring check that the real scree
 still plugged into them.
 
 Two seams make that possible and neither is the paint port. The machine is
-reached through :class:`~agentclip.driver.automation.ops.ScreenOps`, which is
-``agentclip.driver.screen`` behind one object - so the fixture below patches
-``agentclip.driver.automation.ops``' own names, which is the use site the default
-implementation calls through. Everything the sequences still have to ASK a shell
-is :class:`~agentclip.driver.automation.host.AutomationHost`, and ``FakeHost`` is a
+reached through the :class:`~agentclip.driver.monitor.protocol.UIMonitor` - here a
+:class:`~agentclip.driver.monitor.fake.FakeUIMonitor`, whose verbs fall through to a
+real :class:`~agentclip.driver.monitor.ops.ScreenOps`, so the fixture below patches
+``agentclip.driver.monitor.ops``' own names and that is the use site everything
+lands on. Everything the sequences still have to ASK a shell is
+:class:`~agentclip.driver.automation.host.AutomationHost`, and ``FakeHost`` is a
 scripted one: what the live service looks like, where its appearances are, and
 whether the copy click took.
 
@@ -35,6 +36,7 @@ from agentclip.driver.automation.controller import AutomationController
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion, click_point_region
@@ -216,7 +218,9 @@ def flow(
 ) -> AutomationController:
     """A controller with a drawn chat window and a captured copy button - the
     state the finish decision fires the harvest out of."""
-    automation = AutomationController(view=view, host=host, clipboard=FakeClipboard())
+    automation = AutomationController(
+        view=view, host=host, monitor=FakeUIMonitor(clipboard=FakeClipboard())
+    )
     automation.set_calibration(AgentSlot.MASTER, CHAT_REGION)
     automation.set_own_window(OUR_WINDOW)
     host.watch = automation
@@ -276,7 +280,9 @@ async def test_the_snap_back_needs_a_handle_to_snap_to(
     no window to come home to, and the harvest simply leaves the browser
     focused rather than guessing at one."""
     machine.looks = [(MATCH, None)]
-    flow = AutomationController(view=view, host=host, clipboard=FakeClipboard())
+    flow = AutomationController(
+        view=view, host=host, monitor=FakeUIMonitor(clipboard=FakeClipboard())
+    )
     flow.set_calibration(AgentSlot.MASTER, CHAT_REGION)
     flow.set_own_window(None)  # a reading that failed keeps nothing
 
@@ -341,7 +347,9 @@ async def test_nothing_to_search_never_touches_the_machine(
 ) -> None:
     """No drawn window means nowhere to look - and the refusal happens before a
     single click, scroll or cursor move."""
-    flow = AutomationController(view=view, host=host, clipboard=FakeClipboard())
+    flow = AutomationController(
+        view=view, host=host, monitor=FakeUIMonitor(clipboard=FakeClipboard())
+    )
 
     await flow.auto_copy_flow()
 
@@ -360,7 +368,9 @@ async def test_the_hover_scan_runs_after_the_last_static_miss(
     round misses, and then - once, at the end - the cursor climbs the region and
     stops at the first frame the icon appears in."""
     host.preset = _preset(hover_scan=True)
-    flow = AutomationController(view=view, host=host, clipboard=FakeClipboard())
+    flow = AutomationController(
+        view=view, host=host, monitor=FakeUIMonitor(clipboard=FakeClipboard())
+    )
     flow.set_calibration(AgentSlot.MASTER, CHAT_REGION)
     rounds = controller_mod.COPY_SNAP_ROUNDS
     machine.looks = [(None, 0.21)] * (rounds + 1) + [(MATCH, None)]
@@ -379,7 +389,9 @@ async def test_a_static_hit_never_starts_a_scan(
 ) -> None:
     """The cheap path stays cheap: the only cursor move is the pre-snap park."""
     host.preset = _preset(hover_scan=True)
-    flow = AutomationController(view=view, host=host, clipboard=FakeClipboard())
+    flow = AutomationController(
+        view=view, host=host, monitor=FakeUIMonitor(clipboard=FakeClipboard())
+    )
     flow.set_calibration(AgentSlot.MASTER, CHAT_REGION)
     machine.looks = [(MATCH, None)]
 

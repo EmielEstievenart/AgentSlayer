@@ -13,13 +13,15 @@ is a real beat on a real event loop, and a fake that returns 0.0 would assert
 nothing about it. So every beat here is shrunk to nothing on purpose, and what is
 left is the decision tree.
 
-Two seams make that possible and neither is the paint port. The machine, both
-beats and the chunk size are reached through
-:class:`~agentclip.driver.automation.ops.ScreenOps` - subclassed below into a scripted
-one, which is exactly what the Textual shell hands in. Everything the sequence
-still has to ASK a shell is :class:`~agentclip.driver.automation.host.AutomationHost`,
-including the one step that could not come down with the rest: where a payload
-goes when the clipboard provider refuses it (the TUI's OSC-52 escape).
+Two seams make that possible and neither is the paint port. The machine is the
+:class:`~agentclip.driver.monitor.protocol.UIMonitor`; both beats and the chunk size
+are still read off its OS adapter,
+:class:`~agentclip.driver.monitor.ops.ScreenOps` - subclassed below into a scripted
+one and handed to a :class:`~agentclip.driver.monitor.fake.FakeUIMonitor`, whose verbs
+fall straight through to it. Everything the sequence still has to ASK a shell is
+:class:`~agentclip.driver.automation.host.AutomationHost`, including the one step that
+could not come down with the rest: where a payload goes when the clipboard
+provider refuses it (the TUI's OSC-52 escape).
 """
 
 from __future__ import annotations
@@ -41,6 +43,7 @@ from agentclip.driver.automation.delivery import (
 )
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.monitor.ops import ScreenOps
 from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
@@ -86,10 +89,10 @@ class ScriptedOps(ScreenOps):
     """Every OS call the delivery makes, recorded rather than performed - and
     every beat it paces itself by, shrunk to nothing.
 
-    A subclass rather than a monkeypatch of ``agentclip.driver.automation.ops``' names,
-    because that is the substitution the port is FOR: the Textual shell hands in
-    one of these too (``_MainScreenOps``), so a test that uses the same seam is
-    testing the same arrangement the app runs.
+    A subclass rather than a monkeypatch of ``agentclip.driver.monitor.ops``' names,
+    because that is the substitution the adapter is FOR: the Textual shell hands
+    in one of these too (``_MainScreenOps``), so a test that uses the same seam
+    is testing the same arrangement the app runs.
     """
 
     def __init__(self) -> None:
@@ -294,7 +297,10 @@ def delivery(
     The alarm is a recording one throughout, so nothing in this file can make the
     machine beep."""
     automation = AutomationController(
-        view=view, host=host, ops=ops, clipboard=clipboard, alarm=alarm
+        view=view,
+        host=host,
+        monitor=FakeUIMonitor(ops=ops, clipboard=clipboard),
+        alarm=alarm,
     )
     automation.set_calibration(AgentSlot.MASTER, CHAT_REGION)
     return automation
@@ -370,7 +376,9 @@ async def test_no_drawn_window_means_no_click_at_all(
     view: FakeAutomationView, host: FakeHost, ops: ScriptedOps, clipboard: FakeClipboard
 ) -> None:
     """Nothing calibrated is not a click target: there is nowhere to aim."""
-    automation = AutomationController(view=view, host=host, ops=ops, clipboard=clipboard)
+    automation = AutomationController(
+        view=view, host=host, monitor=FakeUIMonitor(ops=ops, clipboard=clipboard)
+    )
 
     await automation.copy_outbound(PAYLOAD)
 
@@ -980,7 +988,9 @@ async def test_no_provider_hands_the_payload_to_the_shell_and_says_so(
     """The write is this layer's; the FALLBACK is not (the TUI's OSC-52 escape is
     a Textual call and exists in no other shell). So the payload crosses back to
     whoever can still park it, and the user is told once."""
-    automation = AutomationController(view=view, host=host, ops=ops)
+    automation = AutomationController(
+        view=view, host=host, monitor=FakeUIMonitor(ops=ops, has_clipboard=False)
+    )
     automation.set_calibration(AgentSlot.MASTER, CHAT_REGION)
 
     assert await automation.park_on_clipboard(PAYLOAD) is False
@@ -995,7 +1005,9 @@ async def test_a_stream_service_falls_back_to_one_burst_with_no_clipboard(
     """Streaming needs a clipboard to write each chunk through: with none, the
     single burst of whatever the shell parked is all there is."""
     host.preset = _preset(delivery=DELIVERY_STREAM)
-    automation = AutomationController(view=view, host=host, ops=ops)
+    automation = AutomationController(
+        view=view, host=host, monitor=FakeUIMonitor(ops=ops, has_clipboard=False)
+    )
     automation.set_calibration(AgentSlot.MASTER, CHAT_REGION)
 
     await automation.copy_outbound(PAYLOAD)

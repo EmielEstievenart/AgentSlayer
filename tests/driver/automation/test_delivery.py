@@ -14,11 +14,13 @@ nothing about it. So every beat here is shrunk to nothing on purpose, and what i
 left is the decision tree.
 
 Two seams make that possible and neither is the paint port. The machine is the
-:class:`~agentclip.driver.monitor.protocol.UIMonitor`; both beats and the chunk size
-are still read off its OS adapter,
-:class:`~agentclip.driver.monitor.ops.ScreenOps` - subclassed below into a scripted
-one and handed to a :class:`~agentclip.driver.monitor.fake.FakeUIMonitor`, whose verbs
-fall straight through to it. Everything the sequence still has to ASK a shell is
+:class:`~agentclip.driver.monitor.protocol.UIMonitor` and nothing under it: since
+phase 6.2 the controller reaches no ``ScreenOps`` at all, so the double here is a
+:class:`~agentclip.driver.monitor.fake.FakeUIMonitor` subclass whose verbs record
+instead of act - the chat box is a ``locate`` answer now, not a template search
+somebody stubbed. The beats are the other half: they are module constants
+(``driver/monitor/beats``) read at the call site, so a suite shrinks one by
+writing to it. Everything the sequence still has to ASK a shell is
 :class:`~agentclip.driver.automation.host.AutomationHost`, including the one step that
 could not come down with the rest: where a payload goes when the clipboard
 provider refuses it (the TUI's OSC-52 escape).
@@ -42,10 +44,12 @@ from agentclip.driver.automation.delivery import (
     stream_flash_text,
 )
 from agentclip.driver.automation.loop_state import LoopState
+from agentclip.driver.clip import chunking
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor import beats
 from agentclip.driver.monitor.fake import FakeUIMonitor
-from agentclip.driver.monitor.ops import ScreenOps
-from agentclip.driver.screen.capture import CaptureError, RegionImage
+from agentclip.driver.monitor.protocol import Located
+from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot
@@ -80,22 +84,27 @@ FOCUS = ["click", "click"]
 FOCUS_REFUSED = ["click"]
 
 
-def _image(width: int, height: int) -> RegionImage:
-    size = width * height * 4
-    return RegionImage(width, height, bytes(size))
-
-
-class ScriptedOps(ScreenOps):
+class ScriptedMonitor(FakeUIMonitor):
     """Every OS call the delivery makes, recorded rather than performed - and
-    every beat it paces itself by, shrunk to nothing.
+    every appearance it asks about, answered out of the host's screen.
 
-    A subclass rather than a monkeypatch of ``agentclip.driver.monitor.ops``' names,
-    because that is the substitution the adapter is FOR: the Textual shell hands
-    in one of these too (``_MainScreenOps``), so a test that uses the same seam
-    is testing the same arrangement the app runs.
+    A ``FakeUIMonitor`` subclass rather than a stub of the machine one layer
+    down, because the monitor IS the machine now (ui-monitor.md 2.3): the
+    chat-box hunt the delivery makes is one ``locate`` round trip, and there is
+    no frame, no template and no tolerance left above the seam for a test to
+    substitute. ``on_screen`` stays on the host, where every test already writes
+    it - one dict, read by whichever half is asked.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        host: FakeHost,
+        clipboard: FakeClipboard | None = None,
+        *,
+        has_clipboard: bool = True,
+    ) -> None:
+        super().__init__(clipboard=clipboard, has_clipboard=has_clipboard)
+        self.host = host
         # Every input event in the order it went out - the whole assertion for
         # "what actually happened to the machine".
         self.events: list[str] = []
@@ -107,7 +116,10 @@ class ScriptedOps(ScreenOps):
         # What the clipboard held at each paste, sampled from inside the burst:
         # by the time a delivery returns, a stream has moved on.
         self.pasted: list[str] = []
-        self.clipboard: FakeClipboard | None = None
+        # The screen that cannot be read at all - a capture that failed, which
+        # the monitor reports as the same empty answer as "not on screen"
+        # because a caller that may not click has the same next move for both.
+        self.blind = False
         # Who the OS says holds the foreground, one reading per ask, the last
         # one repeating for ever - so a script is written as "ours, ours, then
         # the browser" and a machine that never hands it over is one entry long.
@@ -117,10 +129,7 @@ class ScriptedOps(ScreenOps):
         # Every handle the delivery asked to have brought back, in order.
         self.focused: list[int] = []
 
-    def capture(self, region: ScreenRegion) -> RegionImage:
-        return _image(region.width, region.height)
-
-    def click(self, region: ScreenRegion, *, settle_s: float | None = None) -> bool:
+    async def click(self, region: ScreenRegion, *, settle_s: float | None = None) -> bool:
         self.events.append("click")
         # Beside the event trace rather than in it: almost every assertion in
         # this file is about the ORDER things happened in, and only the
@@ -128,53 +137,40 @@ class ScriptedOps(ScreenOps):
         self.clicked.append(region)
         return self.click_lands
 
-    def foreground_window(self) -> int | None:
+    async def foreground_window(self) -> int | None:
         # Deliberately NOT on ``events``: a read is not something done TO the
         # machine, and every "what actually happened" assertion in this file
         # would grow a poll's worth of noise.
         self.foreground_reads += 1
         return self.foreground.pop(0) if len(self.foreground) > 1 else self.foreground[0]
 
-    def focus_window(self, handle: int) -> bool:
+    async def focus_window(self, handle: int) -> bool:
         self.events.append("focus")
         self.focused.append(handle)
         return True
 
-    def send_paste(self) -> bool:
+    async def send_paste(self) -> bool:
         self.events.append("paste")
         if self.clipboard is not None:
             self.pasted.append(self.clipboard.read_text() or "")
         return self.paste_lands
 
-    def send_enter(self) -> bool:
+    async def send_enter(self) -> bool:
         self.events.append("enter")
         return self.enter_lands
 
-    def activation_attempts(self) -> int:
-        # Three rather than the real ten: the budget is a CEILING here, and a
-        # test for "it ran out" only has to spend one.
-        return 3
-
-    def activation_poll(self) -> float:
-        return 0.0
-
-    def focus_click_gap(self) -> float:
-        return 0.0
-
-    def paste_settle(self) -> float:
-        return 0.0
-
-    def snap_back_settle(self) -> float:
-        return 0.0
-
-    def submit_settle(self) -> float:
-        return 0.0
-
-    def stream_chunk_settle(self) -> float:
-        return 0.0
-
-    def stream_chunk_chars(self) -> int:
-        return CHUNK
+    async def locate(
+        self, kind: TemplateKind, *, exclude_kinds: tuple[TemplateKind, ...] = ()
+    ) -> Located:
+        """The host's screen as the monitor would answer about it: the LOWEST of
+        the rectangles, whether there were several, and - on a miss - how close
+        the search came."""
+        if self.blind:
+            return Located(None, False, None)
+        found = self.host.on_screen.get(kind, [])
+        if not found:
+            return Located(None, False, 0.21)
+        return Located(max(found, key=lambda rect: rect.top), len(found) > 1, None)
 
 
 class FakeHost:
@@ -224,7 +220,7 @@ class FakeHost:
 class RecordingAlarm(AttentionAlarm):
     """Every arm, chime and disarm in order, and not one sound.
 
-    A subclass rather than a stub for the same reason ``ScriptedOps`` is one:
+    A subclass rather than a stub for the same reason ``ScriptedMonitor`` is one:
     the controller takes an ``AttentionAlarm``, so a test that hands in one of
     these is testing the arrangement the app runs - minus the thread and the
     tone generator, which are what ``tests/driver/automation/test_alerts.py``
@@ -252,9 +248,27 @@ def _preset(**overrides: Any) -> ServicePreset:
     return replace(base, **overrides) if overrides else base
 
 
-@pytest.fixture
-def ops() -> ScriptedOps:
-    return ScriptedOps()
+@pytest.fixture(autouse=True)
+def quick_beats(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every beat the delivery paces itself by, shrunk to nothing.
+
+    Written onto the modules the controller reads them from, which is the whole
+    point of it reading them there: the real TIMING is the Pilot suites' subject
+    (a settle that returns 0.0 asserts nothing about a settle), and what is left
+    here is the decision tree. The activation budget is three rather than ten
+    for the same reason - it is a CEILING, and a test for "it ran out" only has
+    to spend one.
+    """
+    monkeypatch.setattr(beats, "ACTIVATION_ATTEMPTS", 3)
+    monkeypatch.setattr(beats, "ACTIVATION_POLL_S", 0.0)
+    monkeypatch.setattr(beats, "FOCUS_CLICK_GAP_S", 0.0)
+    monkeypatch.setattr(beats, "PASTE_SETTLE_DELAY", 0.0)
+    monkeypatch.setattr(beats, "SNAP_BACK_SETTLE_S", 0.0)
+    monkeypatch.setattr(beats, "SUBMIT_SETTLE_S", 0.0)
+    monkeypatch.setattr(beats, "STREAM_CHUNK_SETTLE_S", 0.0)
+    # Small enough that a readable payload is several chunks, big enough that a
+    # short one is exactly one.
+    monkeypatch.setattr(chunking, "STREAM_CHUNK_CHARS", CHUNK)
 
 
 @pytest.fixture
@@ -273,10 +287,13 @@ def host() -> FakeHost:
 
 
 @pytest.fixture
-def clipboard(ops: ScriptedOps) -> FakeClipboard:
-    fake = FakeClipboard()
-    ops.clipboard = fake
-    return fake
+def clipboard() -> FakeClipboard:
+    return FakeClipboard()
+
+
+@pytest.fixture
+def machine(host: FakeHost, clipboard: FakeClipboard) -> ScriptedMonitor:
+    return ScriptedMonitor(host, clipboard)
 
 
 @pytest.fixture
@@ -288,20 +305,14 @@ def alarm() -> RecordingAlarm:
 def delivery(
     view: FakeAutomationView,
     host: FakeHost,
-    ops: ScriptedOps,
-    clipboard: FakeClipboard,
+    machine: ScriptedMonitor,
     alarm: RecordingAlarm,
 ) -> AutomationController:
     """A controller with a drawn chat window, a chat box on screen inside it and
     a real (fake) clipboard - the state an outbound payload is delivered out of.
     The alarm is a recording one throughout, so nothing in this file can make the
     machine beep."""
-    automation = AutomationController(
-        view=view,
-        host=host,
-        monitor=FakeUIMonitor(ops=ops, clipboard=clipboard),
-        alarm=alarm,
-    )
+    automation = AutomationController(view=view, host=host, monitor=machine, alarm=alarm)
     automation.set_calibration(AgentSlot.MASTER, CHAT_REGION)
     return automation
 
@@ -322,7 +333,7 @@ def _said(view: FakeAutomationView, fragment: str) -> bool:
 
 async def test_a_payload_is_parked_then_clicked_then_pasted(
     delivery: AutomationController,
-    ops: ScriptedOps,
+    machine: ScriptedMonitor,
     clipboard: FakeClipboard,
     view: FakeAutomationView,
 ) -> None:
@@ -331,8 +342,8 @@ async def test_a_payload_is_parked_then_clicked_then_pasted(
     await delivery.copy_outbound(PAYLOAD)
 
     assert clipboard.written == [PAYLOAD]
-    assert ops.events == [*FOCUS, "paste"]
-    assert ops.pasted == [PAYLOAD]
+    assert machine.events == [*FOCUS, "paste"]
+    assert machine.pasted == [PAYLOAD]
     assert delivery.loop_state is LoopState.WAIT_SEND
     assert _flash(view) == (ENTER_FLASH_TEXT, False)
 
@@ -348,41 +359,39 @@ async def test_the_payload_is_registered_as_our_own_write(
 
 
 async def test_the_reply_gate_opens_whether_or_not_the_paste_landed(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """The payload is out either way - by our Ctrl+V or by the one the banner is
     about to ask for - so a reply is due either way."""
-    ops.paste_lands = False
+    machine.paste_lands = False
     await delivery.copy_outbound(PAYLOAD)
 
     assert delivery.awaiting_pasted_reply is True
 
 
 async def test_a_click_that_never_landed_pastes_nothing(
-    delivery: AutomationController, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     """Focus could be on any window, and pasting into an unknown app is the one
     unforgivable failure here - so the Ctrl+V is the user's to make."""
-    ops.click_lands = False
+    machine.click_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == FOCUS_REFUSED
+    assert machine.events == FOCUS_REFUSED
     assert delivery.loop_state is LoopState.MANUAL_INSERT
     assert _flash(view) == (PASTE_FLASH_TEXT, True)
 
 
 async def test_no_drawn_window_means_no_click_at_all(
-    view: FakeAutomationView, host: FakeHost, ops: ScriptedOps, clipboard: FakeClipboard
+    view: FakeAutomationView, host: FakeHost, machine: ScriptedMonitor, clipboard: FakeClipboard
 ) -> None:
     """Nothing calibrated is not a click target: there is nowhere to aim."""
-    automation = AutomationController(
-        view=view, host=host, monitor=FakeUIMonitor(ops=ops, clipboard=clipboard)
-    )
+    automation = AutomationController(view=view, host=host, monitor=machine)
 
     await automation.copy_outbound(PAYLOAD)
 
-    assert ops.events == []
+    assert machine.events == []
     assert clipboard.written == [PAYLOAD]  # ...but the payload is still parked
     assert automation.loop_state is LoopState.MANUAL_INSERT
     assert _flash(view) == (PASTE_FLASH_TEXT, True)
@@ -400,7 +409,7 @@ async def test_no_drawn_window_means_no_click_at_all(
 async def test_a_chat_box_that_is_not_on_screen_is_never_clicked_or_pasted_into(
     delivery: AutomationController,
     host: FakeHost,
-    ops: ScriptedOps,
+    machine: ScriptedMonitor,
     clipboard: FakeClipboard,
     view: FakeAutomationView,
 ) -> None:
@@ -411,8 +420,8 @@ async def test_a_chat_box_that_is_not_on_screen_is_never_clicked_or_pasted_into(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == []
-    assert ops.clicked == []
+    assert machine.events == []
+    assert machine.clicked == []
     assert clipboard.written == [PAYLOAD]  # ...and it is still theirs to paste
     assert delivery.loop_state is LoopState.MANUAL_INSERT
     assert _flash(view) == (PASTE_FLASH_TEXT, True)
@@ -423,7 +432,7 @@ async def test_a_chat_box_that_is_not_on_screen_is_never_clicked_or_pasted_into(
 async def test_a_service_with_no_chat_box_captured_lands_on_the_same_banner(
     delivery: AutomationController,
     host: FakeHost,
-    ops: ScriptedOps,
+    machine: ScriptedMonitor,
     clipboard: FakeClipboard,
 ) -> None:
     """The pre-calibration degraded mode - one drawn window and no appearance
@@ -434,13 +443,13 @@ async def test_a_service_with_no_chat_box_captured_lands_on_the_same_banner(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == []
+    assert machine.events == []
     assert clipboard.written == [PAYLOAD]
     assert delivery.loop_state is LoopState.MANUAL_INSERT
 
 
 async def test_two_boxes_of_one_layout_refuse_the_paste_rather_than_guess(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     """Two windows of one service under a single drawn region resolve the same
     appearance twice, and picking one is a coin toss between two conversations -
@@ -450,30 +459,28 @@ async def test_two_boxes_of_one_layout_refuse_the_paste_rather_than_guess(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == []
+    assert machine.events == []
     assert delivery.loop_state is LoopState.MANUAL_INSERT
     assert _said(view, "redraw the window so it contains only this chat")
 
 
 async def test_a_screen_that_cannot_be_read_is_not_a_licence_to_click(
-    delivery: AutomationController, ops: ScriptedOps, monkeypatch: pytest.MonkeyPatch
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """A capture that failed says nothing about where the box is, which is
-    exactly the state a click may not be aimed from."""
-
-    def boom(region: ScreenRegion) -> RegionImage:
-        raise CaptureError("no display")
-
-    monkeypatch.setattr(ops, "capture", boom)
+    exactly the state a click may not be aimed from - and the monitor answers it
+    with the same empty ``Located`` as "not on screen", because the delivery's
+    next move is identical for both."""
+    machine.blind = True
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == []
+    assert machine.events == []
     assert delivery.loop_state is LoopState.MANUAL_INSERT
 
 
 async def test_a_stream_service_streams_nothing_without_a_box_to_stream_into(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, clipboard: FakeClipboard
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, clipboard: FakeClipboard
 ) -> None:
     """The chunked path rides the same focus click, so it refuses with it - and
     the clipboard is left holding the WHOLE payload rather than a chunk."""
@@ -482,28 +489,28 @@ async def test_a_stream_service_streams_nothing_without_a_box_to_stream_into(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == []
+    assert machine.events == []
     assert clipboard.written == [PAYLOAD]
     assert clipboard.read_text() == PAYLOAD
 
 
 async def test_the_retry_refuses_the_same_way_when_the_box_is_still_gone(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """The retry button re-runs ``deliver``, so it inherits the refusal instead
     of being a second way in."""
     host.on_screen.clear()
     await delivery.copy_outbound(PAYLOAD)
-    ops.events.clear()
+    machine.events.clear()
 
     await delivery.retry_insert()
 
-    assert ops.events == []
+    assert machine.events == []
     assert delivery.loop_state is LoopState.MANUAL_INSERT
 
 
 async def test_a_box_that_comes_back_delivers_normally_on_the_next_try(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """The refusal is about THIS frame, not about the session: a box that was
     momentarily missing (a dialog, a reflow) is delivered into as soon as it is
@@ -511,21 +518,21 @@ async def test_a_box_that_comes_back_delivers_normally_on_the_next_try(
     host.on_screen.clear()
     await delivery.copy_outbound(PAYLOAD)
     host.on_screen[TemplateKind.CHATBOX_ONGOING] = [CHAT_BOX]
-    ops.events.clear()
+    machine.events.clear()
 
     await delivery.retry_insert()
 
-    assert ops.events == [*FOCUS, "paste"]
-    assert ops.clicked == [AIMED, AIMED]
+    assert machine.events == [*FOCUS, "paste"]
+    assert machine.clicked == [AIMED, AIMED]
     assert delivery.loop_state is LoopState.WAIT_SEND
 
 
 async def test_a_paste_that_did_not_go_through_says_so_in_its_own_words(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """Three roads into MANUAL_INSERT, and the log has to separate them: this is
     the one where the box WAS focused."""
-    ops.paste_lands = False
+    machine.paste_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
@@ -534,7 +541,7 @@ async def test_a_paste_that_did_not_go_through_says_so_in_its_own_words(
 
 
 async def test_disarmed_parks_the_payload_and_touches_nothing(
-    delivery: AutomationController, ops: ScriptedOps, clipboard: FakeClipboard,
+    delivery: AutomationController, machine: ScriptedMonitor, clipboard: FakeClipboard,
     view: FakeAutomationView,
 ) -> None:
     """DISARMED stops one line below the clipboard write and above every OS call:
@@ -544,7 +551,7 @@ async def test_disarmed_parks_the_payload_and_touches_nothing(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == []
+    assert machine.events == []
     assert clipboard.written == [PAYLOAD]
     assert delivery.loop_state is LoopState.MANUAL_INSERT
     assert any("auto-insert suppressed: disarmed" in e.text for e in delivery.harness_log)
@@ -556,74 +563,74 @@ async def test_disarmed_parks_the_payload_and_touches_nothing(
 
 
 async def test_the_paste_waits_until_the_foreground_is_no_longer_ours(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """The click is an activation REQUEST, granted asynchronously, and a Ctrl+V
     that overtakes it lands in whatever held focus a moment ago. So the delivery
     asks the OS who has the foreground until the answer stops being us."""
     delivery.set_own_window(OUR_WINDOW)
-    ops.foreground = [OUR_WINDOW, OUR_WINDOW, BROWSER_WINDOW]
+    machine.foreground = [OUR_WINDOW, OUR_WINDOW, BROWSER_WINDOW]
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.foreground_reads == 3  # asked until the answer changed, then stopped
-    assert ops.events == [*FOCUS, "paste"]
+    assert machine.foreground_reads == 3  # asked until the answer changed, then stopped
+    assert machine.events == [*FOCUS, "paste"]
     assert delivery.loop_state is LoopState.WAIT_SEND
 
 
 async def test_a_foreground_that_never_moves_pastes_anyway_once_the_budget_runs_out(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """The wait is a ceiling, not a precondition: refusing to deliver a payload
     that would probably have landed is worse than pasting on a stale reading,
     and the banner plus the retry button already cover a paste that goes
     nowhere."""
     delivery.set_own_window(OUR_WINDOW)
-    ops.foreground = [OUR_WINDOW]  # ...and it stays ours for ever
+    machine.foreground = [OUR_WINDOW]  # ...and it stays ours for ever
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.foreground_reads == 3  # the whole budget, and not one ask more
-    assert ops.events == [*FOCUS, "paste"]
+    assert machine.foreground_reads == 3  # the whole budget, and not one ask more
+    assert machine.events == [*FOCUS, "paste"]
     assert delivery.loop_state is LoopState.WAIT_SEND
 
 
 async def test_with_no_window_of_our_own_the_wait_is_skipped_rather_than_spent(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """Nothing recorded is nothing to compare the foreground to, so there is no
     question to answer - and a shell that never called ``set_own_window`` must
     not pay the whole budget on every delivery for it."""
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.foreground_reads == 0
-    assert ops.events == [*FOCUS, "paste"]
+    assert machine.foreground_reads == 0
+    assert machine.events == [*FOCUS, "paste"]
 
 
 async def test_a_click_that_never_landed_never_waits_for_an_activation(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """No click, no activation to wait for - and nothing to paste into either."""
     delivery.set_own_window(OUR_WINDOW)
-    ops.click_lands = False
+    machine.click_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.foreground_reads == 0
-    assert ops.events == FOCUS_REFUSED
+    assert machine.foreground_reads == 0
+    assert machine.events == FOCUS_REFUSED
 
 
 # -- the opt-in Enter tap --------------------------------------------------------
 
 
 async def test_auto_submit_taps_enter_after_a_paste_that_landed(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     host.preset = _preset(auto_submit=True)
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == [*FOCUS, "paste", "enter"]
+    assert machine.events == [*FOCUS, "paste", "enter"]
     # Still WAIT_SEND: the tap is an attempt, and only the send gate's own
     # evidence says the send actually landed.
     assert delivery.loop_state is LoopState.WAIT_SEND
@@ -631,34 +638,34 @@ async def test_auto_submit_taps_enter_after_a_paste_that_landed(
 
 
 async def test_no_tap_without_the_opt_in(
-    delivery: AutomationController, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     await delivery.copy_outbound(PAYLOAD)
 
-    assert "enter" not in ops.events
+    assert "enter" not in machine.events
     assert _flash(view) == (ENTER_FLASH_TEXT, False)
 
 
 async def test_no_tap_when_the_paste_never_landed(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """An Enter into a chat box that holds nothing is exactly the accident the
     pasted-first order exists to prevent."""
     host.preset = _preset(auto_submit=True)
-    ops.paste_lands = False
+    machine.paste_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == [*FOCUS, "paste"]
+    assert machine.events == [*FOCUS, "paste"]
 
 
 async def test_a_refused_tap_falls_back_to_asking_for_enter(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     """Nothing was typed, so the banner must keep asking rather than claim the
     send happened - and the log says whose Enter it is now."""
     host.preset = _preset(auto_submit=True)
-    ops.enter_lands = False
+    machine.enter_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
@@ -667,14 +674,14 @@ async def test_a_refused_tap_falls_back_to_asking_for_enter(
     assert any("auto-submit could not type Enter" in e.text for e in delivery.harness_log)
     # ...and the send is theirs to make in the browser, so the browser keeps
     # the focus - a tap that did not take is not an auto-sent delivery.
-    assert "focus" not in ops.events
+    assert "focus" not in machine.events
 
 
 # -- who holds the focus when the delivery is over -------------------------------
 
 
 async def test_an_auto_sent_delivery_hands_the_foreground_back(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """Pasted AND sent leaves the user nothing to do in the browser, so the next
     thing worth watching is this window's rail - and alt-tabbing back to it by
@@ -684,12 +691,12 @@ async def test_an_auto_sent_delivery_hands_the_foreground_back(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == [*FOCUS, "paste", "enter", "focus"]
-    assert ops.focused == [OUR_WINDOW]
+    assert machine.events == [*FOCUS, "paste", "enter", "focus"]
+    assert machine.focused == [OUR_WINDOW]
 
 
 async def test_a_service_can_refuse_to_take_the_foreground_back(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """``ServicePreset.snap_back`` off is the debugging aid: everything else
     about the delivery is unchanged, and the browser simply keeps the focus so
@@ -699,12 +706,12 @@ async def test_a_service_can_refuse_to_take_the_foreground_back(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == [*FOCUS, "paste", "enter"]
-    assert ops.focused == []
+    assert machine.events == [*FOCUS, "paste", "enter"]
+    assert machine.focused == []
 
 
 async def test_a_streamed_delivery_that_auto_sent_hands_it_back_too(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """The stream's auto-submit is the same tap on the same flag, so it cannot
     end up with a different answer to "whose window is this now"."""
@@ -713,12 +720,12 @@ async def test_a_streamed_delivery_that_auto_sent_hands_it_back_too(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events[-2:] == ["enter", "focus"]
-    assert ops.focused == [OUR_WINDOW]
+    assert machine.events[-2:] == ["enter", "focus"]
+    assert machine.focused == [OUR_WINDOW]
 
 
 async def test_a_paste_still_waiting_on_the_users_enter_leaves_the_browser_focused(
-    delivery: AutomationController, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     """">>> PRESS ENTER <<<" is an instruction to act over THERE, and stealing
     the foreground would make the user click back into the browser to obey a
@@ -728,30 +735,30 @@ async def test_a_paste_still_waiting_on_the_users_enter_leaves_the_browser_focus
     await delivery.copy_outbound(PAYLOAD)
 
     assert _flash(view) == (ENTER_FLASH_TEXT, False)
-    assert "focus" not in ops.events
-    assert ops.focused == []
+    assert "focus" not in machine.events
+    assert machine.focused == []
 
 
 async def test_a_paste_that_never_landed_leaves_the_browser_focused(
-    delivery: AutomationController, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     """Same rule, harder case: the banner is asking for a Ctrl+V in the chat
     box, which is the one window this must not take the focus away from."""
     delivery.set_own_window(OUR_WINDOW)
-    ops.paste_lands = False
+    machine.paste_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
     assert _flash(view) == (PASTE_FLASH_TEXT, True)
-    assert "focus" not in ops.events
-    assert ops.focused == []
+    assert "focus" not in machine.events
+    assert machine.focused == []
 
 
 # -- the audible "your move" -----------------------------------------------------
 
 
 async def test_the_click_that_focuses_the_chat_box_is_a_double_click(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """One click is spent waking the browser window; a page still activating
     never routes it to the input field, and the Ctrl+V lands nowhere the user
@@ -761,12 +768,12 @@ async def test_the_click_that_focuses_the_chat_box_is_a_double_click(
     select anything."""
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events[:2] == FOCUS
+    assert machine.events[:2] == FOCUS
     assert delivery_mod.FOCUS_CLICK_GAP_S >= 0.5
 
 
 async def test_both_focus_clicks_land_where_the_service_aims_them(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """A chat box that is clickable end to end takes its click where the
     service says (screen.profile's click points) - and the reinforcing second
@@ -778,40 +785,40 @@ async def test_both_focus_clicks_land_where_the_service_aims_them(
     await delivery.copy_outbound(PAYLOAD)
 
     aimed = ScreenRegion(1250, 800, 1, 1)
-    assert ops.clicked == [aimed, aimed]
+    assert machine.clicked == [aimed, aimed]
 
 
 async def test_the_default_aim_is_the_middle_of_the_matched_box(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """A service that never moved its click point aims at the centre of the
     picture that matched - not at the centre of the drawn window."""
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.clicked == [AIMED, AIMED]
+    assert machine.clicked == [AIMED, AIMED]
 
 
 async def test_a_refused_first_click_is_never_followed_by_a_second(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """A click the OS would not take is the one signal that the target is not
     clickable at all, so the sequence stops rather than hammering it."""
-    ops.click_lands = False
+    machine.click_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == FOCUS_REFUSED
+    assert machine.events == FOCUS_REFUSED
 
 
 async def test_a_stalled_loop_sounds_the_alarm_when_the_service_asked_for_one(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, alarm: RecordingAlarm
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, alarm: RecordingAlarm
 ) -> None:
     """MANUAL_INSERT is the loop saying "the Ctrl+V is yours" to a user who may
     not be looking. The hook is on the state, not on this delivery - which is
     what keeps the other eight roads into an attention state from each needing
     their own beep."""
     host.preset = _preset(alert_sound=True)
-    ops.paste_lands = False
+    machine.paste_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
@@ -820,10 +827,10 @@ async def test_a_stalled_loop_sounds_the_alarm_when_the_service_asked_for_one(
 
 
 async def test_the_repeat_interval_rides_the_preset(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, alarm: RecordingAlarm
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, alarm: RecordingAlarm
 ) -> None:
     host.preset = _preset(alert_sound=True, alert_repeat_seconds=30)
-    ops.paste_lands = False
+    machine.paste_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
@@ -831,11 +838,11 @@ async def test_the_repeat_interval_rides_the_preset(
 
 
 async def test_a_service_without_the_alert_never_makes_a_sound(
-    delivery: AutomationController, ops: ScriptedOps, alarm: RecordingAlarm
+    delivery: AutomationController, machine: ScriptedMonitor, alarm: RecordingAlarm
 ) -> None:
     """Off is the default and off means silent - including in the very state
     the alarm exists for."""
-    ops.paste_lands = False
+    machine.paste_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
@@ -844,12 +851,12 @@ async def test_a_service_without_the_alert_never_makes_a_sound(
 
 
 async def test_leaving_the_attention_state_silences_the_alarm(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, alarm: RecordingAlarm
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, alarm: RecordingAlarm
 ) -> None:
     """The user pasted it themselves and the send gate saw it: nothing is
     waiting on them any more, so neither is the noise."""
     host.preset = _preset(alert_sound=True, alert_repeat_seconds=5)
-    ops.paste_lands = False
+    machine.paste_lands = False
     await delivery.copy_outbound(PAYLOAD)
 
     delivery.set_loop_state(LoopState.WAIT_SEND, "the user pasted it themselves")
@@ -878,12 +885,12 @@ async def test_a_re_sync_is_silent_for_a_service_without_the_alert(
 
 
 async def test_shutdown_silences_a_repeating_alarm(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, alarm: RecordingAlarm
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, alarm: RecordingAlarm
 ) -> None:
     """An alarm still repeating into a closed app is a beep with nobody left to
     answer it."""
     host.preset = _preset(alert_sound=True, alert_repeat_seconds=5)
-    ops.paste_lands = False
+    machine.paste_lands = False
     await delivery.copy_outbound(PAYLOAD)
 
     delivery.stop_alert()
@@ -897,7 +904,7 @@ async def test_shutdown_silences_a_repeating_alarm(
 async def test_a_stream_service_walks_a_long_payload_in_chunk_by_chunk(
     delivery: AutomationController,
     host: FakeHost,
-    ops: ScriptedOps,
+    machine: ScriptedMonitor,
     clipboard: FakeClipboard,
     view: FakeAutomationView,
 ) -> None:
@@ -908,19 +915,19 @@ async def test_a_stream_service_walks_a_long_payload_in_chunk_by_chunk(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert len(ops.pasted) > 1
-    assert "".join(ops.pasted) == PAYLOAD
+    assert len(machine.pasted) > 1
+    assert "".join(machine.pasted) == PAYLOAD
     # The whole payload lands first (it is what every manual recovery pastes),
     # then the chunks in order.
-    assert clipboard.written == [PAYLOAD, *ops.pasted]
-    for chunk in ops.pasted:
+    assert clipboard.written == [PAYLOAD, *machine.pasted]
+    for chunk in machine.pasted:
         assert delivery.self_writes.contains_text(chunk), chunk
     assert delivery.loop_state is LoopState.WAIT_SEND
     assert _flash(view) == (ENTER_FLASH_TEXT, False)
 
 
 async def test_the_banner_counts_the_chunks_while_they_go_in(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     """The user is looking at the browser, so the count is the only thing saying
     a big payload is still going in rather than stuck."""
@@ -928,13 +935,13 @@ async def test_the_banner_counts_the_chunks_while_they_go_in(
 
     await delivery.copy_outbound(PAYLOAD)
 
-    total = len(ops.pasted)
+    total = len(machine.pasted)
     counted = [text for text, _retry in view.paste_flashes if "STREAMING" in text]
     assert counted == [stream_flash_text(n, total) for n in range(1, total + 1)]
 
 
 async def test_a_short_payload_in_stream_mode_is_a_single_burst(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps, clipboard: FakeClipboard
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, clipboard: FakeClipboard
 ) -> None:
     """Nothing to show progress about, so the stream costs one extra clipboard
     write and nothing else."""
@@ -942,36 +949,36 @@ async def test_a_short_payload_in_stream_mode_is_a_single_burst(
 
     await delivery.copy_outbound("short")
 
-    assert ops.events == [*FOCUS, "paste"]
+    assert machine.events == [*FOCUS, "paste"]
     assert clipboard.written == ["short", "short"]
 
 
 async def test_a_paste_service_sends_one_burst_however_long_the_payload(
-    delivery: AutomationController, ops: ScriptedOps, clipboard: FakeClipboard
+    delivery: AutomationController, machine: ScriptedMonitor, clipboard: FakeClipboard
 ) -> None:
     """A payload far past the chunk size, delivered by a service that did not ask
     for streaming, behaves exactly as it did before streaming existed."""
     await delivery.copy_outbound(PAYLOAD * 4)
 
-    assert ops.events == [*FOCUS, "paste"]
+    assert machine.events == [*FOCUS, "paste"]
     assert clipboard.written == [PAYLOAD * 4]
 
 
 async def test_a_failed_chunk_stops_the_stream_and_restores_the_whole_payload(
     delivery: AutomationController,
     host: FakeHost,
-    ops: ScriptedOps,
+    machine: ScriptedMonitor,
     clipboard: FakeClipboard,
     view: FakeAutomationView,
 ) -> None:
     """The box now holds a fragment the user has to clear, so the clipboard has
     to hold the WHOLE message for the manual Ctrl+V that replaces it."""
     host.preset = _preset(delivery=DELIVERY_STREAM)
-    ops.paste_lands = False
+    machine.paste_lands = False
 
     await delivery.copy_outbound(PAYLOAD)
 
-    assert ops.events == [*FOCUS, "paste"]  # stopped, rather than ploughing on
+    assert machine.events == [*FOCUS, "paste"]  # stopped, rather than ploughing on
     assert clipboard.written[-1] == PAYLOAD
     assert clipboard.read_text() == PAYLOAD
     assert delivery.loop_state is LoopState.MANUAL_INSERT
@@ -983,13 +990,13 @@ async def test_a_failed_chunk_stops_the_stream_and_restores_the_whole_payload(
 
 
 async def test_no_provider_hands_the_payload_to_the_shell_and_says_so(
-    view: FakeAutomationView, host: FakeHost, ops: ScriptedOps
+    view: FakeAutomationView, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """The write is this layer's; the FALLBACK is not (the TUI's OSC-52 escape is
     a Textual call and exists in no other shell). So the payload crosses back to
     whoever can still park it, and the user is told once."""
     automation = AutomationController(
-        view=view, host=host, monitor=FakeUIMonitor(ops=ops, has_clipboard=False)
+        view=view, host=host, monitor=ScriptedMonitor(host, has_clipboard=False)
     )
     automation.set_calibration(AgentSlot.MASTER, CHAT_REGION)
 
@@ -1000,24 +1007,23 @@ async def test_no_provider_hands_the_payload_to_the_shell_and_says_so(
 
 
 async def test_a_stream_service_falls_back_to_one_burst_with_no_clipboard(
-    view: FakeAutomationView, host: FakeHost, ops: ScriptedOps
+    view: FakeAutomationView, host: FakeHost
 ) -> None:
     """Streaming needs a clipboard to write each chunk through: with none, the
     single burst of whatever the shell parked is all there is."""
     host.preset = _preset(delivery=DELIVERY_STREAM)
-    automation = AutomationController(
-        view=view, host=host, monitor=FakeUIMonitor(ops=ops, has_clipboard=False)
-    )
+    machine = ScriptedMonitor(host, has_clipboard=False)
+    automation = AutomationController(view=view, host=host, monitor=machine)
     automation.set_calibration(AgentSlot.MASTER, CHAT_REGION)
 
     await automation.copy_outbound(PAYLOAD)
 
-    assert ops.events == [*FOCUS, "paste"]
+    assert machine.events == [*FOCUS, "paste"]
     assert host.parked_off_clipboard == [PAYLOAD]
 
 
 async def test_clipboard_ok_is_the_callers_answer_not_a_re_reading(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """The seam is a parameter for a reason: a shell may have parked the payload
     somewhere this layer cannot see, and ``deliver`` is told, not asked."""
@@ -1025,91 +1031,91 @@ async def test_clipboard_ok_is_the_callers_answer_not_a_re_reading(
 
     await delivery.deliver(PAYLOAD, clipboard_ok=False)
 
-    assert ops.events == [*FOCUS, "paste"]  # one burst, though a stream was asked for
+    assert machine.events == [*FOCUS, "paste"]  # one burst, though a stream was asked for
 
 
 # -- retrying, and re-delivering -------------------------------------------------
 
 
 async def test_the_retry_re_runs_the_whole_insert_against_the_pending_payload(
-    delivery: AutomationController, ops: ScriptedOps, clipboard: FakeClipboard
+    delivery: AutomationController, machine: ScriptedMonitor, clipboard: FakeClipboard
 ) -> None:
     """Between the failure and the press the user may well have copied something
     of their own, so the retry parks the outbound again before it pastes."""
-    ops.paste_lands = False
+    machine.paste_lands = False
     await delivery.copy_outbound(PAYLOAD)
     assert delivery.pending_insert == PAYLOAD
     clipboard.set_text("something the user copied while reading the error")
-    ops.paste_lands = True
+    machine.paste_lands = True
 
     await delivery.retry_insert()
 
-    assert ops.events == [*FOCUS, "paste", *FOCUS, "paste"]
-    assert ops.pasted == [PAYLOAD, PAYLOAD]
+    assert machine.events == [*FOCUS, "paste", *FOCUS, "paste"]
+    assert machine.pasted == [PAYLOAD, PAYLOAD]
     assert delivery.loop_state is LoopState.WAIT_SEND
 
 
 async def test_the_retry_re_runs_the_auto_submit_too(
-    delivery: AutomationController, host: FakeHost, ops: ScriptedOps
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """A retry that pasted but left the message sitting there would be a
     different flow than the one it stands in for."""
     host.preset = _preset(auto_submit=True)
-    ops.paste_lands = False
+    machine.paste_lands = False
     await delivery.copy_outbound(PAYLOAD)
-    ops.paste_lands = True
+    machine.paste_lands = True
 
     await delivery.retry_insert()
 
-    assert ops.events[-4:] == [*FOCUS, "paste", "enter"]
+    assert machine.events[-4:] == [*FOCUS, "paste", "enter"]
 
 
 async def test_the_retry_does_nothing_before_anything_has_been_copied(
-    delivery: AutomationController, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     await delivery.retry_insert()
 
-    assert ops.events == []
+    assert machine.events == []
     assert _said(view, "nothing to re-insert")
 
 
 async def test_the_retry_refuses_while_disarmed(
-    delivery: AutomationController, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     """DISARMED is a promise that nothing here clicks or types, and a button is
     not an exemption from it - the toast names the switch that is."""
-    ops.paste_lands = False
+    machine.paste_lands = False
     await delivery.copy_outbound(PAYLOAD)
     delivery.set_os_armed(False)
-    ops.events.clear()
+    machine.events.clear()
 
     await delivery.retry_insert()
 
-    assert ops.events == []
+    assert machine.events == []
     assert _said(view, "press F5 to arm")
 
 
 async def test_the_retry_refuses_while_the_auto_copy_flow_runs(
-    delivery: AutomationController, ops: ScriptedOps, view: FakeAutomationView
+    delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
     """The flow is driving the mouse through a scroll-and-hover hunt, and shoving
     a focus click through the middle of it wrecks both."""
-    ops.paste_lands = False
+    machine.paste_lands = False
     await delivery.copy_outbound(PAYLOAD)
     delivery.flow_running = True
-    ops.events.clear()
+    machine.events.clear()
 
     await delivery.retry_insert()
 
-    assert ops.events == []
+    assert machine.events == []
     assert _said(view, "driving the mouse")
 
 
 async def test_a_session_reset_forgets_what_there_was_to_retry(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """/new tears the session down, and the last outbound belonged to it."""
-    ops.paste_lands = False
+    machine.paste_lands = False
     await delivery.copy_outbound(PAYLOAD)
 
     delivery.forget_pending_insert()
@@ -1118,7 +1124,7 @@ async def test_a_session_reset_forgets_what_there_was_to_retry(
 
 
 async def test_parking_the_outbound_touches_nothing_else(
-    delivery: AutomationController, ops: ScriptedOps, clipboard: FakeClipboard
+    delivery: AutomationController, machine: ScriptedMonitor, clipboard: FakeClipboard
 ) -> None:
     """Stage one of the `c` re-copy: the payload is back where a Ctrl+V of the
     user's own can reach it, the mouse never moved, and the rail did not budge -
@@ -1127,18 +1133,18 @@ async def test_parking_the_outbound_touches_nothing_else(
 
     await delivery.park_outbound(PAYLOAD)
 
-    assert ops.events == []
+    assert machine.events == []
     assert clipboard.written == [PAYLOAD]
     assert delivery.self_writes.contains_text(PAYLOAD)
     assert delivery.loop_state is before
 
 
 async def test_parking_leaves_the_pending_payload_alone(
-    delivery: AutomationController, ops: ScriptedOps
+    delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """It is what the retry button would re-deliver, and re-copying the payload
     that is already the pending one changes nothing about that."""
-    ops.paste_lands = False
+    machine.paste_lands = False
     await delivery.copy_outbound(PAYLOAD)
 
     await delivery.park_outbound("something else entirely")

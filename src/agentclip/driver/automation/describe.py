@@ -12,10 +12,11 @@ should read.
 The rule is precedence, not prose. A loop state that the user has to act on -
 or that is visibly moving on screen - outranks the phase, because "generating"
 is news and "waiting for the reply" (which is the same fact, one machine over)
-is not. The two ``ATTENTION_STATES`` are the sharpest case: a payload nobody
-pasted and a reply nobody copied are the only two moments where the app is
-stuck on a human, and no phase wording may bury them. When the loop is idle or
-merely interpreting, the browser has nothing to add and the phase speaks.
+is not. The ``ATTENTION_STATES`` are the sharpest case: a payload nobody pasted,
+a reply nobody copied and a monitor nobody can reach are the moments where the
+app is stuck on something no phase can speak for, and no phase wording may bury
+them. When the loop is idle or merely interpreting, the browser has nothing to
+add and the phase speaks.
 
 Wording is inherited rather than invented: where the GUI's watch segment
 already had a sentence for a situation (``gui/view.py`` ``_base_watch_segment``:
@@ -56,8 +57,8 @@ PHASE_LABEL: dict[Phase, str] = {
 # already distinguishes the outcomes the user cares about - working, question
 # parked, sub-agent out, done - and "interpreting" would flatten all four.
 #
-# Total over ``LoopState`` - when phase 5 adds ``DISCONNECTED`` this dict is
-# where it must be answered, and the totality test fails until it is.
+# Total over ``LoopState`` - a new member is answered HERE, and the totality
+# test fails until it is.
 LOOP_LABEL: dict[LoopState, str | None] = {
     LoopState.IDLE: None,
     LoopState.AUTO_INSERT: "pasting into the chat box",
@@ -67,6 +68,13 @@ LOOP_LABEL: dict[LoopState, str | None] = {
     LoopState.AUTO_COPY: "copying the reply",
     LoopState.MANUAL_COPY: "copy the reply yourself",
     LoopState.INTERPRETING: None,
+    # Phase 5's state, and the one row that is not about the browser at all: the
+    # link to the machine the browser is ON is gone (ui-monitor.md §2.9). It
+    # outranks every phase for the ``ATTENTION_STATES`` reason - a phase saying
+    # "generating..." while nothing can see the screen is the app lying about
+    # what it knows - and it says "reconnecting" because the brain is already
+    # redialling on its own; the user is being told, not asked.
+    LoopState.DISCONNECTED: "monitor link lost - reconnecting",
 }
 
 

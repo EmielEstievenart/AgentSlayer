@@ -7,12 +7,25 @@ can drive the identical loop. It talks to the UI only through the
 :class:`~agentclip.driver.automation.view.AutomationView` port and therefore imports no
 Textual (docs/design/gui.md §1).
 
-Since phase 6.1 of docs/design/ui-monitor.md it owns no thread and no pixels.
-Everything on the far side of the screen - the poll loop, the trackers and their
-swap discipline, the generation stamp, the mouse, the keyboard and the clipboard
-- is one object below it, the :class:`~agentclip.driver.monitor.protocol.UIMonitor`,
-handed in at construction. What is left here is *meaning*: what a tick means,
-what may act on it, and what the shell is told about it.
+Since phase 6.2 of docs/design/ui-monitor.md it owns no thread, no pixels and no
+counting. Everything on the far side of the screen is one object below it, the
+:class:`~agentclip.driver.monitor.protocol.UIMonitor`, handed in at construction,
+and the list is now the whole list:
+
+* the poll loop, the trackers and their swap discipline, the generation stamp;
+* the mouse, the keyboard, the clipboard and its watcher;
+* every SEARCH - where an appearance is, whether there are several, how close a
+  miss came, the hover walk that finds a button only drawn under the pointer,
+  and the scroll that snaps a transcript to its bottom (§2.3);
+* and the two consecutive-tick COUNTS - the stale-arm run and the run of ticks
+  every detector agreed on - which ride in on the tick because a count is a
+  statement about a screen, and a brain keeping its own totals would lose them
+  on every reconnect (§2.2, §2.9).
+
+What is left here is *meaning*: what a tick means, what may act on it, and what
+the shell is told about it. Every OS-acting sequence below is still choreography
+- click, settle, snap, look, click, hand back - but each of its steps is now one
+named verb across the seam rather than a frame this object holds.
 
 **The armed flag.** ``/armed`` and F5. DISARMED means the tool stops ACTING on
 the machine - no clicks, no synthetic paste, no cursor moves, no focus stealing,
@@ -82,10 +95,15 @@ object is allowed an event-loop-facing surface for exactly the reason
 ``SessionController`` is. What a shell keeps is the SCHEDULING (Textual puts the
 harvest on a ``run_worker``) and the handful of answers only it has, which cross
 as :class:`~agentclip.driver.automation.host.AutomationHost`. Every one of those
-acts is now ``await self._monitor.click(...)`` and its siblings. What has NOT
-crossed yet is the pixel work those sequences do for themselves - the copy-icon
-hunt, the chat-box verification, the hover scan - which still reads frames
-through the monitor's local-only ``ops``; those verdicts move down in phase 2.
+acts is now ``await self._monitor.click(...)`` and its siblings - and since phase
+6.2 that includes the pixel work those sequences used to do for themselves. The
+copy-icon hunt, the chat-box verification, the hover scan and the snap to the
+bottom are ``locate`` / ``find_all`` / ``hover_scan`` / ``snap_to_bottom`` on the
+monitor now (ui-monitor.md §2.3): nothing here captures a frame, compares a
+template or names a tolerance any more. What is left of each of them is the
+POLICY around the verdict - which kinds a match may not be, whether an ambiguous
+answer may be clicked, how many rounds a hunt is worth, and what the user is told
+when it comes up empty.
 
 **Threading, as of this phase.** Two threads still write the state below: the UI
 thread (a paste, a slot move, a modal, ``/new``) and whichever thread the
@@ -107,7 +125,7 @@ left to serialize (ui-monitor.md §6.2, "no ``threading`` import outside
 Held across bookkeeping, not across work. Every paint leaves through the view
 port, which is non-blocking by contract, and the expensive halves of a tick -
 the capture and the template search - happen inside the monitor, nowhere near
-it. The one call under it that can touch a disk is ``has_appearance`` on a cold
+it, as does every search the sequences make. The one call under it that can touch a disk is ``has_appearance`` on a cold
 profile cache, which is the shell's own read of its own file and is why the
 port's contract asks for it to be cheap.
 """
@@ -116,9 +134,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-import time
 from collections import deque
-from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from typing import Any, Protocol
 
 from agentclip.config import (
@@ -161,14 +178,9 @@ from agentclip.driver.automation.flow import (
     COPY_VERIFY_INTERVAL_S,
     COPY_VERIFY_READS,
     ELEMENT_CLICK_SETTLE_S,
-    PAGE_DOWN_TAPS,
     SNAP_SETTLE_S,
-    SNAP_WHEEL_DETENTS,
     above_chatbox,
-    element_rects,
     how_close,
-    lowest_match,
-    lowest_match_scored,
 )
 from agentclip.driver.automation.harness_log import (
     HARNESS_LOG_MAX,
@@ -183,22 +195,37 @@ from agentclip.driver.automation.host import AutomationHost, NullHost
 from agentclip.driver.automation.loop_state import ATTENTION_STATES, LoopState
 from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.automation.view import AutomationView
+from agentclip.driver.clip import chunking
 from agentclip.driver.clip.base import ClipboardUnavailable
-from agentclip.driver.clip.chunking import split_for_stream
 from agentclip.driver.clip.watcher import SelfWriteSet
-from agentclip.driver.monitor.ops import ScreenOps
-from agentclip.driver.monitor.protocol import MonitorSpec, Tick
+
+# The beats every OS-acting sequence below paces itself by, as a MODULE rather
+# than as names: cadence belongs to the machine being driven (ui-monitor.md
+# §2.10), and reading ``beats.X`` at the call site is what lets a suite shrink a
+# beat by writing to it - a ``from ... import X`` would have bound the number
+# here at import time and every test would wait out a real browser's repaint.
+from agentclip.driver.monitor import beats
+from agentclip.driver.monitor.protocol import Located, MonitorSpec, Tick
 from agentclip.driver.screen.busy import BusyProbe
-from agentclip.driver.screen.capture import CaptureError, RegionImage
-from agentclip.driver.screen.detector import ScreenDetector, Sighting
-from agentclip.driver.screen.hover import hover_scan_points
+from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.detector import Sighting
 from agentclip.driver.screen.matchers import select_matcher
 from agentclip.driver.screen.presence import PresenceTracker
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot, SlotCalibration, new_slots
 from agentclip.driver.screen.stale import StaleProbe, StaleTracker
-from agentclip.driver.screen.template import CandidateSource, RegionMatch, Template, match_rect
+from agentclip.driver.screen.template import CandidateSource
+
+# The two layouts one service's chat box can be drawn in, as one tuple: a fresh
+# chat centres its input box and an ongoing one docks it at the bottom. Named
+# here because they are asked about together everywhere - hunted one after the
+# other for the delivery's click, and handed to ``locate`` as the appearances a
+# copy icon may NOT turn out to be.
+CHATBOX_KINDS: tuple[TemplateKind, ...] = (
+    TemplateKind.CHATBOX_INITIAL,
+    TemplateKind.CHATBOX_ONGOING,
+)
 
 # The tick's recognitions, cut down to pictures. Sizing a crop depends on which
 # renderer the shell can drive, so the CUT is the shell's - but it happens on the
@@ -228,9 +255,13 @@ class MonitorLike(Protocol):
     that line is the real contract, spelled out again only so mypy checks one
     Protocol at the call site instead of two.
 
-    It shrinks in phase 2. The pixel work still routed through ``ops`` - the
-    copy-icon hunt, the chat-box verification, the hover scan - becomes monitor
-    verdicts, and the trackers stop being anybody's business but the monitor's.
+    Phase 2 shrank it: ``ops`` is gone, and with it every way this object could
+    reach a frame. The five pixel verdicts below (``find_all``, ``locate``,
+    ``click_element``, ``hover_scan``, ``snap_to_bottom``) are what replaced it,
+    and they are contract members rather than local-only ones - a
+    ``RemoteUIMonitor`` answers every one of them. What is still local-only is
+    the frame hook (pixels, so they never ride the wire), the self-write register
+    and the trackers the shells mirror in their own chrome.
     """
 
     # -- the contract (driver/monitor/protocol.py) -------------------------
@@ -257,15 +288,25 @@ class MonitorLike(Protocol):
     @property
     def clipboard_kind(self) -> str | None: ...
 
+    # -- the pixel verdicts (ui-monitor.md §2.3) ---------------------------
+    # A kind and nothing else: not a template, not a rectangle, not a tolerance.
+    # None of those could cross the wire, and a caller that supplied them would
+    # be a caller keeping its own copy of the calibration.
+    async def find_all(self, kind: TemplateKind) -> tuple[ScreenRegion, ...]: ...
+    async def locate(
+        self, kind: TemplateKind, *, exclude_kinds: tuple[TemplateKind, ...] = ()
+    ) -> Located: ...
+    async def click_element(
+        self, kind: TemplateKind, *, settle_s: float | None = None
+    ) -> ElementClick: ...
+    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None: ...
+    async def snap_to_bottom(self, action: str) -> None: ...
+
     # -- the local-only tier -----------------------------------------------
-    @property
-    def ops(self) -> ScreenOps: ...
     @property
     def self_writes(self) -> SelfWriteSet: ...
     def on_frame(self, hook: FrameHook) -> Callable[[], None]: ...
     def reset_trackers(self) -> None: ...
-    @property
-    def detector(self) -> ScreenDetector | None: ...
     @property
     def busy_tracker(self) -> PresenceTracker | None: ...
     @property
@@ -417,12 +458,22 @@ class AutomationController:
         # reads; the verdicts above stay the finish decision's business.
         self._busy_generating_now = False
         self._idle_generating_now = False
-        # The latest stale probe's frame-to-frame differing fraction, and the run
-        # of consecutive stale probes whose diff cleared ``send_arm_min_diff``.
-        # Only such a run may arm the auto-copy trigger on staleness alone - see
-        # ``evaluate_finish``.
+        # The latest stale probe's frame-to-frame differing fraction. A READOUT
+        # and nothing else since phase 2 - the sidebar's number - because the run
+        # it used to feed (``send_arm_min_diff`` consecutive big deltas) is the
+        # monitor's arithmetic now and rides in on the tick.
         self._stale_diff: float | None = None
-        self._stale_arm_streak = 0
+        # The tick the bookkeeping below is currently about, kept because the two
+        # STREAKS are its fields rather than this object's (ui-monitor.md §2.2):
+        # a count of consecutive ticks is a statement about a screen, and a brain
+        # that kept its own running totals would lose them on every reconnect and
+        # would have to be told which ticks it had already counted (§2.9). Written
+        # by ``_on_tick`` before it unpacks anything, so every ``consume_*`` under
+        # it - and ``evaluate_finish`` at the end - reads the counts that belong
+        # to the very probe being folded. ``None`` until the first tick lands, and
+        # for a shell that calls a ``consume_*`` method with a probe of its own:
+        # both mean "no streak has been counted", which is what zero says.
+        self._last_tick: Tick | None = None
         # The three finish trackers of the detector the shell built for this
         # run, kept under their own names because the paste, the send and the
         # auto-copy flow all reset the DEBOUNCE without touching what the
@@ -446,11 +497,11 @@ class AutomationController:
         # attribute writes on the event-loop thread - never read from the poller
         # thread, so it is deliberately outside ``_tick_lock``.
         self._prose_window = False
-        # ``_copy_armed``/``_copy_changed_streak`` track the probe sequence that
-        # fires the auto-copy flow - see ``evaluate_finish``. Trigger state, not
-        # calibration, so it is reset whenever the live slot moves.
+        # Has the trigger seen the model generating since the last harvest? The
+        # brain's half of the fire rule (§2.3) - what a run of agreeing ticks is
+        # WORTH is policy, and the run itself is the monitor's count. Trigger
+        # state, not calibration, so it is reset whenever the live slot moves.
         self._copy_armed = False
-        self._copy_changed_streak = 0
         # The SESSION gate under all of that: True only between an outbound
         # copy (the payload is in the chat and a reply is what we are waiting
         # for) and the reply being harvested. Nothing may arm or fire while it
@@ -888,8 +939,16 @@ class AutomationController:
         search is undone by the write that follows it, and the frames the paste
         or the flow produced stay in history. What this object contributes is
         WHEN, which is the only half of it that was ever a decision.
+
+        The two STREAKS go with the debounce, on the far side of the seam and up
+        here both. The monitor zeroes its own counts (ui-monitor.md 4.3, and by
+        the same argument: they are counts of what those trackers said about
+        frames this caller has just produced ITSELF); ``_last_tick`` is dropped
+        so nothing reports the pre-reset run in the window before the next tick
+        lands. Both readings then say zero, which is what has just become true.
         """
         self._monitor.reset_trackers()
+        self._last_tick = None
 
     def forget_verdicts(self) -> None:
         """Drop everything a rebuilt detector set makes obsolete.
@@ -903,9 +962,7 @@ class AutomationController:
         with self._tick_lock:
             self._busy_seen = self._idle_seen = self._stale_seen = False
             self._busy_finished = self._idle_finished = self._stale_finished = None
-            # A half-built large-delta run belongs to the tracker that produced it.
             self._stale_diff = None
-            self._stale_arm_streak = 0
             self._active_detectors = ()
             # The trackers those verdicts came out of, and the detector holding
             # them, are not dropped here any more: they are the monitor's, and
@@ -932,9 +989,7 @@ class AutomationController:
             self._busy_generating_now = False
             self._idle_generating_now = False
             self._stale_diff = None
-            self._stale_arm_streak = 0
             self._copy_armed = False
-            self._copy_changed_streak = 0
 
     # -- the trigger's own state, for shells and tests that mirror it ----------
 
@@ -949,18 +1004,24 @@ class AutomationController:
 
     @property
     def copy_changed_streak(self) -> int:
-        """How many consecutive ticks every live detector has said "finished"."""
-        return self._copy_changed_streak
+        """How many consecutive ticks every live detector has said "finished".
 
-    @copy_changed_streak.setter
-    def copy_changed_streak(self, value: int) -> None:
-        self._copy_changed_streak = value
+        Read off the latest tick, not counted here: it is the monitor that
+        counts consecutive ticks now (ui-monitor.md §2.2), and this object only
+        decides what a run of two is worth. Zero before the first tick lands.
+        """
+        tick = self._last_tick
+        return 0 if tick is None else tick.changed_streak
 
     @property
     def stale_arm_streak(self) -> int:
         """The run of consecutive large-delta stale probes (``send_arm_ticks``
-        of them is what arms the trigger on staleness alone)."""
-        return self._stale_arm_streak
+        of them is what arms the trigger on staleness alone).
+
+        The monitor's count as well, and off the same tick.
+        """
+        tick = self._last_tick
+        return 0 if tick is None else tick.stale_arm_streak
 
     @property
     def stale_diff(self) -> float | None:
@@ -1067,7 +1128,10 @@ class AutomationController:
         The flow clicks, scrolls and hover-scans the very window all three
         detectors watch, so every streak it leaves behind describes the flow's
         own mouse work rather than the model's - including the send-arming run,
-        whose large deltas were the flow's own scrolling.
+        whose large deltas were the flow's own scrolling. Both streaks go with
+        the debounce because both are the monitor's now: ``reset_trackers``
+        zeroes them on the far side of the seam (ui-monitor.md §4.3), which is
+        the same act and one fewer thing up here to forget.
 
         The prose window is closed here too, defensively: the flow's own path
         closes it the moment the harvest returns, but a click that never
@@ -1079,7 +1143,6 @@ class AutomationController:
             self._flow_running = False
             self.reset_trackers()
             self._stale_diff = None
-            self._stale_arm_streak = 0
 
     # -- which probes count ----------------------------------------------------
 
@@ -1281,7 +1344,14 @@ class AutomationController:
         Called from the monitor's thread, so everything under it obeys the same
         rules the poll loop's own call stack did: one probe at a time, each one
         whole, under ``_tick_lock``.
+
+        The tick itself is recorded FIRST, before a single probe is unpacked,
+        because the two streaks ``evaluate_finish`` reads are its fields and the
+        fold happens deep inside the last ``consume_*`` below - so the counts
+        have to be in place before the first one runs, not after the last.
         """
+        with self._tick_lock:
+            self._last_tick = tick
         generation = tick.generation
         if tick.busy is not None:
             self.consume_busy_probe(tick.busy, generation)
@@ -1586,16 +1656,19 @@ class AutomationController:
           paste nag - a reasoning icon on screen is evidence nothing else
           produces.
         * The STALE detector saying "generating" arms it only as part of a
-          sustained large delta: ``send_arm_ticks`` consecutive probes whose
-          diff clears ``send_arm_min_diff``. A caret blinking in the composer,
+          sustained large delta: ``send_arm_ticks`` consecutive ticks whose
+          diff cleared ``send_arm_min_diff`` - counted by the MONITOR and read
+          off the tick (``Tick.stale_arm_streak``, ui-monitor.md §2.2), because
+          a count of consecutive ticks is a statement about a screen and not
+          about this object. A caret blinking in the composer,
           or a mouse-over highlight, is a CHANGING verdict too - and arming on
           one of those between AgentClip's paste and the user's Enter meant the
           still, reply-less pre-Enter screen then read as a finished response
           and fired the auto-copy at nothing.
         * The trigger fires only when EVERY live detector says "finished" on
-          two consecutive ticks. With one detector that is today's
-          MATCH-then-two-CHANGED rule; with both it is the agreement the second
-          detector exists for.
+          two consecutive ticks (``Tick.changed_streak``, the monitor's other
+          count). With one detector that is today's MATCH-then-two-CHANGED
+          rule; with both it is the agreement the second detector exists for.
         * A capture error (no verdict) breaks the streak but leaves the arm
           alone: one bad frame must not silently cancel an in-flight finish.
 
@@ -1645,6 +1718,13 @@ class AutomationController:
         ``consume_*`` took - which is the only way it is ever reached. Everything
         it reads and writes is therefore consistent with the probe that closed
         the tick, and nothing the UI thread does can land halfway through.
+
+        Neither streak is counted here any more (phase 2): both ride in on
+        ``_last_tick``, the tick ``_on_tick`` recorded before it unpacked the
+        probe that reached this call. A shell that calls a ``consume_*`` method
+        with a probe of its own - the public seam those methods are - therefore
+        folds against zero, which is the honest answer for a reading that never
+        came off a tick.
         """
         if self._flow_running or not self._awaiting_pasted_reply:
             return
@@ -1661,19 +1741,11 @@ class AutomationController:
             verdicts.append(self._stale_finished)
         if not verdicts:
             return
-        # Roll the large-delta run forward on every tick the stale detector
-        # reported, so "consecutive" really means consecutive: a small-diff
-        # CHANGING (and a STALE or an ERROR) breaks it.
-        if self._stale_seen:
-            big_delta = (
-                self._stale_finished is False
-                and self._stale_diff is not None
-                and self._stale_diff >= self._send_arm_min_diff
-            )
-            self._stale_arm_streak = self._stale_arm_streak + 1 if big_delta else 0
+        tick = self._last_tick
+        arm_streak = 0 if tick is None else tick.stale_arm_streak
+        changed_streak = 0 if tick is None else tick.changed_streak
         if any(verdict is False for verdict in verdicts):
-            self._copy_changed_streak = 0
-            if self.icon_evidence() or self._stale_arm_streak >= self._send_arm_ticks:
+            if self.icon_evidence() or arm_streak >= self._send_arm_ticks:
                 # WHICH evidence armed it is the whole difference between "a
                 # reasoning icon is on screen" (proof) and "the region kept
                 # changing a lot" (inference), and only the second one can be
@@ -1695,10 +1767,8 @@ class AutomationController:
                 self._view.hide_paste_flash()
             return
         if not all(verdict is True for verdict in verdicts) or not self._copy_armed:
-            self._copy_changed_streak = 0
             return
-        self._copy_changed_streak += 1
-        if self._copy_changed_streak < 2:
+        if changed_streak < 2:
             return
         if not self._os_armed:
             # The finish is real and everything above it stays true - which is
@@ -1731,8 +1801,6 @@ class AutomationController:
             )
             return
         self._copy_armed = False
-        self._copy_changed_streak = 0
-        self._stale_arm_streak = 0
         # The reply we were waiting for is being harvested right now: nothing
         # is outstanding again until the next outbound goes out.
         self.close_reply_gate()
@@ -1894,7 +1962,7 @@ class AutomationController:
         """
         if self._own_window is None:
             return False
-        await asyncio.sleep(self._monitor.ops.snap_back_settle())
+        await asyncio.sleep(beats.SNAP_BACK_SETTLE_S)
         return await self.snap_focus_back()
 
     async def _await_browser_activation(self) -> bool:
@@ -1917,11 +1985,11 @@ class AutomationController:
         handle = self._own_window
         if handle is None:
             return False
-        for _ in range(self._monitor.ops.activation_attempts()):
+        for _ in range(beats.ACTIVATION_ATTEMPTS):
             current = await self._monitor.foreground_window()
             if current is not None and current != handle:
                 return True
-            await asyncio.sleep(self._monitor.ops.activation_poll())
+            await asyncio.sleep(beats.ACTIVATION_POLL_S)
         return False
 
     # -- the two clicks every sequence is built out of -------------------------
@@ -1964,51 +2032,42 @@ class AutomationController:
         like the master's is exactly the case this supports.
 
         All of them rather than the first, with near-duplicate hits on one
-        physical element folded away first (``flow.element_rects``), so a list
-        longer than one really does mean two elements.
+        physical element folded away first, so a list longer than one really does
+        mean two elements.
 
-        ``scene`` lets a caller that already captured the chat region reuse the
-        frame, so several appearances can be hunted in one picture of one
-        instant - which is why it may not be combined with ``slot``: the frame
-        was taken from one window, and translating its matches back through
-        another slot's rectangle would put them anywhere at all.
+        Since phase 2 this is one line onto ``UIMonitor.find_all`` and the whole
+        search - the capture, the fold, the tolerance and the matcher - is the
+        monitor's (ui-monitor.md 2.3). Both extra parameters are therefore
+        VESTIGIAL, kept only so the two shells' host methods, frozen while this
+        phase runs, still type-check against the call they make:
+
+        * ``slot`` cannot be honoured, because the monitor watches ONE window -
+          the one it was last configured with, which is the live one. A caller
+          that means another slot retargets first, which is what
+          ``rebuild_detectors`` is for.
+        * ``scene`` cannot be honoured either: a frame is pixels, and pixels stop
+          at the seam. Reusing one across several searches was an optimisation of
+          the old in-process arrangement, and ``locate`` - one capture, answering
+          about the kind asked for AND the kinds it may not be - is what replaced
+          it.
+
+        Passing both is still refused rather than silently ignored: it was never
+        answerable, and a caller that asks for it has misunderstood the search.
 
         Empty - never raised - for every way this can come up empty: no chat
         region drawn, no such appearance captured, the capture failed, or it
-        simply is not on screen.
+        simply is not on screen. The monitor makes them one answer, because a
+        caller that may not click has one next move for all of them.
 
         This is the implementation BOTH shells' ``AutomationHost.find_all``
         delegates to (``verified_copy_click``'s arrangement exactly): each of
         them had spelled the same search out, because a shell may not import
-        another shell. What stays a host method is the SEAM - the sequences
-        above still ask through ``self._host``, because that indirection is what
-        the Textual suites substitute to put appearances on an imaginary screen.
+        another shell. What stays a host method is the SEAM - it is what the
+        Textual suites substitute to put appearances on an imaginary screen.
         """
         if scene is not None and slot is not None:
             raise ValueError("find_all takes a slot or a captured scene, never both")
-        target = slot if slot is not None else self._live
-        region = self.calibration(target).chat_region
-        if region is None:
-            return []
-        templates = self._host.profile_for(target).variants(kind)
-        if not templates:
-            return []
-        if scene is None:
-            try:
-                scene = await asyncio.to_thread(self._monitor.ops.capture, region)
-            except CaptureError:
-                return []
-        tolerance, matcher = self.live_search()
-        return await asyncio.to_thread(
-            element_rects,
-            self._monitor.ops.all_matches,
-            templates,
-            scene,
-            region,
-            max_diff=kind.max_diff,
-            tolerance=tolerance,
-            matcher=matcher,
-        )
+        return list(await self._monitor.find_all(kind))
 
     async def chatbox_region(self) -> ScreenRegion | None:
         """Which chat input box to poke right now, or None if none is known.
@@ -2087,17 +2146,26 @@ class AutomationController:
         fallback, and None outright when nothing at all is drawn.
 
         A fresh chat centres its input box and an ongoing one docks it at the
-        bottom, so both appearances are hunted in ONE capture of the live chat
-        region - the two layouts are mutually exclusive, so whichever is found
-        is the one on screen. Ongoing goes first: mid-session it is the common
-        case, and the search stops at the first hit.
+        bottom, so both layouts are asked about, ongoing first: mid-session it is
+        the common case, and the hunt stops at the first hit. One
+        :meth:`UIMonitor.locate` per layout rather than one capture searched
+        twice - the frame is the monitor's now, and a caller that held one could
+        not hand it back across the seam (ui-monitor.md 2.2).
+
+        No ``exclude_kinds``, deliberately, and it is the one place that wants
+        saying: the two layouts are the same CONTROL drawn two ways, so a service
+        whose captures of them overlap would have each veto the other and the
+        delivery would refuse a chat box that is plainly on screen. Excluding is
+        for a kind that must not be MISTAKEN for another - the copy icon and the
+        box it may not be found inside; these two are alternatives, and taking
+        the first that answers is what "whichever layout is up" means.
 
         When neither is found (the page is mid-transition, a dialog covers it,
         or the service has no chat box captured at all) the whole chat window is
-        the answer, with no kind beside it. Two input boxes of the same layout
-        inside the region take that same answer: an appearance belongs to the
-        SERVICE, so a second window of it under one drawn region resolves the
-        same box twice and picking one is a coin toss between two conversations.
+        the answer, with no kind beside it. An AMBIGUOUS answer takes that same
+        road: an appearance belongs to the SERVICE, so a second window of it under
+        one drawn region resolves the same box twice and picking one is a coin
+        toss between two conversations.
 
         That un-kinded answer is a WEAK one, and every caller reads it as such.
         The harvest's focus click takes it - it only has to put the page in
@@ -2105,27 +2173,24 @@ class AutomationController:
         The delivery refuses it outright (:meth:`verified_chatbox_target`),
         because the click it makes is followed by a paste.
 
-        Always the LIVE slot: mid-delegation this is the sub-agent's window.
+        Always the LIVE slot: the monitor watches the window it was configured
+        with, and mid-delegation that is the sub-agent's.
         """
         region = self.live.chat_region
         if region is None:
             return None
-        try:
-            scene: RegionImage | None = await asyncio.to_thread(self._monitor.ops.capture, region)
-        except CaptureError:
-            return region, None
         for kind in (TemplateKind.CHATBOX_ONGOING, TemplateKind.CHATBOX_INITIAL):
-            found = await self._host.find_all(kind, scene=scene)
-            if len(found) == 1:
-                return found[0], kind
-            if len(found) > 1:
+            found = await self._monitor.locate(kind)
+            if found.ambiguous:
                 self._view.notify(
-                    f"found {len(found)} things that look like the {kind.label} in the chat "
-                    "window - AgentClip will not paste into a maybe-wrong one; redraw the "
+                    f"several things look like the {kind.label} in the chat window - "
+                    "AgentClip will not paste into a maybe-wrong one; redraw the "
                     "window so it contains only this chat",
                     severity="warning",
                 )
                 return region, None
+            if found.region is not None:
+                return found.region, kind
         return region, None
 
     async def click_profile_element(
@@ -2140,35 +2205,42 @@ class AutomationController:
         simply reads as not-on-screen and gets no click at all. Refusing is
         always the safe answer - the user can click it themselves.
 
-        Finding it TWICE is refused just as firmly. An appearance belongs to
-        the service, so a second window of the same service sitting inside the
-        drawn region carries an identical button; picking one of them is a coin
-        toss between two conversations, and the loser is a chat that gets
-        clicked - reset, even - on behalf of the other.
+        Finding it TWICE is refused just as firmly, and that refusal is the
+        monitor's (AMBIGUOUS). An appearance belongs to the service, so a second
+        window of the same service sitting inside the drawn region carries an
+        identical button; picking one of them is a coin toss between two
+        conversations, and the loser is a chat that gets clicked - reset, even -
+        on behalf of the other.
+
+        **Two of the six verdicts are decided HERE and four over there**
+        (ui-monitor.md 2.3). DISARMED and NOT_CALIBRATED are refusals a brain
+        makes before it asks anything: the armed switch is policy, and "there is
+        nothing captured to look for" is answered against calibration this object
+        is holding anyway. MISMATCH, AMBIGUOUS, CLICKED and NOT_CLICKED are what
+        looking at the screen and pressing a pixel came to, and they are the only
+        things :meth:`UIMonitor.click_element` ever answers - including WHERE
+        inside the matched rectangle the press lands, which is the service's own
+        click point and travels with the profile that owns it.
 
         DISARMED is answered FIRST, above even the calibration check: this is
         one of the four chokepoints the armed switch is enforced at
         (``set_os_armed``), it is the only programmatic click on a service
         appearance in the app, and a refusal that has already captured the
         screen and searched it would be answering a question nobody may act on.
+
+        ``slot`` still names which calibration the refusal is judged against -
+        the sub-agent's new-chat button is not the master's - but it cannot aim
+        the SEARCH, which happens in the window the monitor was last configured
+        with. Every caller that means another window retargets first
+        (``rebuild_detectors``); the parameter stays because both shells pass it
+        and they are frozen while this phase runs.
         """
         if not self._os_armed:
             return ElementClick.DISARMED
         cal = self.calibration(slot)
-        profile = self._host.profile_for(slot)
-        if cal.chat_region is None or not profile.has(kind):
+        if cal.chat_region is None or not self._host.profile_for(slot).has(kind):
             return ElementClick.NOT_CALIBRATED
-        found = await self._host.find_all(kind, slot)
-        if not found:
-            return ElementClick.MISMATCH
-        if len(found) > 1:
-            return ElementClick.AMBIGUOUS
-        # Where inside the matched rectangle, per the service's own click point:
-        # the middle of a control is only the right pixel until a service draws
-        # one whose middle is a label and whose left third is the button.
-        target = click_point_region(found[0], *profile.click_point(kind))
-        clicked = await self._monitor.click(target, settle_s=settle_s)
-        return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
+        return await self._monitor.click_element(kind, settle_s=settle_s)
 
     # -- what the live window is, for the sequences that read it ---------------
 
@@ -2210,92 +2282,12 @@ class AutomationController:
             size = f"{templates[0].width}×{templates[0].height}{extra} · "
         self._view.paint_detection(TemplateKind.COPY, f"{size}{text}")
 
-    def show_copy_crop(
-        self, scene: RegionImage, found: tuple[Template, RegionMatch] | None
-    ) -> None:
-        """Put the flow's OWN copy-button search result in the ELEMENTS column.
-
-        The poller draws that row every tick from its own presence search, so
-        this is not what keeps the row alive - it is the picture of the frame
-        the click was actually aimed at, cut at the instant it was aimed, which
-        is the one the user wants to see when a click misses. The next poll tick
-        will replace it with a picture of *now*, as it should.
-
-        Through the same ``paint_elements`` door the poller uses, so it carries
-        the shell's paint epoch like every other run-scoped paint: a crop asked
-        for just before a rebuild is a picture of a window the column no longer
-        describes.
-        """
-        sighting = (
-            None
-            if found is None
-            else Sighting(TemplateKind.COPY, found[0], found[1], time.monotonic())
-        )
-        self._view.paint_elements(self._crop_elements(scene, {TemplateKind.COPY: sighting}))
-
     # -- the pieces of one harvest ---------------------------------------------
-
-    def hover_scan_for_copy(
-        self,
-        region: ScreenRegion,
-        templates: Sequence[Template],
-        *,
-        tolerance: int,
-        matcher: CandidateSource | None = None,
-    ) -> tuple[Template, RegionMatch] | None:
-        """Walk the real cursor up ``region`` and stop at the FIRST frame the
-        copy icon appears in, or None if it never does.
-
-        Claude's chat only renders a response's copy button while the pointer is
-        over that response, so the cheap static capture finds nothing there no
-        matter how good the template is. Bottom-up (``screen.hover`` picks the
-        stops) because the newest response - the one we want - is at the bottom,
-        so the usual answer is one or two stops in.
-
-        Blocking by design: a cursor move, a settle pause and a capture + region
-        scan per stop. Runs in a worker thread, never on the event loop. Any
-        failure (unsupported platform, a capture that fails) ends the scan,
-        which the caller reports the same way as "not found" - a scan that
-        cannot see is not a scan that found nothing.
-        """
-        for x, y in hover_scan_points(region):
-            if not self._monitor.ops.move_cursor(x, y):
-                return None
-            time.sleep(self._monitor.ops.hover_step_delay())
-            try:
-                scene = self._monitor.ops.capture(region)
-            except CaptureError:
-                return None
-            found = lowest_match(
-                self._monitor.ops.lowest_match,
-                templates,
-                scene,
-                max_diff=TemplateKind.COPY.max_diff,
-                tolerance=tolerance,
-                matcher=matcher,
-            )
-            if found is not None:
-                return found
-        return None
-
-    async def snap_to_bottom(self, region: ScreenRegion, scroll_action: str) -> None:
-        """One snap of the transcript to its bottom, the way this service scrolls.
-
-        Its own method because the flow does it up to ``COPY_SNAP_ROUNDS`` times
-        and the three branches must not drift apart between rounds - a retry
-        that quietly used the wheel on a page whose preset says End would be a
-        retry of something else.
-
-        Deliberately *only* the scroll: the focus click and the pointer park in
-        front of round 1 are one-time choreography (nothing between rounds moves
-        either), and the settle belongs to the caller, which pays it per round.
-        """
-        if scroll_action == SCROLL_PAGE_DOWN:
-            await self._monitor.scroll_key("page_down", PAGE_DOWN_TAPS)
-        elif scroll_action == SCROLL_END:
-            await self._monitor.scroll_key("end")
-        else:
-            await self._monitor.scroll(region, SNAP_WHEEL_DETENTS)
+    # What is left of them after phase 2: the hover scan, the snap and the
+    # copy-icon hunt are ``UIMonitor`` verbs now (ui-monitor.md 2.3), and the
+    # crop of the frame a click was aimed at went with them - a crop is pixels,
+    # and the ELEMENTS column is fed from the monitor's own frame hook instead
+    # (``_on_frame``), which is the picture of the same instant.
 
     async def verified_copy_click(self, target: ScreenRegion) -> bool:
         """Click where the copy button was found, retrying at slightly offset
@@ -2577,7 +2569,7 @@ class AutomationController:
             # below too, since that is the same first Ctrl+V into the same fresh
             # focus.
             await self._await_browser_activation()
-            await asyncio.sleep(self._monitor.ops.paste_settle())
+            await asyncio.sleep(beats.PASTE_SETTLE_DELAY)
             # Streaming needs a clipboard to write each chunk through, so a
             # service that asks for it still falls back to the single burst when
             # there is no backend - whatever the shell parked is all there is.
@@ -2604,7 +2596,7 @@ class AutomationController:
                 # the only thing that moves the loop to WAIT_GENERATE, exactly
                 # as for a human Enter. If the tap did not take, the gate times
                 # out as ever, and the flash below says whose Enter it is now.
-                await asyncio.sleep(self._monitor.ops.submit_settle())
+                await asyncio.sleep(beats.SUBMIT_SETTLE_S)
                 auto_sent = await self._monitor.send_enter()
                 self.log_harness(
                     KIND_GATE,
@@ -2736,7 +2728,7 @@ class AutomationController:
         clicked = await self.focus_click(target)
         if not clicked:
             return False
-        await asyncio.sleep(self._monitor.ops.focus_click_gap())
+        await asyncio.sleep(beats.FOCUS_CLICK_GAP_S)
         await self.focus_click(target)
         return True
 
@@ -2762,10 +2754,10 @@ class AutomationController:
         clipboard and the caller's existing MANUAL_INSERT path takes over, with
         a toast that says both halves of that.
         """
-        # The size is read off ``ScreenOps`` rather than defaulted so the whole
+        # The size is read off the MODULE rather than defaulted so the whole
         # cadence - chunk size and inter-chunk beat - is one pair a shell's
         # suites can shrink without pasting a real payload's worth of bursts.
-        chunks = split_for_stream(text, self._monitor.ops.stream_chunk_chars())
+        chunks = chunking.split_for_stream(text, chunking.STREAM_CHUNK_CHARS)
         total = len(chunks)
         for index, chunk in enumerate(chunks, start=1):
             self._view.show_paste_flash(stream_flash_text(index, total))
@@ -2779,7 +2771,7 @@ class AutomationController:
                 await self._restore_after_partial_stream(text, index, total)
                 return False
             if index < total:
-                await asyncio.sleep(self._monitor.ops.stream_chunk_settle())
+                await asyncio.sleep(beats.STREAM_CHUNK_SETTLE_S)
         return True
 
     async def _restore_after_partial_stream(self, text: str, index: int, total: int) -> None:
@@ -2884,8 +2876,8 @@ class AutomationController:
         # Focus the chat window and park the pointer on the transcript. Both are
         # done ONCE, in front of the first snap: the rounds that follow scroll
         # the way this service says it scrolls (``ServicePreset.scroll_action``,
-        # ``snap_to_bottom``) and touch neither the focus nor the mouse, so a
-        # retry inherits this choreography rather than repeating it.
+        # ``UIMonitor.snap_to_bottom``) and touch neither the focus nor the
+        # mouse, so a retry inherits this choreography rather than repeating it.
         #
         # The keyboard forms ride this focus click - keys go to whatever has
         # focus - so the click may not land in the CHAT BOX the way the paste
@@ -2920,46 +2912,40 @@ class AutomationController:
         await self._monitor.move_cursor(*region.center)
         await asyncio.sleep(0.1)  # let the page's hover tracking register it
 
-        tolerance, matcher = self.live_search()
-        found: tuple[Template, RegionMatch] | None = None
+        found: ScreenRegion | None = None
         best_miss: float | None = None
         for attempt in range(1, COPY_SNAP_ROUNDS + 1):
-            await self.snap_to_bottom(region, scroll_action)
+            await self._monitor.snap_to_bottom(scroll_action)
             await asyncio.sleep(SNAP_SETTLE_S)  # let the page render what it scrolled to
 
-            try:
-                scene = await asyncio.to_thread(self._monitor.ops.capture, region)
-            except CaptureError as exc:
-                self._view.notify(
-                    f"could not capture the chat region: {exc}", severity="error"
-                )
-                self.copy_status("capture failed")
-                self.log_harness(KIND_COPY, f"could not capture the chat region: {exc}")
-                self.set_loop_state(
-                    LoopState.MANUAL_COPY, "the chat region could not be captured to search in"
-                )
-                return
-            found, miss = await asyncio.to_thread(
-                lowest_match_scored,
-                self._monitor.ops.lowest_match,
-                templates,
-                scene,
-                max_diff=TemplateKind.COPY.max_diff,
-                tolerance=tolerance,
-                matcher=matcher,
+            # One monitor verb per round, and the whole hunt is inside it: a
+            # capture of the configured region, the copy stack searched across
+            # it, the bottom-most hit and - on a miss - how close the closest
+            # rejected candidate came. A capture that failed reads as a miss
+            # here, deliberately: it says nothing about where the icon is, which
+            # is the same fact as "it is not on screen" to a caller that may not
+            # click either way (ui-monitor.md 2.3).
+            #
+            # ``exclude_kinds`` is the chat box, both layouts. The copy icon is
+            # hunted across the WHOLE drawn window, the composer included, and a
+            # service whose copy capture also matches a corner of its input box
+            # would have the harvest click into the chat box and copy nothing -
+            # a hit that is really the other control is a click on the wrong
+            # thing, which is exactly what the exclusion is for.
+            located = await self._monitor.locate(
+                TemplateKind.COPY, exclude_kinds=CHATBOX_KINDS
             )
+            found = located.region
             # The closest ANY round came, not the last one's: see the docstring.
-            if miss is not None and (best_miss is None or miss < best_miss):
-                best_miss = miss
-            # The ELEMENTS column's picture of the frame the click is being
-            # AIMED at, which the poller's own copy row cannot be: this frame is
-            # the one after the scroll and the settle. Cut from THIS frame, which
-            # is why it happens before the hover scan - a hover-scan hit was
-            # verified against a frame taken with the pointer somewhere else, and
-            # cutting it out of the static one would draw whatever the icon was
-            # hiding. Repainted every round, so the column shows the frame the
-            # flow is looking at now rather than the one it started with.
-            self.show_copy_crop(scene, found)
+            if located.best_miss is not None and (
+                best_miss is None or located.best_miss < best_miss
+            ):
+                best_miss = located.best_miss
+            # ``ambiguous`` is deliberately NOT consulted. Every response in a
+            # transcript stamps its own copy icon, so several of them on screen
+            # is the ordinary case rather than the two-windows trouble it means
+            # for a button there is only ever one of - and ``locate`` already
+            # answers with the LOWEST, which is the newest reply's.
             if found is not None:
                 break
             if attempt < COPY_SNAP_ROUNDS:
@@ -2981,13 +2967,7 @@ class AutomationController:
             # is the only way to find the icon, gratuitous everywhere else, where
             # a static miss simply means the icon is not there.
             self.copy_status("hover-scanning")
-            found = await asyncio.to_thread(
-                self.hover_scan_for_copy,
-                region,
-                templates,
-                tolerance=tolerance,
-                matcher=matcher,
-            )
+            found = await self._monitor.hover_scan(TemplateKind.COPY)
         if found is None:
             self._view.notify("copy button not found on screen", severity="warning")
             self.copy_status("not found")
@@ -3004,15 +2984,15 @@ class AutomationController:
             )
             return
 
-        template, match = found
-        # The rectangle the match translates back to, reduced to the one pixel
-        # this service aims its copy click at (the centre unless the user moved
-        # it). Reduced HERE rather than inside the click, so the small retry
-        # offsets walk around the point the user chose rather than around a
-        # centre they rejected.
+        # The rectangle the search came back with, reduced to the one pixel this
+        # service aims its copy click at (the centre unless the user moved it).
+        # Reduced HERE rather than inside the click, so the small retry offsets
+        # ``verified_copy_click`` walks through stay around the point the user
+        # chose rather than around a centre they rejected - which is also why
+        # this click does not go through ``UIMonitor.click_element``: the copy
+        # click is CLIPBOARD-verified, and that verification is policy.
         target = click_point_region(
-            match_rect(region, template, match),
-            *self._live_profile().click_point(TemplateKind.COPY),
+            found, *self._live_profile().click_point(TemplateKind.COPY)
         )
         # Arm the prose window for THIS click and nothing else: whatever the
         # clipboard holds when the click verifies is the model's reply, so the
@@ -3022,12 +3002,12 @@ class AutomationController:
         self._prose_window = True
         clicked = await self._host.verified_copy_click(target)
         if clicked:
-            self._view.notify(f"copy button clicked (diff {match.diff:.2f})")
-            self.copy_status(f"clicked (diff {match.diff:.2f})")
+            self._view.notify("copy button clicked")
+            self.copy_status("clicked")
             self.log_harness(
                 KIND_COPY,
-                f"copy button found and clicked (diff {match.diff:.2f}); the clipboard "
-                "changed, so the reply is on its way in",
+                "copy button found and clicked; the clipboard changed, so the reply "
+                "is on its way in",
             )
             # The response is on its way to the clipboard - hand focus back to
             # AgentClip so the user watches the ingest here, not the browser.
@@ -3058,8 +3038,7 @@ class AutomationController:
         self.copy_status("click did not take")
         self.log_harness(
             KIND_COPY,
-            f"the copy button was found (diff {match.diff:.2f}) and clicked, but the "
-            "clipboard never changed",
+            "the copy button was found and clicked, but the clipboard never changed",
         )
         self.set_loop_state(
             LoopState.MANUAL_COPY,
@@ -3124,7 +3103,7 @@ class AutomationController:
         self._view.hide_paste_flash()
         self._host.rebuild_detectors()  # baseline + regions from the new live slot
         # Let the fresh chat render its (centred) input box.
-        await asyncio.sleep(self._monitor.ops.new_chat_settle())
+        await asyncio.sleep(beats.NEW_CHAT_SETTLE_S)
         return True
 
     def end_browser_chat(self) -> None:

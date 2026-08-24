@@ -31,37 +31,63 @@ class LoopState(Enum):
     AUTO_COPY = auto()  # generation stopped; hunting for the reply's copy button
     MANUAL_COPY = auto()  # no copy button to click; the user copies the reply themselves
     INTERPRETING = auto()  # the reply is on the clipboard; parsing and acting on it
+    # Last, and outside the round trip on purpose: it is not a step of the loop
+    # but the loop's absence. The link to the UI monitor is gone (docs/design/
+    # ui-monitor.md §2.9), so nothing can be looked at, clicked or pasted until
+    # a redial lands. Declared at the end so the rail's picture of the round
+    # trip keeps its order and gains a row rather than growing one in the middle.
+    DISCONNECTED = auto()
 
 
-# The two states the loop cannot leave by itself: both mean "the next move is a
-# human's" - the payload nobody pasted, the reply nobody copied. Named here
-# rather than at the one place that reads them because it is a fact about the
-# enum, and anything that has to nag the user (today: the audible alert) is
-# asking exactly this question.
+# The states the loop cannot leave by itself: every one of them means "the next
+# move is not this loop's" - the payload nobody pasted, the reply nobody copied,
+# and the machine nobody can reach. Named here rather than at the one place that
+# reads them because it is a fact about the enum, and anything that has to nag
+# the user (today: the audible alert) is asking exactly this question.
+#
+# DISCONNECTED belongs here for the same reason the two manual states do, with
+# one difference worth being honest about: what the user is being nagged towards
+# is the *monitor*, not the browser - the brain redials on its own, and if it
+# cannot, somebody has to go and look at the machine the monitor runs on.
 ATTENTION_STATES: frozenset[LoopState] = frozenset(
-    {LoopState.MANUAL_INSERT, LoopState.MANUAL_COPY}
+    {LoopState.MANUAL_INSERT, LoopState.MANUAL_COPY, LoopState.DISCONNECTED}
 )
+
+# The one destination that is not forward motion, and the one exception to the
+# header's rule. Losing the monitor link is not a step the loop takes - it is
+# something that happens TO it, at any point, from any state (§2.9), so every
+# row below carries it. It earns the exception ``IDLE`` is denied because it is
+# genuinely reachable from everywhere: a rail that drew it dim while the link
+# was about to drop would be dimming the one move the loop can always make.
+_ANY: frozenset[LoopState] = frozenset({LoopState.DISCONNECTED})
 
 LOOP_TRANSITIONS: dict[LoopState, frozenset[LoopState]] = {
     # A chat message became an outbound payload (``copy_outbound``).
-    LoopState.IDLE: frozenset({LoopState.AUTO_INSERT}),
+    LoopState.IDLE: frozenset({LoopState.AUTO_INSERT}) | _ANY,
     # The focus click + synthetic Ctrl+V either landed (wait for the send) or
     # did not (the user is asked to paste).
-    LoopState.AUTO_INSERT: frozenset({LoopState.WAIT_SEND, LoopState.MANUAL_INSERT}),
+    LoopState.AUTO_INSERT: frozenset({LoopState.WAIT_SEND, LoopState.MANUAL_INSERT}) | _ANY,
     # A manual paste is proven by the ready-to-send button appearing - or, for
     # a service without that capture, only by the generation it leads to.
-    LoopState.MANUAL_INSERT: frozenset({LoopState.WAIT_SEND, LoopState.WAIT_GENERATE}),
+    LoopState.MANUAL_INSERT: frozenset({LoopState.WAIT_SEND, LoopState.WAIT_GENERATE}) | _ANY,
     # The send button going away, or a busy icon / sustained streaming delta,
     # is the user's Enter.
-    LoopState.WAIT_SEND: frozenset({LoopState.WAIT_GENERATE}),
+    LoopState.WAIT_SEND: frozenset({LoopState.WAIT_GENERATE}) | _ANY,
     # The finish detectors agreeing "stopped" fires the auto-copy flow - unless
     # there is no captured copy button, in which case the harvest is the user's.
-    LoopState.WAIT_GENERATE: frozenset({LoopState.AUTO_COPY, LoopState.MANUAL_COPY}),
+    LoopState.WAIT_GENERATE: frozenset({LoopState.AUTO_COPY, LoopState.MANUAL_COPY}) | _ANY,
     # The flow's click puts the reply on the clipboard; any failure (capture,
     # search, a click that did not take) hands the copy to the user.
-    LoopState.AUTO_COPY: frozenset({LoopState.INTERPRETING, LoopState.MANUAL_COPY}),
-    LoopState.MANUAL_COPY: frozenset({LoopState.INTERPRETING}),
+    LoopState.AUTO_COPY: frozenset({LoopState.INTERPRETING, LoopState.MANUAL_COPY}) | _ANY,
+    LoopState.MANUAL_COPY: frozenset({LoopState.INTERPRETING}) | _ANY,
     # The turn runs (parse, gate, execute); its next outbound restarts the loop,
     # and a turn that ends waiting on the user settles back to idle.
-    LoopState.INTERPRETING: frozenset({LoopState.AUTO_INSERT, LoopState.IDLE}),
+    LoopState.INTERPRETING: frozenset({LoopState.AUTO_INSERT, LoopState.IDLE}) | _ANY,
+    # The redial landed. IDLE and nothing else, because a reconnect RE-DERIVES
+    # from the screen rather than resuming: the trackers are rebuilt, the
+    # streaks restart, and nothing about the run that was interrupted is
+    # replayed (§2.9). Phase 2's loop then re-runs, from its top, the recipe of
+    # the state the link dropped in - so the loop walks back out of IDLE by
+    # observing the screen, exactly as it would have the first time.
+    LoopState.DISCONNECTED: frozenset({LoopState.IDLE}),
 }

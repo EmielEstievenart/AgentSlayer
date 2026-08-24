@@ -312,13 +312,13 @@ async def test_start_browser_chat_resets_the_finish_trigger(
         await _calibrate_subagent(app, pilot, picker, seed_templates)
 
         main._copy_armed = True
-        main._copy_changed_streak = 1
         main._busy_seen = True
         main._busy_finished = False
 
         assert await main.start_browser_chat(AgentSlot.SUBAGENT) is True
         assert main._copy_armed is False
-        assert main._copy_changed_streak == 0
+        # the changed streak is the monitor's now (ui-monitor.md §2.2): a
+        # retarget resets it there, and the next tick reads 0
         assert main._busy_seen is False
         assert main._busy_finished is None
 

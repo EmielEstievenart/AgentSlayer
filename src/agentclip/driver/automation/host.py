@@ -9,12 +9,16 @@ answers are made of state a shell owns and this layer does not:
   shell's ``Config``) and what it LOOKS like (a ``ServiceProfile`` read off disk
   into the shell's own cache) - the same reason ``has_appearance`` has always
   been a callback;
-* where an appearance is on screen right now (``find_all``), which is here for
-  the reason the copy click below is and no other: it is the one search that
-  already had a shell-side stand-in the suites substitute, and a sequence that
-  called past the shell could not be handed an imaginary screen.
-  :meth:`AutomationController.find_all` is the implementation both shells
-  delegate to - the search itself is no longer a shell's;
+* where an appearance is on screen right now (``find_all``). Phase 2 of
+  docs/design/ui-monitor.md took the last sequence that asked through it: the
+  chat-box hunt and the find-then-click primitive are ``UIMonitor.locate`` and
+  ``UIMonitor.click_element`` now, and they are asked of the MONITOR, which is
+  the object that can be handed an imaginary screen. What is left of this one is
+  the shells' own searches, which still route through
+  :meth:`AutomationController.find_all` so that neither of them keeps a second
+  copy of a search - and the Textual suites' stand-in, which is what a Pilot test
+  puts a copy button on an imaginary screen with. It stays on the port until the
+  shells are rewired;
 * the two acts that end a harvest and cannot live here: handing a non-protocol
   reply to the SESSION (``agentclip.shell.app`` is above this layer) and rebuilding
   the detector set around a window the automation has just moved to (which

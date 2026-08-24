@@ -880,10 +880,6 @@ class MainScreen(Screen[None]):
     def _copy_changed_streak(self) -> int:
         return self._automation.copy_changed_streak
 
-    @_copy_changed_streak.setter
-    def _copy_changed_streak(self, value: int) -> None:
-        self._automation.copy_changed_streak = value
-
     @property
     def _awaiting_pasted_reply(self) -> bool:
         return self._automation.awaiting_pasted_reply

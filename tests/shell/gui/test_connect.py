@@ -872,7 +872,7 @@ async def test_saving_writes_no_secret(
     assert "password" not in text.lower()
 
 
-# == the --gui --ssh launch ====================================================
+# == the GUI --ssh launch ======================================================
 
 
 async def test_a_pending_launch_opens_the_dialog_and_runs_it(
@@ -884,7 +884,7 @@ async def test_a_pending_launch_opens_the_dialog_and_runs_it(
     harness: RemoteHarness,
     dial: Any,
 ) -> None:
-    """``--gui --ssh`` no longer blocks the launch on a terminal dial: the
+    """A GUI ``--ssh`` launch no longer blocks on a terminal dial: the
     window is already up and the sequence runs in it, pre-filled."""
     harness.view._remote = RemoteConnect(
         local_root=project,

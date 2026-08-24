@@ -391,7 +391,7 @@ def test_pywebview_only_in_the_gui_shell() -> None:
     ``agentclip.shell.gui`` IS pywebview wearing a UI shell, so it imports it;
     nothing else may, because the ``gui`` extra is optional and a TUI-only
     install must not be able to trip over a missing window library.
-    ``cli.main`` reaches the shell on --gui through an import inside the
+    ``cli.main`` reaches the shell through an import inside the
     function, which this checker does not see - by design, that is the same
     allowance every lazy optional import in this project uses.
     """

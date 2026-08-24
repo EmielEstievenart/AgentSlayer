@@ -413,7 +413,20 @@ def tui(monkeypatch: pytest.MonkeyPatch) -> type[FakeApp]:
 
 
 def argv(args: argparse.Namespace, *extra: str) -> list[str]:
-    return ["--project", args.project, "--ssh", "box", "--remote-root", REMOTE_ROOT, *extra]
+    # ``--tui`` because it is the TUI's launch that is under test here: the GUI
+    # defers an ``--ssh`` dial into its own connect dialog (cli.py's
+    # ``pending_connect``), so a bare launch would never reach ``remote_launch``
+    # at all. The GUI's side of that is tests/shell/gui/test_connect.py.
+    return [
+        "--tui",
+        "--project",
+        args.project,
+        "--ssh",
+        "box",
+        "--remote-root",
+        REMOTE_ROOT,
+        *extra,
+    ]
 
 
 def launched(app: type[FakeApp]) -> FakeApp:
@@ -579,7 +592,7 @@ def test_a_local_launch_still_builds_its_engine_here(
     monkeypatch.setattr(
         "agentclip.config.default_global_config_path", lambda: tmp_path / "no-global.toml"
     )
-    assert cli.main(["--project", str(project)]) == 0
+    assert cli.main(["--tui", "--project", str(project)]) == 0
     assert isinstance(launched(tui).kwargs["engine_factory"], cli.LinkFactory)
 
 

@@ -1,4 +1,4 @@
-"""Command-line entry point: argparse, config, clipboard provider, engine, TUI."""
+"""Command-line entry point: argparse, config, clipboard provider, engine, shell."""
 
 from __future__ import annotations
 
@@ -382,8 +382,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="project root ON the remote machine (required with --ssh unless the"
         " saved target names one)",
     )
-    # Hidden: the TUI re-invokes itself with this flag to run the draw-a-box
-    # screen overlay in a child process (tkinter can't share the TUI's process).
+    # Hidden: the app re-invokes itself with this flag to run the draw-a-box
+    # screen overlay in a child process (tkinter can't share either shell's
+    # process).
     parser.add_argument("--pick-region", action="store_true", help=argparse.SUPPRESS)
     # Hidden: the instruction that overlay shows; only meaningful with --pick-region.
     parser.add_argument("--pick-prompt", default=None, help=argparse.SUPPRESS)
@@ -391,9 +392,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # arrives as JSON on stdin and is drawn where each element sits on screen.
     parser.add_argument("--show-identify", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
+        "--tui",
+        action="store_true",
+        help="launch the deprecated Textual TUI instead of the GUI shell",
+    )
+    # Accepted for one release so a muscle-memory `agentclip --gui` (and every
+    # shortcut, script and doc that still carries it) keeps working: the GUI is
+    # what a bare `agentclip` opens now, so the flag asks for what it would get
+    # anyway. Nothing reads it - the shell fork is `args.tui` alone.
+    parser.add_argument(
         "--gui",
         action="store_true",
-        help="launch the experimental GUI shell instead of the TUI",
+        help="deprecated no-op: the GUI shell is the default (see --tui)",
     )
     parser.add_argument(
         "--list-matchers",
@@ -437,7 +447,7 @@ def _gui_smoke() -> int:
 
     ``--list-matchers``' twin, and it exists for the same reason (see its
     docstring): the exe bundles an optional extra whose absence is silent at
-    runtime. ``--gui`` on a build that lost pywebview prints the "install the
+    runtime. A build that lost pywebview prints the "install the
     gui extra" line a frozen user can do nothing about, and a build that kept
     pywebview but lost the packaged page opens a window on nothing - neither
     fails until somebody launches the GUI.
@@ -687,15 +697,21 @@ def main(argv: list[str] | None = None) -> int:
     if args.gui_smoke:
         return _gui_smoke()
 
+    # WHICH shell, in one place: the GUI unless the user asked for the TUI by
+    # name (docs/design/ui-monitor.md §2.12 - the TUI is deprecated and will be
+    # deleted). ``--gui`` is still accepted and deliberately not consulted; it
+    # now names the default rather than selecting anything.
+    gui = not args.tui
+
     # WHERE the session runs, decided before either shell exists - except on the
-    # one path where it is decided AFTER: ``--gui --ssh`` no longer blocks the
-    # launch on a terminal dial. The window opens on this PC and the connect
+    # one path where it is decided AFTER: a GUI ``--ssh`` launch no longer blocks
+    # on a terminal dial. The window opens on this PC and the connect
     # dialog runs the identical sequence in-app, with a checklist and a retry
     # (docs/design/ui-briefs/ssh-connect.md; gui.md §2's "everything slow happens
     # after first paint"). The TUI keeps the launch-time flow verbatim: it cannot
     # prompt once Textual owns the terminal, which is the whole reason for the
     # carve-out.
-    pending_connect = (args.ssh, args.remote_root) if (args.gui and args.ssh) else None
+    pending_connect = (args.ssh, args.remote_root) if (gui and args.ssh) else None
     if args.ssh and pending_connect is None:
         launch = remote_launch(args)
     else:
@@ -778,7 +794,7 @@ def main(argv: list[str] | None = None) -> int:
     # is here and the shell writes it back through ``on_config_change`` - both
     # shells therefore build the next session's Engine from whatever the editor
     # last saved, and neither touches a session already in flight.
-    if args.gui:
+    if gui:
         from agentclip.shell.gui.remote import RemoteConnect
         from agentclip.shell.gui.shell import run_gui
 

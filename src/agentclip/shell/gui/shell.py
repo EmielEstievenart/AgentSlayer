@@ -69,7 +69,7 @@ MISSING_PYWEBVIEW = (
 MISSING_WEBVIEW2 = (
     "agentclip: this Windows install has no Microsoft Edge WebView2 runtime, which the"
     f" GUI shell renders in. Install the Evergreen runtime from {WEBVIEW2_DOWNLOAD}"
-    " (or use the TUI: run agentclip without --gui)."
+    " (or fall back to the deprecated TUI: run agentclip --tui)."
 )
 
 # The asset files the window needs; also what tests/shell/gui checks is really

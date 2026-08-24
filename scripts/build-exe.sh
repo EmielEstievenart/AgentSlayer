@@ -2,7 +2,7 @@
 #
 # Freeze AgentClip's TWO executables and drop them on your PATH.
 #
-#   agentclip         the full app - TUI, GUI shell, OpenCV matcher backend
+#   agentclip         the full app - GUI shell, deprecated TUI, OpenCV backend
 #   agentclip-engine  the engine half, the binary an SSH target runs
 #                     (docs/design/remote-executor.md section 2.6)
 #
@@ -148,7 +148,7 @@ if [ "$engine_only" -eq 0 ]; then
     step 'Verifying the gui extra is importable'
     uv run --group build python -c \
         "from importlib.metadata import version; import webview; print('pywebview ' + version('pywebview'))" ||
-        die "The gui extra is not importable, so agentclip would be built without the GUI shell and --gui would tell the user to install an extra they cannot install into a binary. Fix the environment and re-run."
+        die "The gui extra is not importable, so agentclip would be built without the GUI shell - its DEFAULT shell - and every launch would tell the user to install an extra they cannot install into a binary. Fix the environment and re-run."
 fi
 
 step 'Verifying the mcp extra is importable'
@@ -166,7 +166,8 @@ if [ "$engine_only" -eq 0 ]; then
     app_bin="$(dist_path agentclip)"
     [ -f "$app_bin" ] || die "PyInstaller reported success but $app_bin is missing."
 
-    # cli.py imports agentclip.shell.tui.app, which transitively imports every
+    # cli.py imports agentclip.shell.tui.app (the deprecated --tui shell) at
+    # module level, which transitively imports every
     # screen and widget. A missing hidden import fails here rather than the
     # first time a modal is opened.
     step 'Smoke-testing agentclip'
@@ -213,10 +214,10 @@ if [ "$engine_only" -eq 0 ]; then
         printf '%s\n' "$gui_out"
         case "$gui_out" in
             *DISPLAY*|*display*|*GTK*|*Gtk*|*[Qq][Tt]5*|*[Qq][Tt]6*|*xcb*|*PyGObject*|*WebViewException*)
-                warn "--gui-smoke failed in a way that looks like a missing display or GUI toolkit, NOT like a broken freeze. Continuing, but the GUI shell in this build is UNVERIFIED - re-run this check on a machine with a desktop session before trusting agentclip --gui."
+                warn "--gui-smoke failed in a way that looks like a missing display or GUI toolkit, NOT like a broken freeze. Continuing, but the GUI shell in this build is UNVERIFIED - re-run this check on a machine with a desktop session before trusting agentclip."
                 ;;
             *)
-                die "The frozen agentclip cannot open the GUI shell, so --gui would tell the user to install an extra they cannot install into a binary. Check that the gui extra is installed and packaging/agentclip.spec still names the platform's webview backend and the gui assets."
+                die "The frozen agentclip cannot open the GUI shell, so the default launch would tell the user to install an extra they cannot install into a binary. Check that the gui extra is installed and packaging/agentclip.spec still names the platform's webview backend and the gui assets."
                 ;;
         esac
     fi

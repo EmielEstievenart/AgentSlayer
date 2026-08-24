@@ -89,8 +89,9 @@ try {
     # A missing cv2 produces no build error at all: the exe starts, runs, and
     # silently gives every service the anchor search while the editor tells the
     # user their build does not include OpenCV. A missing pywebview is the same
-    # shape one shell over: the exe starts, runs, and answers --gui with an
-    # "install the gui extra" line a frozen user cannot act on.
+    # shape one shell over: the exe starts, runs, and answers a plain launch -
+    # the GUI is the default shell now - with an "install the gui extra" line a
+    # frozen user cannot act on.
     Write-Step 'Verifying the cv extra is importable'
     uv run --group build python -c "import cv2, numpy; print(f'cv2 {cv2.__version__}, numpy {numpy.__version__}')"
     if ($LASTEXITCODE -ne 0) {
@@ -114,9 +115,10 @@ try {
 
     # --- smoke test ----------------------------------------------------------
 
-    # cli.py imports agentclip.shell.tui.app, which transitively imports every
-    # screen and widget. A missing hidden import fails here, at build time,
-    # instead of the first time a modal is opened.
+    # cli.py imports agentclip.shell.tui.app (the deprecated --tui shell) at
+    # module level, which transitively imports every screen and widget. A
+    # missing hidden import fails here, at build time, instead of the first
+    # time a modal is opened.
     Write-Step 'Smoke-testing the frozen binary'
     $version = & $DistExe --version 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0 -or -not $version.Trim()) {
@@ -146,10 +148,12 @@ try {
 
     # --- bundled-shell check -------------------------------------------------
 
-    # The same argument one shell over. --version proves the TUI's import tree;
-    # it says nothing about a GUI whose every piece is reached lazily - the
-    # package only on --gui, pywebview only inside a function, and its winforms
-    # backend only through webview/guilib.py's per-platform pick. --gui-smoke
+    # The same argument one shell over, and the sharper half now that the GUI
+    # is what a bare `agentclip` opens: --version proves the TUI's import tree
+    # (that one is module-level), and says nothing about a GUI whose every piece
+    # is reached lazily - the package only on a GUI launch, pywebview only
+    # inside a function, and its winforms backend only through
+    # webview/guilib.py's per-platform pick. --gui-smoke
     # walks that whole chain against the exe that was just built: it imports
     # pywebview (which drags in clr and the .NET runtime), READS all three page
     # assets back through importlib.resources - the classic frozen-app failure,
@@ -164,7 +168,7 @@ try {
     $gui = & $DistExe --gui-smoke 2>&1 | Out-String
     if ($LASTEXITCODE -ne 0) {
         Write-Host $gui
-        throw "The frozen exe cannot open the GUI shell, so --gui would tell the user to install an extra they cannot install into an exe. Check that the gui extra is installed and packaging/agentclip.spec still names webview.platforms.winforms and the gui assets."
+        throw "The frozen exe cannot open the GUI shell, so the default launch would tell the user to install an extra they cannot install into an exe. Check that the gui extra is installed and packaging/agentclip.spec still names webview.platforms.winforms and the gui assets."
     }
     Write-Host "    $($gui.Trim())" -ForegroundColor Green
 

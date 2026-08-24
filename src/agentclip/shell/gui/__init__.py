@@ -13,8 +13,9 @@ import here would mean the GUI is somehow built on the TUI. Enforced by
 tests/test_layering.py, twice.
 
 Nothing here is loaded by a TUI launch: ``cli.main`` imports this package only
-on ``--gui``, and ``shell.py`` imports pywebview itself lazily inside its
-functions, so an install without the ``gui`` extra is unaffected.
+when the GUI is the chosen shell (i.e. no ``--tui``), and ``shell.py`` imports
+pywebview itself lazily inside its functions, so an install without the ``gui``
+extra is unaffected.
 """
 
 from __future__ import annotations

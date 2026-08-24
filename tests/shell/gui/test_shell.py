@@ -3,7 +3,8 @@
 Nothing here opens a window. What these tests pin is everything about the shell
 that can be true before the loop starts - that the page is really shipped, that
 it reaches nothing off this machine, that importing the shell costs a TUI
-launch nothing, and that --gui takes the branch that skips the terminal probe.
+launch nothing, and that a default launch takes the branch that skips the
+terminal probe.
 """
 
 from __future__ import annotations
@@ -158,10 +159,49 @@ def _launch(root: Path) -> cli.Launch:
     )
 
 
-def test_the_gui_flag_exists_and_defaults_off() -> None:
+def test_no_flag_selects_the_gui_and_tui_selects_the_tui(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shell fork, from the outside (docs/design/ui-monitor.md 6.0).
+
+    A bare ``agentclip`` opens the GUI; the deprecated Textual shell is only
+    reached by asking for it with ``--tui``.
+    """
     args = cli.build_arg_parser().parse_args([])
-    assert args.gui is False
+    assert args.tui is False
+    assert cli.build_arg_parser().parse_args(["--tui"]).tui is True
+
+    monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
+    monkeypatch.setattr(cli, "probe_terminal", lambda: None)
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "agentclip.shell.gui.shell.run_gui", lambda given, **rest: opened.append("gui") or 0
+    )
+    monkeypatch.setattr(cli, "AgentClipApp", lambda **kwargs: opened.append("tui") or _stop_here())
+
+    assert cli.main(["--project", str(tmp_path)]) == 0
+    with pytest.raises(_Stop):
+        cli.main(["--tui", "--project", str(tmp_path)])
+    assert opened == ["gui", "tui"]
+
+
+def test_the_gui_flag_is_an_accepted_no_op(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kept for one release so a muscle-memory ``--gui`` (and every script and
+    shortcut still carrying it) lands on what it always asked for - the GUI,
+    which is now simply the default."""
     assert cli.build_arg_parser().parse_args(["--gui"]).gui is True
+
+    monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
+    monkeypatch.setattr(cli, "probe_terminal", lambda: pytest.fail("probed the terminal"))
+    opened: list[str] = []
+    monkeypatch.setattr(
+        "agentclip.shell.gui.shell.run_gui", lambda given, **rest: opened.append("gui") or 0
+    )
+
+    assert cli.main(["--gui", "--project", str(tmp_path)]) == 0
+    assert opened == ["gui"]
 
 
 def test_gui_launch_runs_the_shell_and_never_probes_the_terminal(
@@ -183,7 +223,7 @@ def test_gui_launch_runs_the_shell_and_never_probes_the_terminal(
         lambda given, **rest: (seen.append(given), kwargs.update(rest))[0] or 0,
     )
 
-    assert cli.main(["--gui", "--project", str(tmp_path)]) == 0
+    assert cli.main(["--project", str(tmp_path)]) == 0
     assert seen == [launch]
     # ...and it is handed the shell-agnostic pieces the TUI path builds too, so
     # the two frontends cannot end up on two clipboard backends or two engine
@@ -193,7 +233,7 @@ def test_gui_launch_runs_the_shell_and_never_probes_the_terminal(
     assert kwargs["mcp_manager"] is None  # no servers configured in a tmp project
 
 
-def test_without_the_flag_the_tui_path_still_probes(
+def test_the_tui_flag_takes_the_path_that_still_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The twin of the test above: the probe is skipped BY the branch, not
@@ -207,7 +247,7 @@ def test_without_the_flag_the_tui_path_still_probes(
     monkeypatch.setattr(cli, "AgentClipApp", lambda **kwargs: _stop_here())
 
     with pytest.raises(_Stop):
-        cli.main(["--project", str(tmp_path)])
+        cli.main(["--tui", "--project", str(tmp_path)])
     assert probed == ["probe"]
 
 
@@ -347,10 +387,13 @@ def test_the_webview2_check_answers_without_a_window() -> None:
     assert webview2_missing() in (True, False)
 
 
-def test_argparse_help_mentions_the_gui_shell() -> None:
+def test_argparse_help_names_the_default_shell_and_the_deprecated_one() -> None:
     help_text = cli.build_arg_parser().format_help()
-    assert "--gui" in help_text
+    assert "--tui" in help_text
     assert "GUI shell" in help_text
+    # The old flag stays visible for a release, marked for what it now is.
+    assert "--gui" in help_text
+    assert "deprecated no-op" in help_text
 
 
 # == the packaging smoke ======================================================
@@ -387,7 +430,7 @@ def test_the_gui_smoke_fails_when_pywebview_is_gone(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """The whole point of the check: a build that lost the extra must exit
-    non-zero at BUILD time rather than at the user's first --gui."""
+    non-zero at BUILD time rather than at the user's first launch."""
     monkeypatch.setitem(sys.modules, "webview", None)
     assert cli.main(["--gui-smoke"]) == 2
     assert "pywebview is not in this build" in capsys.readouterr().err

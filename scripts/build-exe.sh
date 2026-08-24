@@ -2,7 +2,7 @@
 #
 # Freeze AgentClip's THREE executables and drop them on your PATH.
 #
-#   agentclip          the full app - GUI shell, deprecated TUI, OpenCV backend
+#   agentclip          the full app - GUI shell, OpenCV backend
 #   agentclip-engine   the engine half, the binary an SSH target runs
 #                      (docs/design/remote-executor.md section 2.6)
 #   agentclip-monitor  the monitor half, the standing binary that runs on the
@@ -242,10 +242,9 @@ if [ "$build_app" -eq 1 ]; then
     app_bin="$(dist_path agentclip)"
     [ -f "$app_bin" ] || die "PyInstaller reported success but $app_bin is missing."
 
-    # cli.py imports agentclip.shell.tui.app (the deprecated --tui shell) at
-    # module level, which transitively imports every
-    # screen and widget. A missing hidden import fails here rather than the
-    # first time a modal is opened.
+    # --version answers from the import tree cli.py pulls at module level, so a
+    # hidden import missed anywhere below that line fails here rather than on
+    # somebody's desk.
     step 'Smoke-testing agentclip'
     version_out="$("$app_bin" --version 2>&1)" ||
         { printf '%s\n' "$version_out"; die "agentclip --version failed. Not installing a broken binary."; }

@@ -2,9 +2,8 @@
 
 Nothing here opens a window. What these tests pin is everything about the shell
 that can be true before the loop starts - that the page is really shipped, that
-it reaches nothing off this machine, that importing the shell costs a TUI
-launch nothing, and that a default launch takes the branch that skips the
-terminal probe.
+it reaches nothing off this machine, and that a launch reaches it with the
+resolved Launch and the ingredients built above it.
 """
 
 from __future__ import annotations
@@ -159,30 +158,38 @@ def _launch(root: Path) -> cli.Launch:
     )
 
 
-def test_no_flag_selects_the_gui_and_tui_selects_the_tui(
+def test_a_bare_launch_opens_the_one_shell(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The shell fork, from the outside (docs/design/ui-monitor.md 6.0).
-
-    A bare ``agentclip`` opens the GUI; the deprecated Textual shell is only
-    reached by asking for it with ``--tui``.
-    """
-    args = cli.build_arg_parser().parse_args([])
-    assert args.tui is False
-    assert cli.build_arg_parser().parse_args(["--tui"]).tui is True
-
+    """There is no fork any more (docs/design/ui-monitor.md 6.6 deleted the
+    Textual shell): a bare ``agentclip`` opens the window, and nothing else
+    can be asked for."""
     monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
-    monkeypatch.setattr(cli, "probe_terminal", lambda: None)
     opened: list[str] = []
     monkeypatch.setattr(
         "agentclip.shell.gui.shell.run_gui", lambda given, **rest: opened.append("gui") or 0
     )
-    monkeypatch.setattr(cli, "AgentClipApp", lambda **kwargs: opened.append("tui") or _stop_here())
 
     assert cli.main(["--project", str(tmp_path)]) == 0
-    with pytest.raises(_Stop):
-        cli.main(["--tui", "--project", str(tmp_path)])
-    assert opened == ["gui", "tui"]
+    assert opened == ["gui"]
+
+
+def test_the_tui_flag_is_a_stub_that_says_what_happened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Kept for one release, and kept as a REFUSAL (6.6; 8's "Textual removal
+    timing"). A script that still carries the flag must not be quietly handed a
+    different shell than it asked for, and argparse's "unrecognized arguments"
+    would tell it nothing about where the old one went.
+    """
+    assert cli.build_arg_parser().parse_args(["--tui"]).tui is True
+    monkeypatch.setattr(cli, "local_launch", lambda args: pytest.fail("resolved a launch"))
+    monkeypatch.setattr(
+        "agentclip.shell.gui.shell.run_gui", lambda *a, **k: pytest.fail("opened the window")
+    )
+
+    assert cli.main(["--tui", "--project", str(tmp_path)]) == 2
+    assert cli.TUI_REMOVED in capsys.readouterr().err
 
 
 def test_the_gui_flag_is_an_accepted_no_op(
@@ -190,11 +197,10 @@ def test_the_gui_flag_is_an_accepted_no_op(
 ) -> None:
     """Kept for one release so a muscle-memory ``--gui`` (and every script and
     shortcut still carrying it) lands on what it always asked for - the GUI,
-    which is now simply the default."""
+    which is now simply what a launch opens."""
     assert cli.build_arg_parser().parse_args(["--gui"]).gui is True
 
     monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
-    monkeypatch.setattr(cli, "probe_terminal", lambda: pytest.fail("probed the terminal"))
     opened: list[str] = []
     monkeypatch.setattr(
         "agentclip.shell.gui.shell.run_gui", lambda given, **rest: opened.append("gui") or 0
@@ -204,20 +210,18 @@ def test_the_gui_flag_is_an_accepted_no_op(
     assert opened == ["gui"]
 
 
-def test_gui_launch_runs_the_shell_and_never_probes_the_terminal(
+def test_the_shell_is_handed_the_resolved_launch_and_its_ingredients(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sixel probe is a question for a terminal, asked over stdin/stdout.
-
-    On the GUI path there is no terminal waiting to answer it, so the branch
-    must sit above it (docs/design/gui.md section 2) - and the shell must be
-    reached with the resolved Launch, not with raw argv.
+    """``run_gui`` is reached with the resolved Launch, not with raw argv - and
+    with the pieces ``main`` builds above it, so nothing below that line has to
+    re-decide which clipboard backend or which engine factory a session uses
+    (docs/design/gui.md section 0).
     """
     launch = _launch(tmp_path)
     seen: list[object] = []
     kwargs: dict[str, object] = {}
     monkeypatch.setattr(cli, "local_launch", lambda args: launch)
-    monkeypatch.setattr(cli, "probe_terminal", lambda: seen.append("probe"))
     monkeypatch.setattr(
         "agentclip.shell.gui.shell.run_gui",
         lambda given, **rest: (seen.append(given), kwargs.update(rest))[0] or 0,
@@ -225,38 +229,9 @@ def test_gui_launch_runs_the_shell_and_never_probes_the_terminal(
 
     assert cli.main(["--project", str(tmp_path)]) == 0
     assert seen == [launch]
-    # ...and it is handed the shell-agnostic pieces the TUI path builds too, so
-    # the two frontends cannot end up on two clipboard backends or two engine
-    # factories (docs/design/gui.md section 0).
     assert kwargs["provider"] is not None
     assert callable(kwargs["engine_factory"])
     assert kwargs["mcp_manager"] is None  # no servers configured in a tmp project
-
-
-def test_the_tui_flag_takes_the_path_that_still_probes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The twin of the test above: the probe is skipped BY the branch, not
-    accidentally dropped for everyone."""
-    monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
-    probed: list[str] = []
-    monkeypatch.setattr(cli, "probe_terminal", lambda: probed.append("probe"))
-    # The provider and the MCP runtime are built ABOVE the fork now (both shells
-    # need them), so the TUI path is cut off at the first thing that is really
-    # Textual's.
-    monkeypatch.setattr(cli, "AgentClipApp", lambda **kwargs: _stop_here())
-
-    with pytest.raises(_Stop):
-        cli.main(["--tui", "--project", str(tmp_path)])
-    assert probed == ["probe"]
-
-
-class _Stop(Exception):
-    """Cut main() off right after the probe, before anything opens a TUI."""
-
-
-def _stop_here() -> None:
-    raise _Stop
 
 
 # == the real toolkit, without a window =======================================
@@ -387,11 +362,13 @@ def test_the_webview2_check_answers_without_a_window() -> None:
     assert webview2_missing() in (True, False)
 
 
-def test_argparse_help_names_the_default_shell_and_the_deprecated_one() -> None:
+def test_argparse_help_names_both_retired_flags_for_what_they_now_are() -> None:
     help_text = cli.build_arg_parser().format_help()
-    assert "--tui" in help_text
     assert "GUI shell" in help_text
-    # The old flag stays visible for a release, marked for what it now is.
+    # Both stay visible for a release, each marked for what it now is: one is a
+    # refusal, the other does nothing.
+    assert "--tui" in help_text
+    assert "removed" in help_text
     assert "--gui" in help_text
     assert "deprecated no-op" in help_text
 
@@ -460,7 +437,7 @@ def test_the_spec_ships_the_page_where_importlib_resources_will_look() -> None:
     )
     assert '"agentclip/shell/gui/assets"' in spec, "the assets' destination is not the package path"
     assert "gui_datas" in spec
-    assert "textual_datas + gui_datas" in spec, "the assets are collected but never handed to Analysis"
+    assert "gui_datas + doc_datas" in spec, "the assets are collected but never handed to Analysis"
     # The backend gui/shell.py's webview2_missing() reads, which nothing static
     # reaches (webview/guilib.py picks it per platform at import time).
     assert "webview.platforms.winforms" in spec
@@ -513,18 +490,6 @@ def test_a_target_that_is_not_host_port_is_refused_rather_than_guessed_at(given:
     """Guessing would mean dialling a port nobody asked for, on a channel that
     reaches a machine's mouse and keyboard (§5)."""
     assert cli.parse_monitor_target(given) is None
-
-
-def test_the_monitor_flag_is_refused_for_the_deprecated_tui(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The TUI is frozen (§2.12) and takes no new surfaces, so asking for both
-    is asking for something that will never work - said now, rather than after
-    a session starts watching the wrong screen."""
-    monkeypatch.setattr(cli, "local_launch", lambda args: pytest.fail("resolved a launch"))
-
-    assert cli.main(["--tui", "--monitor", "box:7777", "--project", str(tmp_path)]) == 2
-    assert cli.MONITOR_GUI_ONLY in capsys.readouterr().err
 
 
 def test_a_bad_monitor_target_is_fatal_before_anything_is_launched(

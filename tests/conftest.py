@@ -51,11 +51,12 @@ CHAT_NAME = "amber-falcon"
 OS_TESTS_ENABLED = os.environ.get("AGENTCLIP_OS_TESTS") == "1"
 
 PICK_REGION_BLOCKED = (
-    "pick_region reached the real overlay - mock it at the use site (main_mod.pick_region)"
+    "pick_region reached the real overlay - mock it at the use site "
+    "(the caller's own bound name)"
 )
 IDENTIFY_OVERLAY_BLOCKED = (
     "draw_identify_overlay reached the real overlay - mock it at the use site "
-    "(main_mod.draw_identify_overlay)"
+    "(the caller's own bound name)"
 )
 
 
@@ -67,6 +68,26 @@ def _blocked_identify_overlay(*args: Any, **kwargs: Any) -> None:
     raise AssertionError(IDENTIFY_OVERLAY_BLOCKED)
 
 
+def _blocked_input(*args: Any, **kwargs: Any) -> bool:
+    """The answer an unsupported platform gives, which every caller handles."""
+    return False
+
+
+# What ``driver/monitor/ops.py`` from-imports out of ``driver/screen/focus.py``:
+# every call that injects a keystroke, a click, a wheel detent, a cursor move or
+# a window activation. ``capture_region`` is deliberately NOT here - reading the
+# screen tells a test about the desktop without touching it.
+_OPS_INJECTING_VERBS = (
+    "click_region",
+    "focus_window_verified",
+    "move_cursor",
+    "scroll_region",
+    "send_enter",
+    "send_paste",
+    "send_scroll_key",
+)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail closed on synthetic input: no test moves the cursor, clicks, scrolls
@@ -75,9 +96,9 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
     This generalizes the per-file ``_no_real_paste`` fixtures - a real Ctrl+V
     escaping into the test runner's window is unforgivable, and so is a real
     click landing wherever the pointer happened to be. Individual tests patch
-    ``main_mod.click_region`` / ``main_mod.send_paste`` at the use site, but
-    ``main.py`` from-imports those names, so any test that forgets one drives
-    the real OS. The gate sits under all of them instead.
+    the verb at their own use site, but every layer from-imports these names, so
+    any test that forgets one drives the real OS. The gate sits under all of
+    them instead.
 
     The choke point is ``ctypes.windll.user32``: every injecting call in
     ``screen.focus`` (SendInput for paste/scroll/move, SetCursorPos for the
@@ -119,15 +140,30 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         "agentclip.driver.screen.overlay.run_identify_overlay", _blocked_identify_overlay
     )
-    # ...and again at main.py's bound names, which are the seam every caller uses.
+    # ...and again at the bound names, which are the seam every caller really
+    # uses: both modules from-import these, so a monkeypatch at the definition
+    # module alone would leave their copies pointing at the real overlay.
     monkeypatch.setattr(
-        "agentclip.shell.tui.screens.main.pick_region", _blocked_pick_region, raising=False
+        "agentclip.shell.gui.calibration.view.pick_region", _blocked_pick_region, raising=False
     )
     monkeypatch.setattr(
-        "agentclip.shell.tui.screens.main.draw_identify_overlay",
+        "agentclip.shell.gui.calibration.view.draw_identify_overlay",
         _blocked_identify_overlay,
         raising=False,
     )
+    monkeypatch.setattr(
+        "agentclip.shell.gui.service_editor.pick_region", _blocked_pick_region, raising=False
+    )
+    # The Driver's OS adapter from-imports every injecting primitive out of
+    # ``screen.focus`` (``driver/monitor/ops.py``), so it holds a second binding
+    # for each. The platform choke points below already answer False through
+    # them, but ``ScreenOps`` is the object the whole automation suite drives -
+    # so it is neutered by name too, on every platform, and a suite that runs
+    # somewhere neither branch covers still cannot click.
+    for verb in _OPS_INJECTING_VERBS:
+        monkeypatch.setattr(
+            f"agentclip.driver.monitor.ops.{verb}", _blocked_input, raising=False
+        )
 
     if sys.platform.startswith("linux"):
         # The same choke point, one platform over. ``screen.x11`` funnels EVERY
@@ -179,23 +215,6 @@ def _no_real_permissions_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(
         "agentclip.shell.app.controller.default_permissions_config_path", lambda: missing
     )
-
-
-@pytest.fixture(autouse=True)
-def _half_block_terminal() -> Any:
-    """Every test starts on the renderer that needs nothing from a terminal.
-
-    The sixel verdict is a process-global set once at startup (``tui.graphics``),
-    so a test that declares one to reach the sixel path would otherwise leave it
-    declared for every test after it in the same worker - and a pytest run has
-    no terminal to draw sixels on. Reset rather than forbidden: declaring the
-    verdict IS the documented way into that path.
-    """
-    from agentclip.shell.tui.graphics import NO_SIXEL, set_terminal_graphics
-
-    set_terminal_graphics(NO_SIXEL)
-    yield
-    set_terminal_graphics(NO_SIXEL)
 
 
 @pytest.fixture

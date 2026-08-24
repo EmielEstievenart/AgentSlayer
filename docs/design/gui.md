@@ -3,15 +3,29 @@
 Status: binding. Written 2026-08-14, at the start of the GUI wave. This doc records
 the decisions; the per-surface behavior contracts live in `docs/design/ui-briefs/`.
 
+> **There is one shell now (2026-08-24, `ui-monitor.md` §6.6).** The Textual TUI
+> — `agentclip.shell.tui`, its Pilot suites and the `textual` dependency — was
+> **deleted**; `--tui` survives one release as a stub that prints "the Textual
+> TUI was removed in this release; plain agentclip opens the GUI" and exits 2.
+> This document is unchanged below except for the parity policy, which §2.12
+> already amended, and it is still binding for the GUI: every decision it
+> records about the core, the ports and the window is the code. Read every "the
+> TUI does X" in it as **history** — the sentence that made a decision, kept
+> because deleting it would delete the reason. Nothing below describes code that
+> still exists on that side of the comparison.
+
 ## 0. The shape
 
-AgentClip becomes **one core with two UI shells**:
+AgentClip became **one core with two UI shells** (and, since `ui-monitor.md`
+§6.6, one core with one — the core survived the shell it was extracted from,
+which is what the two ports were for):
 
-- the existing Textual TUI (`agentclip.shell.tui`) — stays, unchanged in behavior;
+- the existing Textual TUI (`agentclip.shell.tui`) — stayed, unchanged in
+  behavior, until phase 6 deleted it;
 - a new desktop GUI built on **pywebview + WebView2** (`agentclip.shell.gui`) — a native
   window rendering an HTML/CSS/JS frontend, Python in-process.
 
-Both shells drive the same two UI-agnostic controllers:
+Both shells drove the same two UI-agnostic controllers:
 
 - `SessionController` via the `ChatView` port (`agentclip/shell/app/view.py`) — exists today;
 - `AutomationController` via the `AutomationView` port
@@ -36,20 +50,21 @@ as it always has been.
 
 ### Parity policy
 
-> **Amended 2026-08-24 by `ui-monitor.md` §2.12 (its phase 0).** The question this
-> section left open — "whether the TUI eventually freezes" — is answered: it has.
-> The TUI is **deprecated and frozen**, sits behind `--tui`, and is deleted in
-> `ui-monitor.md` phase 6. What follows replaces the original two-shell contract.
+> **Amended 2026-08-24 by `ui-monitor.md` §2.12 (its phase 0), and closed by its
+> §6.6 the same day.** The question this section left open — "whether the TUI
+> eventually freezes" — was answered: it froze, and then phase 6 **deleted** it.
+> There is no parity contract left to keep, because there is nothing to keep
+> parity with. What follows replaces the original two-shell contract.
 
-- The briefs in `docs/design/ui-briefs/` are the parity contract for **the GUI
-  alone**. Where a brief and the TUI disagree, the TUI is the stale one — that is
-  no longer a bug against it.
+- The briefs in `docs/design/ui-briefs/` are the behavior contract for **the GUI**,
+  full stop. They were a two-shell parity contract; the second shell is gone.
 - Features still land **core-first**: new behavior goes into the engine, `shell/app`
-  and the Driver, then the GUI grows its view of it. A feature that exists only in
-  the GUI's view layer is **no longer a design smell** and needs no written
-  exception — the frozen TUI simply does not follow it.
-- Known carve-outs today — the *core* ones; the rows that were only "the TUI does
-  X, the GUI does Y" are gone with the parity contract that made them matter:
+  and the Driver, then the GUI grows its view of it. That rule outlived its
+  original justification and is kept on its own merits — it is what let one of
+  the two shells be deleted without the core noticing. A feature that exists only
+  in the GUI's view layer is **not a design smell** and needs no written exception.
+- Known carve-outs — the *core* ones; the rows that were only "the TUI does
+  X, the GUI does Y" went with the parity contract that made them matter:
   - the chunked-send wizard (`tui.md` §6) is designed but not implemented anywhere
     (controller short-circuits multi-chunk; M3). The GUI targets current behavior;
     the wizard lands core-first later.

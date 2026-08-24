@@ -1,4 +1,4 @@
-"""The remote launch flow: one host, wired once, before the TUI exists.
+"""The remote launch flow: one host, wired once, before a session exists.
 
 cli.remote_launch is the single construction point the design gives phase 2 -
 connect, probe, read the REMOTE project config, and hand ONE host to whatever a
@@ -7,11 +7,19 @@ the launch is supposed to fail fast (docs/design/remote-ssh.md 6, and the
 implementation notes).
 
 What a launch is built INTO changed with increment 4's flip
-(docs/design/remote-executor.md §2.12): ``--ssh`` now starts ``agentclip-engine``
-ON the target and drives it over the wire, so the section "the engine runs on the
-target" below takes ``cli.main`` all the way through a scripted handshake. The
-legacy per-call ``SshHost`` assembly - the engine here, the target reached one
-round trip at a time - is still constructable and still tested (the last
+(docs/design/remote-executor.md §2.12): ``--ssh`` starts ``agentclip-engine`` ON
+the target and drives it over the wire. WHEN it happens changed again when the
+Textual shell was deleted (docs/design/ui-monitor.md §6.6): that shell could not
+prompt once its toolkit owned the terminal, so it dialled at launch time, and it
+was the only caller ``cli.main`` ever had for ``remote_launch``. The window does
+not need to - it opens first and dials from its own connect dialog - so the
+section "the engine runs on the target" below drives ``cli.main``, captures the
+``RemoteConnect`` it hands the shell, and runs the real build over a scripted
+exec channel, which is the same sequence through the same code with the window
+left out.
+
+The legacy per-call ``SshHost`` assembly - the engine here, the target reached
+one round trip at a time - is still constructable and still tested (the last
 section); it is simply no longer what any shell does, and §2.8's deletion of it
 is increment 5.
 """
@@ -29,6 +37,7 @@ from agentclip import cli
 from agentclip.config import Config, load_config
 from agentclip.engine.link import wire
 from agentclip.engine.link.factory import EngineRequest
+from agentclip.engine.link.wire import EngineLinkError
 from agentclip.executor.hosts import FakeHost
 from agentclip.executor.hosts.ssh import LinkChannel, SshError
 from tests.executor.hosts.fake_paramiko import FakeChannel, FakeCommandScript, FakeSSHClient
@@ -388,37 +397,55 @@ def test_a_remote_root_that_is_a_file_is_fatal(args, host: FakeSshHost, capsys) 
 # subprocess suite is for (tests/shell/app/test_remote_link.py).
 
 
-class FakeApp:
-    """AgentClipApp, cut to what a launch hands it and what ``main`` calls."""
+class FakeShell:
+    """``run_gui``, cut to the two things a dial needs from it.
 
-    last: FakeApp | None = None
+    The window is where a machine is chosen now, so the shell fake does what the
+    dialog does: it takes the ``RemoteConnect`` ``main`` handed it and calls its
+    ``build`` with a real ``ConnectedRemote`` off the fake host. Everything
+    inside that call is production code - ``make_remote_link_factory``, the
+    engine launch over the exec channel, the wire handshake - and returning from
+    ``run`` puts ``main`` into the teardown that closes what the build swapped in
+    (which is what makes the ordering test below meaningful).
+    """
 
-    def __init__(self, **kwargs: object) -> None:
-        self.kwargs = kwargs
-        self.app_config = kwargs["config"]
-        self.ran = 0
-        FakeApp.last = self
+    last: FakeShell | None = None
 
-    def run(self) -> None:
-        self.ran += 1
+    def __init__(self, args: argparse.Namespace) -> None:
+        self._args = args
+        self.kwargs: dict[str, object] = {}
+        self.runtime: cli.GuiRuntime | None = None
+        self.error: Exception | None = None
+        self.dials = 0
+        FakeShell.last = self
+
+    def run(self, launch: object, **rest: object) -> int:
+        self.kwargs = rest
+        remote = rest.get("remote")
+        if remote is None or getattr(remote, "pending", None) is None:
+            return 0
+        self.dials += 1
+        connected = cli.remote_launch(self._args)
+        assert not isinstance(connected, int), "the connect sequence itself failed"
+        assert connected.remote is not None
+        try:
+            self.runtime = remote.build(connected.remote)
+        except EngineLinkError as exc:  # what the dialog paints on its engine row
+            self.error = exc
+        return 0
 
 
 @pytest.fixture
-def tui(monkeypatch: pytest.MonkeyPatch) -> type[FakeApp]:
-    """``main`` without a terminal under it: no sixel probe, no Textual."""
-    FakeApp.last = None
-    monkeypatch.setattr(cli, "probe_terminal", lambda: None)
-    monkeypatch.setattr(cli, "AgentClipApp", FakeApp)
-    return FakeApp
+def shell(args: argparse.Namespace, monkeypatch: pytest.MonkeyPatch) -> FakeShell:
+    """``main`` with the window replaced by the dial the dialog would run."""
+    FakeShell.last = None
+    fake = FakeShell(args)
+    monkeypatch.setattr("agentclip.shell.gui.shell.run_gui", fake.run)
+    return fake
 
 
 def argv(args: argparse.Namespace, *extra: str) -> list[str]:
-    # ``--tui`` because it is the TUI's launch that is under test here: the GUI
-    # defers an ``--ssh`` dial into its own connect dialog (cli.py's
-    # ``pending_connect``), so a bare launch would never reach ``remote_launch``
-    # at all. The GUI's side of that is tests/shell/gui/test_connect.py.
     return [
-        "--tui",
         "--project",
         args.project,
         "--ssh",
@@ -429,13 +456,14 @@ def argv(args: argparse.Namespace, *extra: str) -> list[str]:
     ]
 
 
-def launched(app: type[FakeApp]) -> FakeApp:
-    assert app.last is not None
-    return app.last
+def connected(shell: FakeShell) -> cli.GuiRuntime:
+    assert shell.error is None, f"the dial failed: {shell.error}"
+    assert shell.runtime is not None
+    return shell.runtime
 
 
 def test_ssh_launches_the_engine_on_the_target_and_drives_it_over_the_wire(
-    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp]
+    args: argparse.Namespace, host: FakeSshHost, shell: FakeShell
 ) -> None:
     """The flip itself: no engine is assembled here, one is started over there.
 
@@ -448,26 +476,26 @@ def test_ssh_launches_the_engine_on_the_target_and_drives_it_over_the_wire(
 
     assert host.link_commands == [f"agentclip-engine --project {REMOTE_ROOT}"]
     assert b'"hello"' in bytes(host.channels[0].sent)  # ...and it really shook hands
-    app = launched(tui)
-    assert not isinstance(app.kwargs["engine_factory"], cli.LinkFactory)
-    assert callable(app.kwargs["engine_factory"])
+    runtime = connected(shell)
+    assert not isinstance(runtime.engine_factory, cli.LinkFactory)
+    assert callable(runtime.engine_factory)
 
 
 def test_the_shells_mcp_source_is_the_engine_on_the_target(
-    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp]
+    args: argparse.Namespace, host: FakeSshHost, shell: FakeShell
 ) -> None:
     """MCP servers spawn where the engine runs (§2.7), so the status source has
     to be the link - and unconditionally, unlike the local builder's: it has
     nothing to report until the first session build carries the settle home, and
     gating it on a non-empty reading would drop it before it could answer."""
     assert cli.main(argv(args)) == 0
-    source = launched(tui).kwargs["mcp_manager"]
+    source = connected(shell).mcp_manager
     assert isinstance(source, cli.RemoteEngine)
     assert source.statuses() == ()  # no session built yet, and that is honest
 
 
 def test_the_service_flag_reaches_the_targets_engine(
-    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp]
+    args: argparse.Namespace, host: FakeSshHost, shell: FakeShell
 ) -> None:
     """The one part of the target's config a local flag legitimately overrides."""
     assert cli.main(argv(args, "--service", "claude")) == 0
@@ -475,7 +503,7 @@ def test_the_service_flag_reaches_the_targets_engine(
 
 
 def test_a_remote_session_keeps_no_session_tree_on_this_pc(
-    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp], tmp_path: Path
+    args: argparse.Namespace, host: FakeSshHost, shell: FakeShell, tmp_path: Path
 ) -> None:
     """§2.4: the store follows the engine, and the engine is over there now.
 
@@ -488,7 +516,7 @@ def test_a_remote_session_keeps_no_session_tree_on_this_pc(
 
 
 def test_the_link_channel_is_closed_before_the_transport_under_it(
-    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp]
+    args: argparse.Namespace, host: FakeSshHost, shell: FakeShell
 ) -> None:
     """The engine dies with its channel (§2.3), so the channel goes first: a
     host closed first would make an orderly shutdown look like a dropped link."""
@@ -497,7 +525,7 @@ def test_the_link_channel_is_closed_before_the_transport_under_it(
 
 
 def test_an_install_hidden_from_sshds_path_is_found_under_local_bin(
-    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp]
+    args: argparse.Namespace, host: FakeSshHost, shell: FakeShell
 ) -> None:
     """The everyday target: `uv tool install agentclip`, and a dead launch.
 
@@ -517,11 +545,18 @@ def test_an_install_hidden_from_sshds_path_is_found_under_local_bin(
     ]
     assert b'"hello"' in bytes(host.channels[1].sent)  # ...and it really shook hands
     assert host.channels[0].closed  # the dead attempt did not leak a channel
-    assert launched(tui).ran == 1
+    assert connected(shell).engine_factory is not None
+
+
+# -- the dead launches. The sentence is the same one it always was; where it
+# LANDS moved with the dial: ``EngineLinkError`` used to reach ``main``, which
+# printed it and exited 2, and now it reaches the connect dialog, which paints it
+# on the engine row and offers Retry (tests/shell/gui/test_connect.py). What is
+# asserted here is the sentence and the cleanup, which are the launch's own.
 
 
 def test_the_fallback_is_only_reached_when_the_plain_name_is_missing(
-    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp], capsys
+    args: argparse.Namespace, host: FakeSshHost, shell: FakeShell
 ) -> None:
     """A launch that DIED is a diagnosis, not a reason to try another path.
 
@@ -532,41 +567,41 @@ def test_the_fallback_is_only_reached_when_the_plain_name_is_missing(
     host.link_exit = 3
     host.link_stderr = [b"ImportError: no agentclip\n"]
 
-    assert cli.main(argv(args)) == 2
+    assert cli.main(argv(args)) == 0
 
     assert host.link_commands == [f"agentclip-engine --project {REMOTE_ROOT}"]
-    err = capsys.readouterr().err
-    assert "exit 3" in err and "ImportError: no agentclip" in err
+    assert shell.runtime is None
+    detail = str(getattr(shell.error, "detail", "") or shell.error)
+    assert "exit 3" in detail and "ImportError: no agentclip" in detail
 
 
 def test_a_target_without_the_engine_anywhere_is_fatal_and_says_what_was_tried(
-    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp], capsys
+    args: argparse.Namespace, host: FakeSshHost, shell: FakeShell
 ) -> None:
-    """The failure every first connect hits, on the stream every other fatal
-    step of going remote uses, with the same exit code (§2.12).
+    """The failure every first connect hits (§2.12).
 
     Both spellings are named, because both were tried: "not installed" to
     somebody who just installed it reads as a broken tool.
     """
     host.runnable = set()  # neither the name nor the path runs
 
-    assert cli.main(argv(args)) == 2
+    assert cli.main(argv(args)) == 0
 
     assert host.link_commands == [
         f"agentclip-engine --project {REMOTE_ROOT}",
         f"/home/dev/.local/bin/agentclip-engine --project {REMOTE_ROOT}",
     ]
-    err = capsys.readouterr().err
-    assert "agentclip-engine is not on the non-interactive PATH of dev@box" in err
-    assert "'~/.local/bin/agentclip-engine'" in err
-    assert "uv tool install agentclip" in err
-    assert "link_closed" not in err  # the wire's own vocabulary is not a sentence
-    assert tui.last is None  # ...and no TUI was opened on top of a dead link
+    detail = str(getattr(shell.error, "detail", "") or shell.error)
+    assert "agentclip-engine is not on the non-interactive PATH of dev@box" in detail
+    assert "'~/.local/bin/agentclip-engine'" in detail
+    assert "uv tool install agentclip" in detail
+    assert "link_closed" not in detail  # the wire's own vocabulary is not a sentence
+    assert shell.runtime is None  # ...and no session was pointed at a dead link
     assert host.closed  # ...and the connection did not outlive the attempt
 
 
 def test_a_wire_version_mismatch_names_both_installs(
-    args: argparse.Namespace, host: FakeSshHost, tui: type[FakeApp], capsys
+    args: argparse.Namespace, host: FakeSshHost, shell: FakeShell
 ) -> None:
     """The far side ANSWERED, so the channel has nothing to add: ``hello()``'s
     sentence is the whole message (§2.9)."""
@@ -574,16 +609,16 @@ def test_a_wire_version_mismatch_names_both_installs(
         _line({"type": "hello_ack", "version": 2, "package": "0.1.0", "server_id": "s"})
     ]
 
-    assert cli.main(argv(args)) == 2
+    assert cli.main(argv(args)) == 0
 
-    err = capsys.readouterr().err
-    assert "wire v2 (agentclip 0.1.0)" in err
-    assert "uv tool install --upgrade agentclip" in err
+    detail = str(getattr(shell.error, "detail", "") or shell.error)
+    assert "wire v2 (agentclip 0.1.0)" in detail
+    assert "uv tool install --upgrade agentclip" in detail
     assert host.closed
 
 
 def test_a_local_launch_still_builds_its_engine_here(
-    tmp_path: Path, tui: type[FakeApp], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, shell: FakeShell, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The twin of the flip: nothing about a local run changed, and the branch
     is what skips the wire rather than the wire being skipped by accident."""
@@ -592,8 +627,9 @@ def test_a_local_launch_still_builds_its_engine_here(
     monkeypatch.setattr(
         "agentclip.config.default_global_config_path", lambda: tmp_path / "no-global.toml"
     )
-    assert cli.main(["--tui", "--project", str(project)]) == 0
-    assert isinstance(launched(tui).kwargs["engine_factory"], cli.LinkFactory)
+    assert cli.main(["--project", str(project)]) == 0
+    assert shell.dials == 0  # nothing to dial: no --ssh
+    assert isinstance(shell.kwargs["engine_factory"], cli.LinkFactory)
 
 
 # == the legacy per-call SshHost assembly (increment 5 deletes it) =============

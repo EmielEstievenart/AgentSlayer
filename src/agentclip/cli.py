@@ -43,8 +43,6 @@ from agentclip.shell.app.engine_launch import (
 from agentclip.shell.app.link import Link, LocalLink, McpStatusLine, SkillReport
 from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLinkClient
 from agentclip.shell.app.sizes import fmt_tokens
-from agentclip.shell.tui.app import AgentClipApp
-from agentclip.shell.tui.graphics import probe_terminal
 
 if TYPE_CHECKING:  # paramiko rides in with SshHost, so the real import stays lazy
     from agentclip.executor.hosts.ssh import LinkChannel, SshHost
@@ -348,10 +346,14 @@ def _launch_verdict(channel: LinkChannel) -> tuple[int | None, str]:
     return channel.exit_status(), channel.stderr_tail()
 
 
-# ``--monitor``'s two refusals, spelled here so the suite pins the sentences
-# rather than a substring of them (docs/design/ui-monitor.md §6.5).
-MONITOR_GUI_ONLY = "the monitor link is GUI-only; the TUI is deprecated"
+# ``--monitor``'s one refusal, spelled here so the suite pins the sentence
+# rather than a substring of it (docs/design/ui-monitor.md §6.5).
 MONITOR_BAD_TARGET = "--monitor wants HOST:PORT with a numeric port, not {given!r}"
+
+# ``--tui``'s epitaph. The flag survives one release as a stub that says what
+# happened rather than an argparse "unrecognized arguments" a script would have
+# to guess at (docs/design/ui-monitor.md §6.6, §8 "Textual removal timing").
+TUI_REMOVED = "the Textual TUI was removed in this release; plain agentclip opens the GUI"
 
 
 def parse_monitor_target(text: str) -> tuple[str, int] | None:
@@ -422,19 +424,23 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Hidden: /identify's read-only twin of --pick-region - the element list
     # arrives as JSON on stdin and is drawn where each element sits on screen.
     parser.add_argument("--show-identify", action="store_true", help=argparse.SUPPRESS)
+    # Kept for one release as a STUB, not as a shell: the Textual TUI is gone
+    # (docs/design/ui-monitor.md §6.6), and ``main`` refuses this flag with one
+    # line saying so. Argparse would otherwise answer "unrecognized arguments",
+    # which tells a script that carried the flag nothing about what happened.
     parser.add_argument(
         "--tui",
         action="store_true",
-        help="launch the deprecated Textual TUI instead of the GUI shell",
+        help="removed: the Textual TUI is gone; plain agentclip opens the GUI",
     )
     # Accepted for one release so a muscle-memory `agentclip --gui` (and every
     # shortcut, script and doc that still carries it) keeps working: the GUI is
-    # what a bare `agentclip` opens now, so the flag asks for what it would get
-    # anyway. Nothing reads it - the shell fork is `args.tui` alone.
+    # what a bare `agentclip` opens, so the flag asks for what it would get
+    # anyway. Nothing reads it - there is only one shell.
     parser.add_argument(
         "--gui",
         action="store_true",
-        help="deprecated no-op: the GUI shell is the default (see --tui)",
+        help="deprecated no-op: the GUI shell is the only shell",
     )
     # The calibration window on its own (docs/design/ui-monitor.md 6.4): the
     # service editor, the ELEMENTS column, the chat-region picker and
@@ -448,10 +454,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="open the calibration window alone (no session, no engine) and exit when it closes",
     )
     # Split mode (docs/design/ui-monitor.md §6.5): the screen this window drives
-    # is on ANOTHER machine, reached over the monitor wire. GUI-only, and the
-    # refusal in ``main`` says so - the TUI is deprecated and takes no new
-    # surfaces (§2.12). There is deliberately no in-app connect field for this
-    # in phase 5: the flag is the whole entry.
+    # is on ANOTHER machine, reached over the monitor wire. There is
+    # deliberately no in-app connect field for this in phase 5: the flag is the
+    # whole entry.
     parser.add_argument(
         "--monitor",
         default=None,
@@ -475,9 +480,9 @@ def _list_matchers() -> int:
     """Say which candidate-generation backends this build can actually run.
 
     The service editor already reports this where a user configures it, but by
-    then it is a complaint rather than a check - and it is unanswerable from
-    outside the TUI, which is the one place a *build* has to be able to answer
-    it. Bundling OpenCV into the frozen exe (architecture.md 6) is only correct
+    then it is a complaint rather than a check, and it needs a window open to
+    ask at all - where a *build* has to be able to answer it from a terminal.
+    Bundling OpenCV into the frozen exe (architecture.md 6) is only correct
     if it is really in there and really loads, and "the file is in the archive"
     is not the same claim: a onefile build extracts to a temp directory and a
     compiled extension can still fail to find its DLLs. So this actually
@@ -594,7 +599,7 @@ def _calibrate(args: argparse.Namespace) -> int:
 class Launch:
     """Everything a session needs to know about WHERE it runs.
 
-    Assembled before the TUI starts, by :func:`local_launch` or
+    Assembled before the window opens, by :func:`local_launch` or
     :func:`remote_launch`, and never mixed: one session is one machine (design
     decision 4). ``data_root`` is where the ``.agentclip`` tree goes - beside
     the project locally, on this PC for a remote one - and ``home`` is whose
@@ -625,8 +630,8 @@ class GuiRuntime:
     What the GUI's connect dialog gets back when it goes remote mid-window
     (``shell/gui/remote.py:RemoteRuntime``, structurally): the config read off the
     target, the session factory that reaches its engine, and the MCP runtime of
-    ITS servers. The TUI has no equivalent because its launch cannot change -
-    the process is already inside ``app.run()`` by the time a user could ask.
+    ITS servers - none of which a launch-time dial can produce, because the
+    machine is chosen after the window is already up.
 
     Since the flip (§2.12) the factory is a ``RemoteLink`` factory over an
     engine running on the target and ``mcp_manager`` is the
@@ -669,7 +674,7 @@ def local_launch(args: argparse.Namespace) -> Launch | int:
 
 
 def ask_password(prompt: str) -> str | None:
-    """Read a secret from the terminal. Only ever called before the TUI starts."""
+    """Read a secret from the terminal. Only ever called before a window opens."""
     try:
         return getpass.getpass(prompt) or None
     except (EOFError, KeyboardInterrupt, OSError):
@@ -729,7 +734,7 @@ def _print_step(event: StepEvent) -> None:
 
 
 def remote_launch(args: argparse.Namespace) -> Launch | int:
-    """Connect, authenticate and probe BEFORE the TUI starts (design 7).
+    """Connect, authenticate and probe BEFORE a session exists (design 7).
 
     A thin wrapper now: the sequence lives in
     :func:`agentclip.executor.hosts.connect.connect_remote` so the GUI's connect dialog
@@ -774,6 +779,12 @@ def remote_launch(args: argparse.Namespace) -> Launch | int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_arg_parser().parse_args(argv)
+    # First, and above every other branch: a launch that asked for the deleted
+    # shell must not half-run as the GUI instead (docs/design/ui-monitor.md
+    # §6.6). One line, exit 2, nothing started.
+    if args.tui:
+        print(f"agentclip: {TUI_REMOVED}", file=sys.stderr)
+        return 2
     if args.pick_region:
         return _pick_region_child(args.pick_prompt)
     if args.show_identify:
@@ -792,25 +803,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.calibrate:
         return _calibrate(args)
 
-    # WHICH shell, in one place: the GUI unless the user asked for the TUI by
-    # name (docs/design/ui-monitor.md §2.12 - the TUI is deprecated and will be
-    # deleted). ``--gui`` is still accepted and deliberately not consulted; it
-    # now names the default rather than selecting anything.
-    gui = not args.tui
-
     # WHICH MACHINE'S SCREEN, and it is a separate question from where the
     # session runs (``--ssh``, below): the monitor link moves the pixels, the
     # mouse and the clipboard onto another box, while the engine and the
     # project stay wherever the launch put them (docs/design/ui-monitor.md §1's
-    # table - three halves, three flags). Refused for the TUI rather than
-    # quietly ignored: the shell is deprecated and frozen (§2.12), so a user who
-    # asked for both has asked for something that will never work and deserves
-    # to be told now instead of after a session starts watching the wrong screen.
+    # table - three halves, three flags).
     monitor_target: tuple[str, int] | None = None
     if args.monitor is not None:
-        if not gui:
-            print(f"agentclip: {MONITOR_GUI_ONLY}", file=sys.stderr)
-            return 2
         monitor_target = parse_monitor_target(args.monitor)
         if monitor_target is None:
             print(
@@ -819,19 +818,16 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
 
-    # WHERE the session runs, decided before either shell exists - except on the
-    # one path where it is decided AFTER: a GUI ``--ssh`` launch no longer blocks
-    # on a terminal dial. The window opens on this PC and the connect
-    # dialog runs the identical sequence in-app, with a checklist and a retry
-    # (docs/design/ui-briefs/ssh-connect.md; gui.md §2's "everything slow happens
-    # after first paint"). The TUI keeps the launch-time flow verbatim: it cannot
-    # prompt once Textual owns the terminal, which is the whole reason for the
-    # carve-out.
-    pending_connect = (args.ssh, args.remote_root) if (gui and args.ssh) else None
-    if args.ssh and pending_connect is None:
-        launch = remote_launch(args)
-    else:
-        launch = local_launch(args)
+    # WHERE the session runs, and it is settled AFTER the window opens rather
+    # than before it: an ``--ssh`` launch does not block on a terminal dial. The
+    # window opens on this PC and the connect dialog runs the identical sequence
+    # in-app, with a checklist and a retry (docs/design/ui-briefs/ssh-connect.md;
+    # gui.md §2's "everything slow happens after first paint"). The launch-time
+    # dial went with the TUI, which was the shell that could not prompt once its
+    # toolkit owned the terminal; :func:`remote_launch` is still the single
+    # construction point that flow is assembled from.
+    pending_connect = (args.ssh, args.remote_root) if args.ssh else None
+    launch = local_launch(args)
     if isinstance(launch, int):
         return launch
     config = launch.config
@@ -869,12 +865,9 @@ def main(argv: list[str] | None = None) -> int:
     if launch.remote is None:
         launch.data_root.mkdir(parents=True, exist_ok=True)
         prune_sessions(launch.data_root, config.backup.keep_sessions)
-    # The clipboard backend and the MCP runtime are shell-agnostic - both shells
-    # drive the same AutomationController and the same engine factory - so they
-    # are built ABOVE the fork, exactly as gui.md section 0 said they would rise
-    # as the GUI grew. The sixel probe is the one step that is NOT: it asks a
-    # terminal questions over stdin/stdout, and there is no terminal on the GUI
-    # path, so it stays below the branch.
+    # The clipboard backend, built here rather than inside the shell: it is a
+    # launch decision (``[clipboard] provider``), and the shell is handed the
+    # result, exactly as gui.md section 0 said it would be.
     provider = select_provider(config.clipboard.provider)
     # The MCP runtime is not built here any more: the engine-side builder owns
     # it, because servers must spawn on the machine the engine runs on
@@ -897,230 +890,131 @@ def main(argv: list[str] | None = None) -> int:
     # (docs/design/remote-ssh.md, "the target owns its policy"). The runtime the
     # connect builds carries the target's instead.
     mcp_remote_target = launch.host.name if config.remote.is_remote() else ""
-    # The fork between the two shells (docs/design/gui.md section 0). It sits
-    # here, after everything about WHERE the session runs is settled and before
-    # the first TUI-only step. Imported inside the function because pywebview is
-    # the optional `gui` extra - a TUI launch must not pay for the import, and
-    # an install without the extra must still run.
+    # The shell, and there is only one of them (docs/design/ui-monitor.md §6.6
+    # deleted the Textual TUI). Imported inside the function because pywebview
+    # is the optional `gui` extra: ``--list-matchers``, ``--pick-region`` and a
+    # plain ``import agentclip.cli`` must not pay for it, and an install without
+    # the extra must still reach the flags above.
     #
-    # The engine factory is built the same way for both, with the same
-    # arguments; only the SHAPE of the "read the live Config" closure differs.
-    # The TUI's reads ``app.app_config``, an attribute its service editor
-    # reassigns. The GUI's window does not exist yet at this line, so the cell
-    # is here and the shell writes it back through ``on_config_change`` - both
-    # shells therefore build the next session's Engine from whatever the editor
-    # last saved, and neither touches a session already in flight.
-    if gui:
-        from agentclip.shell.gui.remote import RemoteConnect
-        from agentclip.shell.gui.shell import run_gui
+    # The window does not exist yet at this line, so the "read the live Config"
+    # closure reads a cell the shell writes back through ``on_config_change`` -
+    # which is what lets the next session's Engine be built from whatever the
+    # service editor last saved, without touching a session already in flight.
+    from agentclip.shell.gui.remote import RemoteConnect
+    from agentclip.shell.gui.shell import run_gui
 
-        live_config = [config]
-        gui_factory = make_engine_factory(
-            lambda: live_config[0],
-            launch.project_root,
-            host=launch.host,
-            os_name=launch.os_name,
-            data_root=(launch.data_root if launch.data_root != launch.project_root else None),
-            home=launch.home,
-            mcp_remote_target=mcp_remote_target,
-            mcp_enabled=pending_connect is None,
-        )
-        # What the process currently OWNS, as opposed to what it was launched
-        # with: an in-app connect replaces both, and the teardown below has to
-        # close what is live rather than what was true at startup. ``engine`` is
-        # whatever holds the live engine - a :class:`LinkFactory` (and with it
-        # this PC's MCP loop thread) at launch, a :class:`RemoteEngine` (and with
-        # it the SSH exec channel the target's engine dies with) after a connect.
-        # Both answer ``close()``, which is all a teardown needs to know.
-        owned: dict[str, Any] = {"engine": gui_factory, "host": launch.host}
-
-        def adopt_config(edited: Config) -> None:
-            live_config[0] = edited
-
-        def build_runtime(remote: ConnectedRemote) -> GuiRuntime:
-            """A successful in-app connect, turned into a session's ingredients.
-
-            Since increment 4's flip this is the launch of an engine ON the
-            target: ``agentclip-engine`` over an exec channel, a wire handshake,
-            and a factory that mints one ``RemoteLink`` per session
-            (docs/design/remote-executor.md §2.12). It lives here rather than in
-            the shell for the reason ``run_gui`` is handed its factory at all:
-            how a session is BUILT is a launch question, and a second
-            construction site is a second thing to drift.
-
-            Nothing local is set up for the box any more - no session tree, no
-            pruning, no MCP runtime on this PC. All three belong to the machine
-            the engine runs on and are its own doing (§2.4, §2.7).
-
-            The launch comes FIRST, before anything is swapped: a failed one
-            raises :class:`EngineLinkError` carrying the classified sentence and
-            must leave the window exactly as it was, on the machine it was
-            already on. The dialled host is closed on the way out, because the
-            failing path is the one that must not leak a connection per retry.
-            Only then are the previous engine and host handed back - engine
-            before host, so the link channel is closed before the transport
-            under it.
-            """
-            try:
-                factory, engine = make_remote_link_factory(remote, service=args.service)
-            except EngineLinkError:
-                closer = getattr(remote.host, "close", None)
-                if closer is not None:
-                    closer()
-                raise
-            live_config[0] = remote.config
-            previous, owned["engine"] = owned["engine"], engine
-            if previous is not None:
-                previous.close()
-            old_host, owned["host"] = owned["host"], remote.host
-            if old_host is not None and old_host is not remote.host:
-                closer = getattr(old_host, "close", None)
-                if closer is not None:
-                    closer()
-            return GuiRuntime(
-                project_root=remote.project_root,
-                config=remote.config,
-                engine_factory=factory,
-                # The RemoteEngine IS the MCP status source in remote mode, and
-                # unconditionally: unlike a local builder it has nothing to
-                # report until the first session build carries the target's
-                # settle home (§2.7), so gating it on a non-empty reading would
-                # drop the source before it could ever answer.
-                mcp_manager=engine,
-                skills=engine.skills,
-                host=remote.host,
-                target=remote.host.target,
-            )
-
-        try:
-            return run_gui(
-                launch,
-                provider=provider,
-                on_config_change=adopt_config,
-                engine_factory=gui_factory,
-                mcp_manager=_mcp_source(gui_factory),
-                # Ungated, where the MCP source is not: a project with no skills
-                # still has six folders `/skills` should be able to name.
-                skills=gui_factory.skills,
-                host=launch.host,
-                remote=RemoteConnect(
-                    local_root=Path(args.project).resolve(),
-                    build=build_runtime,
-                    service_override=args.service,
-                    pending=pending_connect,
-                ),
-                # Split mode, and deliberately handed over as the parsed pair
-                # rather than the raw string: ``main`` is where a bad target is
-                # refused, so nothing below this line can be given one.
-                monitor_target=monitor_target,
-            )
-        finally:
-            # The same hand-back the TUI path does below, over what is LIVE: a
-            # --ssh launch has a connection open by now whichever shell it was
-            # headed for, and so does one the user dialled from the dialog. The
-            # order is the flip's: the ENGINE goes first (which, remotely, closes
-            # the exec channel its process dies with), then the transport under
-            # it - a host closed first would take the channel with it and turn
-            # an orderly shutdown into a dropped link.
-            if owned["engine"] is not None:
-                owned["engine"].close()
-            close = getattr(owned["host"], "close", None)
-            if close is not None:
-                close()
-    # BEFORE app.run(), and this is the only place it may happen: probing asks
-    # the terminal questions over stdin/stdout, and once Textual starts its own
-    # reader thread the answers go to Textual instead - which is exactly how the
-    # ELEMENTS column ends up silently drawing blocks on a terminal that can do
-    # sixel (tui.graphics, tui.md 1.7).
-    probe_terminal()
-    # app.app_config is reassigned in place when the service editor saves, so
-    # the factory's closure keeps reading whatever config is current. The box is
-    # what lets that closure exist BEFORE the app does: the factory is built
-    # first now (asking it for statuses is what builds the MCP runtime, and that
-    # has to happen before the app is handed a status source), and until the
-    # constructor returns there is no ``app`` to read - only the launch config,
-    # which is what ``app.app_config`` is about to be set to anyway.
-    live_app: list[AgentClipApp | None] = [None]
-
-    def tui_config() -> Config:
-        current = live_app[0]
-        return config if current is None else current.app_config
-
-    # The two modes, and the whole of what ``--ssh`` now means. A remote launch
-    # runs its engine ON the target and drives it over the wire; a local one
-    # builds the engine in this process. Below this branch the TUI is handed the
-    # same two things either way - something that mints a ``Link`` per session,
-    # and something that answers ``statuses()``/``set_status_hook()`` - because
-    # that is the whole of what a shell is allowed to know about where its
-    # engine is (docs/design/remote-executor.md §2.2, §2.7).
-    #
-    # The Config built from the TARGET's project file still drives THIS side's
-    # knobs - the service preset, the clipboard backend, the paste budget the
-    # composer displays - and it is still what ``tui_config`` hands the local
-    # builder. The remote engine does not read it: it re-derives its own from
-    # the target's layers, per service, on every session build (§2.5, §2.6),
-    # which is why none of ``os_name``/``data_root``/``home`` is passed over
-    # there. They describe a session assembled here, and there is not one.
-    tui_factory: Callable[[EngineRequest | str], Link]
-    tui_mcp: RemoteEngine | LinkFactory | None
-    stop_engine: Callable[[], None]
-    if launch.remote is not None:
-        try:
-            tui_factory, remote_engine = make_remote_link_factory(
-                launch.remote, service=args.service
-            )
-        except EngineLinkError as exc:
-            # The classified sentence, and nothing about links or wires: a
-            # target with no engine on it is told how to install one, a version
-            # mismatch names both installs (§2.9, §2.12). Same stream and same
-            # exit code as every other fatal step of going remote.
-            print(f"agentclip: {exc.detail or exc}", file=sys.stderr)
-            close = getattr(launch.host, "close", None)
-            if close is not None:
-                close()
-            return 2
-        # Unconditionally the status source: it has nothing to report until the
-        # first session build carries the target's settle home, so gating it on
-        # a non-empty reading would drop it before it could ever answer (§2.7).
-        tui_mcp = remote_engine
-        tui_skills = remote_engine.skills
-        stop_engine = remote_engine.close
-    else:
-        local_factory = make_engine_factory(
-            tui_config,
-            launch.project_root,
-            host=launch.host,
-            os_name=launch.os_name,
-            data_root=launch.data_root if launch.data_root != launch.project_root else None,
-            home=launch.home,
-            mcp_remote_target=mcp_remote_target,
-        )
-        tui_factory = local_factory
-        tui_mcp = _mcp_source(local_factory)
-        # Ungated, where the MCP source is not: a project with no skills still
-        # has six folders `/skills` should be able to name.
-        tui_skills = local_factory.skills
-        stop_engine = local_factory.close
-    app = AgentClipApp(
-        config=config,
-        provider=provider,
-        engine_factory=tui_factory,
-        project_root=launch.project_root,
-        mcp_manager=tui_mcp,
-        skills=tui_skills,
+    live_config = [config]
+    gui_factory = make_engine_factory(
+        lambda: live_config[0],
+        launch.project_root,
+        host=launch.host,
+        os_name=launch.os_name,
+        data_root=(launch.data_root if launch.data_root != launch.project_root else None),
+        home=launch.home,
+        mcp_remote_target=mcp_remote_target,
+        mcp_enabled=pending_connect is None,
     )
-    live_app[0] = app
+    # What the process currently OWNS, as opposed to what it was launched
+    # with: an in-app connect replaces both, and the teardown below has to
+    # close what is live rather than what was true at startup. ``engine`` is
+    # whatever holds the live engine - a :class:`LinkFactory` (and with it
+    # this PC's MCP loop thread) at launch, a :class:`RemoteEngine` (and with
+    # it the SSH exec channel the target's engine dies with) after a connect.
+    # Both answer ``close()``, which is all a teardown needs to know.
+    owned: dict[str, Any] = {"engine": gui_factory, "host": launch.host}
+
+    def adopt_config(edited: Config) -> None:
+        live_config[0] = edited
+
+    def build_runtime(remote: ConnectedRemote) -> GuiRuntime:
+        """A successful in-app connect, turned into a session's ingredients.
+
+        Since increment 4's flip this is the launch of an engine ON the
+        target: ``agentclip-engine`` over an exec channel, a wire handshake,
+        and a factory that mints one ``RemoteLink`` per session
+        (docs/design/remote-executor.md §2.12). It lives here rather than in
+        the shell for the reason ``run_gui`` is handed its factory at all:
+        how a session is BUILT is a launch question, and a second
+        construction site is a second thing to drift.
+
+        Nothing local is set up for the box any more - no session tree, no
+        pruning, no MCP runtime on this PC. All three belong to the machine
+        the engine runs on and are its own doing (§2.4, §2.7).
+
+        The launch comes FIRST, before anything is swapped: a failed one
+        raises :class:`EngineLinkError` carrying the classified sentence and
+        must leave the window exactly as it was, on the machine it was
+        already on. The dialled host is closed on the way out, because the
+        failing path is the one that must not leak a connection per retry.
+        Only then are the previous engine and host handed back - engine
+        before host, so the link channel is closed before the transport
+        under it.
+        """
+        try:
+            factory, engine = make_remote_link_factory(remote, service=args.service)
+        except EngineLinkError:
+            closer = getattr(remote.host, "close", None)
+            if closer is not None:
+                closer()
+            raise
+        live_config[0] = remote.config
+        previous, owned["engine"] = owned["engine"], engine
+        if previous is not None:
+            previous.close()
+        old_host, owned["host"] = owned["host"], remote.host
+        if old_host is not None and old_host is not remote.host:
+            closer = getattr(old_host, "close", None)
+            if closer is not None:
+                closer()
+        return GuiRuntime(
+            project_root=remote.project_root,
+            config=remote.config,
+            engine_factory=factory,
+            # The RemoteEngine IS the MCP status source in remote mode, and
+            # unconditionally: unlike a local builder it has nothing to
+            # report until the first session build carries the target's
+            # settle home (§2.7), so gating it on a non-empty reading would
+            # drop the source before it could ever answer.
+            mcp_manager=engine,
+            skills=engine.skills,
+            host=remote.host,
+            target=remote.host.target,
+        )
+
     try:
-        app.run()
+        return run_gui(
+            launch,
+            provider=provider,
+            on_config_change=adopt_config,
+            engine_factory=gui_factory,
+            mcp_manager=_mcp_source(gui_factory),
+            # Ungated, where the MCP source is not: a project with no skills
+            # still has six folders `/skills` should be able to name.
+            skills=gui_factory.skills,
+            host=launch.host,
+            remote=RemoteConnect(
+                local_root=Path(args.project).resolve(),
+                build=build_runtime,
+                service_override=args.service,
+                pending=pending_connect,
+            ),
+            # Split mode, and deliberately handed over as the parsed pair
+            # rather than the raw string: ``main`` is where a bad target is
+            # refused, so nothing below this line can be given one.
+            monitor_target=monitor_target,
+        )
     finally:
-        # Engine first, then the transport under it - remotely that is the link
-        # channel before the SSH connection, and the remote process dies with
-        # the channel by design (§2.3).
-        stop_engine()
-        close = getattr(launch.host, "close", None)
+        # The hand-back, over what is LIVE rather than what the launch started
+        # with: a connect dialled from the dialog has replaced both by now. The
+        # order is the flip's: the ENGINE goes first (which, remotely, closes
+        # the exec channel its process dies with), then the transport under
+        # it - a host closed first would take the channel with it and turn
+        # an orderly shutdown into a dropped link.
+        if owned["engine"] is not None:
+            owned["engine"].close()
+        close = getattr(owned["host"], "close", None)
         if close is not None:
             close()
-    return 0
 
 
 def _pick_region_child(prompt: str | None = None) -> int:

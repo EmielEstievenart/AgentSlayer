@@ -70,8 +70,8 @@ SRC = os.path.join(ROOT, "src")
 # module scope behind an `except ImportError: sys.exit(1)`. SystemExit is not an
 # Exception, so PyInstaller's collector does not catch it, and without this
 # filter `collect_all` aborts the entire build with "No module named 'typer'".
-# Nothing in AgentClip reaches it - the same shape, and the same fix, as the
-# main spec dropping textual_image's demo app.
+# Nothing in AgentClip reaches it: the module is a CLI this package never
+# invokes, and a filtered `collect_all` is the narrowest way to say so.
 mcp_datas, mcp_binaries, mcp_hidden = collect_all(
     "mcp",
     filter_submodules=lambda name: name != "mcp.cli" and not name.startswith("mcp.cli."),
@@ -119,13 +119,12 @@ hiddenimports = (
 # so that the day one of them becomes reachable, it is a build-time surprise
 # instead of forty extra megabytes on a target that never opens a window.
 excludes = [
-    # SHELL: the two UIs and their trees. `textual` and `pillow`/`textual_image`
-    # are hard runtime dependencies of the package, which is precisely why they
-    # have to be named - a full install on a target drags them (design section
-    # 2.6, "the unused weight is disk, not coupling") and a *binary* has no
-    # excuse to.
-    "textual",
-    "textual_image",
+    # SHELL: the UI and its tree. `textual` and `textual_image` were named here
+    # too - hard runtime dependencies of the package, which is precisely why a
+    # binary that never opens a window had to say so (design section 2.6, "the
+    # unused weight is disk, not coupling") - until docs/design/ui-monitor.md 6.6
+    # deleted the shell and dropped both dependencies, which is a stronger
+    # version of the same guarantee.
     "pygments",
     # The GUI shell's stack. On Linux this is also the awkward one to have
     # collected by accident: pywebview's Linux backends want PyGObject/Qt
@@ -158,8 +157,6 @@ excludes = [
     # somewhere inside the SDK. `jinja2` stays excluded because starlette's
     # templating module guards its import and nothing on the client path asks
     # for it.
-    "textual_dev",
-    "textual_serve",
     "aiohttp",
     "aiohttp_jinja2",
     "jinja2",

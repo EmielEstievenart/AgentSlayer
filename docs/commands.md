@@ -1,6 +1,6 @@
 # Commands
 
-Slash commands are typed in the chat box: Enter sends, and a newline is `shift+enter` or `ctrl+j`. Most keyboard shortcuts only fire when the chat box is *not* focused (press Esc in an empty box to get there) — a focused text box swallows bare letters, which is the only thing keeping `y`/`n`/`a` out of a sentence you are typing. **The key list below is the GUI's** — the shell plain `agentclip` opens, and the one rendering this page behind the titlebar's **docs** button. The deprecated TUI (`agentclip --tui`) shares every slash command and most of the keys.
+Slash commands are typed in the chat box: Enter sends, and a newline is `shift+enter` or `ctrl+j`. Most keyboard shortcuts only fire when the chat box is *not* focused (press Esc in an empty box to get there) — a focused text box swallows bare letters, which is the only thing keeping `y`/`n`/`a` out of a sentence you are typing. **The key list below is the GUI's** — the shell `agentclip` opens, and the one rendering this page behind the titlebar's **docs** button. It is the only shell; the terminal one that used to share these keys was removed.
 
 ## Slash commands
 
@@ -91,7 +91,33 @@ clipboard watcher to run — leaves the strip instead of fading.
 |---|---|
 | `--calibrate` | Open the **calibration window alone** — no session, no engine, nothing running. This is what you launch on the machine the browser is on |
 | `--ssh <target>` | Run this session's tools, files and skills on another machine (`user@host`, an ssh-config alias, or a pasted `ssh …` command) |
-| `--tui` | The deprecated Textual shell. Frozen — no new features land there |
+| `--monitor <host:port>` | Drive the **screen** of another machine — the one running `agentclip-monitor` |
+| `--tui` | **Removed.** The Textual terminal shell is gone; the flag prints one line saying so and exits. Kept for one release so a script that still carries it is told what happened |
+
+`--ssh` and `--monitor` are separate questions and can be used apart or
+together: `--ssh` moves where your *files and commands* live, `--monitor` moves
+which *screen* the browser automation watches, clicks and pastes into.
+
+### On the machine the browser is on
+
+Two commands run over there, and neither needs a session or an engine:
+
+- `agentclip --calibrate` — capture what the service looks like, draw the chat region, watch what is being recognised. Run this first; a monitor with nothing captured has nothing to find.
+- `agentclip-monitor --port 7777` — the standing monitor. It keeps running across disconnects, serves one brain at a time, and hosts nothing else.
+- `agentclip-monitor --port 7777 --bind 0.0.0.0` — listen on something other than loopback. Only with the warning below.
+
+**The monitor port is unauthenticated.** Anything that can reach it can move
+that machine's mouse, type on its keyboard and read its clipboard. So the
+default bind is `127.0.0.1` and `--bind` is the explicit opt-in; the intended
+deployment is a VM on a private host-only network, or an SSH forward from your
+own machine:
+
+```
+ssh -N -L 7777:127.0.0.1:7777 you@the-vm     # then: agentclip --monitor 127.0.0.1:7777
+```
+
+While a monitor link is up the chat GUI's own calibration door (`F2`) is
+closed: the pixels are on the other machine, so calibration runs there.
 
 **Inside the chat box:**
 

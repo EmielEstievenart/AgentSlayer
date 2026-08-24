@@ -110,7 +110,7 @@
   // NOT called `history`: that name is `window.history`, and a var shadowing it
   // inside this closure is the sort of thing that works right up until
   // something in here reaches for a real navigation API.
-  var SENT_MAX = 50; // tui/widgets/composer.py's HISTORY_LIMIT, same reasons
+  var SENT_MAX = 50; // the send-history cap: 50 recalls, which is more than anyone walks back
   var sent = [];
   var sentAt = null;
   var sentDraft = "";

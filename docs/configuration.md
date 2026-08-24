@@ -27,7 +27,35 @@ TOML merge order: **built-in defaults → global config.toml → project .agentc
 
 **Remote sessions** (`--ssh`): the project config and *both* permission files are read from the **target machine** — the machine running your code owns its policy. The global config.toml stays local (it describes this PC: clipboard, screen, themes).
 
+**Split mode** (`--monitor host:port`): the *screen* moves instead of the files. The chat GUI runs here; the browser, the mouse, the clipboard and the appearance profiles all live on the machine running `agentclip-monitor` there. Two commands run over there, and neither needs a session or an engine:
+
+- `agentclip --calibrate` — capture the appearances and draw the chat region on that machine. The profiles stay there; they never cross the link.
+- `agentclip-monitor --port 7777` — the standing monitor, on loopback. It keeps running across disconnects and serves one brain at a time.
+- `agentclip-monitor --port 7777 --bind 0.0.0.0` — listen on something other than loopback, which is the explicit opt-in described below.
+- `agentclip --monitor 127.0.0.1:7777` — here, once a forward is up.
+
+**The monitor port is unauthenticated** (`docs/design/ui-monitor.md` §5). It is a channel to that machine's mouse, keyboard and clipboard, so the default bind is `127.0.0.1` and `--bind` is the opt-in; the intended deployment is a VM on a private host-only network, or an SSH forward: `ssh -N -L 7777:127.0.0.1:7777 you@the-vm`.
+
+If the link drops, the GUI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. While split mode is on, the chat GUI's `F2` is closed: calibration runs on the monitor's machine.
+
 In-app changes (the calibration window, theme pickers, saved remote targets) are persisted to the **global** config.toml.
+
+## Running the monitor on Linux
+
+The monitor half — `agentclip-monitor`, and `agentclip --calibrate` beside it — runs on **X11**. It captures with `XGetImage`, clicks and types through the XTest extension, and switches windows through EWMH's `_NET_ACTIVE_WINDOW`; on Windows the same operations are GDI and `SendInput`, and the backend is picked by platform with nothing to configure.
+
+**Native Wayland is not supported.** A Wayland session gives no client a way to screenshot another client's surface or synthesise input into it, so there is nothing for the monitor to build on. A browser running under **XWayland** *is* a normal X client and works — start it with `GDK_BACKEND=x11` (Firefox: `MOZ_ENABLE_WAYLAND=0`), or log into an "X11"/"Xorg" session at the display manager. `echo $XDG_SESSION_TYPE` says which you are in.
+
+What the machine needs:
+
+- **`DISPLAY` must be set** in the environment the monitor is started from — a bare `ssh you@the-vm` gives you a shell with no `DISPLAY`, so export the desktop's own (usually `export DISPLAY=:0`) before launching it.
+- **python-xlib** — a normal dependency on Linux, so `uv sync` / `pip install agentclip` already brings it; the distro package is `python3-xlib` if you would rather not install it from PyPI.
+- **`python3-tk`** — tkinter, for the `--pick-region` overlay you drag the chat region with. `scripts/build-exe.sh` refuses to build the monitor without it.
+- **`xclip` or `xsel`** — pyperclip's clipboard backends. Without one of them the clipboard is unavailable and AgentClip says so at startup instead of copying silently into nothing.
+- **copykitten** is the preferred clipboard backend and is *untested* on Linux; if it misbehaves, uninstall it and the pyperclip fallback takes over (set `[clipboard] provider = "pyperclip"` to force it).
+- **A window manager that speaks EWMH** — anything mainstream does. Without one, the snap-back after an auto-copy click simply reports that focus did not come, and the rest keeps working.
+
+`agentclip-monitor --port 7777` binds loopback on that machine, so reach it with an SSH forward rather than `--bind`: `ssh -N -L 7777:127.0.0.1:7777 you@the-vm`, then `agentclip --monitor 127.0.0.1:7777` here.
 
 ## config.toml reference
 
@@ -38,7 +66,7 @@ In-app changes (the calibration window, theme pickers, saved remote targets) are
 | `service` | `"chatgpt-attach"` | Active service preset for the master window |
 | `subagent_service` | `""` | Preset for the sub-agent window (`""` = same as master) |
 | `chars_per_token` | `3` | Token-estimate divisor, 1–10. Sizes in the UI are shown as `~N tokens` — this is what they are divided by |
-| `theme` | `"textual-dark"` | TUI theme: `textual-light`, `textual-dark`, `claude-warm`, `claude-dark` |
+| `theme` | `"textual-dark"` | Legacy theme name, kept so an existing config file still loads: `textual-light`, `textual-dark`, `claude-warm`, `claude-dark`. The window reads `[gui] theme`; this one named the terminal shell's theme, and that shell is gone |
 
 ### [clipboard]
 

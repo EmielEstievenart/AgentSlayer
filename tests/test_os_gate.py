@@ -19,14 +19,17 @@ import sys
 
 import pytest
 
+from agentclip.driver.monitor import ops as monitor_ops
 from agentclip.driver.screen import focus, overlay, picker, x11
 from agentclip.driver.screen.region import ScreenRegion
+from tests import conftest
 
 REGION = ScreenRegion(40, 40, 20, 20)
 
 # Captured at import time, i.e. during collection - before any fixture runs.
 REAL_PICK_REGION = picker.pick_region
 REAL_IDENTIFY_OVERLAY = picker.draw_identify_overlay
+REAL_OPS_SEND_PASTE = monitor_ops.send_paste
 # The X11 backend's two injection seams, same rule. Importing the module costs
 # nothing anywhere: it reaches python-xlib only inside its functions.
 REAL_FAKE_INPUT = x11._fake_input
@@ -119,6 +122,48 @@ def test_the_gate_swaps_the_identify_overlay_out_by_default() -> None:
     assert picker.draw_identify_overlay is not REAL_IDENTIFY_OVERLAY
 
 
+# == the bound names, which are where a caller really reaches these ============
+# A from-import makes a SECOND binding, so a patch at the definition module
+# alone leaves it pointing at the real thing. The gate patches those copies too,
+# and this is the list of where they live now that the TUI's ``MainScreen`` is
+# gone (docs/design/ui-monitor.md 6.6): the Driver's OS adapter for the
+# injecting verbs, and the calibration window and the service editor for the
+# two fullscreen overlays.
+
+
+@gated_only
+@pytest.mark.parametrize("verb", sorted(conftest._OPS_INJECTING_VERBS))
+def test_the_drivers_os_adapter_cannot_inject_under_any_of_its_names(verb: str) -> None:
+    """``driver/monitor/ops.py`` is what ``ScreenOps`` - and so the whole
+    automation suite - actually calls, one from-imported name at a time."""
+    assert getattr(monitor_ops, verb)(REGION, 1) is False
+
+
+@gated_only
+def test_the_gate_swaps_the_adapters_names_out_by_default() -> None:
+    assert monitor_ops.send_paste is not REAL_OPS_SEND_PASTE
+
+
+@gated_only
+def test_the_calibration_windows_overlays_are_blocked_at_its_own_names() -> None:
+    """The window that OWNS both overlays since phase 4 (6.4): a forgotten mock
+    there would throw a fullscreen child process over the user's desktop."""
+    from agentclip.shell.gui.calibration import view as calibration_view
+
+    with pytest.raises(AssertionError, match="mock it at the use site"):
+        calibration_view.pick_region()
+    with pytest.raises(AssertionError, match="mock it at the use site"):
+        calibration_view.draw_identify_overlay([])
+
+
+@gated_only
+def test_the_service_editors_picker_is_blocked_at_its_own_name() -> None:
+    from agentclip.shell.gui import service_editor
+
+    with pytest.raises(AssertionError, match="mock it at the use site"):
+        service_editor.pick_region()
+
+
 def _funcptr_type() -> type:
     """The type ctypes gives a ``windll`` entry, borrowed from a call the gate
     never touches (``GetSystemMetrics`` only reads the desktop)."""
@@ -196,6 +241,7 @@ def test_the_real_os_marker_lifts_the_gate() -> None:
     genuine functions back, which is what the opt-in promises."""
     assert picker.pick_region is REAL_PICK_REGION
     assert picker.draw_identify_overlay is REAL_IDENTIFY_OVERLAY
+    assert monitor_ops.send_paste is REAL_OPS_SEND_PASTE
 
 
 @pytest.mark.real_os

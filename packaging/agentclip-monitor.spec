@@ -107,12 +107,11 @@ if sys.platform.startswith("linux"):
     hiddenimports += collect_submodules("Xlib")
 
 excludes = [
-    # SHELL: both UIs and their trees. `textual` and `pillow`/`textual_image`
-    # are hard package dependencies, which is exactly why they have to be named:
-    # a full install on the monitor machine drags them and a BINARY has no
-    # excuse to.
-    "textual",
-    "textual_image",
+    # SHELL: the UI and its tree. `textual` and `textual_image` were named here
+    # too - hard package dependencies, which is exactly why a binary that never
+    # opens a window had to say so - until docs/design/ui-monitor.md 6.6 deleted
+    # the shell and dropped both dependencies, which is a stronger version of the
+    # same guarantee.
     "pygments",
     # The GUI shell's stack. See the module docstring: the calibration window is
     # a later phase's addition to this binary, not a silent one.
@@ -134,8 +133,6 @@ excludes = [
     # The monitor never SSHes anywhere: the brain dials IT.
     "paramiko",
     # The dev group, same shared .venv, same reasoning as the other two specs.
-    "textual_dev",
-    "textual_serve",
     "aiohttp",
     "aiohttp_jinja2",
     "jinja2",

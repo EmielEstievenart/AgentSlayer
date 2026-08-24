@@ -6,7 +6,7 @@
     Builds PyInstaller onefile binaries, smoke-tests each frozen artifact, then
     copies them into a folder that is already on PATH:
 
-      agentclip.exe          the full app - GUI shell, deprecated TUI, OpenCV backend
+      agentclip.exe          the full app - GUI shell, OpenCV backend
       agentclip-monitor.exe  the standing monitor, the binary that runs on the
                              machine whose SCREEN shows the chat - a VM, or this
                              PC in split mode (docs/design/ui-monitor.md 2.5, 6.5)
@@ -153,10 +153,10 @@ try {
 
         # --- smoke test ------------------------------------------------------
 
-        # cli.py imports agentclip.shell.tui.app (the deprecated --tui shell) at
-        # module level, which transitively imports every screen and widget. A
-        # missing hidden import fails here, at build time, instead of the first
-        # time a modal is opened.
+        # --version answers from the import tree cli.py pulls at module level -
+        # config, the engine link, the executor seam - so a hidden import missed
+        # anywhere below that line fails here, at build time, instead of on
+        # somebody's desk.
         Write-Step 'Smoke-testing the frozen binary'
         $version = & $DistExe --version 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0 -or -not $version.Trim()) {
@@ -186,12 +186,11 @@ try {
 
         # --- bundled-shell check ---------------------------------------------
 
-        # The same argument one shell over, and the sharper half now that the GUI
-        # is what a bare `agentclip` opens: --version proves the TUI's import tree
-        # (that one is module-level), and says nothing about a GUI whose every piece
-        # is reached lazily - the package only on a GUI launch, pywebview only
-        # inside a function, and its winforms backend only through
-        # webview/guilib.py's per-platform pick. --gui-smoke
+        # The sharper half, because --version proves only what is imported at
+        # module level and the shell is not: every piece of it is reached lazily -
+        # the package only when the window opens, pywebview only inside a
+        # function, and its winforms backend only through webview/guilib.py's
+        # per-platform pick. --gui-smoke
         # walks that whole chain against the exe that was just built: it imports
         # pywebview (which drags in clr and the .NET runtime), READS all three page
         # assets back through importlib.resources - the classic frozen-app failure,

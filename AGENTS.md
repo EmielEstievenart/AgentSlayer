@@ -1,9 +1,6 @@
 # AgentClip — agent instructions
 
-AgentClip is a Python desktop app with **two UI shells**, frozen into a single `agentclip.exe` with PyInstaller:
-
-- the **GUI** (`agentclip.shell.gui`, pywebview + WebView2) — the primary shell, and what plain `agentclip` launches;
-- the **TUI** (`agentclip.shell.tui`, Textual) — **deprecated**. It sits behind `--tui`, is frozen (no new features land there) and is removed in a later phase (`docs/design/ui-monitor.md` §2.12). `--gui` is still accepted and does nothing.
+AgentClip is a Python desktop app with **one UI shell**, frozen into a single `agentclip.exe` with PyInstaller: the **GUI** (`agentclip.shell.gui`, pywebview + WebView2), which is what `agentclip` launches. It had a second, a Textual TUI behind `--tui`; `docs/design/ui-monitor.md` §6.6 deleted it on 2026-08-24, and both `--tui` (a stub that says so and exits 2) and `--gui` (a no-op) survive one release for the scripts that carry them.
 
 Design docs in `docs/design/` are binding — but **a status header inside a design doc qualifies that claim**: a document (or a section of one) whose header says "plan, not yet binding" is intent, not law, and only the parts its header calls built are binding.
 
@@ -31,11 +28,11 @@ Delegate work to subagents rather than doing it inline. Use Sonnet for explorati
 
 - Tests: `uv run pytest`
 - Lint / types: `uv run ruff check .` and `uv run mypy src`
-- All third-party assets must stay embedded in Python source (e.g. CSS lives in the `AgentClipApp.CSS` string, no `.tcss` files) so the PyInstaller build needs no `--add-data`.
+- Third-party assets stay embedded in Python source wherever they can, so the PyInstaller build needs no `--add-data` for them. The one deliberate exception is the GUI page (`shell/gui/assets/`, and the calibration window's own): a browser engine loads those over a `file://` URL, so they are real files and `packaging/agentclip.spec` collects them by package-relative path.
 
 ### Running OS-touching tests
 
-`uv run pytest` is safe to run while you use the machine. An autouse gate in `tests/conftest.py` neuters the three `user32` calls that inject input (`SendInput`, `SetCursorPos`, `SetForegroundWindow`), so nothing in the suite can click, scroll, move the cursor or type a Ctrl+V into whatever window you have in front of you, and `pick_region` raises instead of throwing a fullscreen overlay up. Read-only calls (desktop metrics, GDI screen capture) stay real.
+`uv run pytest` is safe to run while you use the machine. An autouse gate in `tests/conftest.py` neuters the three `user32` calls that inject input (`SendInput`, `SetCursorPos`, `SetForegroundWindow`) — and, on Linux, the two `screen.x11` seams every injection passes through — so nothing in the suite can click, scroll, move the cursor or type a Ctrl+V into whatever window you have in front of you. It also blanks the injecting verbs at their bound names in `driver/monitor/ops.py` (the Driver's OS adapter from-imports each one), and makes `pick_region` and `draw_identify_overlay` raise instead of throwing a fullscreen overlay up. Read-only calls (desktop metrics, GDI screen capture) stay real.
 
 Tests that genuinely need the real desktop or the real clipboard carry `@pytest.mark.real_os` and are skipped by default. To run them:
 

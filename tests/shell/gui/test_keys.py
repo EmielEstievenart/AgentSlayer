@@ -38,11 +38,6 @@ from agentclip.shell.app.commands import COMMANDS
 from agentclip.shell.gui.bridge import JsApi, JsCalls
 from agentclip.shell.gui.runner import GuiRunner
 from agentclip.shell.gui.view import QUIT_BODY, QUIT_TITLE, THEME_CHOICES, GuiView
-
-# The one cross-shell import in this file, and it earns its place: the send
-# history's cap is a number both shells have to agree on, so it is asserted
-# equal rather than described twice (tui.md §3.3d).
-from agentclip.shell.tui.widgets.composer import HISTORY_LIMIT
 from tests.shell.gui.conftest import Harness, settle
 from tests.shell.gui.test_view import ControllerSpy, session_view, snapshot
 
@@ -150,9 +145,8 @@ def test_the_help_sheet_is_rendered_from_the_key_table() -> None:
 def test_the_table_carries_every_binding_the_brief_lists(key: str) -> None:
     """§5.1's table, minus what a page has no equivalent for.
 
-    Absent on purpose: ``ctrl+p`` (there is no palette here, and the TUI's
-    Textual default is switched off - the composer's slash commands are the one
-    command surface in both shells), ``ctrl+s`` (``ctrl+enter`` is this shell's
+    Absent on purpose: ``ctrl+p`` (there is no palette - the composer's slash
+    commands are the one command surface), ``ctrl+s`` (``ctrl+enter`` is this shell's
     one send chord, and it IS in the table), and the composer-local and
     modal-local rows, which belong to their own handlers.
     """
@@ -357,11 +351,11 @@ def test_editing_the_box_ends_the_walk() -> None:
     assert "el.composer.selectionStart = el.composer.selectionEnd = text.length;" in recall
 
 
-def test_the_two_shells_walk_the_same_history_by_the_same_rules() -> None:
-    """These arrows are muscle memory; two shells that disagreed about them
-    would be worse than one shell that lacked them. The cap is asserted equal
-    rather than described, because it is the one rule that is a number."""
-    assert "var SENT_MAX = " + str(HISTORY_LIMIT) + ";" in APP_JS
+def test_the_composer_walks_its_history_by_the_documented_rules() -> None:
+    """These arrows are muscle memory. The cap was asserted equal to the deleted
+    shell's constant until phase 6 (docs/design/ui-monitor.md 6.6); it is a
+    literal here now, which is where the last copy of it lives."""
+    assert "var SENT_MAX = 50;" in APP_JS
     fn = APP_JS[APP_JS.index("function sentPush(text)") :]
     fn = fn[: fn.index("\n  }\n")]
     assert "if (!text.trim()) return;" in fn  # blanks are not sends
@@ -502,13 +496,12 @@ def test_f4_is_an_appearance_picker_and_nothing_more_just_as_the_tuis_is() -> No
     assert 'input.type = "radio"' in fn
 
 
-def test_the_two_shells_share_exactly_the_claude_pair_of_theme_names() -> None:
-    """The overlap is a decision, not a leak. `/theme claude-dark` has to mean
-    the same thing whichever shell it is typed in, so those two names live in
-    both vocabularies and this shell paints them as CSS blocks. Everything else
-    stays put - `dark`/`light` are this shell's and the `textual-*` pair is the
-    TUI's - which is what keeps `[gui] theme` and `[general] theme` from
-    collapsing into one setting with two spellings."""
+def test_the_two_theme_vocabularies_overlap_in_exactly_the_claude_pair() -> None:
+    """The overlap is a decision, not a leak. `[gui] theme` names a CSS palette
+    block and `[general] theme` names a theme by the old shell's spelling; the
+    two claude names are deliberately in both, so `/theme claude-dark` means one
+    thing, while `dark`/`light` stay this shell's own. That is what keeps the
+    two settings from collapsing into one with two spellings."""
     shared = VALID_GUI_THEMES & VALID_THEMES
     assert shared == {"claude-warm", "claude-dark"}
     this_shells_own = VALID_GUI_THEMES - VALID_THEMES

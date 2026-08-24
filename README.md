@@ -35,10 +35,9 @@ Requires Python 3.11+.
 uv sync
 uv run agentclip            # in the project you want the agent to work on
 # or: uv run agentclip --project path/to/project --service chatgpt-attach
-uv run agentclip --tui      # the old Textual terminal shell (deprecated)
 ```
 
-Plain `agentclip` opens the **desktop GUI** — a native window rendering an HTML frontend in the WebView2 runtime Windows already ships. `--tui` opens the original Textual shell in your terminal instead; it is deprecated, frozen at the behavior it has today, and will be removed. (`--gui` is still accepted and does nothing.)
+`agentclip` opens the **desktop GUI** — a native window rendering an HTML frontend in the WebView2 runtime Windows already ships. It is the only shell: the Textual terminal shell that used to sit behind `--tui` was removed, and the flag survives one release as a message saying so. (`--gui` is still accepted and does nothing.)
 
 Linux clipboard: the bundled backend works on X11 and Wayland-with-XWayland out of the box. On a pure-Wayland system install `wl-clipboard` (and `xclip` for X11 fallback).
 
@@ -83,7 +82,7 @@ This builds **two** artifacts (PyInstaller onefile, no Python needed to run them
 
 Re-run to update after changing the source. Useful flags: `-Clean` (fresh build), `-MonitorOnly` (skip the app, and its `gui` extra), `-NoInstall` (build only), `-InstallDir <path>`. The engine binary is not built here — that one runs on an SSH target, so `scripts/build-exe.sh` owns it.
 
-The exe carries **both UI shells and every optional extra the desktop needs**: the GUI shell (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships), the deprecated TUI (`agentclip.exe --tui`) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the GUI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three against the exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
+The exe carries **the shell and every optional extra the desktop needs**: the GUI (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the GUI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three against the exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
 
 The monitor exe is proved the same way, minus the shell half: `--version` walks its whole import tree and `--list-matchers` imports the OpenCV backend for real — which matters more there than in the app, because the monitor machine is where every template search actually runs.
 
@@ -120,12 +119,12 @@ TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (
 - `docs/design/architecture.md` — module layout (Shell / Driver / Executor), config, persistence, tests
 - `docs/design/protocol.md` — the CLIP/1 wire protocol
 - `docs/design/gui.md` — the GUI wave: one core, two shells, and why pywebview. Per-surface behavior contracts live in `docs/design/ui-briefs/`
-- `docs/design/tui.md` — the Textual shell (deprecated and frozen; kept as the record of what it does)
+- `docs/design/tui.md` — **historical**: the Textual shell, deleted 2026-08-24. Kept because the automation rules designed there — the finish decision, the send gate, the auto-copy flow — still run one layer down
 - `docs/design/remote-executor.md` — running the engine on the SSH target instead of round-tripping every call: the link seam, the wire codec, `agentclip-engine`
 - `docs/design/remote-ssh.md` — the earlier per-call SSH design, superseded by the above where they disagree
 - `docs/design/mcp.md` — MCP server support, reading OpenCode's config shape
 - `docs/design/skills.md` — Agent Skills: discovering `SKILL.md` files from the Claude Code / OpenCode folders and exposing them as a `skill` tool
-- `docs/design/ui-monitor.md` — **plan**: splitting the screen-automation half across a process boundary (a UI monitor where the pixels are, the brain where you are), and retiring the TUI
-- `docs/design/research-*.md` — paste-limit / clipboard / Textual research underpinning the design
+- `docs/design/ui-monitor.md` — splitting the screen-automation half across a process boundary (a UI monitor where the pixels are, the brain where you are), and retiring the TUI. Phases graduate to binding one at a time; its header says which are built
+- `docs/design/research-*.md` — paste-limit / clipboard / Textual research underpinning the design (the Textual one is historical: that dependency is gone)
 
 Each design doc carries a status header, and it qualifies the list above: a doc marked "plan, not yet binding" describes intent, and only the sections its header calls built describe code.

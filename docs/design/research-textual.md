@@ -1,5 +1,11 @@
 # Textual Capability Brief for AgentClip (verified June 2026)
 
+> **HISTORICAL — AgentClip does not use Textual.** This brief chose the toolkit
+> for the TUI; that shell was deleted and the dependency dropped on 2026-08-24
+> (`ui-monitor.md` §6.6). Kept as the record of what was evaluated and why, not
+> as a statement about any dependency this project has.
+
+
 ## 1. Version, Python, extras
 - Current stable: **Textual 8.2.7** (released 2026-05-19). Active release cadence (~weekly); pin `textual>=8.2,<9`.
 - Python `>=3.9,<4.0` supported; AgentClip's 3.11+ target is fine. Note: the `syntax` extra requires **Python 3.10+** since Textual 5.0 (tree-sitter dependency).

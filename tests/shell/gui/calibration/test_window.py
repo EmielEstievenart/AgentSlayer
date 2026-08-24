@@ -299,7 +299,6 @@ def test_calibrate_opens_the_window_and_builds_no_engine(
     monkeypatch.setattr(
         "agentclip.shell.gui.shell.run_gui", lambda *a, **k: pytest.fail("opened the chat GUI")
     )
-    monkeypatch.setattr(cli, "probe_terminal", lambda: pytest.fail("probed the terminal"))
 
     assert cli.main(["--calibrate", "--project", str(tmp_path)]) == 0
     assert seen["config"].services  # a real Config, layered for this project
@@ -337,7 +336,7 @@ def test_the_calibration_package_drags_in_no_session_machinery() -> None:
         "import sys;"
         " import agentclip.shell.gui.calibration as c;"
         " bad = [m for m in ('agentclip.shell.app', 'agentclip.shell.gui.view',"
-        " 'agentclip.shell.tui', 'agentclip.engine.link.factory') if m in sys.modules];"
+        " 'agentclip.engine.link.factory') if m in sys.modules];"
         " print(bad)"
     )
     out = subprocess.run(

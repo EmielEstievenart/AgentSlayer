@@ -7,7 +7,7 @@
 > `remote-executor.md` did: when a phase lands, its section gets an "as built"
 > note and its status flips. Until then everything here is intent.
 >
-> **Exception: §2.12, §6.0, §6.1, §6.3 and §6.4 are built, and binding.** Phase 0
+> **Exception: §2.12, §6.0, §6.1, §6.3, §6.4 and §6.5 are built, and binding.** Phase 0
 > shipped on 2026-08-24: the default shell is the GUI, the TUI is behind
 > `--tui` and frozen, and every phase-0 row in §7 is applied. Phase 1 shipped
 > the same day, in its **Driver half only** — `driver/monitor/` exists, the
@@ -16,8 +16,15 @@
 > §6.1's status note is the ledger of what that rewire still owes, and until it
 > lands the shell suites do not run. §3's interface listing is the shipped
 > `driver/monitor/protocol.py`. §6.2 and everything from §6.4 on is still
-> plan, **except §6.4**, which shipped on 2026-08-24 (see its own status note)
-> and takes its phase-4 rows in §7 with it.
+> plan, **except §6.4 and §6.5**, which both shipped on 2026-08-24 (see their
+> own status notes) and take their phase-4 and phase-5 rows in §7 with them.
+> §6.5 is the RPC and the split-mode brain — the wire, the standing server, the
+> client, `SwitchableMonitor`, `LoopState.DISCONNECTED` and `--monitor
+> host:port`; §5's auth question stays OPEN and is named in §6.5's note.
+> **§6.6 is built in its first bullet only** (2026-08-24): the Textual TUI is
+> deleted, `textual` is out of `pyproject.toml`, `--tui` is a stub that says so
+> and exits 2, and §8's "Textual removal timing" is closed. Its second bullet —
+> the `SshHost` per-call path — is still owed.
 >
 > **Where this document overrides others** — say it here so no two docs
 > disagree:
@@ -29,7 +36,8 @@
 >   true for the engine, **deliberately false for the monitor server** (§2.6).
 >   The monitor outlives the brain; the brain redials.
 > - `gui.md:39-44` (parity policy, "the TUI keeps full parity for now"): the
->   TUI is **deprecated** as of phase 0 (§6.0) and deleted in phase 6.
+>   TUI was **deprecated** at phase 0 (§6.0) and **deleted** at phase 6 (§6.6),
+>   so there is no parity contract left — the ui-briefs bind the GUI alone.
 >
 > **For the implementing agent.** Read this whole document, then
 > `architecture.md` §0 and `gui.md` §0–§1, before touching code. Work one
@@ -341,6 +349,32 @@ and clipboard. v1 binds `127.0.0.1` by default and requires an explicit
 host-only network or an SSH `-L` forward. Adding a shared-secret handshake is
 **OPEN** (§8) and must be resolved before this document calls phase 5 binding.
 
+### 5.1 Which desktops the monitor can serve — **as built**
+
+The monitor's whole job is pixels, mouse, keyboard and clipboard, so "runs on a
+VM" is a claim about a *display server*, not about an OS. Two backends exist,
+picked by `sys.platform` with nothing to configure:
+
+| Platform | Capture | Input | Focus |
+|---|---|---|---|
+| Windows | GDI `BitBlt`/`GetDIBits` (`driver/screen/capture.py`) | `SendInput` (`driver/screen/focus.py`) | `SetForegroundWindow` + the ALT-tap loophole |
+| Linux / **X11** | `XGetImage` (`driver/screen/x11.py`) | XTest `fake_input` | EWMH `_NET_ACTIVE_WINDOW` + `XRaiseWindow` |
+
+`capture.py` and `focus.py` stay the Windows implementation and dispatch to
+`x11.py` when the platform says linux; every other platform keeps the
+documented `CaptureError`/`False`, so macOS is still "tell the user once". The
+X11 module converts ZPixmap to the same BGRX `RegionImage` byte layout GDI
+produces, which is what lets the detector, the matchers and the PNG encoder
+stay platform-blind. `python-xlib` is a core dependency under a
+`sys_platform == 'linux'` marker: the monitor is expected to run there with no
+extras. Operator-facing details are in `docs/configuration.md`, "Running the
+monitor on Linux".
+
+**Native Wayland is not supported** and is an open point (§8): a Wayland client
+cannot screenshot another client's surface or synthesise input into it, so
+there is nothing to build the monitor on without going through portals. A
+browser under **XWayland** is a normal X client and works.
+
 ## 6. Phases
 
 Order is 0 → 1 → 2 → 3 → 4 → 5 → 6, except: **3 and 4 depend only on 1**, so
@@ -632,7 +666,63 @@ left in `view.py`/`bridge.py`; `agentclip --calibrate` runs with no engine
 and no session; the ui-briefs `elements-panel.md` and `service-editor.md`
 are amended to name the window; suite green.
 
-### 6.5 The RPC
+### 6.5 The RPC — **AS BUILT**
+
+> **Status: BUILT and binding**, 2026-08-24, with the gaps named below. What
+> shipped:
+>
+> - **The wire** (`driver/monitor/wire.py`): JSON-lines frames `hello`,
+>   `hello_ack`, `call`, `result`, `error`, `tick`, `clip`, with a version
+>   constant of its own and a mismatch that names BOTH installs.
+> - **The server** (`driver/monitor/server.py`, `driver/monitor/__main__.py`,
+>   the `agentclip-monitor` console script and `packaging/agentclip-monitor.spec`):
+>   a standing process that keeps polling across disconnects, accepts a redial,
+>   and refuses a second brain by naming the first (§2.8). It starts
+>   *unconfigured* — the `MonitorSpec` is the brain's payload and arrives on the
+>   first `configure`.
+> - **The client** (`driver/monitor/remote.py`): a reader task owned from day
+>   one, `latest`/`generation` as local fields, one round trip per action
+>   matched back by id alone, and link loss that fails everything in flight,
+>   raises out of a parked `observe()` and fires `on_disconnect` once.
+> - **The brain side** (`driver/monitor/switchable.py`, `shell/gui/view.py`,
+>   `cli.py`): `LoopState.DISCONNECTED` and its transitions — every state may
+>   reach it, and it leaves only to `IDLE`, because a reconnect re-derives from
+>   the screen rather than resuming. The GUI builds its controller over a
+>   `SwitchableMonitor` (inert until the first dial, swapped on every redial, so
+>   neither the view nor the automation core is rebuilt for a link event), dials
+>   after first paint, and on a drop parks in `DISCONNECTED` and redials on a
+>   doubling backoff (1s → 10s cap) until the window closes. A redial that comes
+>   back with a different `server_id` is reported as a monitor that restarted.
+>   Calibration is refused in split mode and points at the monitor's machine.
+>
+> **Decided here, and now binding:** §8's *tick cadence* question — the reader
+> task's backlog policy is **drop-to-latest**. `latest` is a field the newest
+> tick overwrites and `observe()` only ever wants the newest, so nothing is
+> queued and nothing is replayed; a WAN link that falls behind loses
+> intermediate ticks, which is what a slower poll would have done anyway.
+>
+> **The entry is the flag, and only the flag.** `--monitor host:port`, GUI-only
+> (with `--tui` it exits 2 with a one-line message). §6.5's original sketch also
+> named a *GUI connect field*; that is deliberately **not** built — one entry is
+> enough to run split mode, and a second one would have to answer what a
+> mid-session retarget means to a live loop. If it is ever wanted it is a phase
+> of its own.
+>
+> **Still owed / still open:**
+>
+> - **Auth on the port is still OPEN** (§5, §8). v1 binds `127.0.0.1` unless
+>   `--bind` is typed, which is the consent, and the documented deployment is a
+>   host-only network or an SSH `-L` forward. This is the one thing that keeps
+>   §5 itself from being closed.
+> - **Chat regions are still not persisted on the monitor** (§6.4's own note).
+>   The brain sends a region in the spec and the monitor's calibration window
+>   draws one locally; nothing over there keeps it across a restart, so a
+>   restarted monitor is re-targeted by the brain's next `configure` and
+>   re-calibrated by hand if the region itself was lost.
+> - **`reset_trackers` is not a wire verb.** In split mode the brain's tracker
+>   reset is a no-op (`switchable.py` says so out loud); the debounce keeps a
+>   streak the caller's own paste produced for one poll longer. Closing it is a
+>   wire change, not a shell one.
 
 `driver/monitor/wire.py` (frames: `hello`, `hello_ack`, `call`, `result`,
 `error`, `tick`, `clip`; own version constant), `driver/monitor/server.py`
@@ -642,7 +732,8 @@ with `seq` greater than the one current at call time), a console script
 `agentclip-monitor` (`pyproject.toml [project.scripts]`, plus a PyInstaller
 spec alongside `packaging/agentclip-engine.spec`), and a `--monitor
 host:port` launch flag / GUI connect field. Add `LoopState.DISCONNECTED` and
-its transitions (§2.9).
+its transitions (§2.9). *(The connect field was dropped — see the status
+note.)*
 
 **Done when:** a localhost e2e test runs the full recipe suite against
 `RemoteUIMonitor` → real TCP → server → `LocalUIMonitor` with fake ops, and
@@ -651,6 +742,50 @@ lands in `DISCONNECTED` and recovers; §5's bind default is enforced; suite
 green; exe and monitor exe rebuilt.
 
 ### 6.6 Delete
+
+> **Status: the TUI half is BUILT and binding (2026-08-24). The `SshHost` half
+> is still owed.** What shipped, part A:
+>
+> - **`src/agentclip/shell/tui/` and `tests/shell/tui/` are gone** — 26 modules
+>   and 44 Pilot suites, 31,064 lines, deleted whole. Nothing under `src/` imports `textual`,
+>   and `tests/test_layering.py` has a test that says so about every module at
+>   once, in place of the three rules that used to keep one shell's toolkit out
+>   of the other's graph.
+> - **`textual` and `textual-image` are out of `pyproject.toml`**, with
+>   `pytest-textual-snapshot` and `textual-dev` out of the dev group;
+>   `uv lock` refreshed. `packaging/agentclip.spec` lost its `collect_all`, its
+>   pygments lexer sweep, its `textual_image` submodule walk and the
+>   textual-dev/textual-serve excludes; `binaries` is empty and `datas` is
+>   `gui_datas + doc_datas`. **`pillow` is deliberately left in** — nothing
+>   imports it any more (it came in with `textual-image` for the sixel crops),
+>   but dropping a runtime dependency is a separate call with its own build to
+>   re-prove.
+> - **`--tui` is a STUB, not a removal**, which is §8's open point answered the
+>   conservative way: it parses, prints `the Textual TUI was removed in this
+>   release; plain agentclip opens the GUI` on stderr and exits 2, above every
+>   other branch in `main` so a script that carries it cannot be quietly handed
+>   a different shell. `cli.TUI_REMOVED` is the sentence, pinned by a test.
+>   `--gui` stays the no-op it already was.
+> - **The shell fork in `cli.main` is gone**, and with it the launch-time SSH
+>   dial: `--ssh` always defers into the window's connect dialog now, because
+>   the TUI was the only caller that could not prompt after start-up.
+>   `remote_launch` stays — it is still the single construction point that
+>   sequence is built from, and `tests/test_launch_remote.py` still drives it
+>   end to end over a fake host, through the `RemoteConnect` the shell is
+>   handed rather than through a shell fork. `probe_terminal` and the sixel
+>   verdict went with `tui/graphics.py`; nothing else asked them anything.
+> - **The OS gate moved off the deleted shell.** `tests/conftest.py` used to
+>   re-block `pick_region`/`draw_identify_overlay` at `tui/screens/main.py`'s
+>   bound names; it now blocks them at `shell/gui/calibration/view.py` and
+>   `shell/gui/service_editor.py` (where those names are from-imported today)
+>   and additionally blanks the seven injecting verbs at
+>   `driver/monitor/ops.py`, which is the adapter the whole automation suite
+>   drives. `tests/test_os_gate.py` covers each new patch point.
+> - **Prose that names the Textual shell was left where it explains a
+>   decision** (`driver/automation/*.py`'s "lifted out of the Textual
+>   MainScreen", `gui.md`'s comparisons): those sentences are the record of why
+>   a seam is shaped the way it is, and deleting them would delete the reason.
+>   What was removed is every dead *import*, flag path and packaging entry.
 
 - `shell/tui/` in full; `textual` out of `pyproject.toml`; `tui.md` header
   becomes "historical, not binding"; the `--tui` flag prints a one-line
@@ -677,28 +812,50 @@ green; exe and monitor exe rebuilt.
 | 1 | `docs/design/architecture.md:49–55` | seams table + the "deepens" note — **applied**, along with §0's layer text/diagram and §1's module tree |
 | 1 | `docs/design/gui.md`, `docs/design/tui.md` | **applied**: pointers where the monitor took `ScreenOps`, the delivery beats and the cadence out from under them |
 | 4 | `docs/design/ui-briefs/elements-panel.md`, `service-editor.md` | name the calibration window as their host — **applied**, as a status note at the top of each |
-| 5 | `docs/configuration.md`, `docs/commands.md` | `--monitor`, `--calibrate`, `agentclip-monitor` |
+| 5 | `docs/configuration.md`, `docs/commands.md` | `--monitor`, `--calibrate`, `agentclip-monitor` — **applied**, with §5's security note in both |
 | 6 | `docs/design/tui.md`, `remote-ssh.md` | historical headers |
 
-All **phase 0**, **phase 1** and **phase 4** rows are applied (§6.0's, §6.1's
-and §6.4's as-built notes). Phase 5's row is half applied ahead of its phase:
-`--calibrate` is in `docs/commands.md` and `docs/configuration.md` already,
-because it shipped with §6.4; `--monitor` and `agentclip-monitor` are still
-owed. The rest are still owed.
+Phase 6's `tui.md` row is **applied**: the document opens with a "HISTORICAL,
+NOT BINDING — the TUI was deleted 2026-08-24" header that points a reader at the
+layer each surviving rule lives in now. Three more went with it, unlisted above
+because the row predates them: `research-textual.md` carries the same kind of
+header, `gui.md` gained one saying there is one shell and that every "the TUI
+does X" below it is history (its parity policy is now closed rather than
+amended), and `AGENTS.md`, `README.md`, `docs/commands.md` and
+`docs/configuration.md` name one shell and describe `--tui` as the stub it is.
+The `remote-ssh.md` row belongs to §6.6's second bullet and is still owed.
+
+All **phase 0**, **phase 1**, **phase 4** and **phase 5** rows are applied
+(§6.0's, §6.1's, §6.4's and §6.5's as-built notes), and phase 6's first row with
+them.
 
 ## 8. Open points (**OPEN**)
 
 - **Auth on the monitor port** (§5). Shared secret in `hello`? Rely on SSH
-  forwarding only? Must close before phase 5 is binding.
+  forwarding only? **Still open, with phase 5 built**: what shipped is §5's
+  bind default (loopback unless `--bind` is typed) and the documented SSH `-L`
+  deployment, which is a deployment answer rather than a protocol one. The
+  handshake has room for a secret and does not use it.
 - **Which clipboard the manual fallback states mean in split mode.**
   `MANUAL_INSERT` / `MANUAL_COPY` assume the operator can reach the browser's
   clipboard. On a VM that is the VM's clipboard — the brain's GUI can show the
   text to paste, but the operator pastes it *there*. Confirm the attention
   alarm and the GUI copy still make sense, or park manual states as
   unsupported in split mode.
-- **Tick cadence on the wire.** 0.5 s × a few hundred bytes is nothing on a
-  LAN; over a WAN link the reader task's backlog policy (drop-to-latest vs.
-  queue) is undecided. Default to drop-to-latest; `observe()` only ever wants
-  the newest anyway.
-- **Textual removal timing.** Phase 6 deletes it; whether `--tui` survives one
-  release as a stub or goes immediately is the user's call at phase 6.
+- ~~**Tick cadence on the wire.**~~ **RESOLVED** at phase 5: drop-to-latest.
+  `latest` is a field the newest tick overwrites and `observe()` only ever
+  wants the newest, so nothing is queued and nothing is replayed — a link that
+  falls behind loses intermediate ticks, exactly as a slower poll would have.
+- **Wayland.** The X11 backend (§5.1) covers X sessions and XWayland browsers;
+  a native Wayland session has no equivalent, and every route to one
+  (xdg-desktop-portal ScreenCast for pixels, libei/RemoteDesktop for input) is
+  a per-session, user-approved handshake rather than a library call - which
+  fights the monitor's "standing process, no operator on that machine" shape.
+  Undecided whether that is worth building, or whether "log into an X11
+  session" stays the answer.
+- ~~**Textual removal timing.**~~ **RESOLVED** at phase 6 (2026-08-24), the
+  conservative way: `--tui` survives one release as a **stub**. It parses,
+  prints one line naming what happened and where the shell went, and exits 2 —
+  so a script or a shortcut that still carries the flag is told, rather than
+  meeting an argparse "unrecognized arguments" or, worse, silently getting a
+  different shell. It goes for good in the release after this one.

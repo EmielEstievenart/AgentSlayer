@@ -5,8 +5,8 @@ Build via ``scripts/build-exe.ps1``, or by hand from the repo root::
 
     uv run --group build pyinstaller --noconfirm packaging/agentclip.spec
 
-The app itself is deliberately freeze-friendly (architecture.md S7): the Textual
-CSS lives in a class var, the protocol templates are string constants, and
+The app itself is deliberately freeze-friendly (architecture.md S7): third-party
+assets live in Python source, the protocol templates are string constants, and
 nothing resolves paths relative to ``__file__``. Two things are deliberate
 exceptions and are the only ``datas`` of our own here: the GUI shell's page
 (three hand-written files that a browser engine loads over a ``file://`` URL
@@ -16,18 +16,18 @@ read, never compiled in). Everything else exists to work around *dependency*
 dynamism that PyInstaller's static analysis cannot see.
 
 The build environment must have the ``cv`` AND ``gui`` extras installed: the exe
-bundles the OpenCV matcher backend and both UI shells, and PyInstaller can only
+bundles the OpenCV matcher backend and the UI shell, and PyInstaller can only
 collect a package that is there. ``scripts/build-exe.ps1`` syncs both and then
 refuses to build without either, because both failures are otherwise silent - an
 exe missing cv2 starts, runs, and quietly gives every service the anchor search,
-and an exe missing pywebview starts, runs, and answers ``--gui`` with an
+and an exe missing pywebview starts, runs, and answers a launch with an
 "install the gui extra" line a frozen user cannot act on.
 """
 
 import os
 import sys
 
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_submodules
 
 # SPECPATH is injected by PyInstaller. Relative paths in Analysis() resolve
 # against the invoking CWD, which would make the build directory-sensitive;
@@ -35,39 +35,11 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 SRC = os.path.join(ROOT, "src")
 
-# textual.widgets lazy-loads through a module-level __getattr__, so the static
-# analysis finds none of the widgets we actually use (Collapsible, Markdown,
-# Select, TextArea, Button, Input, Footer, ...).
-textual_datas, textual_binaries, textual_hidden = collect_all("textual")
-
-# shell/tui/widgets/action_panel.py calls Syntax.guess_lexer(), a fully dynamic
-# pygments lookup. Without these the plain ``diff`` highlight keeps working
-# while any extension-recognised file preview blows up - a half-broken build.
-pygments_hidden = (
-    collect_submodules("pygments.lexers")
-    + collect_submodules("pygments.styles")
-    + collect_submodules("pygments.formatters")
-)
-
-# The ELEMENTS column reaches textual-image only through lazy, guarded imports
-# (shell/tui/graphics.py: probe_terminal and sixel_image_class both import inside a
-# try, so the whole app can run without the package). PyInstaller's static
-# analysis therefore sees nothing, and a missed collection would not error -
-# the probe would just answer "no sixel" and the frozen exe would silently draw
-# half blocks on a terminal that can do better, which is the exact failure the
-# probe exists to end. Named explicitly so it cannot happen.
-#
-# Pillow needs no help here: PyInstaller ships a hook for it, and the platform
-# plugins it drags in are the hook's business, not ours.
-#
-# Its bundled demo app is dropped: it is a `python -m textual_image` playground
-# that pulls click (which `excludes` below deliberately keeps out) and nothing
-# in AgentClip imports it.
-textual_image_hidden = [
-    name
-    for name in collect_submodules("textual_image")
-    if not name.startswith("textual_image.demo") and name != "textual_image.__main__"
-]
+# Textual, textual-image and the pygments lexers that fed the TUI's action panel
+# were all collected here until phase 6 of docs/design/ui-monitor.md deleted that
+# shell. Nothing dynamic is left to chase on that side: the one remaining shell's
+# page is three files this spec names below, and it reaches them by
+# package-relative resource path rather than by import.
 
 # The GUI shell's page (docs/design/gui.md S2 and S5). These three files are
 # package data under src/agentclip/shell/gui/assets - hatchling puts everything
@@ -182,13 +154,10 @@ else:
     webview_runtime = []
 
 hiddenimports = (
-    textual_hidden
-    + pygments_hidden
-    + textual_image_hidden
     # copykitten is imported lazily inside a function and guarded by
     # try/except, so a missed collection would not error - it would silently
     # fall back to pyperclip and lose the Windows sequence-number polling.
-    + ["copykitten", "pyperclip"]
+    ["copykitten", "pyperclip"]
     # The --pick-region overlay imports tkinter lazily (inside a function) so a
     # tk-less Linux still runs the rest of the app; name it explicitly so the
     # frozen build can never silently lose the picker.
@@ -208,9 +177,9 @@ hiddenimports = (
     # REACHABILITY, which is exactly what a lazy import makes fragile.
     + ["cv2", "numpy"]
     # The GUI shell (docs/design/gui.md). Same lazy shape again, twice over:
-    # cli.py imports agentclip.shell.gui.shell only under --gui, and that
-    # module imports `webview` inside its functions, so nothing static reaches
-    # any of this. And pywebview is itself dynamic below that line -
+    # cli.py imports agentclip.shell.gui.shell inside the function that opens
+    # the window, and that module imports `webview` inside its own functions, so
+    # nothing static reaches any of this. And pywebview is itself dynamic below that line -
     # webview/guilib.py picks a backend per platform at import time, so
     # ``webview.platforms.winforms`` (the Windows one, which then chooses
     # between edgechromium and mshtml by reading the EdgeUpdate registry keys
@@ -225,7 +194,7 @@ hiddenimports = (
     # sys.platform - see the webview_platforms/webview_runtime block, which
     # extends the same argument to guilib.py's Linux and Darwin branches.
     # `webview` itself is unconditional: the package is the same everywhere and
-    # it is what cli.py's --gui path reaches for.
+    # it is what cli.py's launch path reaches for.
     #
     # Collection below that needs no help: pywebview and pythonnet each ship a
     # PyInstaller hook through the `pyinstaller40` entry point (webview/
@@ -249,16 +218,10 @@ hiddenimports = (
 )
 
 # The dev group shares the same .venv. None of this is reachable from our
-# imports, but excluding it explicitly guarantees textual-dev's web-serving
-# tree can never be dragged in.
+# imports; excluding it explicitly is what keeps a test-only tree from being
+# dragged into the exe by something's optional import.
 excludes = [
-    "textual_dev",
-    "textual_serve",
-    "aiohttp",
-    "aiohttp_jinja2",
-    "jinja2",
     "click",
-    "msgpack",
     "pytest",
     "_pytest",
     "mypy",
@@ -269,8 +232,8 @@ excludes = [
 a = Analysis(
     [os.path.join(SRC, "agentclip", "__main__.py")],
     pathex=[SRC],
-    binaries=textual_binaries,
-    datas=textual_datas + gui_datas + doc_datas,
+    binaries=[],
+    datas=gui_datas + doc_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

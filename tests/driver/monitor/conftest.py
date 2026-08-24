@@ -1,10 +1,14 @@
 """The harness the ``LocalUIMonitor`` suites share: one wired monitor, real
 threads, and a teardown that refuses to let one outlive its test.
 
-Three files hang off this. ``test_local.py`` asserts what a tick IS and where it
+Five files hang off this. ``test_local.py`` asserts what a tick IS and where it
 goes; ``test_poller.py`` asserts the thread that produces them - ownership,
 order, stamps and stopping; ``test_tracker_reset.py`` asserts the one race the
-poll thread introduced, with a hand parked exactly where it used to be lost.
+poll thread introduced, with a hand parked exactly where it used to be lost;
+``test_verbs.py`` asserts the pixel verdicts, against a hand
+(:class:`ScriptedOps`) that answers instead of touching a machine; and
+``test_streaks.py`` asserts the two consecutive-tick counts the monitor carries
+on every tick.
 
 Two things are deliberate here and worth not undoing:
 
@@ -28,22 +32,25 @@ a calibrated service behind every reading. It is installed through
 from __future__ import annotations
 
 import asyncio
+import random
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 
 import pytest
 
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.monitor import local as local_module
 from agentclip.driver.monitor.local import LocalUIMonitor
+from agentclip.driver.monitor.ops import ScreenOps
 from agentclip.driver.monitor.protocol import MonitorSpec, Tick
 from agentclip.driver.screen.busy import BusyProbe
-from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.detector import DetectionSnapshot, Sighting
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.stale import StaleProbe
+from agentclip.driver.screen.template import CandidateSource, RegionMatch, Template
 
 # Fast enough that a test never waits on a tick, slow enough to still be a tick.
 POLL_S = 0.005
@@ -157,6 +164,150 @@ class ScriptedDetector:
         return self._answer
 
 
+def noise(width: int, height: int, seed: int = 1) -> RegionImage:
+    """A frame of deterministic pseudo-random pixels - enough structure for
+    ``Template.build`` to take it."""
+    rng = random.Random(seed)
+    return RegionImage(width, height, bytes(rng.randrange(256) for _ in range(width * height * 4)))
+
+
+def template(width: int = 20, height: int = 16, seed: int = 1) -> Template:
+    """One captured appearance. What it looks LIKE never matters in the verb
+    suites - the search is scripted - but its SIZE does: a located rectangle is
+    the size of the image that matched, and a click aims inside it."""
+    return Template.build(noise(width, height, seed))
+
+
+def profile_with(*kinds: TemplateKind, key: str = "svc") -> ServiceProfile:
+    """A service that has captured exactly these appearances, one image each.
+
+    One image per kind on purpose: the union over a stack is
+    ``monitor/search.py``'s business and is tested there, so a verb suite that
+    stacked two would only be re-asserting it - and would make every scripted
+    search answer twice.
+    """
+    held = ServiceProfile(key)
+    for index, kind in enumerate(kinds):
+        held.templates[kind] = [template(seed=index + 1)]
+    return held
+
+
+class ScriptedOps(ScreenOps):
+    """A hand on a machine that answers instead of touching one.
+
+    Every OS call the pixel verbs make, recorded and scripted. A subclass rather
+    than a stub because what the verbs are ABOUT is which of these they make, in
+    what order, with what arguments - so anything left unoverridden reaching the
+    real desktop would be the bug this cannot afford to hide.
+
+    Each script is a queue whose last entry repeats, the way ``FakeUIMonitor``'s
+    frames do: a test that cares about one answer writes one, and a test about a
+    walk up the screen writes the sequence it expects to be walked.
+    """
+
+    def __init__(
+        self,
+        *,
+        lowest: Sequence[tuple[RegionMatch | None, float | None]] = ((None, None),),
+        all_matches: Sequence[Sequence[RegionMatch]] = ((),),
+        capture_error: bool = False,
+        move_ok: bool = True,
+        click_ok: bool = True,
+    ) -> None:
+        self._lowest = list(lowest)
+        self._all = list(all_matches)
+        self._capture_error = capture_error
+        self._move_ok = move_ok
+        self._click_ok = click_ok
+        self.captures: list[ScreenRegion] = []
+        self.moves: list[tuple[int, int]] = []
+        self.clicks: list[tuple[ScreenRegion, float | None]] = []
+        self.scrolls: list[tuple[ScreenRegion, int]] = []
+        self.keys: list[tuple[str, int]] = []
+        # Which searches were spent, in order. The two questions cost the same
+        # full-region comparison, so "how many of each" is a claim the verbs
+        # make about their own cost and one this file pins.
+        self.searches: list[str] = []
+
+    @staticmethod
+    def _next(queue: list[object]) -> object:
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    def capture(self, region: ScreenRegion) -> RegionImage:
+        self.captures.append(region)
+        if self._capture_error:
+            raise CaptureError("nothing to see")
+        return frame()
+
+    def move_cursor(self, x: int, y: int) -> bool:
+        self.moves.append((x, y))
+        return self._move_ok
+
+    def click(self, region: ScreenRegion, *, settle_s: float | None = None) -> bool:
+        self.clicks.append((region, settle_s))
+        return self._click_ok
+
+    def scroll(self, region: ScreenRegion, detents: int) -> bool:
+        self.scrolls.append((region, detents))
+        return True
+
+    def scroll_key(self, key: str, taps: int = 1) -> bool:
+        self.keys.append((key, taps))
+        return True
+
+    def lowest_match(
+        self,
+        template: Template,
+        scene: RegionImage,
+        *,
+        tolerance: int,
+        max_diff: float,
+        matcher: CandidateSource | None,
+    ) -> tuple[RegionMatch | None, float | None]:
+        self.searches.append("lowest")
+        answer = self._next(self._lowest)
+        assert isinstance(answer, tuple)
+        return answer
+
+    def all_matches(
+        self,
+        template: Template,
+        scene: RegionImage,
+        *,
+        tolerance: int,
+        max_diff: float,
+        limit: int,
+        matcher: CandidateSource | None,
+    ) -> list[RegionMatch]:
+        self.searches.append("all")
+        answer = self._next(self._all)
+        assert isinstance(answer, (list, tuple))
+        return list(answer)
+
+    def hover_step_delay(self) -> float:
+        """No pause at all: the beat is a real browser's repaint and a suite
+        that waited one out per stop is a suite nobody runs."""
+        return 0.0
+
+    def forget(self) -> None:
+        """Drop the record, keep the script.
+
+        For the moment between "the monitor is configured" and "the verb under
+        test was called": a configured monitor POLLS, and a poll captures
+        through this same hand, so whatever it managed before the suspend is
+        noise against an assertion about which calls a verb made. The scripts
+        are untouched because a poll never consumes one - the detector's
+        trackers search through ``driver/screen`` directly, and only the verbs
+        come through here.
+        """
+        self.captures.clear()
+        self.moves.clear()
+        self.clicks.clear()
+        self.scrolls.clear()
+        self.keys.clear()
+        self.searches.clear()
+
+
 class Wiring:
     """One monitor, everything that came out of it, and the frames it asked for."""
 
@@ -191,17 +342,30 @@ def wire() -> Iterator[Callable[..., Wiring]]:
         poll_seconds: float = POLL_S,
         clip_poll_interval_ms: int = 5,
         capture: CaptureFn | None = None,
+        ops: ScreenOps | None = None,
+        service: str = "svc",
     ) -> Wiring:
         held = profile if profile is not None else ServiceProfile("svc")
         captured: list[ScreenRegion] = []
-        shot = capture if capture is not None else (lambda _region: frame())
+        # A monitor handed an ``ops`` captures THROUGH it by default, the way
+        # the real one does (``self._ops.capture``): the pixel verbs and the
+        # poll loop go through one seam, and a suite that split them would be
+        # asserting against a machine no deployment has.
+        shot: CaptureFn
+        if capture is not None:
+            shot = capture
+        elif ops is not None:
+            shot = ops.capture
+        else:
+            shot = lambda _region: frame()  # noqa: E731
 
         def capturing(region: ScreenRegion) -> RegionImage:
             captured.append(region)
             return shot(region)
 
         monitor = LocalUIMonitor(
-            profile_for=lambda key: held if key == "svc" else None,
+            profile_for=lambda key: held if key == service else None,
+            ops=ops,
             clipboard=clipboard,
             capture=capturing,
             poll_seconds=poll_seconds,

@@ -14,12 +14,16 @@ Three groups, and they are three different kinds of thing:
   generating, None no verdict (the capture failed) - so the fold above them
   never has to remember that a busy appearance means the opposite of an idle
   one. That inversion is the whole reason these are functions and not a
-  comparison at the call site.
+  comparison at the call site. They are :mod:`agentclip.driver.monitor.verdicts`'
+  now (phase 2 counts the streaks made of them where the pixels are) and are
+  re-exported below.
 * **The readout.** ``format_*_probe`` and the ``SEND_READY_*`` lines are the
   words the sidebar (and, later, the GUI) shows for those same probes. They are
   paint TEXT rather than paint DECISIONS, which is why they cross the
   ``AutomationView`` port as strings: the controller knows what happened, the
-  shell only knows where to put it.
+  shell only knows where to put it. The three ``format_*_probe`` functions
+  travelled with the verdicts they narrate; the ``SEND_READY_*`` lines are about
+  a GATE rather than a probe, and stay here.
 * **The tunables.** How much change counts as change, how long a gate may wait.
   Policy about a screen, not about a widget.
 
@@ -31,8 +35,20 @@ from __future__ import annotations
 
 from enum import Enum
 
-from agentclip.driver.screen.busy import BusyProbe, BusyState
-from agentclip.driver.screen.stale import StaleProbe, StaleState
+# The verdicts and their readout MOVED to the monitor in phase 2
+# (docs/design/ui-monitor.md §6.2): the monitor is what folds a probe into a
+# verdict now, and it counts the two streaks that used to be controller fields.
+# They stay reachable from here because every caller in the brain, and every
+# suite, names them at this address - and because this module is where the
+# vocabulary they belong to is documented.
+from agentclip.driver.monitor.verdicts import (  # noqa: F401
+    busy_verdict,
+    format_busy_probe,
+    format_idle_probe,
+    format_stale_probe,
+    idle_verdict,
+    stale_verdict,
+)
 
 
 class SendGate(Enum):
@@ -104,70 +120,3 @@ SEND_READY_RELEASED = "gone - sent, finish detection running"
 SEND_READY_OVERRIDDEN = "generating - sent, finish detection running"
 SEND_READY_TIMEOUT = "never appeared - finish detection running"
 SEND_READY_STUCK = "never went away - finish detection running"
-
-
-def format_busy_probe(probe: BusyProbe) -> str:
-    """Unmistakable readout for the sidebar - this is the whole deliverable."""
-    if probe.state is BusyState.ERROR:
-        return "✗ capture failed"
-    pct = f"{(probe.diff or 0.0) * 100:.1f}%"
-    if probe.state is BusyState.MATCH:
-        return f"● GENERATING · match (diff {pct})"
-    return f"○ response ready · changed (diff {pct})"
-
-
-def format_idle_probe(probe: BusyProbe) -> str:
-    """Same readout for the idle element, with the polarity flipped: it was
-    calibrated while the chat was idle, so MATCH is the *finished* verdict."""
-    if probe.state is BusyState.ERROR:
-        return "✗ capture failed"
-    pct = f"{(probe.diff or 0.0) * 100:.1f}%"
-    if probe.state is BusyState.MATCH:
-        return f"○ response ready · match (diff {pct})"
-    return f"● GENERATING · changed (diff {pct})"
-
-
-def format_stale_probe(probe: StaleProbe) -> str:
-    """Same unmistakable readout for the stale detector: the response region
-    still moving means the model is still typing; long enough unchanged means
-    the answer is done. ``still ×N`` shows the streak building toward STALE."""
-    if probe.state is StaleState.ERROR:
-        return "✗ capture failed"
-    if probe.state is StaleState.STALE:
-        return f"○ response ready · stale (still ×{probe.stable_ticks})"
-    pct = f"{(probe.diff or 0.0) * 100:.2f}%"
-    return f"● GENERATING · changing (diff {pct} · still ×{probe.stable_ticks})"
-
-
-def busy_verdict(probe: BusyProbe) -> bool | None:
-    """The busy element's probe as a finish verdict: True = finished,
-    False = generating, None = no verdict (capture error).
-
-    It was calibrated WHILE the model was generating, so a MATCH means the
-    generation is still going.
-    """
-    if probe.state is BusyState.ERROR:
-        return None
-    return probe.state is BusyState.CHANGED
-
-
-def idle_verdict(probe: BusyProbe) -> bool | None:
-    """The idle element's probe as a finish verdict, same three values.
-
-    It was calibrated while the chat was IDLE, so a MATCH means the response
-    has finished - the exact inverse of the busy element.
-    """
-    if probe.state is BusyState.ERROR:
-        return None
-    return probe.state is BusyState.MATCH
-
-
-def stale_verdict(probe: StaleProbe) -> bool | None:
-    """The stale tracker's probe as a finish verdict, same three values.
-
-    STALE (unchanged long enough) means finished; CHANGING - including the
-    settling polls before the streak completes - means generating.
-    """
-    if probe.state is StaleState.ERROR:
-        return None
-    return probe.state is StaleState.STALE

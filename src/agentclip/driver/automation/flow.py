@@ -11,44 +11,45 @@ chat box" is. The sequences that read them live on the controller.
 ``distinct_rects`` and ``element_rects`` arrived later and by the other route:
 BOTH shells had spelled them out, because a shell may not import another shell
 (tests/test_layering.py), and a second copy of the fold that stops two IMAGES of
-one control reading as two windows is exactly the copy that drifts.
+one control reading as two windows is exactly the copy that drifts. Phase 2 moved
+them on again, to :mod:`agentclip.driver.monitor.search`, along with the two
+scroll sizes and the element-click settle (:mod:`agentclip.driver.monitor.beats`):
+the monitor is what captures a frame, searches it and scrolls the page now
+(docs/design/ui-monitor.md §2.3), and none of that arithmetic may sit above the
+seam it is asked across.
 
-The constants stay reachable under the shell's old names (``main.py``
+What is still WRITTEN here is what the brain still asks for itself: where to
+click before a keyboard scroll (``above_chatbox``), how a failed hunt reports
+itself (``how_close``), and the sizes of the hunt's own retries.
+
+Every name stays reachable under the shell's old address (``main.py``
 re-imports them), because the suites size their assertions off them.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-
-from agentclip.driver.screen.capture import RegionImage
-from agentclip.driver.screen.profile import TemplateKind
-from agentclip.driver.screen.region import ScreenRegion
-from agentclip.driver.screen.template import (
-    DEFAULT_TOLERANCE,
-    CandidateSource,
-    RegionMatch,
-    Template,
-    match_rect,
-    same_element,
+from agentclip.driver.monitor.beats import (  # noqa: F401
+    ELEMENT_CLICK_SETTLE_S,
+    PAGE_DOWN_TAPS,
+    SNAP_WHEEL_DETENTS,
 )
 
-# The wheel flick's size, in detents, for the auto-copy flow's snap to the
-# bottom. Deliberately far more than it takes to cross one screenful: a flick
-# that stops short leaves the newest reply's copy button above the fold and the
-# harvest hunts a transcript that is not showing the answer, which is a silent
-# fall to MANUAL_COPY. Over-shooting costs nothing at all - the page is already
-# at its bottom and the extra detents land on a wall - so the number is chosen
-# for the worst long response rather than the typical one.
-SNAP_WHEEL_DETENTS = -100
-# How many Page Down taps a "page_down" scroll action sends in one burst
-# (ServicePreset.scroll_action). Sized like the wheel flick above and for the
-# same reason: a generous over-shoot that stops at the bottom, because the flow
-# wants the newest reply on screen, not a measured scroll. Twelve taps is
-# roughly a dozen screenfuls, which comfortably covers a long reply the user
-# scrolled away from. End needs no such count - one tap is the bottom by
-# definition, which is why it is left at one.
-PAGE_DOWN_TAPS = 12
+# The search's arithmetic MOVED to the monitor in phase 2
+# (docs/design/ui-monitor.md §2.3): it is the monitor that captures a frame and
+# asks these two questions now, so they live where the pixels are. Re-exported
+# here because the brain and every suite name them at this address.
+from agentclip.driver.monitor.search import (  # noqa: F401
+    MAX_MATCHES,
+    FindAll,
+    FindLowest,
+    distinct_rects,
+    element_rects,
+    lowest_match,
+    lowest_match_scored,
+)
+from agentclip.driver.screen.profile import TemplateKind
+from agentclip.driver.screen.region import ScreenRegion
+
 # How many times the flow will snap-and-search before giving up on the static
 # frame. Pages that stream a reply keep growing while the flow is already
 # running, and a lazily rendered transcript can still be laying out the last
@@ -64,27 +65,11 @@ SNAP_SETTLE_S = 0.4
 # padding, and this is deliberately a small number: a few pixels higher is the
 # last response itself, where a click could land on a link or select text.
 ABOVE_CHATBOX_PX = 10
-# Hover pause before clicking a calibrated element, for the same reason the copy
-# click settles: web UIs paint their buttons on hover.
-ELEMENT_CLICK_SETTLE_S = 0.05
 # Small offsets from the pixel the click was aimed at, still inside a ~24 px
 # icon, and how hard the verification looks for a clipboard that changed.
 COPY_CLICK_OFFSETS = ((0, 0), (-3, -3), (3, 3))
 COPY_VERIFY_READS = 6
 COPY_VERIFY_INTERVAL_S = 0.2
-
-# How many matches of one appearance are worth collecting. The question the
-# search answers is "one, or more than one?", so anything past a handful is the
-# same answer - and every extra candidate is a full pixel comparison.
-MAX_MATCHES = 8
-
-# One image's answer about one frame: the bottom-most match, and the closest
-# candidate that was rejected. ``ScreenOps.lowest_match`` is the implementation;
-# it is passed in so the two functions below stay arithmetic.
-FindLowest = Callable[..., tuple[RegionMatch | None, float | None]]
-# The same trick for the other question: every match of one image in one frame.
-# ``ScreenOps.all_matches`` is the implementation.
-FindAll = Callable[..., list[RegionMatch]]
 
 
 def above_chatbox(box: ScreenRegion, region: ScreenRegion) -> ScreenRegion | None:
@@ -109,127 +94,6 @@ def above_chatbox(box: ScreenRegion, region: ScreenRegion) -> ScreenRegion | Non
     if not (region.top <= y < region.top + region.height):
         return None
     return ScreenRegion(x, y, 1, 1)
-
-
-def lowest_match_scored(
-    find: FindLowest,
-    templates: Sequence[Template],
-    scene: RegionImage,
-    *,
-    max_diff: float,
-    tolerance: int = DEFAULT_TOLERANCE,
-    matcher: CandidateSource | None = None,
-) -> tuple[tuple[Template, RegionMatch] | None, float | None]:
-    """The bottom-most match of ANY of a kind's images, and how close the whole
-    stack came to one.
-
-    The copy button's question asked across a whole stack: every response stamps
-    one icon, the newest is the lowest, and which of the service's captured
-    pictures of it matched changes nothing about that - only the size of the
-    rectangle to click.
-
-    The second value is the smallest REJECTED diff across every image of the
-    kind (None when no candidate was judged at all), and it is what lets a
-    failed copy-button search say whether the button was absent or the capture
-    has stopped matching it - see ``screen.template.find_lowest_with_best_miss``.
-    Across the stack rather than per image, because the user captured several
-    pictures of ONE control and "how close did we get" is a question about the
-    control.
-    """
-    best: tuple[Template, RegionMatch] | None = None
-    best_miss: float | None = None
-    for template in templates:
-        match, miss = find(
-            template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher
-        )
-        if miss is not None and (best_miss is None or miss < best_miss):
-            best_miss = miss
-        if match is None:
-            continue
-        if best is None or (match.y, match.x) > (best[1].y, best[1].x):
-            best = (template, match)
-    return best, best_miss
-
-
-def lowest_match(
-    find: FindLowest,
-    templates: Sequence[Template],
-    scene: RegionImage,
-    *,
-    max_diff: float,
-    tolerance: int = DEFAULT_TOLERANCE,
-    matcher: CandidateSource | None = None,
-) -> tuple[Template, RegionMatch] | None:
-    """:func:`lowest_match_scored` without the miss - the hover scan's question,
-    which only ever asks "is it there yet"."""
-    return lowest_match_scored(
-        find, templates, scene, max_diff=max_diff, tolerance=tolerance, matcher=matcher
-    )[0]
-
-
-def distinct_rects(
-    region: ScreenRegion, found: list[tuple[Template, RegionMatch]]
-) -> list[ScreenRegion]:
-    """Scene-local matches as absolute rectangles, one per physical element.
-
-    Each match carries the image that produced it, because a kind holds several
-    (screen.profile) and a rectangle to click is the size of the image that
-    actually matched. Fed the whole union at once for the same reason: two
-    images of one control - a send button and its greyed-out twin - land on the
-    same pixels, and must fold into one rectangle rather than read as two
-    windows of the same service.
-    """
-    kept: list[ScreenRegion] = []
-    for template, match in found:
-        rect = match_rect(region, template, match)
-        if not any(same_element(rect, other) for other in kept):
-            kept.append(rect)
-    return kept
-
-
-def element_rects(
-    find: FindAll,
-    templates: Sequence[Template],
-    scene: RegionImage,
-    region: ScreenRegion,
-    *,
-    max_diff: float,
-    tolerance: int = DEFAULT_TOLERANCE,
-    matcher: CandidateSource | None = None,
-) -> list[ScreenRegion]:
-    """Every place a kind is in one frame, as absolute rectangles - one each.
-
-    ``lowest_match_scored``'s sibling and the other half of the search model:
-    that one asks "where is the NEWEST one", this one asks "how many are
-    there". All of them rather than the first, because that is the question
-    callers actually have to answer - an appearance belongs to the SERVICE, so
-    a second window of the same service inside the drawn region carries the
-    same button, and clicking whichever match came back first would click a
-    different conversation's.
-
-    A plain OR-union over the kind's images: any of them being on screen means
-    the control is. Sorted back into reading order across the union before the
-    fold, so which image happened to be searched first cannot change which
-    rectangle survives as a duplicate's representative - and then folded
-    (``distinct_rects``), so a list longer than one really does mean two
-    elements rather than two IMAGES of one (screen.profile's variant stacks).
-
-    Arithmetic over a frame, like everything else here: the search is passed in
-    (``ScreenOps.all_matches``) and the capture is the caller's.
-    """
-    found: list[tuple[Template, RegionMatch]] = []
-    for template in templates:
-        matches = find(
-            template,
-            scene,
-            tolerance=tolerance,
-            max_diff=max_diff,
-            limit=MAX_MATCHES,
-            matcher=matcher,
-        )
-        found.extend((template, match) for match in matches)
-    found.sort(key=lambda pair: (pair[1].y, pair[1].x))
-    return distinct_rects(region, found)
 
 
 def how_close(best_miss: float | None) -> str:

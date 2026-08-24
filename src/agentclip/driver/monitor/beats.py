@@ -1,4 +1,4 @@
-"""The beats every OS-acting sequence paces itself by.
+"""The beats every OS-acting sequence paces itself by, and the sizes it moves in.
 
 Cadence is a property of the machine whose screen is being driven, not of the
 policy that decides what to do - so these live in the monitor package
@@ -85,3 +85,33 @@ STREAM_CHUNK_SETTLE_S = 0.12
 # Beat between opening a fresh browser chat and treating it as the live slot -
 # the page still has to render its (centred) input box.
 NEW_CHAT_SETTLE_S = 0.4
+# Hover pause before clicking a calibrated element, for the same reason the copy
+# click settles: web UIs paint their buttons on hover, so the pixel that was
+# matched has to be given a moment under the pointer before it is pressed.
+# ``UIMonitor.click_element``'s default settle.
+ELEMENT_CLICK_SETTLE_S = 0.05
+
+# -- how far one snap to the bottom goes -----------------------------------
+# Sizes rather than beats, and here for the same reason the beats are: how far a
+# wheel detent or a Page Down tap carries is a property of the machine and the
+# page being driven, not of the policy that decided to scroll
+# (docs/design/ui-monitor.md §2.10). ``UIMonitor.snap_to_bottom`` is their only
+# reader; ``driver/automation/flow.py`` re-exports them under the names its
+# suites size their assertions off.
+
+# The wheel flick's size, in detents. Deliberately far more than it takes to
+# cross one screenful: a flick that stops short leaves the newest reply's copy
+# button above the fold and the harvest hunts a transcript that is not showing
+# the answer, which is a silent fall to MANUAL_COPY. Over-shooting costs nothing
+# at all - the page is already at its bottom and the extra detents land on a
+# wall - so the number is chosen for the worst long response rather than the
+# typical one.
+SNAP_WHEEL_DETENTS = -100
+# How many Page Down taps a "page_down" scroll action sends in one burst
+# (ServicePreset.scroll_action). Sized like the wheel flick above and for the
+# same reason: a generous over-shoot that stops at the bottom, because the flow
+# wants the newest reply on screen, not a measured scroll. Twelve taps is
+# roughly a dozen screenfuls, which comfortably covers a long reply the user
+# scrolled away from. End needs no such count - one tap is the bottom by
+# definition, which is why it is left at one.
+PAGE_DOWN_TAPS = 12

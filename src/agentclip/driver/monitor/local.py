@@ -38,23 +38,41 @@ import threading
 import time
 from collections.abc import Callable, Mapping
 
+from agentclip.config import SCROLL_END, SCROLL_PAGE_DOWN
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.driver.clip.watcher import SelfWriteSet, watch, write_via
+from agentclip.driver.monitor.beats import (
+    ELEMENT_CLICK_SETTLE_S,
+    PAGE_DOWN_TAPS,
+    SNAP_WHEEL_DETENTS,
+)
 from agentclip.driver.monitor.ops import ScreenOps
 from agentclip.driver.monitor.protocol import (
     ClipHook,
+    ElementClick,
+    Located,
     MonitorSpec,
     Tick,
     TickHook,
     UIMonitor,
 )
+from agentclip.driver.monitor.search import element_rects, lowest_match, lowest_match_scored
+from agentclip.driver.monitor.verdicts import roll_arm_streak, roll_changed_streak
 from agentclip.driver.screen.busy import BusyProbe
 from agentclip.driver.screen.capture import CaptureError, RegionImage
-from agentclip.driver.screen.detector import ScreenDetector, Sighting, build_detector
+from agentclip.driver.screen.detector import (
+    DetectionSnapshot,
+    ScreenDetector,
+    Sighting,
+    build_detector,
+)
+from agentclip.driver.screen.hover import hover_scan_points
+from agentclip.driver.screen.matchers import select_matcher
 from agentclip.driver.screen.presence import PresenceTracker
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
-from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.stale import StaleProbe, StaleTracker
+from agentclip.driver.screen.template import CandidateSource, Template, match_rect, same_element
 
 _log = logging.getLogger(__name__)
 
@@ -203,6 +221,15 @@ class LocalUIMonitor:
         self._busy_tracker: PresenceTracker | None = None
         self._idle_tracker: PresenceTracker | None = None
         self._stale_tracker: StaleTracker | None = None
+        # -- the two streaks -----------------------------------------------------
+        # Consecutive-tick counts, rolled forward as each tick is stamped and
+        # carried on it. They live beside the trackers rather than on the
+        # detector because they are counts of what the DETECTOR SAID, not of
+        # what it saw - and they are reset by exactly what resets a tracker's
+        # debounce: a retarget, and the flow's own "forget the frames you have
+        # seen" (both of which mean the screen these counts describe is gone).
+        self._stale_arm_streak = 0
+        self._changed_streak = 0
         # -- the clipboard ------------------------------------------------------
         # The backend is constructed by the shell and only driven here: which
         # clipboard exists is a startup question about the machine. None means a
@@ -252,6 +279,11 @@ class LocalUIMonitor:
             self._busy_tracker = None
             self._idle_tracker = None
             self._stale_tracker = None
+            # A streak is a claim about one screen holding still, or one screen
+            # churning. Retargeting says the screen is a different screen, so
+            # both claims expire with the generation that made them.
+            self._stale_arm_streak = 0
+            self._changed_streak = 0
         region = spec.region
         if region is None:
             return generation
@@ -434,6 +466,12 @@ class LocalUIMonitor:
                 except CaptureError:
                     scene = None  # every detector hears about it the same way
                 snapshot = detector.observe(scene)
+                # Rolled BEFORE the tick is built, because the tick carries the
+                # counts as of itself: a tick that reports the third big delta
+                # says three, not two.
+                arm_streak, changed_streak = self._roll_streaks(
+                    generation, snapshot, detector.active_detectors
+                )
                 # Locations, not pixels (§2.2). A sighting knows where it was in
                 # the FRAME; the tick says where it is on the real screen, which
                 # is the only half a brain on another machine could use.
@@ -451,6 +489,8 @@ class LocalUIMonitor:
                             for kind, sighting in snapshot.sightings.items()
                         },
                         active_detectors=detector.active_detectors,
+                        stale_arm_streak=arm_streak,
+                        changed_streak=changed_streak,
                     )
                 )
                 # The pictures, after the verdicts they illustrate, out of the
@@ -499,6 +539,40 @@ class LocalUIMonitor:
         with self._tick_lock:
             self._seq += 1
             return self._seq
+
+    def _roll_streaks(
+        self,
+        generation: int,
+        snapshot: DetectionSnapshot,
+        active_detectors: tuple[str, ...],
+    ) -> tuple[int, int]:
+        """Fold one observation into the two consecutive-tick counts.
+
+        Under the lock because two threads reach these ints - the poller rolls
+        them, and ``configure``/``reset_trackers`` zero them from the event loop
+        - and it is bookkeeping, which is exactly what the lock is for (§4.4);
+        the arithmetic itself is three comparisons.
+
+        A run whose generation has been retargeted away rolls NOTHING and is
+        told the current counts: its tick is a ghost that will be dropped a
+        moment later (§4.2), and letting it advance a count on its way out would
+        put a dead screen's evidence on the live screen's tally.
+        """
+        with self._tick_lock:
+            if generation != self._generation:
+                return self._stale_arm_streak, self._changed_streak
+            min_diff = self._spec.send_arm_min_diff if self._spec is not None else 0.0
+            self._stale_arm_streak = roll_arm_streak(
+                self._stale_arm_streak, snapshot.stale, min_diff=min_diff
+            )
+            self._changed_streak = roll_changed_streak(
+                self._changed_streak,
+                busy=snapshot.busy,
+                idle=snapshot.idle,
+                stale=snapshot.stale,
+                active_detectors=active_detectors,
+            )
+            return self._stale_arm_streak, self._changed_streak
 
     def _deliver(self, tick: Tick) -> None:
         """Publish one tick: ghost check, bookkeeping, then everyone else.
@@ -637,6 +711,27 @@ class LocalUIMonitor:
                 if detector is not None and detector.stale is self._stale_tracker:
                     detector.stale = stale_spare
                 self._stale_tracker = stale_spare
+            # The streaks go with the debounce, for the same reason and by the
+            # same argument: they are counts of what those trackers said about
+            # frames the caller has just produced ITSELF - a paste, a send, the
+            # auto-copy flow's own scrolling. A count that survived the reset
+            # would be the flow's own mouse work, still being counted as the
+            # model's.
+            self._stale_arm_streak = 0
+            self._changed_streak = 0
+
+    @property
+    def stale_arm_streak(self) -> int:
+        """Consecutive ticks whose stale probe reported a big change. The live
+        count; every tick carries its own value of it."""
+        with self._tick_lock:
+            return self._stale_arm_streak
+
+    @property
+    def changed_streak(self) -> int:
+        """Consecutive ticks on which every active detector said "finished"."""
+        with self._tick_lock:
+            return self._changed_streak
 
     # -- the test seam ---------------------------------------------------------
 
@@ -649,6 +744,8 @@ class LocalUIMonitor:
         stale: StaleProbe | None = None,
         sightings: Mapping[TemplateKind, ScreenRegion | None] | None = None,
         active_detectors: tuple[str, ...] = (),
+        stale_arm_streak: int = 0,
+        changed_streak: int = 0,
         generation: int | None = None,
         at: float | None = None,
     ) -> Tick:
@@ -671,6 +768,8 @@ class LocalUIMonitor:
                 stale=stale,
                 sightings=dict(sightings or {}),
                 active_detectors=active_detectors,
+                stale_arm_streak=stale_arm_streak,
+                changed_streak=changed_streak,
             )
 
     def feed(self, tick: Tick) -> None:
@@ -816,6 +915,265 @@ class LocalUIMonitor:
 
     async def send_enter(self) -> bool:
         return self._ops.send_enter()
+
+    # == the pixel verdicts ====================================================
+    # §2.3's half of ``click_profile_element`` and everything around it: capture
+    # the configured region, search it with the configured profile, answer about
+    # what is on it. The brain names a KIND and nothing else - not a template,
+    # not a rectangle, not a tolerance - because none of those could cross the
+    # wire, and because a caller that had to supply them would be a caller
+    # keeping its own copy of the calibration.
+    #
+    # **The search runs off the event loop.** Each of these is a full-region
+    # pixel comparison (and ``hover_scan`` is that plus a real cursor walk with
+    # a settle at every stop, seconds of it), so the blocking half sits in a
+    # ``_*_now`` method and the verb awaits it through ``asyncio.to_thread`` -
+    # exactly where the controller put it before these moved. No thread this
+    # object owns: the poller's is still the only one.
+    #
+    # **Never raises.** No spec, no region, no profile, a capture that failed,
+    # nothing captured for the kind - all the same answer, because a caller that
+    # may not click either way has the same next move for every one of them.
+
+    def _search_context(self) -> tuple[MonitorSpec, ScreenRegion, ServiceProfile] | None:
+        """The spec, the region and the profile the verbs answer against, or
+        None when any of the three is missing.
+
+        Read together and once per call, so a configure landing mid-verb cannot
+        leave a search hunting one service's appearance inside another's
+        rectangle. The profile is resolved per call rather than cached at
+        configure time because it is EDITED while the app runs (the calibration
+        window captures into it), and a verb that answered from a stale copy
+        would ignore the capture the user just took to fix it.
+        """
+        with self._tick_lock:
+            spec = self._spec
+        if spec is None or spec.region is None:
+            return None
+        profile = self._profile_for(spec.service)
+        if profile is None:
+            return None
+        return spec, spec.region, profile
+
+    @staticmethod
+    def _matcher(spec: MonitorSpec) -> CandidateSource:
+        """How this service wants its appearances hunted for.
+
+        The same pair (``spec.tolerance`` and this) the detector was built with,
+        because a verb searching by another ruler than the poller would have the
+        ELEMENTS column and the thing about to be clicked disagreeing about the
+        same frame.
+        """
+        return select_matcher(spec.matcher).origins
+
+    async def find_all(self, kind: TemplateKind) -> tuple[ScreenRegion, ...]:
+        ctx = self._search_context()
+        if ctx is None:
+            return ()
+        spec, region, profile = ctx
+        templates = profile.variants(kind)
+        if not templates:
+            return ()
+        return await asyncio.to_thread(self._find_all_now, spec, region, kind, templates)
+
+    def _find_all_now(
+        self,
+        spec: MonitorSpec,
+        region: ScreenRegion,
+        kind: TemplateKind,
+        templates: tuple[Template, ...],
+    ) -> tuple[ScreenRegion, ...]:
+        try:
+            scene = self._capture(region)
+        except CaptureError:
+            return ()
+        return tuple(
+            element_rects(
+                self._ops.all_matches,
+                templates,
+                scene,
+                region,
+                max_diff=kind.max_diff,
+                tolerance=spec.tolerance,
+                matcher=self._matcher(spec),
+            )
+        )
+
+    async def locate(
+        self, kind: TemplateKind, *, exclude_kinds: tuple[TemplateKind, ...] = ()
+    ) -> Located:
+        ctx = self._search_context()
+        if ctx is None:
+            return Located(None, False, None)
+        spec, region, profile = ctx
+        templates = profile.variants(kind)
+        if not templates:
+            return Located(None, False, None)
+        return await asyncio.to_thread(
+            self._locate_now, spec, region, profile, kind, templates, exclude_kinds
+        )
+
+    def _locate_now(
+        self,
+        spec: MonitorSpec,
+        region: ScreenRegion,
+        profile: ServiceProfile,
+        kind: TemplateKind,
+        templates: tuple[Template, ...],
+        exclude_kinds: tuple[TemplateKind, ...],
+    ) -> Located:
+        """One capture, and up to two searches of it.
+
+        The lowest-match search comes FIRST and always, because it is the one
+        that answers both halves of a miss - not there, and how close - and a
+        miss is the expensive path this must not double: the auto-copy's hunt
+        re-snaps and re-searches three times over, and every one of those rounds
+        is a full-region comparison.
+
+        The second search only ever runs on a HIT, and only to answer "were
+        there several?". Nothing found is not ambiguous, so there is nothing to
+        ask; and a caller holding a rectangle is about to click it, which is
+        precisely when the number matters.
+        """
+        try:
+            scene = self._capture(region)
+        except CaptureError:
+            return Located(None, False, None)
+        matcher = self._matcher(spec)
+        found, best_miss = lowest_match_scored(
+            self._ops.lowest_match,
+            templates,
+            scene,
+            max_diff=kind.max_diff,
+            tolerance=spec.tolerance,
+            matcher=matcher,
+        )
+        if found is None:
+            return Located(None, False, best_miss)
+        rect = match_rect(region, found[0], found[1])
+        for other in exclude_kinds:
+            other_templates = profile.variants(other)
+            if not other_templates:
+                continue
+            forbidden = element_rects(
+                self._ops.all_matches,
+                other_templates,
+                scene,
+                region,
+                max_diff=other.max_diff,
+                tolerance=spec.tolerance,
+                matcher=matcher,
+            )
+            if any(same_element(rect, taken) for taken in forbidden):
+                # It IS on screen - it is just not this kind's element. Reported
+                # as a miss rather than as an ambiguity because there is nothing
+                # a redrawn window would fix.
+                return Located(None, False, best_miss)
+        rects = element_rects(
+            self._ops.all_matches,
+            templates,
+            scene,
+            region,
+            max_diff=kind.max_diff,
+            tolerance=spec.tolerance,
+            matcher=matcher,
+        )
+        return Located(rect, len(rects) > 1, None)
+
+    async def click_element(
+        self, kind: TemplateKind, *, settle_s: float | None = None
+    ) -> ElementClick:
+        ctx = self._search_context()
+        if ctx is None:
+            return ElementClick.MISMATCH
+        spec, region, profile = ctx
+        templates = profile.variants(kind)
+        if not templates:
+            return ElementClick.MISMATCH
+        # ``_locate_now`` rather than ``locate``, so the search and the click
+        # that follows it are aimed by ONE reading of the configuration: a
+        # retarget landing between the two would otherwise have this pressing a
+        # pixel found in the window the automation has just left.
+        located = await asyncio.to_thread(
+            self._locate_now, spec, region, profile, kind, templates, ()
+        )
+        if located.region is None:
+            return ElementClick.MISMATCH
+        if located.ambiguous:
+            # Two of them under one drawn region is two conversations, and
+            # picking one is a coin toss whose loser is a chat that gets clicked
+            # on behalf of the other.
+            return ElementClick.AMBIGUOUS
+        target = click_point_region(located.region, *profile.click_point(kind))
+        settle = ELEMENT_CLICK_SETTLE_S if settle_s is None else settle_s
+        clicked = await self.click(target, settle_s=settle)
+        return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
+
+    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None:
+        ctx = self._search_context()
+        if ctx is None:
+            return None
+        spec, region, profile = ctx
+        templates = profile.variants(kind)
+        if not templates:
+            return None
+        return await asyncio.to_thread(self._hover_scan_now, spec, region, kind, templates)
+
+    def _hover_scan_now(
+        self,
+        spec: MonitorSpec,
+        region: ScreenRegion,
+        kind: TemplateKind,
+        templates: tuple[Template, ...],
+    ) -> ScreenRegion | None:
+        """Move, settle, capture, search - and stop at the first frame it is on.
+
+        Blocking by design: three OS calls and a pause per stop. The pause is
+        read through ``ScreenOps`` rather than taken from a constant because a
+        suite shrinks it, and a file full of scans that each waited out a real
+        browser repaint is a file nobody runs.
+
+        Any failure ends the scan: a cursor move the platform refused, or a
+        capture that did not come back, means the scan cannot SEE - which is not
+        the same fact as "it is not there" but has the same consequence, and
+        pretending to keep looking would spend the rest of the walk moving the
+        user's mouse for nothing.
+        """
+        matcher = self._matcher(spec)
+        for x, y in hover_scan_points(region):
+            if not self._ops.move_cursor(x, y):
+                return None
+            time.sleep(self._ops.hover_step_delay())
+            try:
+                scene = self._capture(region)
+            except CaptureError:
+                return None
+            found = lowest_match(
+                self._ops.lowest_match,
+                templates,
+                scene,
+                max_diff=kind.max_diff,
+                tolerance=spec.tolerance,
+                matcher=matcher,
+            )
+            if found is not None:
+                return match_rect(region, found[0], found[1])
+        return None
+
+    async def snap_to_bottom(self, action: str) -> None:
+        with self._tick_lock:
+            spec = self._spec
+        region = None if spec is None else spec.region
+        if action == SCROLL_PAGE_DOWN:
+            await self.scroll_key("page_down", PAGE_DOWN_TAPS)
+        elif action == SCROLL_END:
+            await self.scroll_key("end")
+        elif region is not None:
+            # The wheel is the only one of the three that has to be AIMED - a
+            # scroll key goes to whatever holds focus, a wheel detent goes where
+            # the pointer is - so it is the only one a monitor with no region
+            # drawn cannot do at all.
+            await self.scroll(region, SNAP_WHEEL_DETENTS)
 
 
 def _conforms(monitor: LocalUIMonitor) -> UIMonitor:

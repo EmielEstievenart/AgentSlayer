@@ -49,6 +49,8 @@ from agentclip.driver.clip.watcher import SelfWriteSet, write_via
 from agentclip.driver.monitor.ops import ScreenOps
 from agentclip.driver.monitor.protocol import (
     ClipHook,
+    ElementClick,
+    Located,
     MonitorSpec,
     Tick,
     TickHook,
@@ -202,13 +204,21 @@ class FakeUIMonitor:
         stale: StaleProbe | None = None,
         sightings: Mapping[TemplateKind, ScreenRegion | None] | None = None,
         active_detectors: tuple[str, ...] | None = None,
+        stale_arm_streak: int = 0,
+        changed_streak: int = 0,
     ) -> Tick:
         """One tick, with everything a caller did not care about filled in.
 
         The defaults are the quiet ones: captured, no probe of any kind, nothing
-        searched for. ``active_detectors`` follows the last spec's
-        ``finish_signals``, so a configured monitor's ticks say what they run
-        without every call site repeating it.
+        searched for, neither streak running. ``active_detectors`` follows the
+        last spec's ``finish_signals``, so a configured monitor's ticks say what
+        they run without every call site repeating it.
+
+        The two streaks are written OUT rather than counted here: the real
+        monitor rolls them from the probes it is stamping, and a double that
+        recomputed them would be a suite asserting against a second
+        implementation of the thing under test. A scenario says "and this is the
+        third big delta" by saying three.
         """
         return Tick(
             seq=self.seq + 1 if seq is None else seq,
@@ -224,6 +234,8 @@ class FakeUIMonitor:
                 if active_detectors is None
                 else active_detectors
             ),
+            stale_arm_streak=stale_arm_streak,
+            changed_streak=changed_streak,
         )
 
     # The name ``LocalUIMonitor`` gives the same seam, so one test helper can be
@@ -285,6 +297,32 @@ class FakeUIMonitor:
 
     async def send_enter(self) -> bool:
         return self._answer("send_enter", (), self.ops.send_enter)
+
+    # -- the pixel verdicts ----------------------------------------------------
+    # No screen, so no fall-through: each one records the ask and hands back
+    # either what :attr:`answers` scripts or the "there is nothing there"
+    # answer - which is the same answer the real monitor gives for a machine
+    # with no region drawn, so a brain driven by this double takes the branch it
+    # would take against an uncalibrated screen unless a test says otherwise.
+
+    async def find_all(self, kind: TemplateKind) -> tuple[ScreenRegion, ...]:
+        return self._answer("find_all", (kind,), tuple)
+
+    async def locate(
+        self, kind: TemplateKind, *, exclude_kinds: tuple[TemplateKind, ...] = ()
+    ) -> Located:
+        return self._answer("locate", (kind, exclude_kinds), lambda: Located(None, False, None))
+
+    async def click_element(
+        self, kind: TemplateKind, *, settle_s: float | None = None
+    ) -> ElementClick:
+        return self._answer("click_element", (kind, settle_s), lambda: ElementClick.MISMATCH)
+
+    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None:
+        return self._answer("hover_scan", (kind,), lambda: None)
+
+    async def snap_to_bottom(self, action: str) -> None:
+        self._answer("snap_to_bottom", (action,), lambda: None)
 
     # -- the clipboard ---------------------------------------------------------
 

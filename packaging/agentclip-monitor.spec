@@ -1,9 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller onefile spec for the MONITOR half - ``agentclip-monitor``.
 
-Build by hand from the repo root::
+Build via ``scripts/build-exe.ps1 -MonitorOnly`` (Windows) or
+``scripts/build-exe.sh --monitor-only`` (Linux/macOS) - both also build it as
+part of a plain, everything run - or by hand from the repo root::
 
-    uv run --group build --extra cv pyinstaller --noconfirm packaging/agentclip-monitor.spec
+    uv run --group build pyinstaller --noconfirm packaging/agentclip-monitor.spec
+
+The build environment must have the ``cv`` extra installed, for the reason the
+next paragraph gives; the scripts sync it and refuse to build without it.
 
 This is the binary that runs on the machine whose SCREEN shows the chat
 (docs/design/ui-monitor.md 2.5, 6.5): a VM on a host-only network, or this PC in
@@ -29,7 +34,20 @@ What it MUST carry, and why each name is here rather than found:
   brain only ever sees the text.
 * **tkinter** - the ``--pick-region`` overlay (driver/screen/overlay.py) imports
   it inside a function. Kept, where the engine spec drops it, because the region
-  a user drags is drawn on THIS machine.
+  a user drags is drawn on THIS machine. No ``datas`` are needed for it:
+  PyInstaller ships a tkinter hook that bundles Tcl/Tk (and, on Linux, the
+  library trees they read at run time) once the module is REACHABLE - which is
+  the only half a function-body import makes fragile, and the half named above.
+  The hook can only collect a tkinter that EXISTS, though, which is why
+  ``scripts/build-exe.sh`` checks ``import tkinter`` before building this spec
+  and names the distro package if it is missing.
+
+The frozen binary answers two questions about all of that without opening a
+socket, and both build scripts ask them of the artifact they just produced:
+``--version`` walks the whole module-level import tree, and ``--list-matchers``
+imports each matcher backend for real and prints "NOT AVAILABLE" for any that
+did not load - the main binary's check, one machine over, where it matters more
+(see driver/monitor/__main__.py's ``_list_matchers``).
 
 What it must NOT carry is the other three quarters of the app. The monitor
 package may import only ``agentclip``, ``agentclip.config``,
@@ -39,10 +57,15 @@ shell, the engine or the executor - and the ``excludes`` list is that rule said
 to PyInstaller, so the day a stray import appears it is a fat binary and a spec
 conflict rather than a VM that needs a browser engine to start polling.
 
-**No GUI here, deliberately.** The calibration window (6.4) is pywebview and is
-part of what a monitor machine eventually hosts, but it is a separate window
-with its own asset bundle; wiring it into this binary is 6.4's business, and
-until it is, ``webview`` stays excluded rather than half-collected.
+**No GUI here, deliberately.** The calibration window (6.4) does run where the
+pixels are, but it is a SHELL package (``agentclip.shell.gui.calibration``, with
+its own pywebview window and its own asset bundle) and this binary may not
+import a shell at all. It ships in the app binary instead, which is what
+``agentclip --calibrate`` opens on the monitor machine - so ``webview`` and its
+runtime stay excluded here rather than half-collected, and ``agentclip-monitor``
+has no ``--calibrate`` of its own (driver/monitor/__main__.py). That is also why
+this spec wants only the ``cv`` extra where the main one wants ``cv`` and
+``gui``.
 """
 
 import os

@@ -38,7 +38,58 @@ from agentclip.config import default_profile_dir, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.monitor.local import LocalUIMonitor
 from agentclip.driver.monitor.server import LOOPBACK, BindRefused, serve
+from agentclip.driver.screen.matchers import MATCHERS, select_matcher
 from agentclip.driver.screen.profile_store import load_profile
+
+
+def _list_matchers() -> int:
+    """Say which candidate-generation backends THIS build can actually run.
+
+    ``agentclip --list-matchers`` asks the same question of the app binary, and
+    the wording is deliberately identical so a build script can grep one token
+    ("NOT AVAILABLE") against either. It is re-implemented rather than imported
+    because ``agentclip.cli`` is off this package's layering allowance
+    (tests/test_layering.py) - and the shared part, the part that could drift,
+    is not this loop but :data:`MATCHERS` and :func:`select_matcher`, which both
+    binaries do share.
+
+    It matters MORE here than it does there. The monitor binary is where every
+    template search actually runs (docs/design/ui-monitor.md 2.5), and
+    ``cv2`` reaches it through a lazy, try/except-guarded import - so a freeze
+    that lost OpenCV, or kept it and cannot load its shared objects out of a
+    onefile extraction directory, raises nothing at all: every service
+    configured for the exhaustive sweep silently gets the anchor search on the
+    one machine that does the matching. This imports each backend for real and
+    reports what happened, which is what the build scripts run against the
+    binary they just produced.
+    """
+    frozen = bool(getattr(sys, "frozen", False))
+    print(f"agentclip-monitor {__version__} ({'frozen build' if frozen else 'from source'})")
+    for name in MATCHERS:
+        chosen = select_matcher(name)
+        if chosen.name == name:
+            print(f"  {name:<8} available")
+        else:
+            print(f"  {name:<8} NOT AVAILABLE - would fall back to {chosen.name!r}")
+    return 0
+
+
+class _ListMatchersAction(argparse.Action):
+    """``--list-matchers`` as an ACTION, for ``--version``'s reason.
+
+    ``--port`` is required, and argparse enforces required arguments only after
+    the whole command line has been consumed - so a plain ``store_true`` flag
+    would answer a build's question with "the following arguments are required:
+    --port". The version action sidesteps that by printing and exiting from
+    inside parsing; this does the same, so both smoke tests are single-flag
+    invocations that never open a socket.
+    """
+
+    def __init__(self, option_strings: list[str], dest: str, help: str | None = None) -> None:
+        super().__init__(option_strings, dest, nargs=0, default=argparse.SUPPRESS, help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):  # type: ignore[override]
+        parser.exit(_list_matchers())
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -56,6 +107,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # and a BUILD asking it of the frozen binary as a smoke test - it walks the
     # whole import tree and exits 0 without opening a socket.
     parser.add_argument("--version", action="version", version=f"agentclip-monitor {__version__}")
+    # --version proves the import tree; it says nothing about a backend that is
+    # only ever imported inside a function on a poll tick. Its twin, and the
+    # other half of what the build scripts ask of the frozen binary.
+    parser.add_argument(
+        "--list-matchers",
+        action=_ListMatchersAction,
+        help="print which appearance-matcher backends this build can run, and exit",
+    )
     parser.add_argument(
         "--port",
         required=True,

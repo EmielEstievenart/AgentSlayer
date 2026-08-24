@@ -67,35 +67,47 @@ The target needs `agentclip-engine` on it — `uv tool install agentclip` over t
 
 > `uv tool install` writes `~/.local/bin`, which sshd's *non-interactive* shell does not have on `PATH` (that comes from `~/.profile`, and no profile is read for `ssh host command`). AgentClip therefore also tries `~/.local/bin/agentclip-engine` before giving up. If you installed somewhere else, symlink the binary into `/usr/local/bin`.
 
-### Standalone executable (Windows)
+### Standalone executables (Windows)
 
-To use `agentclip` from any directory without the checkout, freeze it into a single self-contained exe:
+To use `agentclip` from any directory without the checkout, freeze it into self-contained exes:
 
 ```powershell
-.\scripts\build-exe.ps1
+.\scripts\build-exe.ps1                 # both exes
+.\scripts\build-exe.ps1 -MonitorOnly    # just the monitor
 ```
 
-This builds `dist\agentclip.exe` (PyInstaller onefile, ~78 MB, no Python needed to run it), smoke-tests it, and copies it to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`. Re-run it to update after changing the source. Useful flags: `-Clean` (fresh build), `-NoInstall` (build only), `-InstallDir <path>`.
+This builds **two** artifacts (PyInstaller onefile, no Python needed to run them), smoke-tests each, and copies them to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`:
+
+- `dist\agentclip.exe` (~78 MB) — the full app.
+- `dist\agentclip-monitor.exe` — the *monitor* half alone, the standing process that runs on the machine whose **screen** shows the chat: a VM on a host-only network, or this PC in split mode (`docs/design/ui-monitor.md` §2.5, §6.5). It serves that machine's pixels, mouse, keyboard and clipboard to a brain over a TCP wire and keeps polling whether or not one is attached. It carries the OpenCV backend and the region picker and nothing shell- or engine-shaped: no pywebview, no textual, no MCP.
+
+Re-run to update after changing the source. Useful flags: `-Clean` (fresh build), `-MonitorOnly` (skip the app, and its `gui` extra), `-NoInstall` (build only), `-InstallDir <path>`. The engine binary is not built here — that one runs on an SSH target, so `scripts/build-exe.sh` owns it.
 
 The exe carries **both UI shells and every optional extra the desktop needs**: the GUI shell (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships), the deprecated TUI (`agentclip.exe --tui`) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the GUI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three against the exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
 
-The build is driven by `packaging/agentclip.spec`; a onefile exe unpacks to `%TEMP%` on each launch, costing a second or two of startup.
+The monitor exe is proved the same way, minus the shell half: `--version` walks its whole import tree and `--list-matchers` imports the OpenCV backend for real — which matters more there than in the app, because the monitor machine is where every template search actually runs.
+
+The builds are driven by `packaging/agentclip.spec` and `packaging/agentclip-monitor.spec`; a onefile exe unpacks to `%TEMP%` on each launch, costing a second or two of startup.
 
 > If `agentclip` says the gui extra is not installed, you are running a *different* `agentclip` — most likely a stale `uv tool install`. Run `where.exe agentclip`; the build script prints the same warning when it spots one, and `uv tool uninstall agentclip` clears it.
 
 ### Standalone executables (Linux / macOS)
 
 ```bash
-scripts/build-exe.sh              # both binaries
+scripts/build-exe.sh               # all three binaries
 scripts/build-exe.sh --engine-only
+scripts/build-exe.sh --monitor-only
 ```
 
-Same idea, **two** artifacts, because a POSIX box is usually the machine being *driven onto* rather than the one driving:
+Same idea, **three** artifacts, because a POSIX box is usually a machine being *driven onto* rather than the one driving:
 
 - `dist/agentclip` — the full app, exactly as above.
 - `dist/agentclip-engine` (~21 MB) — the engine half alone, the binary an SSH target runs (`docs/design/remote-executor.md` §2.6). It carries the MCP SDK and nothing shell- or driver-shaped: no textual, no pywebview, no OpenCV. Copy it onto a target's `PATH` and remote sessions work there without a Python install.
+- `dist/agentclip-monitor` — the monitor half alone, as under Windows above: the standing process for the machine whose screen shows the chat. Copy it onto a VM's `PATH` and that VM can serve its screen without a Python install.
 
-`--engine-only` builds just that second one and skips the `cv`/`gui` extras, whose Linux wheels want system libraries a headless target need not have. Both binaries are smoke-tested before install (`--version`, plus `--list-matchers` and `--gui-smoke` for the full app), then copied to `$AGENTCLIP_INSTALL_DIR` or `~/.local/bin`. Other flags mirror the PowerShell script: `--clean`, `--no-install`, `--install-dir <path>`.
+`--engine-only` builds just the engine and skips the `cv`/`gui` extras, whose Linux wheels want system libraries a headless target need not have; `--monitor-only` builds just the monitor and skips `gui`/`mcp`. Naming both builds those two halves and skips the full app. Every binary is smoke-tested before install (`--version` and `--list-matchers`, plus `--gui-smoke` for the full app), then copied to `$AGENTCLIP_INSTALL_DIR` or `~/.local/bin`. Other flags mirror the PowerShell script: `--clean`, `--no-install`, `--install-dir <path>`.
+
+> The monitor's region picker draws with tkinter, which many distributions ship apart from the interpreter, so the script checks for it before freezing that binary: `sudo apt install python3-tk` (Debian/Ubuntu) or `sudo dnf install python3-tkinter` (Fedora).
 
 A frozen binary is architecture- and glibc-specific, so build it on (or for) the machine family it will run on.
 

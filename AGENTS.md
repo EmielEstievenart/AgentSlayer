@@ -9,15 +9,15 @@ Design docs in `docs/design/` are binding — but **a status header inside a des
 
 ## Build & deploy
 
-Always deploy the exe onto PATH when building. Use the build script — never run PyInstaller by hand:
+Always deploy the exes onto PATH when building. Use the build script — never run PyInstaller by hand:
 
 ```powershell
 .\scripts\build-exe.ps1
 ```
 
-This syncs the build environment (including the `cv` extra, which the exe bundles), builds from `packaging/agentclip.spec`, smoke-tests the frozen exe, verifies the OpenCV matcher backend actually loads inside it, and copies it into the PATH folder (`$env:AGENTCLIP_INSTALL_DIR` if set, otherwise `$HOME\Documents\PATH`). Whenever a change should be usable from the terminal — or the user asks for a build — finish by running this script so the installed `agentclip.exe` is up to date. Only skip the install step (`-NoInstall`) if the user explicitly asks for a build without deploying.
+That builds **two** exes and installs both: `agentclip.exe` (the full app, from `packaging/agentclip.spec`) and `agentclip-monitor.exe` (the standing monitor that runs where the *pixels* are — a VM, or this PC in split mode — from `packaging/agentclip-monitor.spec`). It syncs the build environment (the `cv` extra, which both exes bundle, and `gui`, which only the app does), smoke-tests each frozen artifact (`--version` and `--list-matchers` for both, plus `--gui-smoke` for the app), and copies them into the PATH folder (`$env:AGENTCLIP_INSTALL_DIR` if set, otherwise `$HOME\Documents\PATH`). Whenever a change should be usable from the terminal — or the user asks for a build — finish by running this script so the installed exes are up to date. Only skip the install step (`-NoInstall`) if the user explicitly asks for a build without deploying. `-MonitorOnly` builds just the monitor (and skips the `gui` extra); `-Clean` and `-InstallDir <path>` are the other flags.
 
-On Linux/macOS the equivalent is `scripts/build-exe.sh`, which builds **two** binaries: `agentclip` and `agentclip-engine` (the engine half an SSH target runs, from `packaging/agentclip-engine.spec`). `--engine-only` builds just the engine and skips the `cv`/`gui` extras. Same flags otherwise: `--clean`, `--no-install`, `--install-dir DIR`.
+On Linux/macOS the equivalent is `scripts/build-exe.sh`, which builds **three** binaries: `agentclip`, `agentclip-engine` (the engine half an SSH target runs, from `packaging/agentclip-engine.spec`) and `agentclip-monitor`. `--engine-only` builds just the engine and skips the `cv`/`gui` extras; `--monitor-only` builds just the monitor and skips `gui`/`mcp`; naming both builds those two halves and skips the full app. Same flags otherwise: `--clean`, `--no-install`, `--install-dir DIR`. The monitor needs tkinter for its `--pick-region` overlay, so that script checks `import tkinter` before building it and names the distro package (`python3-tk`) if it is missing.
 
 ## Workflow
 

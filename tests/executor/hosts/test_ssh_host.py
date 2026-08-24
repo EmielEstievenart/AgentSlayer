@@ -1,12 +1,17 @@
 """SshHost against a paramiko that is a dictionary: no network, no server.
 
-What is worth pinning here is everything that is NOT "paramiko does the right
-thing": the POSIX-path discipline (this suite runs on Windows, where a Path
-would otherwise spell a remote path with backslashes), the reconnect state
-machine, the unknown-outcome answer a command in flight gets when the link
-dies, the auth ladder's order, and the SFTP primitives' contract with the seam.
-The real thing is exercised by tests/executor/hosts/test_ssh_real.py, which needs a
-machine to talk to and is skipped without one.
+What an ``SshHost`` IS shrank with remote-executor.md §2.8 (increment 5): the
+per-call tool path over SSH is deleted, so there is no ``spawn``, no
+``ExecHandle``, no kill-tree wrapper and none of the write/traverse primitives
+to test any more. What is left - and what this suite pins - is the CONNECTION:
+the auth ladder's order, the reconnect state machine, and the handful of probes
+and reads :func:`connect_remote` makes before a session exists, including the
+POSIX-path discipline they need (this suite runs on Windows, where a Path would
+otherwise spell a remote path with backslashes).
+
+The link channel has its own suite (test_link_channel.py). The real thing is
+exercised by tests/executor/hosts/test_ssh_real.py, which needs a machine to
+talk to and is skipped without one.
 """
 
 from __future__ import annotations
@@ -17,12 +22,7 @@ import paramiko
 import pytest
 
 from agentclip.executor.hosts.connect import PASSWORD_ATTEMPTS
-from agentclip.executor.hosts.ssh import (
-    CONNECTION_LOST_EXIT,
-    SshError,
-    SshHost,
-    wrap_command,
-)
+from agentclip.executor.hosts.ssh import CONNECTION_LOST_EXIT, SshError, SshHost
 
 from .fake_paramiko import FakeCommandScript, FakeSSHClient
 
@@ -55,38 +55,6 @@ def host(tmp_path: Path) -> SshHost:
     return h
 
 
-# -- the command wrapper -------------------------------------------------------
-
-
-def test_wrapper_cds_records_the_pid_and_keeps_the_command_whole() -> None:
-    line = wrap_command("pytest -q && ruff check", "/srv/app", "/tmp/p.pid")
-    assert "cd /srv/app" in line
-    assert "echo $$ >/tmp/p.pid" in line
-    assert "pytest -q && ruff check" in line
-    # A compound command must not be exec'd - exec would run only its head.
-    assert "exec pytest" not in line
-    assert line.startswith("setsid --wait true")  # probed, not assumed
-    assert "exec bash -lc" in line  # ...with a fallback for a box without it
-
-
-def test_wrapper_quotes_a_directory_with_spaces() -> None:
-    line = wrap_command("ls", "/srv/my app", "/tmp/p.pid")
-    assert "/srv/my app" in line
-    assert "cd /srv/my app" not in line  # unquoted, that is a cd with two arguments
-
-
-def test_spawn_sends_the_wrapped_command_from_the_workspace_root(host: SshHost) -> None:
-    host.spawn("ls -la", Path(ROOT))
-    sent = FakeSSHClient.instances[0].commands[0]
-    assert f"cd {ROOT}" in sent
-    assert "ls -la" in sent
-
-
-def test_spawn_merges_stderr_into_the_one_stream(host: SshHost) -> None:
-    host.spawn("ls", Path(ROOT))
-    assert FakeSSHClient.instances[0].channels[0].combined is True
-
-
 # -- POSIX paths, from a Windows PC --------------------------------------------
 
 
@@ -95,11 +63,6 @@ def test_a_path_built_by_pathlib_reaches_the_wire_as_posix(host: SshHost) -> Non
     FakeSSHClient.fs.add_file(f"{ROOT}/src/utils.py", "x")
     host.read_bytes(Path(ROOT) / "src" / "utils.py")
     assert FakeSSHClient.fs.reads[-1][0] == f"{ROOT}/src/utils.py"
-
-
-def test_the_cwd_of_a_command_is_posix_too(host: SshHost) -> None:
-    host.spawn("ls", Path(ROOT) / "src")
-    assert f"cd {ROOT}/src" in FakeSSHClient.instances[0].commands[0]
 
 
 def test_realpath_answers_a_path_that_stays_posix(host: SshHost) -> None:
@@ -128,37 +91,6 @@ def test_read_bytes_missing_raises_filenotfounderror(host: SshHost) -> None:
         host.read_bytes(Path(f"{ROOT}/nope.txt"))
 
 
-def test_write_bytes_creates_the_missing_parents(host: SshHost) -> None:
-    FakeSSHClient.fs.add_dir(ROOT)
-    host.write_bytes(Path(f"{ROOT}/a/b/c.txt"), b"hi")
-    assert FakeSSHClient.fs.made == [f"{ROOT}/a", f"{ROOT}/a/b"]  # shallowest first
-    assert FakeSSHClient.fs.files[f"{ROOT}/a/b/c.txt"] == b"hi"
-
-
-def test_write_bytes_append_extends(host: SshHost) -> None:
-    FakeSSHClient.fs.add_file(f"{ROOT}/log.txt", "one\n")
-    host.write_bytes(Path(f"{ROOT}/log.txt"), b"two\n", append=True)
-    assert FakeSSHClient.fs.files[f"{ROOT}/log.txt"] == b"one\ntwo\n"
-
-
-def test_write_bytes_overwrites(host: SshHost) -> None:
-    FakeSSHClient.fs.add_file(f"{ROOT}/log.txt", "one\n")
-    host.write_bytes(Path(f"{ROOT}/log.txt"), b"two\n")
-    assert FakeSSHClient.fs.files[f"{ROOT}/log.txt"] == b"two\n"
-
-
-def test_delete_removes_one_file(host: SshHost) -> None:
-    FakeSSHClient.fs.add_file(f"{ROOT}/gone.txt", "x")
-    host.delete(Path(f"{ROOT}/gone.txt"))
-    assert f"{ROOT}/gone.txt" not in FakeSSHClient.fs.files
-
-
-def test_rmdir_refuses_a_directory_with_something_in_it(host: SshHost) -> None:
-    FakeSSHClient.fs.add_file(f"{ROOT}/pkg/a.txt", "x")
-    with pytest.raises(OSError):
-        host.rmdir(Path(f"{ROOT}/pkg"))
-
-
 # -- metadata ------------------------------------------------------------------
 
 
@@ -170,39 +102,12 @@ def test_stat_of_a_file_reports_size(host: SshHost) -> None:
 
 def test_stat_of_a_missing_path_is_none_not_an_error(host: SshHost) -> None:
     assert host.stat(Path(f"{ROOT}/nope")) is None
-    assert host.lstat(Path(f"{ROOT}/nope")) is None
-
-
-def test_stat_follows_a_symlink_and_lstat_does_not(host: SshHost) -> None:
-    FakeSSHClient.fs.add_dir(f"{ROOT}/real")
-    FakeSSHClient.fs.links[f"{ROOT}/link"] = f"{ROOT}/real"
-    followed = host.stat(Path(f"{ROOT}/link"))
-    assert followed is not None and followed.is_dir and followed.is_symlink
-    itself = host.lstat(Path(f"{ROOT}/link"))
-    assert itself is not None and itself.is_symlink
-    assert not itself.is_dir and not itself.is_file
 
 
 def test_stat_of_a_broken_symlink_is_none(host: SshHost) -> None:
+    """stat follows the link, and there is nothing at the end of this one."""
     FakeSSHClient.fs.links[f"{ROOT}/dangling"] = f"{ROOT}/not-there"
     assert host.stat(Path(f"{ROOT}/dangling")) is None
-    assert host.lstat(Path(f"{ROOT}/dangling")) is not None
-
-
-def test_listdir_reports_types_and_sizes(host: SshHost) -> None:
-    FakeSSHClient.fs.add_file(f"{ROOT}/a.txt", "abc")
-    FakeSSHClient.fs.add_dir(f"{ROOT}/sub")
-    entries = {e.name: e for e in host.listdir(Path(ROOT))}
-    assert entries["a.txt"].is_file and entries["a.txt"].size == 3
-    assert entries["sub"].is_dir and entries["sub"].size == 0
-
-
-def test_listdir_entry_flags_follow_symlinks(host: SshHost) -> None:
-    """As os.scandir has it: a link to a directory is a directory AND a link."""
-    FakeSSHClient.fs.add_dir(f"{ROOT}/real")
-    FakeSSHClient.fs.links[f"{ROOT}/link"] = f"{ROOT}/real"
-    entries = {e.name: e for e in host.listdir(Path(ROOT))}
-    assert entries["link"].is_dir and entries["link"].is_symlink
 
 
 def test_realpath_strict_needs_the_path_to_exist(host: SshHost) -> None:
@@ -223,61 +128,6 @@ def test_realpath_resolves_a_symlinked_ancestor(host: SshHost) -> None:
     assert host.realpath(Path(f"{ROOT}/alias/new.txt")).as_posix() == "/srv/real/new.txt"
 
 
-# -- commands ------------------------------------------------------------------
-
-
-def test_wait_returns_the_exit_code_and_merged_output(host: SshHost) -> None:
-    FakeSSHClient.scripts = [FakeCommandScript(exit_code=3, output="boom\n")]
-    result = host.spawn("false", Path(ROOT)).wait(1.0)
-    assert result is not None and result.exit_code == 3 and result.output == "boom\n"
-
-
-def test_wait_answers_none_while_the_command_runs(host: SshHost) -> None:
-    FakeSSHClient.scripts = [FakeCommandScript(hangs=True, output="working\n")]
-    handle = host.spawn("sleep 60", Path(ROOT))
-    assert handle.wait(0.05) is None
-    # Output buffered during that slice survives into the drain, as the
-    # ExecHandle contract promises.
-    assert "working" in handle.drain(0.05)
-
-
-def test_peek_hands_over_what_the_poll_loop_has_already_pumped(host: SshHost) -> None:
-    """A remote command is watchable too - at the polling loop's resolution."""
-    FakeSSHClient.scripts = [FakeCommandScript(hangs=True, output="halfway\n")]
-    handle = host.spawn("make", Path(ROOT))
-    assert handle.peek() == ""  # nothing has been pumped yet
-    handle.wait(0.05)
-    assert handle.peek() == "halfway\n"
-    assert handle.peek() == "halfway\n"  # a snapshot, and repeatable
-
-
-def test_peek_matches_the_finished_result(host: SshHost) -> None:
-    FakeSSHClient.scripts = [FakeCommandScript(exit_code=0, output="all of it\n")]
-    handle = host.spawn("make", Path(ROOT))
-    result = handle.wait(1.0)
-    assert result is not None and handle.peek() == result.output
-
-
-def test_kill_sends_a_kill_to_the_whole_process_group(host: SshHost) -> None:
-    FakeSSHClient.scripts = [FakeCommandScript(hangs=True)]
-    handle = host.spawn("sleep 60", Path(ROOT))
-    pidfile = FakeSSHClient.instances[0].commands[0].split("echo $$ >")[1].split(" ")[0]
-    FakeSSHClient.fs.add_file(pidfile, "4321\n")
-
-    handle.wait(0.01)
-    handle.kill()
-
-    assert any("kill -9 -- -4321" in c for c in FakeSSHClient.instances[0].commands)
-    assert FakeSSHClient.instances[0].channels[0].closed
-
-
-def test_kill_without_a_pidfile_still_closes_the_channel(host: SshHost) -> None:
-    FakeSSHClient.scripts = [FakeCommandScript(hangs=True)]
-    handle = host.spawn("sleep 60", Path(ROOT))
-    handle.kill()  # the pidfile was never written: must not raise
-    assert FakeSSHClient.instances[0].channels[0].closed
-
-
 def test_probe_os_names_the_remote_kernel_for_the_bootstrap(host: SshHost) -> None:
     FakeSSHClient.scripts = [FakeCommandScript(output="Linux\n")]
     assert host.probe_os() == "Linux (ssh)"
@@ -290,26 +140,38 @@ def test_probe_os_fails_loudly_when_the_box_cannot_answer(host: SshHost) -> None
         host.probe_os()
 
 
+def test_a_probe_runs_through_a_login_shell(host: SshHost) -> None:
+    """``printenv`` must report the LOGIN shell's view; a bare exec would not."""
+    FakeSSHClient.scripts = [FakeCommandScript(output="HOME=/home/dev\n")]
+    code, out = host.probe_command("printenv")
+    assert (code, out) == (0, "HOME=/home/dev\n")
+    assert FakeSSHClient.instances[0].commands[0] == "bash -lc printenv"
+    assert FakeSSHClient.instances[0].channels[0].combined is True
+
+
+def test_a_probe_over_a_dead_link_answers_rather_than_raising(host: SshHost) -> None:
+    """A non-fatal connect step carries on with an empty answer (ssh-connect.md 2)."""
+    FakeSSHClient.instances[0].broken = True
+    code, out = host.probe_command("printenv")
+    assert code == CONNECTION_LOST_EXIT
+    assert "connection lost to dev@box" in out
+    assert not host.connected
+
+
+def test_a_probes_channel_is_closed_when_it_is_done(host: SshHost) -> None:
+    FakeSSHClient.scripts = [FakeCommandScript(output="Linux\n")]
+    host.probe_command("uname -s")
+    assert FakeSSHClient.instances[0].channels[0].closed
+
+
 # -- the reconnect state machine ----------------------------------------------
-
-
-def test_a_command_in_flight_when_the_link_dies_reports_an_unknown_outcome(
-    host: SshHost,
-) -> None:
-    FakeSSHClient.scripts = [FakeCommandScript(breaks=True)]
-    result = host.spawn("make", Path(ROOT)).wait(1.0)
-    assert result is not None
-    assert result.exit_code == CONNECTION_LOST_EXIT
-    assert "connection lost to dev@box" in result.output
-    assert "outcome unknown" in result.output
-    assert "may have completed or still be running" in result.output
 
 
 def test_the_host_marks_itself_dead_and_redials_on_the_next_operation(
     host: SshHost, tmp_path: Path
 ) -> None:
     FakeSSHClient.scripts = [FakeCommandScript(breaks=True)]
-    host.spawn("make", Path(ROOT)).wait(1.0)
+    host.probe_command("uname -s")
     assert not host.connected  # DEAD
     assert host.reconnects == 0  # ...but nothing has been re-dialed yet
 
@@ -326,13 +188,6 @@ def test_a_dead_link_under_an_sftp_call_becomes_a_connection_error(host: SshHost
         host.read_bytes(Path(f"{ROOT}/a.txt"))
     assert "connection lost to dev@box" in str(caught.value)
     assert not host.connected
-
-
-def test_a_finished_result_survives_being_asked_again(host: SshHost) -> None:
-    FakeSSHClient.scripts = [FakeCommandScript(exit_code=0, output="done\n")]
-    handle = host.spawn("true", Path(ROOT))
-    first = handle.wait(1.0)
-    assert handle.wait(1.0) == first
 
 
 # -- authentication ------------------------------------------------------------
@@ -424,9 +279,7 @@ def test_an_unreachable_box_is_an_ssherror_not_a_socket_error(tmp_path: Path) ->
 
 def test_an_ssh_config_alias_supplies_host_user_and_port(tmp_path: Path) -> None:
     config = tmp_path / "config"
-    config.write_text(
-        "Host box\n  HostName 10.0.0.7\n  User pi\n  Port 2222\n", encoding="utf-8"
-    )
+    config.write_text("Host box\n  HostName 10.0.0.7\n  User pi\n  Port 2222\n", encoding="utf-8")
     host = SshHost("box", ssh_config_path=config, known_hosts_path=tmp_path / "kh")
     host.connect()
     assert host.target == "pi@10.0.0.7:2222"

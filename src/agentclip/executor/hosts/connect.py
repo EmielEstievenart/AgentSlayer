@@ -27,6 +27,14 @@ config loads. ``tests/test_layering.py`` gives it its own rule for exactly that
 allowance; the rest of ``hosts`` stays the stdlib-and-paramiko leaf it is.
 Nothing here is imported by ``agentclip/executor/hosts/__init__.py``, so importing the
 seam still costs neither paramiko nor the config layer.
+
+**What an ``SshHost`` is, since remote-executor.md §2.8 (increment 5).** Not a
+:class:`~agentclip.executor.hosts.base.Host` - the per-call tool path over SSH
+is deleted, and a remote session's tools run on the target inside
+``agentclip-engine``. It is a dialled CONNECTION, and this module is its only
+real consumer: the six steps below are the whole of what is still asked of a
+target from this side, and the seventh (the engine launch) rides on the exec
+channel :meth:`~agentclip.executor.hosts.ssh.SshHost.open_link_channel` opens.
 """
 
 from __future__ import annotations
@@ -224,11 +232,11 @@ def remote_environment(host: SshHost) -> tuple[dict[str, str], str]:
 
     Unlike probe_os this is not fatal, so it returns a (mapping, complaint)
     pair rather than raising: an unusable answer means empty, which is exactly
-    what an unset variable already substitutes to. ``spawn`` already runs
-    everything through ``bash -lc``, so the bare command IS the login shell's
-    own view; prefixing it again would nest a second shell.
+    what an unset variable already substitutes to. ``probe_command`` already
+    runs everything through ``bash -lc``, so the bare command IS the login
+    shell's own view; prefixing it again would nest a second shell.
     """
-    code, out = host.run_blocking("printenv")
+    code, out = host.probe_command("printenv")
     environment = parse_environment(out) if code == 0 else {}
     if environment:
         return environment, ""

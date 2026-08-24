@@ -12,6 +12,12 @@ in with::
 The target must authenticate without a prompt (agent or key) and its host key
 must already be in known_hosts - an unattended run has nobody to ask. Every file
 these tests write lands under AGENTCLIP_SSH_ROOT, which they create and clean up.
+
+Much smaller than it was: remote-executor.md §2.8 deleted the per-call tool
+path, so there is no ``spawn``, no kill-tree and no write side to prove against a
+real box. What is left is the connection and the connect sequence's own probes
+and reads - plus tests/executor/hosts/test_link_real.py, which proves the engine
+launch on the same target.
 """
 
 from __future__ import annotations
@@ -23,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from agentclip.executor.hosts.ssh import CONNECTION_LOST_EXIT, SshHost
+from agentclip.executor.hosts.ssh import SshHost
 
 SSH_TESTS_ENABLED = os.environ.get("AGENTCLIP_SSH_TESTS") == "1"
 SSH_TARGET = os.environ.get("AGENTCLIP_SSH_TARGET", "")
@@ -52,92 +58,57 @@ def host() -> Iterator[SshHost]:
 def workdir(host: SshHost) -> Iterator[Path]:
     """A throwaway directory on the far end, removed afterwards."""
     path = Path(f"{SSH_ROOT}/{uuid.uuid4().hex[:8]}")
-    host.mkdir(path)
+    host.probe_command(f"mkdir -p {path.as_posix()}", timeout=30)
     yield path
-    host.run_blocking(f"rm -rf {path.as_posix()}", timeout=30)
+    host.probe_command(f"rm -rf {path.as_posix()}", timeout=30)
 
 
 def test_probe_reports_the_remote_kernel(host: SshHost) -> None:
     assert host.os_name.endswith("(ssh)")
 
 
+def test_a_probe_runs_through_the_login_shell(host: SshHost) -> None:
+    """What makes ``printenv`` mean the login environment (connect step 5)."""
+    code, out = host.probe_command("echo $HOME", timeout=30)
+    assert code == 0
+    assert out.strip().splitlines()[-1].strip().startswith("/")
+
+
 def test_home_dir_is_the_remote_users(host: SshHost) -> None:
     """Where a remote session looks for the global skill folders."""
-    code, out = host.run_blocking("echo $HOME", timeout=30)
+    code, out = host.probe_command("echo $HOME", timeout=30)
     assert code == 0
     assert host.home_dir().as_posix() == out.strip().splitlines()[-1].strip()
 
 
-def test_a_command_runs_in_the_workspace_root(host: SshHost, workdir: Path) -> None:
-    result = host.spawn("pwd", workdir).wait(30)
-    assert result is not None and result.exit_code == 0
-    assert result.output.strip().endswith(workdir.name)
+def test_the_connect_sequences_reads_work_over_sftp(host: SshHost, workdir: Path) -> None:
+    """Steps 4 and 6: check the remote root, then read the target's config off it."""
+    target = workdir / "config.toml"
+    host.probe_command(f"echo hi > {target.as_posix()}", timeout=30)
 
-
-def test_stdout_and_stderr_arrive_interleaved_in_one_stream(
-    host: SshHost, workdir: Path
-) -> None:
-    result = host.spawn("echo out; echo err >&2; exit 7", workdir).wait(30)
-    assert result is not None and result.exit_code == 7
-    assert "out" in result.output and "err" in result.output
-
-
-def test_a_login_shell_sources_the_profile(host: SshHost, workdir: Path) -> None:
-    result = host.spawn("echo $HOME", workdir).wait(30)
-    assert result is not None and result.output.strip().startswith("/")
-
-
-def test_kill_reaps_the_whole_process_tree(host: SshHost, workdir: Path) -> None:
-    """The grandchild is the real work; killing only the wrapper would orphan it."""
-    marker = f"agentclip-victim-{uuid.uuid4().hex[:8]}"
-    handle = host.spawn(f"bash -c 'sleep 300 # {marker}'", workdir)
-    assert handle.wait(2.0) is None  # still running
-    handle.kill()
-    handle.drain(5.0)
-
-    code, out = host.run_blocking(f"pgrep -f {marker} | wc -l", timeout=30)
-    assert code == 0
-    assert out.strip().splitlines()[-1].strip() == "0"
-
-
-def test_files_round_trip_over_sftp(host: SshHost, workdir: Path) -> None:
-    target = workdir / "deep" / "nested" / "file.txt"
-    host.write_bytes(target, b"hello\n")
-    assert host.read_bytes(target) == b"hello\n"
-    assert host.read_bytes(target, max_bytes=2) == b"he"
-
-    host.write_bytes(target, b"more\n", append=True)
-    assert host.read_bytes(target) == b"hello\nmore\n"
+    assert host.read_bytes(target) == b"hi\n"
+    assert host.read_bytes(target, max_bytes=1) == b"h"
 
     st = host.stat(target)
-    assert st is not None and st.is_file and st.size == 11
-
-    names = {e.name for e in host.listdir(workdir / "deep")}
-    assert names == {"nested"}
-
-    host.delete(target)
-    assert host.stat(target) is None
+    assert st is not None and st.is_file and st.size == 3
+    assert host.stat(workdir / "not-there") is None
+    assert host.realpath(workdir, strict=True).as_posix().endswith(workdir.name)
 
 
 def test_realpath_resolves_a_symlink_and_tolerates_a_missing_tail(
     host: SshHost, workdir: Path
 ) -> None:
-    host.mkdir(workdir / "real")
-    host.run_blocking(f"ln -s {(workdir / 'real').as_posix()} {(workdir / 'link').as_posix()}")
+    host.probe_command(f"mkdir -p {(workdir / 'real').as_posix()}", timeout=30)
+    host.probe_command(
+        f"ln -s {(workdir / 'real').as_posix()} {(workdir / 'link').as_posix()}", timeout=30
+    )
     resolved = host.realpath(workdir / "link" / "not-yet.txt")
     assert resolved.as_posix().endswith("/real/not-yet.txt")
 
 
-def test_a_lost_connection_reports_an_unknown_outcome(host: SshHost, workdir: Path) -> None:
-    """Pull the link out from under a running command; nobody may claim to know."""
-    handle = host.spawn("sleep 30", workdir)
-    assert handle.wait(1.0) is None
-    host.close()  # the link dies while the command is in flight
-    result = handle.wait(5.0)
-    assert result is not None
-    assert result.exit_code == CONNECTION_LOST_EXIT
-    assert "outcome unknown" in result.output
-
-    # ...and the next operation transparently re-dials.
-    assert host.stat(workdir) is not None
-    assert host.reconnects >= 1
+def test_a_dead_link_is_re_dialled_by_the_next_operation(host: SshHost, workdir: Path) -> None:
+    """The two-state machine, against a real transport."""
+    before = host.reconnects
+    host.close()
+    assert host.stat(workdir) is not None  # LIVE again, transparently
+    assert host.reconnects > before

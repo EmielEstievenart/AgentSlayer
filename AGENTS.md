@@ -50,4 +50,4 @@ Same rule, different resource: `@pytest.mark.real_ssh` (tests/executor/hosts/tes
 $env:AGENTCLIP_SSH_TESTS = '1'; $env:AGENTCLIP_SSH_TARGET = 'user@host'; uv run pytest tests/executor/hosts/test_ssh_real.py
 ```
 
-The target must authenticate without a prompt and already be in `known_hosts`. Everything else about `SshHost` is covered by `tests/executor/hosts/test_ssh_host.py`, which never opens a socket.
+The target must authenticate without a prompt and already be in `known_hosts`. Everything else about `SshHost` — which since remote-executor.md §2.8 is a *connection*, not a `Host`: auth, reconnect, the engine's link channel and the connect sequence's probes — is covered by `tests/executor/hosts/test_ssh_host.py` and `test_link_channel.py`, neither of which opens a socket.

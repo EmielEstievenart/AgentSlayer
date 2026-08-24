@@ -19,9 +19,9 @@ exec channel, which is the same sequence through the same code with the window
 left out.
 
 The legacy per-call ``SshHost`` assembly - the engine here, the target reached
-one round trip at a time - is still constructable and still tested (the last
-section); it is simply no longer what any shell does, and §2.8's deletion of it
-is increment 5.
+one round trip at a time - is GONE (remote-executor.md §2.8, increment 5), and
+with it the pin test that kept it constructable. There is one remote story now,
+and it is the one below.
 """
 
 from __future__ import annotations
@@ -34,9 +34,7 @@ from typing import Any
 import pytest
 
 from agentclip import cli
-from agentclip.config import Config, load_config
 from agentclip.engine.link import wire
-from agentclip.engine.link.factory import EngineRequest
 from agentclip.engine.link.wire import EngineLinkError
 from agentclip.executor.hosts import FakeHost
 from agentclip.executor.hosts.ssh import LinkChannel, SshError
@@ -92,7 +90,7 @@ class FakeSshHost(FakeHost):
         # plain name exits 127, the explicit path does not.
         self.runnable: set[str] | None = None
 
-    def run_blocking(self, command: str, *, timeout: float = 60.0) -> tuple[int, str]:
+    def probe_command(self, command: str, *, timeout: float = 60.0) -> tuple[int, str]:
         return self.blocking.get(command, (0, ""))
 
     def connect(self) -> None:
@@ -630,48 +628,6 @@ def test_a_local_launch_still_builds_its_engine_here(
     assert cli.main(["--project", str(project)]) == 0
     assert shell.dials == 0  # nothing to dial: no --ssh
     assert isinstance(shell.kwargs["engine_factory"], cli.LinkFactory)
-
-
-# == the legacy per-call SshHost assembly (increment 5 deletes it) =============
-# Not reachable from ``--ssh`` or the GUI's connect any more - the flip above is
-# what a remote session does. It stays constructable, and pinned, because §2.8's
-# deletion is a whole increment of its own and a path nobody tests is a path
-# nobody can delete safely.
-
-
-def test_the_legacy_assembly_still_builds_a_whole_session_over_one_host(
-    tmp_path: Path,
-) -> None:
-    """The single-construction-point rule: no session is half local."""
-    host = FakeSshHost()
-    host.add_file(f"{REMOTE_ROOT}/README.md", "hi\n")
-    host.add_file(f"{REMOTE_ROOT}/.claude/skills/deploy/SKILL.md", "---\nname: deploy\n---\ngo")
-    # A global skill folder under the REMOTE user's home, not the operator's.
-    host.add_file("/home/dev/.claude/skills/release/SKILL.md", "---\nname: release\n---\nship")
-
-    def get_config() -> Config:
-        return load_config(
-            Path(REMOTE_ROOT), global_config_path=tmp_path / "none.toml", host=host
-        )
-
-    build = cli.make_engine_factory(
-        get_config,
-        Path(REMOTE_ROOT),
-        host=host,
-        os_name="Linux (ssh)",
-        data_root=tmp_path / "state",
-        home=host.home_dir(),
-    )
-    # The factory returns a Link; this test is about what it BUILT, so unwrap.
-    engine = build(EngineRequest(service="claude")).engine
-
-    payload = engine.start_task("do it").chunks[0]
-    assert "on Linux (ssh)" in payload  # the bootstrap tells the truth
-    assert "deploy" in payload  # ...and the skills came off the remote machine
-    assert "release" in payload  # ...including the remote user's own
-    # The session tree is on THIS PC, next to nothing the remote host holds.
-    assert (tmp_path / "state" / ".agentclip" / "sessions").is_dir()
-    assert host.stat(Path(f"{REMOTE_ROOT}/.agentclip")) is None
 
 
 def test_a_local_launch_is_unchanged(tmp_path: Path) -> None:

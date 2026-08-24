@@ -122,11 +122,10 @@ def main(argv: list[str] | None = None) -> int:
     builder = make_engine_builder(
         get_config,
         project_root,
-        # This process runs ON the machine the project is on, so its Host is the
-        # local one - the remote half never SSHes out (design section 2.6). Its
-        # MCP servers are local to it for the same reason, which is why no
-        # remote target is named.
-        host=None,
+        # There is nothing to say about WHERE any more: this process runs ON the
+        # machine the project is on, and since §2.8 that is the only arrangement
+        # there is - the builder always uses its own LocalHost, and its MCP
+        # servers are local to it for the same reason.
         data_root=data_root,
         home=home,
     )

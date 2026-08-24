@@ -55,7 +55,7 @@ class ScriptedHost(FakeHost):
         self._fail = fail  # "connect" | "probe" | ""
         self.blocking: dict[str, tuple[int, str]] = {"printenv": (0, "HOME=/home/dev\n")}
 
-    def run_blocking(self, command: str, *, timeout: float = 60.0) -> tuple[int, str]:
+    def probe_command(self, command: str, *, timeout: float = 60.0) -> tuple[int, str]:
         return self.blocking.get(command, (0, ""))
 
     def connect(self) -> None:

@@ -105,31 +105,32 @@ def make_engine_factory(
     project_root: Path,
     chat_name: str | None = None,
     *,
-    host: Host | None = None,
     os_name: str | None = None,
     data_root: Path | None = None,
     home: Path | None = None,
-    mcp_remote_target: str = "",
     mcp_enabled: bool = True,
 ) -> LinkFactory:
-    """One :class:`LinkFactory` over one engine-side builder.
+    """One :class:`LinkFactory` over one engine-side builder, in THIS process.
 
     Every argument is the builder's - see its docstring for what each one means
-    and for the per-session rules (fresh config read, fresh chat name, one host
-    per session, MCP construction and catalog sizing). The name stays
-    ``make_engine_factory`` because an engine is still exactly what it builds -
-    the link is how the caller reaches it.
+    and for the per-session rules (fresh config read, fresh chat name, MCP
+    construction and catalog sizing). The name stays ``make_engine_factory``
+    because an engine is still exactly what it builds - the link is how the
+    caller reaches it.
+
+    There is no ``host=`` any more (remote-executor.md §2.8, increment 5): the
+    engine this builds runs here, on this machine, and a session on another one
+    is :func:`make_remote_link_factory`'s job - an engine over there, reached
+    over the wire.
     """
     return LinkFactory(
         make_engine_builder(
             get_config,
             project_root,
             chat_name,
-            host=host,
             os_name=os_name,
             data_root=data_root,
             home=home,
-            mcp_remote_target=mcp_remote_target,
             mcp_enabled=mcp_enabled,
         )
     )
@@ -252,10 +253,9 @@ def make_remote_link_factory(
     shipped it additive and increment 4's parity pass flipped the default: a
     remote session runs its engine, its stores, its policy, its skills and its
     MCP servers on the target, and this is the one place that connection is
-    made. The legacy per-call ``SshHost`` assembly
-    (:func:`make_engine_factory` with a ``host=``) still works when called
-    directly and is still tested, but nothing in either shell reaches it any
-    more; §2.8's deletion of it is increment 5.
+    made. Increment 5 deleted the alternative outright - there is no longer any
+    way to assemble a remote session HERE, over a host reached one round trip at
+    a time (§2.8).
 
     Failure has one shape and it is an :class:`EngineLinkError`: a target with
     no engine on it, a wire-version mismatch, or a launch that died some other
@@ -606,17 +606,22 @@ class Launch:
     home directory holds the global skill folders.
 
     ``remote`` is the dialled machine itself, and it is what tells ``main``
-    which kind of session this is. A remote launch now runs the ENGINE on the
-    target (docs/design/remote-executor.md §2.12, increment 4's flip), so the
-    session factory is built from this rather than from the four
-    where-does-it-run fields: those describe a session assembled HERE over an
-    ``SshHost``, which is the legacy per-call path, still constructable and no
-    longer the default. ``None`` for every local launch.
+    which kind of session this is. A remote launch runs the ENGINE on the target
+    (docs/design/remote-executor.md §2.12), so the session factory is built from
+    this and not from the four where-does-it-run fields, which now only ever
+    describe THIS PC. ``None`` for every local launch.
+
+    ``host`` is typed as the union it has always held: a :class:`LocalHost` for
+    a local launch, and for a remote one the dialled
+    :class:`~agentclip.executor.hosts.ssh.SshHost` - which since §2.8 is a
+    connection rather than a ``Host``. Nothing reads it as either: what is left
+    of it here is the link indicator's three facts and a ``close()`` at
+    teardown.
     """
 
     project_root: Path
     config: Config
-    host: Host
+    host: Host | SshHost
     os_name: str
     data_root: Path
     home: Path
@@ -649,7 +654,7 @@ class GuiRuntime:
     # the MCP slot: every machine has skill folders worth naming, even when it
     # has nothing in them.
     skills: Callable[[], SkillReport]
-    host: Host
+    host: Host | SshHost
     target: str
 
 
@@ -872,16 +877,7 @@ def main(argv: list[str] | None = None) -> int:
     # The MCP runtime is not built here any more: the engine-side builder owns
     # it, because servers must spawn on the machine the engine runs on
     # (docs/design/remote-executor.md section 2.7). What ``main`` still decides
-    # is the two facts only a launch knows.
-    #
-    # ``mcp_remote_target`` is the legacy per-call SshHost path's one oddity:
-    # the config came off the target while the process spawning servers is this
-    # PC, so stdio entries are refused BY NAME and a dial that fails says who
-    # dialled it. The host's name, not a bare flag - a status line that names
-    # the box beats one that says "remote". Since the flip it evaluates to ""
-    # on every path that still builds a local builder (a remote session's
-    # servers are the target's, spawned by the target's own engine), and it goes
-    # with §2.8's deletion in increment 5.
+    # is the one fact only a launch knows.
     #
     # A launch with a connect PENDING builds no MCP at all: those servers would
     # be this PC's, read from this PC's permissions.json, for a session that is
@@ -889,7 +885,10 @@ def main(argv: list[str] | None = None) -> int:
     # consulted at all in a remote session" is the rule, not a preference
     # (docs/design/remote-ssh.md, "the target owns its policy"). The runtime the
     # connect builds carries the target's instead.
-    mcp_remote_target = launch.host.name if config.remote.is_remote() else ""
+    #
+    # ``mcp_remote_target`` used to be the second fact, naming the box a remote
+    # config came off while the process spawning servers was this one. §2.8
+    # deleted the only arrangement that could happen in.
     # The shell, and there is only one of them (docs/design/ui-monitor.md §6.6
     # deleted the Textual TUI). Imported inside the function because pywebview
     # is the optional `gui` extra: ``--list-matchers``, ``--pick-region`` and a
@@ -907,11 +906,9 @@ def main(argv: list[str] | None = None) -> int:
     gui_factory = make_engine_factory(
         lambda: live_config[0],
         launch.project_root,
-        host=launch.host,
         os_name=launch.os_name,
         data_root=(launch.data_root if launch.data_root != launch.project_root else None),
         home=launch.home,
-        mcp_remote_target=mcp_remote_target,
         mcp_enabled=pending_connect is None,
     )
     # What the process currently OWNS, as opposed to what it was launched

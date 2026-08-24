@@ -71,11 +71,11 @@ def host() -> Iterator[SshHost]:
 def link(host: SshHost) -> Iterator[LinkChannel]:
     """One ``agentclip-engine`` on the far end, for the length of one test."""
     root = f"{SSH_ROOT}/{uuid.uuid4().hex[:8]}"
-    host.run_blocking(f"mkdir -p {root}", timeout=30)
+    host.probe_command(f"mkdir -p {root}", timeout=30)
     channel = host.open_link_channel(engine_command(root))
     yield channel
     channel.close()
-    host.run_blocking(f"rm -rf {root}", timeout=30)
+    host.probe_command(f"rm -rf {root}", timeout=30)
 
 
 def test_a_session_runs_on_the_target_over_one_exec_channel(link: LinkChannel) -> None:
@@ -96,14 +96,14 @@ def test_a_session_runs_on_the_target_over_one_exec_channel(link: LinkChannel) -
 def test_closing_the_channel_stops_the_engine(host: SshHost) -> None:
     """§2.3: the remote process dies with the channel - no detached daemon."""
     root = f"{SSH_ROOT}/{uuid.uuid4().hex[:8]}"
-    host.run_blocking(f"mkdir -p {root}", timeout=30)
+    host.probe_command(f"mkdir -p {root}", timeout=30)
     channel = host.open_link_channel(engine_command(root))
     RemoteLinkClient(channel.reader, channel.writer).hello()
     channel.close()
 
-    code, out = host.run_blocking(
+    code, out = host.probe_command(
         f"pgrep -f 'agentclip-engine --project {root}' | wc -l", timeout=30
     )
     assert code == 0
     assert out.strip().splitlines()[-1].strip() == "0"
-    host.run_blocking(f"rm -rf {root}", timeout=30)
+    host.probe_command(f"rm -rf {root}", timeout=30)

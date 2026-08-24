@@ -1,50 +1,42 @@
-"""SshHost: the Host seam over a remote machine, via Paramiko.
+"""SshHost: one authenticated SSH connection to a target, via Paramiko.
 
-One persistent authenticated connection per session (docs/design/remote-ssh.md
-decisions 2, 5, 7, 8). Every command gets a fresh exec channel on it -
-``bash -lc`` from the workspace root, so profile/rc files are sourced exactly as
-a native CLI agent has them and nothing carries between commands. Files go over
-one SFTP session on the same connection.
+**No longer a Host.** This module used to implement the whole
+:class:`~agentclip.executor.hosts.base.Host` seam over SSH - a fresh exec
+channel per tool command, an SFTP round trip per file read - and that path was
+deleted with remote-executor.md §2.8 (increment 5). A remote session runs its
+Executor on the target now: ``agentclip-engine`` is launched over one exec
+channel and every tool it runs uses the target's own
+:class:`~agentclip.executor.hosts.local.LocalHost`, so no primitive crosses the
+link. What is left here is the connection itself - dial, authenticate, notice a
+dead link, re-dial - plus the two things the Shell still asks of it directly:
+:meth:`SshHost.open_link_channel`, and the handful of probes and reads
+:func:`agentclip.executor.hosts.connect.connect_remote` needs BEFORE a session
+exists (the remote OS name, the login environment, the remote home, and the
+target's own config files).
 
-**Paths.** The Host protocol speaks :class:`pathlib.Path`, and on Windows that
-is a ``WindowsPath`` whose ``str()`` would hand the server backslashes. So every
-path arriving here is normalized to a POSIX string (:func:`_posix`) before it
-reaches the wire, and every path handed back is built from one. Nothing above
-the seam has to know: ``joinpath``/``relative_to``/``parts``/``as_posix`` are
-lexical operations a WindowsPath performs correctly on a POSIX-shaped path. Two
-consequences worth naming: a remote file name containing a literal backslash
-(legal on Linux) would be split into components, and Windows path comparison is
-case-insensitive, so two remote paths differing only in case compare equal above
-the seam. Both are accepted - the alternative is a parallel path type through
-every tool - and neither can widen the sandbox jail, whose containment check
-only ever gets *more* eager.
+**Paths.** The connect sequence speaks :class:`pathlib.Path`, and on Windows
+that is a ``WindowsPath`` whose ``str()`` would hand the server backslashes. So
+every path arriving here is normalized to a POSIX string (:func:`_posix`) before
+it reaches the wire, and every path handed back is built from one:
+``joinpath``/``relative_to``/``parts``/``as_posix`` are lexical operations a
+WindowsPath performs correctly on a POSIX-shaped path.
 
-**Connection loss** (design 5) is a two-state machine::
+**Connection loss** (remote-ssh.md design 5) is a two-state machine::
 
     LIVE --(transport error)--> DEAD --(next operation calls _ensure)--> LIVE
 
-A command in flight when the link dies is never retried and never reported as
-failed: it comes back as an :class:`ExecResult` carrying
-:data:`CONNECTION_LOST_EXIT` and a body saying the outcome is unknown, because
-it may have completed, half-completed, or still be running. The host marks
-itself dead; the next operation transparently re-dials and re-authenticates
-(with the credentials that already worked, so a reconnect under a live TUI needs
-no prompt it could not show).
+The host marks itself dead and the next operation transparently re-dials and
+re-authenticates, with the credentials that already worked - so a reconnect
+under a live window needs no prompt it could not show. What a dead link does to
+a session in flight is no longer this module's problem: the session lives on the
+target, and the link channel dying is one failed call in
+:class:`~agentclip.shell.app.remote_link.RemoteLinkClient`, not a verdict about
+a tool.
 
-**Kill-tree** (design 8): closing a channel kills nothing remote. The wrapper
-records its own PID and runs under ``setsid`` where that exists, so it is a
-session leader and its PID is the process group of everything the command
-spawns; :meth:`SshExec.kill` reads that PID over SFTP and sends
-``kill -9 -- -<pgid>`` down a separate channel - the remote twin of LocalExec's
-killpg.
-
-**The link channel** (:meth:`SshHost.open_link_channel`) is the other kind of
-channel this module opens, and deliberately the opposite shape: one long-lived
-duplex stream carrying the Shell<->Engine wire protocol
-(docs/design/remote-executor.md §2.12), rather than one command with an exit
-code. It is NOT wrapped, NOT setsid'd and NOT registered with the per-call
-bookkeeping above - see the method's docstring for why each of those is a
-feature.
+**The link channel** (:meth:`SshHost.open_link_channel`) is the channel that
+matters: one long-lived duplex stream carrying the Shell<->Engine wire protocol
+(docs/design/remote-executor.md §2.12). It is deliberately NOT wrapped and NOT
+``setsid``'d - see the method's docstring for why each of those is a feature.
 """
 
 from __future__ import annotations
@@ -57,7 +49,6 @@ import shlex
 import stat as stat_module
 import threading
 import time
-import uuid
 from collections.abc import Callable, Sequence
 from contextlib import suppress
 from pathlib import Path, PurePosixPath
@@ -65,9 +56,9 @@ from types import TracebackType
 
 import paramiko
 
-from agentclip.executor.hosts.base import DirEntry, ExecResult, FileStat
+from agentclip.executor.hosts.base import FileStat
 
-# The exit code an unfinished command gets when the link died under it: what
+# The exit code a connect-time probe reports when it could not complete: what
 # ssh(1) itself uses for "the transport failed", and no shell produces it for
 # anything else in practice.
 CONNECTION_LOST_EXIT = 255
@@ -86,9 +77,9 @@ _RECV_CHUNK = 65536
 _LINK_STDERR_TAIL = 8192
 _LINK_CLOSE_JOIN_S = 2.0
 
-# Prompt callbacks the caller supplies. Both are answered BEFORE the TUI starts
-# on the first connect (cli.py wires them to the terminal); a re-dial calls them
-# again only if the credentials that worked no longer do.
+# Prompt callbacks the caller supplies. Both are answered by whoever drives the
+# connect - the terminal launch's getpass, or the GUI dialog's modals; a re-dial
+# calls them again only if the credentials that worked no longer do.
 PasswordPrompt = Callable[[str], str | None]  # prompt -> secret; None/"" = give up
 HostKeyPrompt = Callable[[str, str, str], bool]  # host, key type, fingerprint -> trust?
 # title, instructions, ((prompt, echo), ...) -> one answer per prompt; None = give up.
@@ -130,32 +121,6 @@ def _fingerprint(key: paramiko.PKey) -> str:
     return "SHA256:" + base64.b64encode(digest).decode("ascii").rstrip("=")
 
 
-def wrap_command(command: str, cwd: str, pidfile: str) -> str:
-    """The line actually sent: record the process group, cd, run.
-
-    ``setsid`` puts the wrapper in a session of its own, so its PID *is* the
-    process group id of every descendant, and ``--wait`` keeps the command's
-    exit status as the channel's. Neither is assumed (busybox has one and not
-    the other): both are probed by running them, and the fallback still records
-    a PID, so kill() degrades to killing what it can reach rather than not
-    existing. The trap clears the pidfile without disturbing the exit status.
-
-    The command is NOT ``exec``'d: a compound command (``a && b``) is not a
-    simple command, and exec would run only its head.
-    """
-    inner = (
-        f"trap 'rm -f {pidfile}' EXIT; "
-        f"echo $$ >{pidfile} 2>/dev/null; "
-        f"cd {shlex.quote(cwd)} || exit 1; "
-        f"{command}"
-    )
-    quoted = shlex.quote(inner)
-    return (
-        f"setsid --wait true >/dev/null 2>&1 && exec setsid --wait bash -lc {quoted}; "
-        f"exec bash -lc {quoted}"
-    )
-
-
 class _AskPolicy(paramiko.MissingHostKeyPolicy):
     """known_hosts, with a question where AutoAddPolicy has a shrug (design 7)."""
 
@@ -170,110 +135,6 @@ class _AskPolicy(paramiko.MissingHostKeyPolicy):
         client.get_host_keys().add(hostname, key.get_name(), key)
 
 
-class SshExec:
-    """One remote command on its own channel, behind the ExecHandle contract."""
-
-    __slots__ = ("_host", "_chan", "_pidfile", "_buffer", "_result")
-
-    def __init__(self, host: SshHost, chan: paramiko.Channel, pidfile: str) -> None:
-        self._host = host
-        self._chan = chan
-        self._pidfile = pidfile
-        self._buffer = ""
-        self._result: ExecResult | None = None
-
-    def wait(self, timeout: float) -> ExecResult | None:
-        if self._result is not None:
-            return self._result  # finished (or lost) earlier: the answer stands
-        deadline = time.monotonic() + max(0.0, timeout)
-        while True:
-            try:
-                self._pump()
-                if self._chan.exit_status_ready() and not self._readable():
-                    self._pump()  # anything that arrived behind the status
-                    code = self._chan.recv_exit_status()
-                    self._result = ExecResult(exit_code=code, output=self._buffer)
-                    self._close()
-                    return self._result
-            except (OSError, EOFError, paramiko.SSHException) as exc:
-                return self._connection_lost(exc)
-            if time.monotonic() >= deadline:
-                return None
-            time.sleep(min(_POLL_S, max(0.0, deadline - time.monotonic())))
-
-    def peek(self) -> str:
-        """The merged output so far, as of the last :meth:`wait`/:meth:`drain`.
-
-        No transport call of its own: the channel is pumped by the polling loop
-        that already calls ``wait()`` every slice, and touching it from here
-        would mean a second place that can discover a dead link. So a remote
-        command streams at exactly the polling loop's resolution, which is the
-        same resolution the UI redraws at.
-        """
-        return self._buffer
-
-    def kill(self) -> None:
-        """Kill the remote process group, best effort, never raising."""
-        pgid = ""
-        # Gone already, or the link died: then the channel close below is all
-        # there is, and kill() still may not raise.
-        with suppress(OSError):
-            pgid = self._host.read_bytes(Path(self._pidfile)).decode("ascii", "replace").strip()
-        if pgid.isdigit():
-            self._host.run_detached(f"kill -9 -- -{pgid} 2>/dev/null; kill -9 {pgid} 2>/dev/null")
-        self._close()
-
-    def drain(self, timeout: float) -> str:
-        """Whatever the command managed to emit before it died, best effort."""
-        deadline = time.monotonic() + max(0.0, timeout)
-        while True:
-            try:
-                self._pump()
-                if not self._readable():
-                    break
-            except (OSError, EOFError, paramiko.SSHException):
-                break
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(_POLL_S)
-        return self._buffer
-
-    # -- internals ----------------------------------------------------------
-
-    def _readable(self) -> bool:
-        return bool(self._chan.recv_ready() or self._chan.recv_stderr_ready())
-
-    def _pump(self) -> None:
-        """Move every byte currently available into the buffer; never blocks."""
-        while self._chan.recv_ready():
-            data = self._chan.recv(_RECV_CHUNK)
-            if not data:
-                break
-            self._buffer += data.decode("utf-8", errors="replace")
-        # set_combine_stderr should make the second loop dead code; a server that
-        # ignores it must not be able to lose the error output.
-        while self._chan.recv_stderr_ready():
-            data = self._chan.recv_stderr(_RECV_CHUNK)
-            if not data:
-                break
-            self._buffer += data.decode("utf-8", errors="replace")
-
-    def _connection_lost(self, exc: Exception) -> ExecResult:
-        """The honest answer to "did it run?" when the link died: nobody knows."""
-        self._host.mark_dead(exc)
-        note = (
-            f"connection lost to {self._host.target}; command outcome unknown"
-            " (it may have completed or still be running)"
-        )
-        body = f"{self._buffer}\n{note}" if self._buffer else note
-        self._result = ExecResult(exit_code=CONNECTION_LOST_EXIT, output=body)
-        return self._result
-
-    def _close(self) -> None:
-        with suppress(Exception):  # closing a dead channel must never raise
-            self._chan.close()
-
-
 class _ChannelReader:
     """Lines of UTF-8 text off a channel's stdout, blocking until there is one.
 
@@ -281,7 +142,7 @@ class _ChannelReader:
     ``BufferedFile`` is not a clean text stream (its ``readline`` has its own
     newline rules and its own idea of when a read is short), and the wire's whole
     framing rests on "one ``\\n``-terminated line is one frame". So the same
-    ``recv`` loop :class:`SshExec` uses moves bytes, an INCREMENTAL decoder turns
+    ``recv`` loop moves bytes, an INCREMENTAL decoder turns
     them into text - a multibyte character split across two TCP-sized chunks must
     not become two replacement characters - and only ``"\\n"`` ends a line.
 
@@ -414,9 +275,17 @@ class LinkChannel:
 
 
 class SshHost:
-    """The Host implementation for a machine reached over SSH."""
+    """One authenticated SSH connection to a machine, and what connect asks it.
 
-    case_sensitive = True  # every OS worth reaching this way
+    NOT a :class:`~agentclip.executor.hosts.base.Host` any more (see the module
+    docstring): it implements none of the tool primitives, and the only file
+    reads left on it are the connect sequence's own. What it IS is the dialler
+    the Shell holds for the life of a remote session - the thing that
+    authenticates, notices a dead link and re-dials it, opens the engine's link
+    channel, and answers the six questions
+    :func:`agentclip.executor.hosts.connect.connect_remote` asks before a
+    session exists.
+    """
 
     def __init__(
         self,
@@ -476,7 +345,7 @@ class SshHost:
     # -- the connection state machine ---------------------------------------
 
     def connect(self) -> None:
-        """Dial and authenticate. Raises SshError - call it before the TUI starts."""
+        """Dial and authenticate. Raises SshError - the connect sequence's step 2."""
         with self._lock:
             self._connect_locked()
 
@@ -614,8 +483,8 @@ class SshHost:
             raise SshError(f"cannot reach {self.target}: {exc}") from exc
 
         # The password that already worked is tried first and never re-asked:
-        # by the time a reconnect happens the terminal that could prompt is
-        # underneath the TUI.
+        # a reconnect happens mid-session, where the prompt that could ask has
+        # no turn of its own to appear in.
         secrets: list[str] = [self._password] if self._password else []
         for attempt in range(_PASSWORD_ATTEMPTS):
             if attempt >= len(secrets):
@@ -643,11 +512,67 @@ class SshHost:
             return False  # nobody to ask means no trust: never auto-add (design 7)
         return self._host_key_prompt(hostname, keytype, fingerprint)
 
-    # -- launch-time probes --------------------------------------------------
+    # -- connect-time probes -------------------------------------------------
+
+    def probe_command(self, command: str, *, timeout: float = 60.0) -> tuple[int, str]:
+        """Run one short command through a login shell and read all of it.
+
+        The replacement for the deleted ``run_blocking``/``spawn`` pair, and
+        deliberately a much smaller thing than either
+        (docs/design/remote-executor.md §2.8). There is no
+        :class:`~agentclip.executor.hosts.base.ExecHandle` here, no pidfile, no
+        ``setsid`` process group and no kill path: those existed so a *tool's*
+        command could be streamed and cancelled from above the seam, and no tool
+        runs over this connection any more - the engine on the target runs them
+        all, in its own process, over its own :class:`LocalHost`.
+
+        What is left is what :func:`connect_remote` needs and only that: two
+        one-line questions (``uname -s``, ``printenv``) whose answers cannot
+        change under a session, asked once, before one exists. ``bash -lc`` is
+        kept because it is load-bearing for the second of them - ``printenv``
+        must report the LOGIN shell's environment, which is what an
+        ``{env:...}`` in the target's config means.
+
+        Never raises: a failed probe is a (code, text) pair like any other, so a
+        non-fatal connect step (ssh-connect.md §2, rows 6-8) can carry on with
+        an empty answer. A transport that died on the way marks the host dead,
+        so the next operation re-dials.
+        """
+        client = self._ensure()
+        try:
+            transport = client.get_transport()
+            if transport is None:
+                raise paramiko.SSHException("the transport is gone")
+            chan = transport.open_session(timeout=_CONNECT_TIMEOUT_S)
+            chan.set_combine_stderr(True)  # one merged stream: a probe has no stderr
+            chan.exec_command(f"bash -lc {shlex.quote(command)}")
+        except (paramiko.SSHException, OSError, EOFError) as exc:
+            self.mark_dead(exc)
+            return CONNECTION_LOST_EXIT, f"connection lost to {self.target}: {exc}"
+        buffer = ""
+        deadline = time.monotonic() + max(0.0, timeout)
+        try:
+            while True:
+                while chan.recv_ready():
+                    data = chan.recv(_RECV_CHUNK)
+                    if not data:
+                        break
+                    buffer += data.decode("utf-8", errors="replace")
+                if chan.exit_status_ready() and not chan.recv_ready():
+                    return chan.recv_exit_status(), buffer
+                if time.monotonic() >= deadline:
+                    return CONNECTION_LOST_EXIT, f"{command!r} timed out after {timeout:.0f}s"
+                time.sleep(_POLL_S)
+        except (OSError, EOFError, paramiko.SSHException) as exc:
+            self.mark_dead(exc)
+            return CONNECTION_LOST_EXIT, f"connection lost to {self.target}: {exc}"
+        finally:
+            with suppress(Exception):  # closing a dead channel must never raise
+                chan.close()
 
     def probe_os(self) -> str:
         """``uname -s`` on the far end, as the bootstrap's OS name. Fails loudly."""
-        code, out = self.run_blocking("uname -s", timeout=_CONNECT_TIMEOUT_S)
+        code, out = self.probe_command("uname -s", timeout=_CONNECT_TIMEOUT_S)
         kernel = out.strip().splitlines()[-1].strip() if out.strip() else ""
         if code != 0 or not kernel:
             raise SshError(
@@ -669,47 +594,6 @@ class SshHost:
         except OSError:
             return Path(f"/home/{self._resolved_user}") if self._resolved_user else Path("/root")
 
-    def run_blocking(self, command: str, *, timeout: float = 60.0) -> tuple[int, str]:
-        """Run one command to completion. For launch-time probes, not for tools."""
-        handle = self.spawn(command, Path("."))
-        deadline = time.monotonic() + timeout
-        while True:
-            result = handle.wait(min(0.5, max(0.0, deadline - time.monotonic())))
-            if result is not None:
-                return result.exit_code, result.output
-            if time.monotonic() >= deadline:
-                handle.kill()
-                return CONNECTION_LOST_EXIT, f"{command!r} timed out after {timeout:.0f}s"
-
-    def run_detached(self, command: str) -> None:
-        """Fire a command and forget it (the kill path). Never raises."""
-        try:
-            transport = self._ensure().get_transport()
-            if transport is None:
-                return
-            chan = transport.open_session(timeout=_CONNECT_TIMEOUT_S)
-            chan.exec_command(command)
-            chan.close()
-        except Exception:  # noqa: BLE001 - killing is best effort by contract
-            pass
-
-    # -- Host: process execution --------------------------------------------
-
-    def spawn(self, command: str, cwd: Path) -> SshExec:
-        client = self._ensure()
-        pidfile = f"/tmp/.agentclip-{uuid.uuid4().hex}.pid"
-        try:
-            transport = client.get_transport()
-            if transport is None:
-                raise paramiko.SSHException("the transport is gone")
-            chan = transport.open_session(timeout=_CONNECT_TIMEOUT_S)
-            chan.set_combine_stderr(True)  # one merged stream, as LocalHost has it
-            chan.exec_command(wrap_command(command, _posix(cwd), pidfile))
-        except (paramiko.SSHException, OSError, EOFError) as exc:
-            self.mark_dead(exc)
-            raise OSError(errno.EIO, f"connection lost to {self.target}: {exc}") from exc
-        return SshExec(self, chan, pidfile)
-
     # -- the link channel ----------------------------------------------------
 
     def open_link_channel(self, command: str) -> LinkChannel:
@@ -721,23 +605,24 @@ class SshHost:
         channel's stdio for the life of the session. ``_ensure`` dials or
         re-dials first, so this is also the point a dead link is noticed.
 
-        Three deliberate differences from :meth:`spawn`, all of them semantics
-        rather than tidiness:
+        Three deliberate differences from :meth:`probe_command`, all of them
+        semantics rather than tidiness:
 
-        * **No** :func:`wrap_command`, and in particular no ``setsid``. The
-          engine process MUST die with this channel and with the connection -
-          that IS §2.3's disconnect model ("the remote process dies with the SSH
-          connection; no detached daemon in v1"), and a session leader would
-          survive exactly the event the design says ends it, leaving an engine
-          behind on the target with a session store open under it.
+        * **No wrapper**, and in particular no ``setsid``. The engine process
+          MUST die with this channel and with the connection - that IS §2.3's
+          disconnect model ("the remote process dies with the SSH connection; no
+          detached daemon in v1"), and a session leader would survive exactly the
+          event the design says ends it, leaving an engine behind on the target
+          with a session store open under it. (The deleted per-call path DID
+          ``setsid`` its commands, so that a tool's whole process tree could be
+          killed; nothing here is ever killed by us.)
         * **stderr is kept separate** (``set_combine_stderr(False)``): stdout is
           the protocol and nothing else may appear on it, while stderr is the
           remote log and the only evidence a failed launch leaves.
-        * **No per-call bookkeeping** - no pidfile, no :class:`SshExec`, no kill
-          path. There is no "outcome unknown" to report here because there is no
-          command result to report: a transport that dies surfaces as EOF on the
-          reader, and the client turns that into one failed call rather than a
-          verdict about a tool.
+        * **Not read to completion.** A probe is a question with an answer; this
+          is a stream with a lifetime. Nothing here waits for an exit status,
+          and a transport that dies surfaces as EOF on the reader, which the
+          client turns into one failed call.
         """
         client = self._ensure()
         try:
@@ -752,7 +637,20 @@ class SshHost:
             raise OSError(errno.EIO, f"connection lost to {self.target}: {exc}") from exc
         return LinkChannel(chan)
 
-    # -- Host: files ---------------------------------------------------------
+    # -- what the connect sequence reads off the target -----------------------
+    #
+    # Three SFTP calls, and no more: they are what steps 4 and 6 of
+    # :func:`connect_remote` are made of - resolve and check the remote root,
+    # then read the target's ``.agentclip.toml`` and ``permissions.json`` into
+    # the Config that drives THIS side's knobs (docs/design/remote-executor.md
+    # §2.12, "what the shell still keeps locally"). Everything else that used to
+    # be here - write_bytes, delete, mkdir, rmdir, lstat, listdir - was the tool
+    # path, and went with §2.8. Nothing writes to the target from this side any
+    # more, so no file is pushed at connect time.
+    #
+    # ``read_bytes`` keeps its Host-seam name and signature on purpose:
+    # ``config.load_config(host=...)`` calls exactly that, and renaming it here
+    # would only move the coupling somewhere less obvious.
 
     def read_bytes(self, path: Path, *, max_bytes: int | None = None) -> bytes:
         remote = _posix(path)
@@ -762,39 +660,8 @@ class SshHost:
             f.prefetch()
             return bytes(f.read())
 
-    def write_bytes(self, path: Path, data: bytes, *, append: bool = False) -> None:
-        remote = _posix(path)
-        with self._sftp(remote) as sftp:
-            _mkdirs(sftp, _parent(remote))
-            with sftp.open(remote, "ab" if append else "wb") as f:
-                f.write(data)
-
-    def delete(self, path: Path) -> None:
-        remote = _posix(path)
-        with self._sftp(remote) as sftp:
-            sftp.remove(remote)
-
-    # -- Host: directories ---------------------------------------------------
-
-    def mkdir(self, path: Path) -> None:
-        remote = _posix(path)
-        with self._sftp(remote) as sftp:
-            _mkdirs(sftp, remote)
-
-    def rmdir(self, path: Path) -> None:
-        remote = _posix(path)
-        with self._sftp(remote) as sftp:
-            sftp.rmdir(remote)
-
-    # -- Host: metadata ------------------------------------------------------
-
     def stat(self, path: Path) -> FileStat | None:
-        return self._describe(path, follow=True)
-
-    def lstat(self, path: Path) -> FileStat | None:
-        return self._describe(path, follow=False)
-
-    def _describe(self, path: Path, *, follow: bool) -> FileStat | None:
+        """Stat following symlinks; None when the path is not there."""
         remote = _posix(path)
         with self._sftp(remote) as sftp:
             try:
@@ -803,7 +670,7 @@ class SshHost:
                 return None
             mode = attr.st_mode or 0
             is_symlink = stat_module.S_ISLNK(mode)
-            if follow and is_symlink:
+            if is_symlink:
                 try:
                     attr = sftp.stat(remote)
                 except OSError:
@@ -815,29 +682,6 @@ class SshHost:
                 is_symlink=is_symlink,
                 size=attr.st_size or 0,
             )
-
-    def listdir(self, path: Path) -> list[DirEntry]:
-        remote = _posix(path)
-        entries: list[DirEntry] = []
-        with self._sftp(remote) as sftp:
-            for attr in sftp.listdir_attr(remote):
-                mode = attr.st_mode or 0
-                is_symlink = stat_module.S_ISLNK(mode)
-                if is_symlink:
-                    # listdir_attr answers lstat, but DirEntry's flags follow
-                    # links as os.scandir's do - so a link costs one round trip.
-                    mode = _stat_mode(sftp, f"{remote.rstrip('/')}/{attr.filename}")
-                is_dir = stat_module.S_ISDIR(mode)
-                entries.append(
-                    DirEntry(
-                        name=attr.filename,
-                        is_dir=is_dir,
-                        is_file=stat_module.S_ISREG(mode),
-                        is_symlink=is_symlink,
-                        size=0 if is_dir else (attr.st_size or 0),
-                    )
-                )
-        return entries
 
     def realpath(self, path: Path, *, strict: bool = False) -> Path:
         remote = _posix(path)
@@ -880,33 +724,6 @@ class SshHost:
             if self._sftp_client is None:
                 self._sftp_client = client.open_sftp()
             return self._sftp_client
-
-
-def _stat_mode(sftp: paramiko.SFTPClient, remote: str) -> int:
-    """st_mode through symlinks; 0 (neither dir nor file) when it cannot be had."""
-    try:
-        return sftp.stat(remote).st_mode or 0
-    except OSError:
-        return 0
-
-
-def _mkdirs(sftp: paramiko.SFTPClient, remote: str) -> None:
-    """mkdir -p: create the missing ancestors, shallowest first."""
-    missing: list[str] = []
-    cur = remote
-    while cur not in ("/", "", "."):
-        try:
-            sftp.stat(cur)
-            break
-        except OSError:
-            missing.append(cur)
-            cur = _parent(cur)
-    for directory in reversed(missing):
-        try:
-            sftp.mkdir(directory)
-        except OSError:
-            if not stat_module.S_ISDIR(_stat_mode(sftp, directory)):
-                raise  # lost a race is fine; refused is not
 
 
 class _SftpCall:

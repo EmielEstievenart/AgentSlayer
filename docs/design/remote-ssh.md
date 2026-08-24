@@ -1,24 +1,46 @@
 # Remote development over SSH
 
-Status: **agreed design** (grilling session 2026-08-11), **implemented in full**,
-and **substantially superseded** (2026-08-19) by
-`docs/design/remote-executor.md`, which moved the engine itself onto the target.
+Status: **HISTORICAL, NOT BINDING** (2026-08-25). Agreed and implemented in full
+(grilling session 2026-08-11), then **superseded** (2026-08-19) by
+`docs/design/remote-executor.md`, which moved the engine itself onto the target
+— and, on 2026-08-25, **the code this document describes was deleted**
+(remote-executor.md §2.8, increment 5).
 
 > **What `--ssh` does now.** This document describes a mode where AgentClip runs
 > here and reaches the target one primitive at a time — an exec channel per
-> command, an SFTP read per file. That mode is no longer what `--ssh` starts.
-> Since remote-executor.md's increment 4, a remote session launches
+> command, an SFTP read per file. That mode is gone. A remote session launches
 > `agentclip-engine` on the target and drives it over one wire connection
 > (remote-executor.md §2.12 "the flip"); tools, stores, backups, policy, skills
 > and MCP servers are all local to the target and no primitive crosses the link.
 >
-> Everything below is kept: it is the history of how the seam got built, most of
-> it is still the code (the connect/auth/reconnect machinery is exactly what the
-> link channel is opened on), and the per-call machinery **still exists** —
-> `make_engine_factory(host=…)` still assembles an engine here over an `SshHost`
-> — it is simply unreachable from either shell. Its deletion is
-> remote-executor.md §2.8, increment 5. Individual sections that no longer
-> describe what a remote session does carry their own marker below.
+> **What survives in the code**, and it is the reason this file is kept rather
+> than deleted — it is the history of how that seam got built:
+>
+> * The whole **connect/auth/reconnect machinery** of `SshHost` (decisions 3, 5,
+>   7): the ssh_config lookup, the auth ladder, the host-key question, the
+>   password that is asked at most three times and then reused, and the
+>   LIVE↔DEAD state machine. The link channel is opened on exactly this.
+> * **`SshHost.open_link_channel`** and `LinkChannel` — the one exec channel a
+>   session now has, described by remote-executor.md §2.12, not here.
+> * The **connect sequence** (`executor/hosts/connect.py`), unchanged in shape:
+>   its six steps still resolve, dial, probe the OS, check the remote root,
+>   capture home + environment, and read the target's config. What they run on
+>   shrank to match — one `probe_command` (a bare `bash -lc`, no `setsid`, no
+>   pidfile, no `ExecHandle`) and three read-only SFTP calls.
+> * **Decisions 1, 4, 6** and "the target owns its policy", which the flip made
+>   *more* true rather than less.
+>
+> **What was deleted**, and with it every sentence below that describes it:
+> `SshExec` (the `ExecHandle` over an exec channel), `wrap_command` (the
+> `setsid`/pidfile kill-tree wrapper), `spawn`, `run_blocking`, `run_detached`,
+> and the `Host` filesystem primitives `write_bytes`/`delete`/`mkdir`/`rmdir`/
+> `lstat`/`listdir`. `SshHost` no longer implements the `Host` protocol at all —
+> it is a **connection**, not a machine tools run on. The `host=` parameter of
+> `make_engine_factory`/`make_engine_builder` went with it: an engine now always
+> runs on its own machine.
+>
+> Individual sections that no longer describe what a remote session does carry
+> their own marker below.
 
 ## Goal
 
@@ -35,9 +57,9 @@ local.
    truth. *(Still true, and more so: the whole executor is over there now.)*
 
 2. **Persistent connection, fresh shell per command.** — **SUPERSEDED (2026-08-19)
-   by remote-executor.md §2.1/§2.12.** Kept for the record; the per-call
-   machinery is still in the code (`SshHost.spawn`, `SshExec`, the wrapper) and
-   no longer reached by a session. What a `--ssh` connect opens now is ONE
+   by remote-executor.md §2.1/§2.12, and DELETED (2026-08-25) by its §2.8.**
+   Kept for the record only: `SshHost.spawn`, `SshExec` and the wrapper are
+   gone. What a `--ssh` connect opens now is ONE
    long-lived exec channel running `agentclip-engine`, and a `run_command` is a
    wire message to a process that is already on the box — it does not cross the
    link at all. The no-state-between-commands semantics below still hold, because
@@ -94,8 +116,9 @@ local.
    authenticate, probe `uname` and remote root existence *before* the TUI starts.
 
 8. **Remote cancel/kill.** — **SUPERSEDED (2026-08-19) by remote-executor.md
-   §2.9/§2.12.** Kept for the record; the machinery is still in `SshHost` and no
-   longer reached by a session. A cancel is now a `cancel` frame on the wire and
+   §2.9/§2.12, and DELETED (2026-08-25) by its §2.8.** Kept for the record only:
+   there is no `setsid` wrapper, no pidfile and no kill exec left in `SshHost`.
+   A cancel is now a `cancel` frame on the wire and
    the kill happens ON the target, by the engine over there, using the ordinary
    local kill-tree — which is also why the LINK channel is opened bare, with no
    `setsid`: the engine process must die WITH the channel (§2.3), where a tool's
@@ -197,8 +220,9 @@ remote-executor.md §2.4.** The store follows the ENGINE, and the engine is on t
 target: a remote session's transcripts and backups now land in
 `<project>/.agentclip/` over there, and `cli.main` no longer creates or prunes
 the local tree for one. `default_remote_state_dir` and `SessionStore`'s
-`data_root` both still exist, for the per-call path and for the localhost e2e
-suite's isolation. The accepted cost of the new answer is stated in §2.4:
+`data_root` both still exist — the first because the connect sequence still
+computes one, the second for the localhost e2e suite's isolation — but since
+§2.8 nothing writes a remote session's state here. The accepted cost of the new answer is stated in §2.4:
 transcripts and backups are unreachable while the target is. *(Original text.)*
 Sessions, transcripts and backups
 are AgentClip's state, so they stay local — but the project root they normally
@@ -320,9 +344,9 @@ TARGET, with the target's environment and cwd. The premise changed, not the
 reasoning: this paragraph was written for a world where the only process
 AgentClip had over there was an exec channel. Its "accepted cost" paragraph below
 is the exact cost the reversal PAYS OFF — a `http://localhost:<port>` on the box
-now resolves to the box. `mcp_remote_target` (the "dialled from this PC" note and
-the stdio refusal) survives only for the per-call path and is `""` everywhere
-else. *(Original text.)* The config describing an HTTP server is read
+now resolves to the box. `mcp_remote_target` went from the engine builder with
+§2.8's deletion (2026-08-25): the one arrangement it existed for — a config off
+one machine, servers spawned by another — cannot happen any more. *(Original text.)* The config describing an HTTP server is read
 from the target, but the connection is dialed by AgentClip itself, from the host PC.
 Tunnelling it through paramiko (`direct-tcpip`) so it originated from the target was
 considered and rejected: it is new transport code with its own lifecycle and
@@ -342,9 +366,9 @@ wrong box.
 case the reversal was FOR: a stdio server now spawns on the target, by the
 engine, with the target's argv, environment and cwd — exactly the "plausible
 later wave" the last sentence below predicted. The refusal still exists in
-`McpManager` and still fires when `mcp_remote_target` is set, which since the
-flip means the per-call path alone; the GUI's connect banner keeps naming refused
-stdio servers for the same reason. *(Original text.)* A `type: "local"` entry
+`McpManager` and still fires when its `remote_target` is set, but since §2.8
+(2026-08-25) nothing sets it: the arrangement it guarded is gone. The GUI's
+connect banner keeps naming refused stdio servers, which is now dead paint. *(Original text.)* A `type: "local"` entry
 in the target's config is reported as an unsupported-here server in the MCP status
 pane, with its name. It is not spawned on the host PC (its argv and `cwd` describe
 the target) and not silently dropped. Spawning stdio servers on the target over an

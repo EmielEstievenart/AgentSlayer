@@ -164,24 +164,23 @@ class EngineBuilder:
     chat naming - or, for the plain master case, just the service key, which is
     coerced to the equivalent default request.
 
-    ``host`` is the machine the project lives on, and this is the ONE place it
-    is chosen: every session this builder makes hands the same Host to the
-    workspace jail, the tool context, the backup store and the engine, so a
-    session cannot end up half local and half remote. ``os_name`` is what the
-    bootstrap's "on {os}" slot says (the REMOTE kernel in a remote session);
-    ``data_root`` is where the .agentclip session tree goes when the project
-    root is not on this PC; ``home`` is whose home directory holds the global
-    skill folders. All of them default to "this machine", which is what every
-    local run passes.
+    **The host is not a parameter.** An engine runs on the machine its process
+    runs on, full stop: every session this builder makes hands the same
+    :class:`~agentclip.executor.hosts.local.LocalHost` to the workspace jail,
+    the tool context, the backup store and the engine, so a session cannot end
+    up half local and half remote. It used to be choosable, because a remote
+    session was assembled HERE over an ``SshHost`` and every tool call was a
+    round trip; that path was deleted with remote-executor.md §2.8, and a remote
+    session is now an ``agentclip-engine`` process on the target calling this
+    same builder over there.
 
-    ``mcp_remote_target`` names the machine the config came off when this
-    builder is the legacy per-call ``SshHost`` path's - the one arrangement
-    where the config describes one box and the process spawning servers is on
-    another (see :meth:`_mcp`). It is "" everywhere else, including in the
-    ``agentclip-engine`` process, which IS its machine. ``mcp_enabled`` is the
-    single launch that must build no MCP runtime at all: a GUI window opened
-    with a connect PENDING, whose servers would be this PC's for a session
-    about to belong to another one.
+    ``os_name`` is what the bootstrap's "on {os}" slot says; ``data_root`` is
+    where the .agentclip session tree goes when the project root is not beside
+    it; ``home`` is whose home directory holds the global skill folders. All of
+    them default to "this machine", which is what every caller now passes.
+    ``mcp_enabled`` is the single launch that must build no MCP runtime at all:
+    a GUI window opened with a connect PENDING, whose servers would be this PC's
+    for a session about to belong to another one.
     """
 
     __slots__ = (
@@ -193,7 +192,6 @@ class EngineBuilder:
         "_data_root",
         "_skills",
         "_skill_report",
-        "_mcp_remote_target",
         "_mcp_enabled",
         "_mcp_lock",
         "_manager",
@@ -208,11 +206,9 @@ class EngineBuilder:
         project_root: Path,
         chat_name: str | None = None,
         *,
-        host: Host | None = None,
         os_name: str | None = None,
         data_root: Path | None = None,
         home: Path | None = None,
-        mcp_remote_target: str = "",
         mcp_enabled: bool = True,
     ) -> None:
         self._get_config = get_config
@@ -227,9 +223,10 @@ class EngineBuilder:
         # quarter: at the 12k presets a quarter leaves no headroom and a full
         # skills library tips it over. Skills describe the project, so in a
         # remote session they are discovered in the remote machine's skill
-        # folders (design 6): the project-local ones AND the ones under the
-        # REMOTE user's home, all through the same host.
-        self._host: Host = host if host is not None else LocalHost()
+        # folders (remote-ssh.md design 6) - which, since the engine went over
+        # there, needs no arranging: the discovery runs in the target's own
+        # process, over the target's own host.
+        self._host: Host = LocalHost()
         self._os_name = os_name or platform.system() or "unknown OS"
         self._data_root = data_root
         self._skills = discover_skills(project_root, home=home, host=self._host)
@@ -238,7 +235,6 @@ class EngineBuilder:
         # both halves of it are already settled: discovery happens once per
         # builder, and the roots are a pure function of the arguments.
         self._skill_report = skill_report(self._skills, skill_search_roots(project_root, home))
-        self._mcp_remote_target = mcp_remote_target
         self._mcp_enabled = mcp_enabled
         self._mcp_lock = threading.Lock()
         self._manager: McpManager | None = None
@@ -406,7 +402,6 @@ class EngineBuilder:
             manager = McpManager(
                 cfg.mcp_servers.servers,
                 self._project_root,
-                remote_target=self._mcp_remote_target,
                 rejected=cfg.mcp_servers.rejected,
             )
             if self._status_hook is not None:
@@ -421,11 +416,9 @@ def make_engine_builder(
     project_root: Path,
     chat_name: str | None = None,
     *,
-    host: Host | None = None,
     os_name: str | None = None,
     data_root: Path | None = None,
     home: Path | None = None,
-    mcp_remote_target: str = "",
     mcp_enabled: bool = True,
 ) -> EngineBuilder:
     """One :class:`EngineBuilder`; see its docstring for every argument."""
@@ -433,11 +426,9 @@ def make_engine_builder(
         get_config,
         project_root,
         chat_name,
-        host=host,
         os_name=os_name,
         data_root=data_root,
         home=home,
-        mcp_remote_target=mcp_remote_target,
         mcp_enabled=mcp_enabled,
     )
 

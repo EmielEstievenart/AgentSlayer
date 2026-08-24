@@ -7,13 +7,15 @@
 > the design session for the first increment happens, this document graduates
 > into a binding design doc and `remote-ssh.md` gets amended where superseded.
 >
-> **Exception: §2.2, §2.4, §2.5, §2.6, §2.7, §2.9, §2.10, §2.11 and §2.12 are
-> built, and binding** — increment 1 (the link seam), increment 2 (the
+> **Exception: §2.2, §2.4, §2.5, §2.6, §2.7, §2.8, §2.9, §2.10, §2.11 and §2.12
+> are built, and binding** — increment 1 (the link seam), increment 2 (the
 > engine-side package, the wire codec, the server loop, `RemoteLink` and the
 > localhost e2e suite), increment 3 (the console script, the SSH link channel,
-> launch-failure classification and the remote factory) and increment 4 (policy,
-> stores, skills, MCP on the target — and the flip) shipped in full, so those
-> parts describe code rather than intent. Everything else here is still plan.
+> launch-failure classification and the remote factory), increment 4 (policy,
+> stores, skills, MCP on the target — and the flip) and increment 5 (the
+> deletion, §2.8) shipped in full, so those parts describe code rather than
+> intent. **All five increments in §4 are done.** Everything else here — §1,
+> §3 and the §5 open points — is still plan.
 >
 > **The default `--ssh` mode IS the remote engine.** Increment 4's last slice
 > flipped it: a remote session — terminal launch or in-app connect — dials the
@@ -22,12 +24,11 @@
 > a per-call round trip is now local to the target: tools, stores, backups,
 > policy, skills and MCP servers.
 >
-> **The per-call `SshHost` path still exists in the code and is no longer
-> reachable from either shell.** `make_engine_factory(host=…)` still assembles
-> an engine here over an `SshHost`, and its tests still pin it; nothing calls it
-> with a remote host. §2.8's deletion is increment 5, and that is the only thing
-> the two remaining paragraphs of §2.4/§2.7 about "the legacy per-call path" are
-> still describing.
+> **The per-call `SshHost` path is DELETED** (2026-08-25, increment 5, §2.8).
+> There is no `make_engine_factory(host=…)` any more and no way to assemble a
+> remote session on this PC; `SshHost` is the dialled connection the engine's
+> link channel is opened on, and nothing else. The paragraphs of §2.4/§2.7 about
+> "the legacy per-call path" describe what was removed, not what is there.
 
 ## 1. Goal
 
@@ -180,8 +181,8 @@ In the `agentclip-engine` server process `__main__.py` passes `host=None` (so
 `<project>/.agentclip/` **on the target** and backups are captured by the target's
 own filesystem reads. Nothing mirrors home.
 
-The **legacy per-call `SshHost` path** — still the default until §2.8's deletion —
-keeps phase 2's answer: `cli` passes
+The **legacy per-call `SshHost` path** — deleted in increment 5 (§2.8), described
+here as the thing this replaced — kept phase 2's answer: `cli` passed
 `data_root=default_remote_state_dir(target, root)`, a
 `<user_data_dir>/agentclip/remote/<target>-<root>-<hash>/` tree on the OPERATOR's
 PC, and the `BackupStore` reads remote bytes over the Host to store them there.
@@ -368,9 +369,11 @@ default `--ssh` mode, its config still comes off the target while the process
 spawning servers is this PC, so `cli` passes `mcp_remote_target=<host name>`
 there and `client.py`'s stdio refusal and "dialled from this PC" note fire
 exactly as before. That parameter is `""` everywhere else, including in
-`agentclip-engine`. It goes when §2.8 does, in increment 5.
+`agentclip-engine`. **It went with §2.8, in increment 5 (2026-08-25)**: the
+builder has no `mcp_remote_target` any more, because the arrangement it named —
+a config read off one machine, servers spawned by another — cannot happen.
 
-### 2.8 SshHost per-call mode is replaced outright
+### 2.8 SshHost per-call mode is replaced outright — **AS BUILT (2026-08-25, increment 5)**
 
 Once the remote-Executor mode reaches parity, the per-call `SshHost` tool path
 (every file read / command as its own round trip; grep/glob pulling whole
@@ -381,6 +384,57 @@ on. Nothing deploys source any more (§2.6), so the SFTP side survives only as
 connect/auth plumbing — no file is pushed to the target at connect time. One
 remote story, clean break — same style as the opencode.json → permissions.json
 split.
+
+**As built.** `ssh.py` went from 945 lines to 762 (328 deleted, 145 written).
+Gone: `SshExec` (the whole `ExecHandle` — `wait`/`peek`/`kill`/`drain` and the
+"outcome unknown" verdict), `wrap_command`, `spawn`, `run_blocking`,
+`run_detached`, and the `Host` primitives `write_bytes`/`delete`/`mkdir`/
+`rmdir`/`lstat`/`listdir` with their `_mkdirs`/`_stat_mode` helpers. Kept:
+connect/auth/reconnect, `open_link_channel`, `LinkChannel`, `_ChannelReader`,
+`_ChannelWriter`.
+
+**`SshHost` is now a connection, not a `Host`** — it implements none of the
+protocol, and `hosts/connect.py` is its only real consumer. `cli.Launch.host`
+and `GuiRuntime.host` are typed `Host | SshHost`, which is the union they
+already held; both shells read that slot through `getattr` (`target`,
+`connected`, `reconnects`, `reconnect`, `close`) and did not change.
+
+**Two things the deletion list named had to survive in a smaller shape**, and
+both for the same reason: they are not the tool path, they are the *connect*
+path, and §2.12 keeps connect step 6's `Config` as "what the shell still keeps
+locally".
+
+* `read_bytes`, `stat` and `realpath` stay, read-only. Steps 4 and 6 ARE those
+  calls — resolve and check the remote root, then read the target's
+  `.agentclip.toml`/`permissions.json` through `load_config(host=…)`. This is
+  exactly what "the SFTP side survives only as connect/auth plumbing" asks for;
+  nothing writes to the target from this side any more.
+* `run_blocking` is deleted and replaced by **`probe_command`**, half its size
+  and named so it cannot be mistaken for a tool path: one bare `bash -lc` on its
+  own channel, merged stderr, read to the exit status, no pidfile, no `setsid`,
+  no handle, and never raising (a failed probe is a `(code, text)` pair, because
+  steps 3 and 5 are non-fatal). Its only callers are `probe_os` and step 5's
+  `printenv`. `bash -lc` is load-bearing for the second: `{env:…}` in the
+  target's config means the LOGIN shell's environment.
+
+**`host=` is gone from `make_engine_factory`/`make_engine_builder`/
+`EngineBuilder`**, and `mcp_remote_target` with it (§2.7 said it goes in this
+increment): an engine runs on the machine its own process runs on, so the
+builder just constructs a `LocalHost`. `McpManager`'s own `remote_target`
+parameter is left in place, defaulted, and is now unreachable.
+
+**The config layer stopped asking for a `Host`.** `load_config` only ever used
+`name` + `read_bytes`, so `hosts/base.py` carves those two out as `FileReader`
+and `Host` inherits from it. A connection can satisfy that without pretending to
+be a machine tools run on.
+
+**Tests.** `tests/test_launch_remote.py` lost the legacy-assembly pin test and
+its section header — the file is purely the flip now. `test_ssh_host.py` went
+506 → 359 lines (the wrapper, `spawn`, peek/kill, the write/traverse primitives
+and the in-flight-command verdict out; three `probe_command` tests in).
+`test_ssh_real.py` was rewritten around the connection and the connect probes.
+`test_connect.py`, `test_link_channel.py` and `test_link_real.py` needed only the
+`run_blocking` → `probe_command` rename.
 
 ### 2.9 Wire protocol v1 (as built)
 
@@ -858,7 +912,8 @@ pruned for a remote run — the store follows the engine (§2.4), so an empty
 `<user_data_dir>/agentclip/remote/…` directory would be a history that is not
 there. And `mcp_remote_target` now evaluates to `""` on every path that still
 builds a local builder, because a remote session's servers are the target's and
-its own engine spawns them; the parameter goes with §2.8's deletion.
+its own engine spawns them; the parameter **went with §2.8's deletion**
+(2026-08-25).
 
 **The RemoteEngine is the status source unconditionally**, where the local
 `LinkFactory` is passed through `_mcp_source` and dropped when it has no rows.
@@ -965,7 +1020,8 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
    target, the dialog showing it as a seventh checklist row, and neither reaches
    the per-call assembly any more (§2.12 "the flip").
 5. **Delete SshHost per-call mode** once parity is verified; amend
-   `remote-ssh.md`.
+   `remote-ssh.md`. — **done (2026-08-25).** See §2.8 "as built" for what went
+   and for the two things that had to survive in a smaller shape.
 
 ## 5. Open points (**OPEN**)
 
@@ -1042,5 +1098,7 @@ events, output deltas (RunPanel streaming), notes/toasts, state snapshots.
   superseded markers on decision 2 (per-call exec channels), decision 8 (remote
   kill-tree), the phase-3 MCP mechanics (MCP-stays-on-the-host, the stdio
   refusal), and "where a remote session's own state lives" — each pointing at the
-  section here that replaced it, each saying that the machinery it describes is
-  still in the code until §2.8's deletion, and none of them deleted.
+  section here that replaced it. §2.8's deletion (2026-08-25) closed the loop:
+  each marker now says the machinery is GONE, and the document carries a
+  HISTORICAL, NOT BINDING header naming what survives in the code and what does
+  not.

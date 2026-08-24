@@ -107,10 +107,29 @@ class ExecHandle(Protocol):
     def drain(self, timeout: float) -> str: ...
 
 
-class Host(Protocol):
-    """The OS primitives a session's tools may use. See the module docstring."""
+class FileReader(Protocol):
+    """Enough of a machine to read files off it, and to say which machine.
+
+    Carved out of :class:`Host` for the config layer, which asks a machine for
+    exactly these two things (``load_config(host=...)`` reads
+    ``.agentclip.toml`` and ``permissions.json``, and names where they came
+    from). A ``Host`` is one of these; so is
+    :class:`~agentclip.executor.hosts.ssh.SshHost`, which since
+    docs/design/remote-executor.md §2.8 is a CONNECTION rather than a Host - it
+    kept these two members because the connect sequence reads the target's
+    config over SFTP before a session exists, and nothing else.
+    """
 
     name: str  # for diagnostics / the bootstrap's "on {os}" slot
+
+    def read_bytes(self, path: Path, *, max_bytes: int | None = None) -> bytes:
+        """Read a file. ``max_bytes`` reads only a prefix (the binary sniff)."""
+        ...
+
+
+class Host(FileReader, Protocol):
+    """The OS primitives a session's tools may use. See the module docstring."""
+
     # Do path NAMES compare case-sensitively here? A property of the machine the
     # files are on, never of the one AgentClip runs on: glob's matching and the
     # skill-folder ordering ask this, and a Windows operator driving a Linux box
@@ -124,10 +143,6 @@ class Host(Protocol):
         ...
 
     # -- files -------------------------------------------------------------
-
-    def read_bytes(self, path: Path, *, max_bytes: int | None = None) -> bytes:
-        """Read a file. ``max_bytes`` reads only a prefix (the binary sniff)."""
-        ...
 
     def write_bytes(self, path: Path, data: bytes, *, append: bool = False) -> None:
         """Write (or append to) a file, creating missing parent directories."""

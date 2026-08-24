@@ -3,8 +3,9 @@
    composer and its slash-command popup, the run panel, the approval gate, the
    toasts, the modals (the session summary, the help sheet, the settings picker
    and the user guide among them), the sidebar, the status bar, the harness log
-   pane, the elements column and the service editor - and it still invents no
-   vocabulary the remaining increment (the SSH dialog) would argue with.
+   pane and the SSH connect dialog. The ELEMENTS column and the service editor
+   are NOT here any more: they moved into the calibration window, which has a
+   stylesheet of its own (gui/calibration/assets/app.css, ui-monitor.md 6.4).
    Only system fonts - nothing here may reach the network. */
 
 /* The palettes, and the whole difference between them is this region: every
@@ -161,8 +162,7 @@ body {
 button,
 .run-head,
 .ev details summary,
-.set-choice,
-.svc-check {
+.set-choice {
   user-select: none;
 }
 
@@ -1459,94 +1459,6 @@ button:not(:disabled) {
   color: var(--warn);
 }
 
-/* -- elements column (F7) -------------------------------------------------
-   A sibling of the sidebar with its own toggle, never nested inside it
-   (elements-panel.md 2.1). Narrower than the sidebar because a row is a short
-   label over a small picture, and scrolling because seven rows of both is
-   taller than most windows. */
-
-.elements {
-  flex: none;
-  /* Same bargain as the sidebar, one size down: the thumbnails scale with the
-     row, so a narrower column loses detail rather than content. */
-  width: clamp(160px, 20vw, 210px);
-  overflow-y: auto;
-  padding: 14px 14px 18px;
-  border-left: 1px solid var(--line);
-  background: var(--bg-raised);
-  font-size: 12.5px;
-}
-
-.elements > .side-title:first-child {
-  margin-top: 0;
-}
-
-.el-rows {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-/* Every row is the same height whether or not it holds a picture, so a match
-   landing cannot make the column dance (elements-panel.md 2.2). */
-.el-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-height: 44px;
-  padding: 4px 0;
-  border-bottom: 1px solid var(--line);
-}
-
-.el-text {
-  flex: 1;
-  min-width: 0;
-}
-
-.el-name {
-  color: var(--text);
-  font-size: 11.5px;
-  overflow-wrap: anywhere;
-}
-
-.el-verdict {
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
-.el-row.found .el-verdict {
-  color: var(--ok);
-}
-
-/* "Searched and not there" is a live verdict, not an absence: it reads warm,
-   while "nothing has ever been searched for this" stays dim. */
-.el-row.missing .el-verdict {
-  color: var(--warn);
-}
-
-/* The crop box: a fixed slot the picture is fitted INTO, so an icon and a
-   848x5 chat-box strip both land in the same row height without either being
-   distorted. object-fit keeps the crop's own aspect ratio and pixelated
-   rendering keeps a doubled 12px icon the blocky thing the detector matched
-   rather than a smoothed guess at one (brief 7: the intent carries over, the
-   terminal cell arithmetic does not). */
-.el-crop {
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 72px;
-  height: 36px;
-}
-
-.el-crop img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-  image-rendering: pixelated;
-}
-
 /* -- harness log pane (F8, /log) ------------------------------------------ */
 
 .logpane {
@@ -1727,337 +1639,8 @@ button:not(:disabled) {
   display: none !important;
 }
 
-/* -- the service editor (F2) ----------------------------------------------
-   A page modal over the whole per-service profile. Its own scrim, one z-index
-   BELOW the confirm/summary one, because two of its actions ("Forget
-   appearance" and the discard-the-pending-edit close) open a confirm over it.
-
-   Three columns and a footer strip - the TUI's information hierarchy without
-   any of its cell arithmetic: fixed lanes for the settings and the appearance
-   rows, one flexible column for the editable form, and a footer whose width no
-   column can squeeze (ui-briefs/service-editor.md §7). Nothing here is pinned
-   in character cells and the appearance column scrolls like any other list;
-   both of those constraints exist only because sixel escapes bypass a
-   terminal's compositor. */
-
-.svc-scrim {
-  position: fixed;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  background: var(--scrim-deep);
-  z-index: 25;
-}
-
-.svc-modal {
-  display: flex;
-  flex-direction: column;
-  /* 100%, not a vw fraction: the scrim pads itself, and a viewport-relative
-     width does not know about that padding - it overflows it by a few pixels
-     on a narrow window, exactly where there are none to spare. */
-  width: min(1120px, 100%);
-  max-height: 92vh;
-  padding: 16px 18px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg-raised);
-}
-
-.svc-title {
-  margin-bottom: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-}
-
-.svc-body {
-  display: grid;
-  /* The two outer lanes are still fixed-looking at any comfortable width; the
-     minmax() only lets them give ground before the modal starts overflowing
-     its own scrim. The appearance lane is the wider of the two because its
-     cards flow into columns - 380px is two of them side by side, and the form
-     in the middle is still the roomiest thing in the modal. Under the narrow
-     breakpoint (end of file) the three lanes stack instead. */
-  grid-template-columns: minmax(200px, 260px) minmax(220px, 1fr) minmax(260px, 380px);
-  gap: 18px;
-  min-height: 0;
-  overflow: auto;
-}
-
-.svc-col {
-  min-width: 0;
-}
-
-.svc-col > .side-title:first-child {
-  margin-top: 0;
-}
-
-.svc-col select,
-.svc-col input[type="text"],
-.svc-col textarea {
-  width: 100%;
-  padding: 5px 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg);
-  color: var(--text);
-  font-family: inherit;
-  font-size: 12.5px;
-}
-
-.svc-col textarea {
-  resize: vertical;
-}
-
-.svc-col input:disabled,
-.svc-col select:disabled,
-.svc-col textarea:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-
-/* Checkboxes and radios read as one list of sentences: the label carries the
-   row, and a disabled one is dimmed rather than removed so the column cannot
-   reflow while a new service is being filled in (brief §3.5). */
-.svc-check {
-  display: flex;
-  gap: 8px;
-  align-items: baseline;
-  padding: 2px 0;
-  font-size: 12.5px;
-  cursor: pointer;
-}
-
-.svc-check input {
-  margin: 0;
-  flex: none;
-}
-
-.svc-check.off {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.svc-slider {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
-.svc-slider input[type="range"] {
-  flex: 1;
-  min-width: 0;
-  accent-color: var(--accent);
-}
-
-.svc-slider-value {
-  min-width: 2.5em;
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 12px;
-  text-align: right;
-}
-
-/* Both inline readouts are advisory, not failures: the matcher one says a
-   saved choice will silently fall back, the signal one says a ticked detector
-   has no appearance to run against. Empty most of the time, and collapsed when
-   it is (no reserved band that would make the column jump). */
-.svc-warn:empty {
-  display: none;
-}
-
-.svc-warn {
-  margin: 4px 0 2px;
-  color: var(--warn);
-  font-size: 11.5px;
-}
-
-.svc-error:empty {
-  display: none;
-}
-
-.svc-error {
-  margin-top: 8px;
-  color: var(--err);
-  font-family: var(--mono);
-  font-size: 11.5px;
-}
-
-/* Every appearance is a CARD, not a row. Four things belong to one kind - a
-   picture, the arrows that walk its stack, a coordinate pair and two buttons -
-   and side by side they need some 350px of unshrinkable width, which is more
-   than this lane has at any window size: the buttons fell off the end and the
-   label was squeezed to nothing. Stacked, the card is only as wide as its
-   widest line - the click-point pair - which is about half a lane.
-
-   The cards then FLOW into as many columns as the lane can hold, so seven of
-   them are never a seven-deep tower: two columns in the lane below, more when
-   the modal stacks its lanes and this one gets the full width. */
-.svc-kinds {
-  display: grid;
-  /* 165px is the click-point line - the widest of the four - plus the card's
-     own padding. A column narrower than its content is what the old row was. */
-  grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
-  gap: 8px;
-  margin: 0 0 10px;
-  padding: 0;
-  list-style: none;
-}
-
-.svc-kind {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 0;
-  padding: 8px;
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-}
-
-/* The card's heading: which appearance this is, and what is on file for it. */
-.svc-kind-text {
-  min-width: 0;
-}
-
-.svc-kind-name {
-  font-size: 12.5px;
-  overflow-wrap: anywhere;
-}
-
-.svc-kind-status {
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 11px;
-  overflow-wrap: anywhere;
-}
-
-/* The crop box and the two arrows that walk its stack, as one unit: the arrows
-   are drawn (disabled) even for a kind with one image, so a second capture
-   landing cannot reflow the column under the pointer. */
-.svc-variants {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-}
-
-.svc-arrow {
-  flex: none;
-  padding: 3px 5px;
-  font-size: 12px;
-  line-height: 1;
-}
-
-/* The crop box is drawn whether or not it holds a picture, so a capture
-   landing cannot walk every card below it down the lane. It takes whatever
-   width the card has left over between the arrows; the height is fixed, which
-   is what keeps a row of cards level. */
-.svc-thumb {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: 1;
-  min-width: 0;
-  height: 38px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--bg);
-  overflow: hidden;
-}
-
-.svc-thumb img {
-  max-width: 100%;
-  max-height: 100%;
-  image-rendering: pixelated;
-}
-
-/* Where inside the matched picture the click goes, x then y, as percentages.
-   One labelled line under the picture: the pair has to read as ONE setting
-   about the card it sits in, and the × between them is what says the two
-   numbers are coordinates rather than two independent knobs. */
-.svc-click {
-  display: flex;
-  gap: 4px;
-  align-items: center;
-  color: var(--text-dim);
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
-/* The one thing on the line that may give. It is the same label on every card,
-   so the boxes line up down a column of them with nothing spacing them. */
-.svc-click-label {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.svc-click input {
-  flex: none;
-  width: 3.6em;
-  padding: 2px 4px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--bg);
-  color: var(--text);
-  font-family: var(--mono);
-  font-size: 11px;
-  text-align: right;
-}
-
-/* A number box comes with a pair of spin buttons the engine draws INSIDE it on
-   hover; in a box three characters wide they land on top of the digits. The
-   arrow keys still step the value, which is the only stepping this pair was
-   ever going to get. */
-.svc-click input::-webkit-inner-spin-button,
-.svc-click input::-webkit-outer-spin-button {
-  appearance: none;
-  margin: 0;
-}
-
-/* Pushed to the bottom of the card so the buttons of a row of cards line up
-   even where one kind's name wrapped onto a second line. */
-.svc-kind-actions {
-  display: flex;
-  gap: 6px;
-  margin-top: auto;
-}
-
-.svc-kind-actions button {
-  flex: 1;
-  min-width: 0;
-  padding: 3px 6px;
-  font-size: 11.5px;
-}
-
-.svc-footer {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
-}
-
-.svc-footer .hint {
-  color: var(--text-dim);
-  font-size: 11.5px;
-}
-
-.svc-modal button.danger {
-  border-color: var(--err);
-  color: var(--err);
-}
-
-.svc-modal button:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
 /* == the SSH connect dialog (parity increment 7) ==========================
-   The service editor's frame, one surface over: a scrim, a raised panel, a
+   The one page modal this window still has: a scrim, a raised panel, a
    footer strip. What is different is that the middle is a picture of something
    RUNNING somewhere else, so the checklist is the only part of this shell that
    has to read as time passing - hence one row per step, in the sequence's own
@@ -2076,7 +1659,8 @@ button:not(:disabled) {
 .conn-modal {
   display: flex;
   flex-direction: column;
-  /* 100% rather than a vw fraction, for the reason .svc-modal gives. */
+  /* 100% rather than a vw fraction: below the width the min() picks, a
+     percentage of the VIEWPORT ignores the scrim's own padding. */
   width: min(860px, 100%);
   max-height: 92vh;
   padding: 16px 18px;
@@ -2300,38 +1884,25 @@ button:not(:disabled) {
    working and the layout has to CHANGE SHAPE instead. Nothing here fires above
    its breakpoint, so a normal window is untouched. */
 
-/* Under this width the two side columns cannot take their share and leave the
-   chat readable, so they stop being columns: they float over the chat,
-   right-anchored, shown and hidden by the same F3/F7 toggles - they are still
-   only [hidden] to app.js, which is why none of this needed script. */
+/* Under this width the sidebar cannot take its share and leave the chat
+   readable, so it stops being a column: it floats over the chat,
+   right-anchored, shown and hidden by the same F3 toggle - it is still only
+   [hidden] to app.js, which is why none of this needed script. */
 @media (max-width: 640px) {
   .body {
     position: relative;
   }
 
-  .sidebar,
-  .elements {
+  .sidebar {
     position: absolute;
     top: 0;
     right: 0;
     bottom: 0;
+    width: min(300px, 80vw);
     /* Above the chat and the log pane, below the toasts (20) and every scrim
        (25+): a floating column is still part of the page, not a modal. */
     z-index: 12;
     box-shadow: var(--shadow);
-  }
-
-  .sidebar {
-    width: min(300px, 80vw);
-  }
-
-  .elements {
-    width: min(210px, 62vw);
-  }
-
-  /* Both open at once: the narrower one steps left so neither is buried. */
-  .body:has(> .sidebar:not([hidden])) > .elements {
-    right: min(300px, 80vw);
   }
 
   /* A shortcut wrapped onto two lines is still readable; a key column holding
@@ -2356,31 +1927,18 @@ button:not(:disabled) {
   }
 
   /* 16px a side is a frame at 1200px wide and a tax at 450. Same for the 8vh
-     the dialogs leave above and below themselves. */
-  .svc-scrim,
+     the dialog leaves above and below itself. */
   .conn-scrim {
     padding: 8px;
   }
 
-  .svc-modal,
   .conn-modal {
     max-height: 96vh;
   }
 
   /* A row of buttons plus a hint is wider than the panel now. */
-  .svc-footer,
   .conn-footer {
     flex-wrap: wrap;
-  }
-}
-
-/* The service editor's three lanes need roughly 700px between them before the
-   middle one stops being a form and starts being a gutter. Below that they
-   stack in document order - settings, form, appearance - and .svc-body's own
-   scroll carries the height. */
-@media (max-width: 860px) {
-  .svc-body {
-    grid-template-columns: minmax(0, 1fr);
   }
 }
 

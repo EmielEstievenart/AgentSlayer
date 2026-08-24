@@ -877,7 +877,6 @@ def test_the_stylesheet_turns_selection_off_for_click_targets_only() -> None:
         ".run-head",  # the line that toggles the run panel
         ".ev details summary",  # the disclosure line
         ".set-choice",  # a radio row you click by its label
-        ".svc-check",  # ditto, a checkbox row
     }
 
 

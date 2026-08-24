@@ -27,12 +27,14 @@ definition; ``docs/design/gui.md`` §2 lists them and that list is now empty.
 Everything a *turn* passes through - the transcript, the gate, the delivery, the
 watcher, the prompts - is the real thing, and so are the sidebar, the status
 bar's ten segments and the harness log pane (increment 2), the window tabs, the
-per-window transcripts and the session summary (increment 3), the ELEMENTS
-column, the chat-region picker and ``/identify`` (increment 4), and the SERVICE
-EDITOR behind F2 (increment 5, whose model lives in ``gui/service_editor.py``).
-What is left of the parity backlog is whole SURFACES this shell does not have
-yet - the SSH connect dialog. (Help, settings, the slash popup and the whole key
-chain landed in increment 6.)
+per-window transcripts and the session summary (increment 3). Every surface
+made of PIXELS - the ELEMENTS column, the chat-region picker, ``/identify`` and
+the service editor - is a WINDOW OF ITS OWN as of ui-monitor.md 6.4
+(``gui/calibration/``), built over a local monitor rather than over this shell's
+controller; what is left here is the door onto it and the bracket around the
+visit. What is left of the parity backlog is whole SURFACES this shell does not
+have yet - the SSH connect dialog. (Help, settings, the slash popup and the
+whole key chain landed in increment 6.)
 """
 
 from __future__ import annotations
@@ -43,7 +45,7 @@ from collections.abc import Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from agentclip.config import (
     VALID_GUI_THEMES,
@@ -56,7 +58,6 @@ from agentclip.config import (
     save_active_services,
     save_gui_theme,
     save_remote_target,
-    save_services,
 )
 from agentclip.driver.automation.controller import AutomationController, MonitorLike
 from agentclip.driver.automation.describe import describe
@@ -81,11 +82,9 @@ from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.driver.monitor.local import LocalUIMonitor
 from agentclip.driver.monitor.protocol import MonitorSpec
-from agentclip.driver.screen.capture import CaptureError, RegionImage, capture_region, crop
-from agentclip.driver.screen.detector import RUNTIME_KINDS, Sighting
+from agentclip.driver.screen.capture import RegionImage
+from agentclip.driver.screen.detector import ScreenDetector
 from agentclip.driver.screen.focus import foreground_window
-from agentclip.driver.screen.identify import IdentifiedElement, identify_elements, summarise
-from agentclip.driver.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.profile_store import load_profile
 from agentclip.driver.screen.region import ScreenRegion
@@ -113,6 +112,8 @@ from agentclip.shell.app.sizes import fmt_budget, fmt_tokens, fmt_tokens_compact
 from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.gui.bridge import Bridge
+from agentclip.shell.gui.calibration import CalibrationRunner, open_calibration_window
+from agentclip.shell.gui.calibration.window import build_monitor as build_calibration_monitor
 from agentclip.shell.gui.docs import load_doc_pages
 from agentclip.shell.gui.remote import (
     ConnectDialog,
@@ -122,7 +123,6 @@ from agentclip.shell.gui.remote import (
     policy_lines,
     saved_rows,
 )
-from agentclip.shell.gui.service_editor import ServiceEditor, kind_of, png_data_uri
 
 # Where a model's stated reason is clipped at the gate. The tools layer's own
 # number (``tools/shell.py``), spelled here with ``_reason_line``.
@@ -300,57 +300,11 @@ CONNECT_MID_TURN = "a turn is running - connecting would end this session"
 CONNECT_UNAVAILABLE = "this build has no way to go remote"
 CONNECT_DONE = "connected to {target} - this session's tools now run over there"
 
-# == the ELEMENTS column ======================================================
-# The third column (F7): one row per appearance the tool can recognise, showing
-# the pixels it last matched. ``ui-briefs/elements-panel.md`` is the contract;
-# §7 is what this shell does NOT carry over - the whole sixel/half-block
-# machinery, the cell-grid budgets and the "which renderer" readout are terminal
-# adaptations, and a page has one rendering path: an <img> per row, fed a PNG
-# data URI. What DOES carry over is the crop policy (the matched rectangle only,
-# cut on the thread that captured the frame), the BGRX rule (``screen.png``
-# writes the undefined fourth byte as opaque alpha rather than reading it as
-# one, which is what keeps a crop from encoding as fully transparent) and the
-# three-state row contract below.
-
-# Every kind, in the detector's own report order, so a row can never be mistaken
-# for a picture of another row's search (``screen.detector.RUNTIME_KINDS`` ==
-# ``tui.widgets.elements.ELEMENT_ORDER``).
-ELEMENT_ORDER: tuple[TemplateKind, ...] = RUNTIME_KINDS
-
-# The same words ``TemplateKind.label`` uses wherever the user is asked to
-# capture one - a row labelled differently from the button that filled it is a
-# row about something else (``tui/widgets/elements.py:ELEMENT_LABEL``).
-ELEMENT_LABEL: dict[TemplateKind, str] = {
-    TemplateKind.SEND_READY: "send button",
-    TemplateKind.BUSY: "busy icon",
-    TemplateKind.IDLE: "idle icon",
-    TemplateKind.COPY: "copy button",
-    TemplateKind.CHATBOX_INITIAL: "start chat box",
-    TemplateKind.CHATBOX_ONGOING: "ongoing chat box",
-    TemplateKind.NEW_CHAT: "new-chat button",
-}
-
-# Three row states, and the distinction is the panel's whole point: "nothing has
-# been looked for" and "we looked and it is not there" are opposite readings of
-# the same blank space. A row that STAYS resting says something precise - this
-# window's service has no capture of that appearance - because everything
-# captured is searched twice a second whatever the automation is doing.
-ELEMENT_RESTING = "no match yet"
-ELEMENT_MISSING = "not on screen"
-
-# The state literal each row crosses with, which is what the page colours from.
-STATE_RESTING = "resting"
-STATE_MISSING = "missing"
-STATE_FOUND = "found"
-
-# What the user is asked to draw for a window: the TUI's ``_CHAT_REGION_PROMPT``,
-# spelled again for the reason every display string in this module is. Generous
-# rather than tight - everything else is recognised inside it, including the
-# new-chat button, which most chat sites park in a sidebar.
-CHAT_REGION_PROMPT = (
-    "Drag a box around the WHOLE browser window hosting the chat - including its "
-    "sidebar, so the New Chat button is inside it · Esc cancels"
-)
+# What a second F2 says. A toast rather than silence: the window it is
+# asking for may be behind the browser the user is calibrating against, and
+# "nothing happened" and "it is already open, look behind you" are different
+# answers to the same press.
+CALIBRATION_OPEN = "the calibration window is already open"
 
 REGION_UNSET = "not set - alt-tab to the chat yourself"
 # The CHAT WINDOW block's readiness line, per SELECTED window - ``tui/widgets/
@@ -486,10 +440,16 @@ class ShellMonitor(MonitorLike, Protocol):
     contract and deliberately says nothing about lifetime - the controller never
     starts the monitor and never ends it. This shell does both: it constructs
     the monitor, hands it down, and closes it when the window goes away, which
-    is the whole of the difference between the two protocols.
+    is the whole of the difference between the two protocols. ``detector`` is
+    the monitor's LOCAL-ONLY tier (ui-monitor.md 3, local.py's "three tiers"):
+    it never rides the wire, so the automation's own protocol says nothing about
+    it and the one reader up here - ``copy_seen_note`` - asks for it by name.
     """
 
     async def close(self) -> None: ...
+
+    @property
+    def detector(self) -> ScreenDetector | None: ...
 
 
 def _fence(body: str) -> str:
@@ -600,66 +560,6 @@ def _preview_fields(action: PendingAction) -> dict[str, str]:
     return fields
 
 
-@dataclass(frozen=True, slots=True)
-class ElementCrop:
-    """One matched appearance: the pixels that matched, and how well.
-
-    ``tui/messages.py:ElementCrop``, and deliberately the same two fields - but
-    the image here is the crop UNTOUCHED, at the size the screenshot has it. The
-    TUI sizes a crop in the worker because its two renderers want two different
-    things (an exact cell grid, or raw pixels); a page has one rendering path and
-    CSS to fit with, so there is nothing to decide on this side of the bridge
-    (elements-panel.md §4.4, §7).
-    """
-
-    image: RegionImage
-    diff: float
-
-
-def element_crop(scene: RegionImage, sighting: Sighting | None) -> ElementCrop | None:
-    """Cut a verified match out of the frame it was found in. Worker-side.
-
-    ``None`` in, ``None`` out - "nothing matched" and "the match is too
-    degenerate to draw" are the same row, and there is nothing useful to tell
-    apart (``MainScreen._element_crop``).
-    """
-    if sighting is None:
-        return None
-    template, match = sighting.template, sighting.match
-    cut = crop(scene, match.x, match.y, template.width, template.height)
-    if cut.width <= 0 or cut.height <= 0:
-        return None
-    return ElementCrop(cut, match.diff)
-
-
-def element_png(image: RegionImage) -> str:
-    """One crop as a ``data:`` URI an ``<img>`` can be pointed straight at.
-
-    ``screen.png.encode_png`` is the whole conversion, and it is the reason this
-    shell needs no Pillow: it already reads a capture as BGRX and writes the
-    undefined fourth byte as OPAQUE alpha rather than as transparency, which is
-    the one rule that has to survive into any new renderer - read as alpha, that
-    byte is zero and every crop encodes as an invisible rectangle
-    (elements-panel.md §6.3).
-
-    ``""`` for anything that cannot be encoded (a truncated buffer, a zero-area
-    cut). The row still says ``found`` with its diff: the search DID match, and
-    blanking the verdict because the picture failed would report the opposite.
-
-    One line, because the service editor's seven thumbnails want exactly the
-    same conversion under the same rule (parity increment 5): the encoder call
-    site is :func:`agentclip.shell.gui.service_editor.png_data_uri` and this name is
-    kept because a crop is what this column is about.
-    """
-    return png_data_uri(image)
-
-
-def found_line(diff: float) -> str:
-    """What a matched row says under its name: the same number the sidebar's
-    verdict line reports, next to the picture it is a number about."""
-    return f"found · {diff:.1%}"
-
-
 class GuiView:
     """``ChatView`` + ``AutomationView`` + ``AutomationHost``, over the bridge."""
 
@@ -681,6 +581,7 @@ class GuiView:
         schedule: Callable[[Coroutine[Any, Any, Any]], None] | None = None,
         on_exit: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
+        open_calibration: OpenCalibration | None = None,
     ) -> None:
         self._bridge = bridge
         self._config = config
@@ -714,6 +615,12 @@ class GuiView:
         # and drivable - without one.
         self._schedule = schedule if schedule is not None else _no_schedule
         self._on_exit = on_exit if on_exit is not None else _no_exit
+        # The one line of this shell that touches pywebview. Injected for the
+        # reason ``schedule`` is: a second window is the runner's world, not
+        # the view's, and a suite must be able to press F2 without a toolkit.
+        self._open_calibration: OpenCalibration = (
+            open_calibration if open_calibration is not None else _open_calibration_window
+        )
 
         # -- transcripts, one per WINDOW -------------------------------------
         # Three pointers, and the whole of this surface's correctness is that
@@ -793,44 +700,19 @@ class GuiView:
             services=self._initial_services(config),
             accepts=looks_like_protocol,
             on_clipboard_captured=self._clipboard_captured,
-            crop_elements=self._crop_elements,
             has_appearance=self._live_has,
             on_fire=self._fire_auto_copy,
         )
-        # -- the ELEMENTS column ---------------------------------------------
-        # What each row is currently showing, and the three-state contract in
-        # one data structure: a kind ABSENT has never been searched (its service
-        # has no capture of it), present-and-None was searched and not found,
-        # present-and-crop was found. Written by the poller thread through
-        # ``paint_elements``, read by it and by the loop thread when the column
-        # is opened - one whole-dict rebind per tick rather than an in-place
-        # edit, so a reader either sees the old tick or the new one.
-        self._elements: dict[TemplateKind, ElementCrop | None] = {}
-        # Is the column on screen? The page owns the F7 flip (it is show/hide of
-        # one element, like F3 and F8) and TELLS this side, because encoding a
-        # PNG nobody can see is the one part of the panel that is not free. The
-        # crops keep being cut and kept while it is hidden, so opening it paints
-        # the CURRENT tick rather than the one after it (elements-panel.md §3.1).
-        self._elements_open = False
-        # The last PNG per kind, keyed by the exact pixels it was made from:
-        # the poller re-cuts the same still icon frame after frame, and the
-        # comparison is a bytes equality over an icon (§6.8).
-        self._element_pngs: dict[TemplateKind, tuple[RegionImage, str]] = {}
         # Whether the sub-agent window was ready last time anything readiness
         # depends on changed, so the "you must /new for it" toast fires once
         # rather than on every repaint (``MainScreen._delegation_ready``).
         self._delegation_ready = False
-        # One fullscreen child process at a time - the region picker and
-        # ``/identify`` share it, exactly as ``MainScreen._refuse_second_picker``
-        # does, because cancelling a task cannot take a blocking child process
-        # down and two stacked overlays are unusable.
-        self._picker_open = False
-        # The service editor's model while its modal is up, and None the rest of
-        # the time - the GUI's equivalent of "is ServiceEditorScreen the active
-        # screen". Everything it decides lives in gui/service_editor.py; what
-        # this object owns is the bracket around the visit (detectors suspended
-        # for its whole duration) and the apply path on the way out.
-        self._editor: ServiceEditor | None = None
+        # The calibration window while it is open, and None the rest of
+        # the time - the GUI's equivalent of "is the calibration window
+        # up". One at a time, and the object is held because closing it is
+        # this side's job: it borrowed this shell's loop and cannot
+        # unwind itself.
+        self._calibration: CalibrationRunner | None = None
         self._logged_session_active = False
         # Is the quit-mid-turn confirm already up? ``AgentClipApp.action_quit``'s
         # ``isinstance(self.screen, ConfirmScreen)`` guard: hammering the window's
@@ -896,8 +778,9 @@ class GuiView:
     @property
     def monitor(self) -> ShellMonitor:
         """The machine the automation acts on - this shell's window onto the
-        screen, the mouse and the clipboard. Read by the calibration surfaces
-        (the ELEMENTS crops, ``/identify``) and closed by the runner."""
+        screen, the mouse and the clipboard. Closed by the runner. NOT what the
+        calibration window runs over: that one builds its own (6.4), so nothing
+        over there can move this poller's generation or its trackers."""
         return self._monitor
 
     def start(self) -> None:
@@ -997,15 +880,6 @@ class GuiView:
         self._push_commands()
         self._push_settings()
         self._push_docs()
-        # A fresh page draws the ELEMENTS column hidden, whatever it was doing
-        # before the load, so the encoder is told the truth before the rows go
-        # out - a reload is the one moment this flag can be stale.
-        self._elements_open = False
-        self._push_elements()
-        # The editor is a MODEL that outlives a reload, so a page that came back
-        # under an open one gets it back rather than a window with a suspended
-        # poller and no way to close it.
-        self._push_editor()
         # Same reason as the editor above: the connect dialog is a MODEL that
         # outlives a reload, and a page that came back under an open one (or
         # mid-checklist) must get it back rather than a window with a connect
@@ -1701,179 +1575,17 @@ class GuiView:
         # included).
         await self._automation.snap_back_after_click()
 
-    # == the two fullscreen child processes ====================================
-    # The region picker and ``/identify`` are the same shape and share one
-    # mutual-exclusion flag: a translucent, always-on-top tkinter window in a
-    # CHILD PROCESS (``screen/picker.py``), because neither shell can host
-    # tkinter - the TUI owns a terminal and this one owns a WebView2 message
-    # pump, and tkinter wants an event loop and the main thread. That mechanism
-    # is shell-agnostic and carries over verbatim (gui.md §2).
-    #
-    # The GUI window is deliberately NOT minimised around either of them. The
-    # overlay spans the whole virtual desktop and is topmost, so it is over this
-    # window either way, and the TUI leaves its terminal up for the same reason;
-    # minimising would also cost a restore that can steal focus back from the
-    # browser the user just drew a box around.
-
-    def _refuse_second_picker(self) -> bool:
-        """True (and toast) when an overlay is already up.
-
-        Cancelling a task cannot kill a blocking child process, so the only safe
-        guard against stacked fullscreen overlays is refusing the second ask
-        (``MainScreen._refuse_second_picker``).
-        """
-        if self._picker_open:
-            self.notify("a region picker is already open - finish it or press Esc first")
-            return True
-        self._picker_open = True
-        return False
-
-    def set_chat_region(self) -> None:
-        """The sidebar's "Set chat region..." button: draw the chatbot window.
-
-        The target slot is decided HERE, when the overlay opens, and travels
-        with the flow - see ``_pick_chat_region``.
-        """
-        if self._refuse_second_picker():
-            return
-        self._schedule(self._pick_chat_region(self._automation.calibrating_slot))
-
-    async def _pick_chat_region(self, slot: AgentSlot) -> None:
-        """Run the draw-a-box overlay and adopt what was drawn as ``slot``'s window.
-
-        ``MainScreen._pick_chat_region``, minus Textual. Three things it keeps
-        exactly:
-
-        * the slot is a PARAMETER rather than a read of ``calibrating_slot`` on
-          the way out, because the overlay blocks for as long as the user takes
-          to drag a box and the pointer moves on its own meanwhile (a delegated
-          run's focus selects the sub-agent tab). What was selected when the
-          picker opened is what the user was answering;
-        * the detectors are suspended for the whole visit: this overlay is a
-          fullscreen window thrown over the very browser they watch, and an
-          overlay appearing and vanishing is precisely the sustained large delta
-          that arms the finish trigger on staleness alone (§3.4e);
-        * the poller is rebuilt only when the window just drawn is the one it is
-          watching - drawing the sub-agent's window mid-session is the normal way
-          to reach delegation, and rebuilding around it would re-aim a poller at
-          a window the automation is not driving.
-        """
-        self.suspend_detectors()
-        try:
-            region = await asyncio.to_thread(
-                pick_region, prompt=self._slot_prompt(CHAT_REGION_PROMPT, slot)
-            )
-        except ScreenPickError as exc:
-            self.notify(str(exc), severity="error")
-            return
-        else:
-            if region is None:
-                self.notify("chat region unchanged (selection cancelled)")
-                return
-            self._automation.set_calibration(slot, region)
-            # Only when the tab it belongs to is still the one on screen: the
-            # sidebar shows ONE window's calibration, and writing this one's box
-            # into a column describing the other is the same mix-up in the other
-            # direction.
-            if slot is self._automation.calibrating_slot:
-                self._push_sidebar()
-            self._after_calibration()
-            if slot is self._automation.live_slot:
-                self._start_detector_worker()
-            self.notify(
-                f"chat region set ({region.describe()}) - the chatbot window; "
-                "everything is recognised inside it"
-            )
-        finally:
-            self._picker_open = False
-            # After the adoption above, so the common case (the live window was
-            # the one drawn) has already retargeted the monitor and this only
-            # puts the polling back - which is what ``resume_detectors`` is.
-            self.resume_detectors()
-
-    def _after_calibration(self) -> None:
-        """Tell the user ONCE when the sub-agent window becomes usable.
-
-        ``MainScreen._after_calibration``, minus its sidebar repaint (the
-        caller's ``_push_sidebar`` already carries the readiness line). The
-        one-shot matters because the delegate tool is baked into the bootstrap:
-        a window that just became ready reaches the model on the next ``/new``
-        and not before, which is not something a readiness line says.
-        """
-        ready = self.delegation_available()
-        if ready and not self._delegation_ready:
-            self.notify("sub-agent slot ready - /new to give the model the delegate tool")
-        self._delegation_ready = ready
-
-    def _slot_prompt(self, prompt: str, slot: AgentSlot) -> str:
-        """Both windows share the picker, so the sub-agent's prompts have to say
-        out loud which window the user is being asked to draw on."""
-        if slot is AgentSlot.SUBAGENT:
-            return f"SUB-AGENT window · {prompt}"
-        return prompt
-
-    def show_identify_overlay(self) -> None:
-        """``/identify``: box every part of the live chat window we can recognise.
-
-        The debug view of the whole recognition model - everything the
-        automation does is "find this captured appearance inside that drawn
-        rectangle", and this draws the search's actual answer on the actual
-        screen, next to the actual buttons. The LIVE window, not the selected
-        tab: what is boxed has to be what the automation would act on.
-        """
-        if self._refuse_second_picker():
-            return
-        self._schedule(self._identify_live_window())
-
-    async def _identify_live_window(self) -> None:
-        """Capture the live chat region, work out what is in it, draw the answer.
-
-        The capture happens FIRST and exactly once, before any overlay exists:
-        the overlay covers the browser, so a frame taken with it up would be
-        identified as part of the chat window. The search runs with the same
-        tolerance and matcher the poller uses (``live_search``) - an overlay
-        that searched with different settings would answer a question nobody
-        asked (elements-panel.md §4.5).
-        """
-        try:
-            region = self._automation.live.chat_region
-            if region is None:
-                self.notify(
-                    'no chat window drawn for this tab - use "Set chat region..." first; '
-                    "there is nothing to identify inside yet",
-                    severity="warning",
-                )
-                return
-            try:
-                scene = await asyncio.to_thread(capture_region, region)
-            except CaptureError as exc:
-                self.notify(f"could not capture the chat window: {exc}", severity="error")
-                return
-            tolerance, matcher = self._automation.live_search()
-            elements: list[IdentifiedElement] = await asyncio.to_thread(
-                identify_elements,
-                region,
-                self.profile_for(self._automation.live_slot),
-                scene,
-                tolerance=tolerance,
-                matcher=matcher,
-            )
-            self.suspend_detectors()
-            try:
-                await asyncio.to_thread(draw_identify_overlay, elements)
-            except ScreenPickError as exc:
-                self.notify(str(exc), severity="error")
-                return
-            finally:
-                self.resume_detectors()
-            # After the overlay is down, so the summary is readable rather than
-            # painted behind it.
-            self.notify(summarise(elements))
-        finally:
-            self._picker_open = False
+    # == the fullscreen child processes ========================================
+    # There are none left in this window. The region picker, the capture overlay
+    # and ``/identify`` are all translucent always-on-top tkinter windows in a
+    # CHILD PROCESS (``screen/picker.py``), and every one of them is raised from
+    # the calibration window now (``gui/calibration/view.py``), which owns the
+    # one-at-a-time mutex over them. What is left on this side is the pair
+    # below: the bracket this shell's OWN detectors need while that window is
+    # up, because it is their browser those overlays land on.
 
     def suspend_detectors(self) -> None:
-        """Stop polling (and disarm the trigger) while an overlay owns the screen.
+        """Stop polling (and disarm the trigger) while the calibration window is up.
 
         ``MainScreen.suspend_detectors``: a fullscreen child process thrown over
         the browser the detectors watch is a sustained large delta, which is
@@ -1892,7 +1604,8 @@ class GuiView:
     def resume_detectors(self) -> None:
         """Poll again after ``suspend_detectors``, under the same configuration.
 
-        Free to call in a ``finally`` beside a path that already retargeted: the
+        Free to call beside a path that already retargeted (a chat region drawn
+        in the calibration window rebuilds the poller on its way through): the
         detector never went anywhere - only its thread did - so a resume of a
         monitor that is already polling is a no-op down there rather than a
         second rebuild up here.
@@ -2714,278 +2427,118 @@ class GuiView:
                 f"could not remember the service for next launch: {exc}", severity="warning"
             )
 
-    # == the service editor (F2) ===============================================
-    # The GUI's ``AgentClipApp.action_settings`` / ``_open_service_editor``,
-    # minus Textual's ``push_screen_wait`` hand-off (a single-loop shell can just
-    # await a modal). What is kept is every bracket that dance existed to
-    # produce: F2 is refused while the editor is already up or while a capture
-    # overlay is open elsewhere in the app, the finish detectors are suspended
-    # for the WHOLE visit, and the propagation on the way out runs for either
-    # half of the answer - a preset edit or an appearance the editor already
-    # wrote to disk (ui-briefs/service-editor.md §5.10, §7).
+    # == the calibration window (F2) ===========================================
+    # Everything made of PIXELS moved out of this window and into one of its own
+    # (``gui/calibration/``, ui-monitor.md 2.6 and 6.4): the service editor, the
+    # ELEMENTS column, the chat-region picker and ``/identify``. That window runs
+    # over a ``LocalUIMonitor`` of ITS OWN - never this shell's, never the
+    # controller's - so two readers watch one screen, which is fine, and neither
+    # can move the other's generation or trackers.
+    #
+    # What stays here is what the old in-window editor also owned: the door, the
+    # one-at-a-time rule, the suspend bracket around the visit, and the two ways
+    # an answer comes back (a config the editor saved, a chat region it drew).
 
-    def open_service_editor(self) -> None:
-        """F2 / the sidebar's door: open the per-service profile editor.
+    def open_calibration(self) -> None:
+        """F2, the titlebar's "calibrate" button and the sidebar's two doors.
 
-        Refused out loud in the two cases two fullscreen overlays could
-        otherwise coexist: this editor's own capture buttons spawn the same
-        child process the chat-region picker does, and cancelling a task cannot
-        kill either of them.
+        One window at a time, and a second press is a toast rather than a second
+        window: both would be throwing fullscreen capture overlays at the same
+        browser, and the suspend below is a bracket, not a counter.
         """
-        if self._editor is not None:
-            return  # already open
-        if self._picker_open:
-            self.notify(
-                "a region picker is open - finish it or press Esc first", severity="warning"
-            )
+        if self._calibration is not None:
+            self.notify(CALIBRATION_OPEN)
             return
-        # Capturing an appearance throws a fullscreen overlay over the very
-        # browser window the detectors watch, and an overlay appearing and
-        # vanishing is exactly the sustained large delta that arms the finish
-        # trigger on staleness alone. Suspended for the whole visit, resumed in
-        # the close path's finally.
+        runner = CalibrationRunner(
+            config=self._config,
+            # Its own machine (6.4). ``build_monitor`` is that package's own
+            # constructor for exactly this: a LocalUIMonitor whose profile lookup
+            # is a plain disk read rather than this shell's cache, because the
+            # window rewrites captures under it while it is open.
+            monitor=build_calibration_monitor(
+                self._config, profile_root=self._profile_root, provider=self._provider
+            ),
+            profile_root=self._profile_root,
+            global_config_path=self._global_config_path,
+            # This shell's loop, borrowed. A loop of its own would have to be
+            # shut down in the right order against this one, and both windows'
+            # work is short and non-blocking (``gui/calibration/window.py``).
+            schedule=self._schedule,
+            on_config_change=self._adopt_config,
+            on_calibration=self._calibrated,
+        )
+        try:
+            self._open_calibration(runner, self._calibration_closed)
+        except Exception as exc:  # noqa: BLE001 - a window that will not open is a toast
+            self.notify(f"the calibration window could not open: {exc}", severity="error")
+            return
+        self._calibration = runner
+        # Suspended for the WHOLE visit, exactly as the editor and the picker
+        # each bracketed themselves before: every capture in that window throws
+        # a fullscreen overlay over the very browser these detectors watch, and
+        # an overlay appearing and vanishing is precisely the sustained large
+        # delta that arms the finish trigger on staleness alone (3.4e).
         self.suspend_detectors()
-        self._editor = ServiceEditor(
-            self._config,
-            self._profile_root,
-            # Re-read fresh on every open (never cached): the editor lands on
-            # whichever service the tab the user is looking at is pointed at.
-            self._service_for(_WINDOW_SLOTS[self._selected_window]),
-            notify=self._editor_notify,
-            confirm=self.confirm,
-        )
-        self._push_editor()
 
-    def _editor_notify(self, message: str, severity: str) -> None:
-        """The model's toast sink, widened to this view's ``notify`` shape."""
-        self.notify(message, severity=cast(Severity, severity))
+    def _calibration_closed(self) -> None:
+        """The calibration window went away: unwind it and poll again.
 
-    def _push_editor(self) -> None:
-        """The whole editor as one event. Closed is one field, not a second type."""
-        editor = self._editor
-        if editor is None:
-            self._bridge.send("editor", open=False)
-            return
-        self._bridge.send("editor", **editor.state())
-
-    # -- what the modal asks for (js_api, already on the loop) ----------------
-    # Each one drives the model and repaints; the model owns every refusal, so
-    # a press that cannot do anything toasts from down there rather than being
-    # swallowed up here.
-
-    def svc_select(self, key: str) -> None:
-        if self._editor is None:
-            return
-        self._editor.select(key)
-        self._push_editor()
-
-    def svc_form(self, fields: dict[str, Any]) -> None:
-        """A keystroke in the form column: the WHOLE candidate, revalidated.
-
-        The page sends every field on any change because ``max <= total`` is a
-        cross-field rule - there is no per-field validity to send.
+        Raised by pywebview on the WINDOW's own thread, so everything it does is
+        thread-safe by construction: the view's ``close`` goes onto this shell's
+        loop through ``schedule`` (a runner that borrowed a loop does not close
+        its own view - it has no loop of its own to close it on), and
+        ``resume_detectors`` is a schedule too.
         """
-        if self._editor is None:
+        runner, self._calibration = self._calibration, None
+        if runner is None:
             return
-        self._editor.set_form({k: str(v) for k, v in dict(fields).items()})
-        self._push_editor()
+        self._schedule(runner.view.close())
+        runner.stop()
+        self.resume_detectors()
 
-    def svc_detection(self, state: dict[str, Any]) -> None:
-        """Any toggle on the left column: all of them, folded in at once."""
-        if self._editor is None:
-            return
-        self._editor.set_detection(
-            signals=[str(name) for name in state.get("signals") or ()],
-            hover_scan=bool(state.get("hover_scan")),
-            require_fenced=bool(state.get("require_fenced")),
-            stream=bool(state.get("stream")),
-            auto_submit=bool(state.get("auto_submit")),
-        )
-        self._push_editor()
+    def _calibrated(self, slot: AgentSlot, region: ScreenRegion | None) -> None:
+        """The calibration window drew (or forgot) ``slot``'s chat window.
 
-    def svc_edit_by_lines(self, on: bool) -> None:
-        if self._editor is None:
-            return
-        self._editor.set_edit_by_lines(on)
-        self._push_editor()
-
-    def svc_after_delivery(self, state: dict[str, Any]) -> None:
-        """Either tick in the AFTER DELIVERY block: both of them, at once.
-
-        The pair rides one call for the reason the detection set does - the page
-        reads both boxes on any change rather than trusting which one fired.
+        What the in-window picker did on its way out, minus the overlay. Three
+        things it keeps exactly: the slot is what the WINDOW answered about
+        rather than whatever is selected now (the user may have moved tabs while
+        the overlay was up); the sidebar is repainted only when the tab it
+        describes is still the one on screen; and the poller is rebuilt only
+        when the window just drawn is the one it is watching - drawing the
+        sub-agent's window mid-session is the normal way to reach delegation,
+        and rebuilding around it would re-aim a poller at a window the
+        automation is not driving.
         """
-        if self._editor is None:
-            return
-        self._editor.set_after_delivery(
-            snap_back=bool(state.get("snap_back")),
-            alert_sound=bool(state.get("alert_sound")),
-        )
-        self._push_editor()
+        self._automation.set_calibration(slot, region)
+        if slot is self._automation.calibrating_slot:
+            self._push_sidebar()
+        self._after_calibration()
+        if slot is self._automation.live_slot:
+            self._start_detector_worker()
 
-    def svc_scroll(self, action: str) -> None:
-        if self._editor is None:
-            return
-        self._editor.set_scroll(action)
-        self._push_editor()
+    def _after_calibration(self) -> None:
+        """Tell the user ONCE when the sub-agent window becomes usable.
 
-    def svc_matcher(self, matcher: str) -> None:
-        if self._editor is None:
-            return
-        self._editor.set_matcher(matcher)
-        self._push_editor()
-
-    def svc_tolerance(self, value: int) -> None:
-        if self._editor is None:
-            return
-        self._editor.set_tolerance(value)
-        self._push_editor()
-
-    def svc_add(self) -> None:
-        if self._editor is None:
-            return
-        self._editor.add()
-        self._push_editor()
-
-    def svc_reset(self) -> None:
-        if self._editor is None:
-            return
-        self._editor.reset()
-        self._push_editor()
-
-    def svc_delete(self) -> None:
-        if self._editor is None:
-            return
-        self._editor.delete()
-        self._push_editor()
-
-    def svc_prev(self, kind_name: str) -> None:
-        """The arrow left of a thumbnail: show that kind's previous variant."""
-        editor, kind = self._editor, kind_of(kind_name)
-        if editor is None or kind is None:
-            return
-        editor.show_previous(kind)
-        self._push_editor()
-
-    def svc_next(self, kind_name: str) -> None:
-        """The arrow right of a thumbnail: show that kind's next variant."""
-        editor, kind = self._editor, kind_of(kind_name)
-        if editor is None or kind is None:
-            return
-        editor.show_next(kind)
-        self._push_editor()
-
-    def svc_click_point(self, kind_name: str, x: int, y: int) -> None:
-        """Where inside that appearance its click lands, written immediately."""
-        editor, kind = self._editor, kind_of(kind_name)
-        if editor is None or kind is None:
-            return
-        editor.set_click_point(kind, x, y)
-        self._push_editor()
-
-    def svc_clear(self, kind_name: str) -> None:
-        """The variant on show, gone from disk. No confirm, by design."""
-        editor, kind = self._editor, kind_of(kind_name)
-        if editor is None or kind is None:
-            return
-        editor.clear(kind)
-        self._push_editor()
-
-    def svc_forget(self) -> None:
-        if self._editor is None:
-            return
-        self._schedule(self._svc_forget())
-
-    async def _svc_forget(self) -> None:
-        editor = self._editor
-        if editor is None:
-            return
-        await editor.forget()
-        self._push_editor()
-
-    def svc_capture(self, kind_name: str) -> None:
-        """Draw a box around one appearance and file the pixels under this service.
-
-        The claim is synchronous and the work is scheduled: two presses both
-        marshal onto this loop as two callbacks, and if the flag were taken
-        inside the coroutine neither would have seen the other's.
+        ``MainScreen._after_calibration``, minus its sidebar repaint (the
+        caller's ``_push_sidebar`` already carries the readiness line). The
+        one-shot matters because the delegate tool is baked into the bootstrap:
+        a window that just became ready reaches the model on the next ``/new``
+        and not before, which is not something a readiness line says.
         """
-        editor, kind = self._editor, kind_of(kind_name)
-        if editor is None or kind is None:
-            return
-        if not editor.start_capture(kind):
-            self._push_editor()
-            return
-        # The app-wide overlay flag too, so nothing else in this shell can put a
-        # second child process up while this one is drawing.
-        self._picker_open = True
-        self._push_editor()
-        self._schedule(self._svc_capture(kind))
+        ready = self.delegation_available()
+        if ready and not self._delegation_ready:
+            self.notify("sub-agent slot ready - /new to give the model the delegate tool")
+        self._delegation_ready = ready
 
-    async def _svc_capture(self, kind: TemplateKind) -> None:
-        editor = self._editor
-        if editor is None:
-            self._picker_open = False
-            return
-        try:
-            await editor.run_capture(kind)
-        finally:
-            self._picker_open = False
-            self._push_editor()
+    def show_identify_overlay(self) -> None:
+        """``/identify``: open the window the overlay is drawn from now.
 
-    def svc_close(self) -> None:
-        """Esc, or the modal's close button. May be refused - see the model."""
-        if self._editor is None:
-            return
-        self._schedule(self._svc_close())
-
-    async def _svc_close(self) -> None:
-        """Apply exactly what ``AgentClipApp._open_service_editor`` applies.
-
-        Two independent kinds of change come back and the propagation runs for
-        either: the presets table, which is ours to write to config.toml, and
-        captured appearances the editor already wrote or deleted on disk - which
-        still have to reach this view, because it caches profiles, paints them
-        in the sidebar and hunts for them on a poll timer.
+        Kept pointing at something rather than dropped. The overlay moved into
+        the calibration window with every other surface made of pixels (6.4),
+        and a user who types ``/identify`` wants to see what the tool
+        recognises - which is what opens, with the ELEMENTS column beside it.
         """
-        editor = self._editor
-        if editor is None:
-            return
-        result = await editor.close()
-        if not result.closed:
-            self._push_editor()  # a capture is up, or the discard was declined
-            return
-        self._editor = None
-        self._bridge.send("editor", open=False)
-        try:
-            if result.edits is None:
-                return  # closed with no changes - nothing to persist or propagate
-            saved = True
-            if result.edits.services is not None:
-                try:
-                    save_services(result.edits.services, self._global_config_path)
-                except OSError as exc:
-                    # The in-memory adoption below still happens: the user's
-                    # edit is real for this process even when the file it should
-                    # outlive it in could not be written.
-                    saved = False
-                    self.notify(
-                        f"could not save the service presets: {exc}", severity="error", timeout=8
-                    )
-                self._adopt_config(replace(self._config, services=result.edits.services))
-            else:
-                self._adopt_config(self._config)
-            if saved:
-                self.notify(
-                    "service presets saved"
-                    if result.edits.services is not None
-                    else "appearance updated",
-                    timeout=4,
-                )
-        finally:
-            # The propagation above has already retargeted the monitor (that is
-            # what ``_adopt_config`` does); this only puts the polling back.
-            self.resume_detectors()
+        self.open_calibration()
 
     def _adopt_config(self, config: Config) -> None:
         """``MainScreen.update_config``, spelled for this shell's readouts.
@@ -3171,120 +2724,17 @@ class GuiView:
         self._bridge.send("detection", kind="STALE", label="", text=text)
 
     def paint_elements(self, crops: Mapping[TemplateKind, object]) -> None:
-        """One tick's recognitions into the ELEMENTS column.
+        """The ELEMENTS column is another window's now: nothing to draw here.
 
-        The ``isinstance`` is the port's opacity being cashed in: a crop is
-        whatever the shell that cut it made, so the automation layer routes the
-        mapping without a type for it and this end recognises its own - it cut
-        them itself, in ``_crop_elements``, on the thread now calling this. A
-        controller wired with no ``crop_elements`` at all routes raw sightings
-        instead, and they read here as "searched, nothing to draw" rather than
-        as a crash.
-
-        A kind ABSENT from ``crops`` keeps whatever its row last said: the
-        detector searches every calibrated kind on every frame, so the only
-        reason a tick says nothing about one is that the live window's service
-        has no capture of it, and a tick that never looked must not blank a row
-        (elements-panel.md §4.2). Present-and-``None`` is the opposite claim -
-        the search ran and found nothing - and it clears the picture.
+        Implemented rather than dropped because it is ``AutomationView``'s
+        (``driver/automation/view.py``) and a port method is not optional - the
+        controller routes a mapping through it on every tick and on every
+        hover-scan sighting, and a view that did not answer would strand the
+        poller. This shell wires no ``crop_elements``, so what arrives is raw
+        sightings it has no use for; the pictures are cut and drawn in
+        ``gui/calibration/view.py``, off that window's own monitor
+        (ui-monitor.md 6.4).
         """
-        merged = dict(self._elements)
-        for kind, crop_obj in crops.items():
-            if kind not in ELEMENT_LABEL:
-                # The floor under a TemplateKind added to the enum and not to
-                # the label table: a lost row rather than a crashed poll tick.
-                continue
-            merged[kind] = crop_obj if isinstance(crop_obj, ElementCrop) else None
-        self._elements = merged
-        self._push_elements()
-
-    def _crop_elements(
-        self,
-        scene: RegionImage,
-        sightings: Mapping[TemplateKind, Sighting | None],
-    ) -> Mapping[TemplateKind, object]:
-        """One tick's recognitions, cut down to pictures before they cross.
-
-        The poller thread's one question of this shell, and it does work rather
-        than routing: the cut runs HERE, on the thread that captured the frame,
-        because what should reach a UI is an icon per appearance and not a whole
-        chat window (``MainScreen._crop_elements``, whose implementation this
-        is). Touches no page state and reads nothing mutable.
-        """
-        return {kind: element_crop(scene, sighting) for kind, sighting in sightings.items()}
-
-    def set_elements_visible(self, visible: bool) -> None:
-        """F7 told us the column opened or closed.
-
-        The flip itself never leaves the page - it is show/hide of one element,
-        like F3 and F8 - and this is the half that has to cross: while the
-        column is hidden no PNG is encoded, and opening it repaints from the
-        crops the poller kept meanwhile, so the first frame a user sees is the
-        current one rather than the next tick's (elements-panel.md §3.1).
-        """
-        was_open = self._elements_open
-        self._elements_open = visible
-        if visible and not was_open:
-            self._push_elements()
-
-    def _push_elements(self) -> None:
-        """The column, whole: one row per kind, in the detector's report order.
-
-        Whole rather than per-kind because a row's state is only readable
-        against the others - the two chat-box rows are EXPECTED to disagree, and
-        seven partial writes have seven ways to be half-painted. Raised from the
-        poller thread, so it does what every paint here does: build and queue.
-        """
-        crops = self._elements
-        live_window = _WINDOW_NAMES[
-            SUBAGENT_WINDOW if self._automation.live_slot is AgentSlot.SUBAGENT else MASTER_WINDOW
-        ]
-        rows: list[dict[str, Any]] = []
-        for kind in ELEMENT_ORDER:
-            row: dict[str, Any] = {"kind": kind.name, "label": ELEMENT_LABEL[kind]}
-            if kind not in crops:
-                row["state"] = STATE_RESTING
-                row["text"] = ELEMENT_RESTING
-            elif crops[kind] is None:
-                row["state"] = STATE_MISSING
-                row["text"] = ELEMENT_MISSING
-            else:
-                found = crops[kind]
-                assert found is not None  # narrowed by the branch above
-                row["state"] = STATE_FOUND
-                row["text"] = found_line(found.diff)
-                if self._elements_open:
-                    png = self._element_png(kind, found.image)
-                    if png:
-                        row["png"] = png
-            rows.append(row)
-        self._bridge.send("elements", window=live_window, rows=rows)
-
-    def _element_png(self, kind: TemplateKind, image: RegionImage) -> str:
-        """This row's crop as a data URI, re-encoded only when the pixels moved.
-
-        The TUI leaves a row showing the same bytes alone rather than re-drawing
-        it; the same idea, one layer earlier - the encode is what costs here, not
-        the paint, and a still icon re-cut twice a second is the common case
-        (elements-panel.md §6.8).
-        """
-        cached = self._element_pngs.get(kind)
-        if cached is not None and cached[0] == image:
-            return cached[1]
-        png = element_png(image)
-        self._element_pngs[kind] = (image, png)
-        return png
-
-    def _clear_elements(self) -> None:
-        """Back to "no match yet", every row - a detector rebuild happened.
-
-        The heading may have just been repointed at the other window, and a crop
-        cut from the old one under the new one's name is a straightforward lie
-        (``ElementsPanel.clear``). The rows refill on the new run's first tick.
-        """
-        self._elements = {}
-        self._element_pngs.clear()
-        self._push_elements()
 
     def show_paste_flash(self, text: str, *, retry: bool = False) -> None:
         self._bridge.send("flash", show=True, text=text, retry=retry)
@@ -3517,10 +2967,6 @@ class GuiView:
         self.paint_detection(TemplateKind.COPY, COPY_RESTING)
         self.paint_stale(stale_line)
         self._push_sidebar()  # the heading names the window these lines are about
-        # The ELEMENTS column is bound by this block's ownership rule (tui.md
-        # §3.4e): it describes the LIVE window, only the detector machinery
-        # writes it, and a rebuild may have just repointed it at the other one.
-        self._clear_elements()
 
     def _live_has(self, kind: TemplateKind) -> bool:
         """Has the LIVE window's service a capture of ``kind``? Called on the
@@ -3990,6 +3436,37 @@ class GuiView:
         interacting with AgentClip. The HANDLE is OS state both shells snap
         focus back to, so it is kept below."""
         self._automation.set_own_window(foreground_window())
+
+
+class OpenCalibration(Protocol):
+    """How a calibration window is put on screen, and how its close comes back.
+
+    A Protocol rather than the function below so this module stays importable
+    with no ``gui`` extra installed and drivable with no toolkit at all: the
+    default implementation imports pywebview, and a suite injects a recorder.
+    """
+
+    def __call__(self, runner: CalibrationRunner, on_closed: Callable[[], None]) -> None: ...
+
+
+def _open_calibration_window(runner: CalibrationRunner, on_closed: Callable[[], None]) -> None:
+    """Create the second window on the pump this process is already running.
+
+    ``webview.start()`` may only be called ONCE per process and it is this
+    shell's main thread that called it, so the calibration window is created and
+    left for the running pump to pick up - which is exactly what
+    :func:`~agentclip.shell.gui.calibration.open_calibration_window` does and
+    deliberately all it does. ``closed`` is subscribed here rather than inside
+    that function because who cares that the window went away is the caller: a
+    standalone ``agentclip --calibrate`` run has nothing to tell.
+
+    Imported inside the function because the ``gui`` extra is optional and
+    importing this module must stay free (``gui/shell.py``).
+    """
+    import webview
+
+    window = open_calibration_window(webview, runner)
+    window.events.closed += on_closed
 
 
 def _no_config(config: Config) -> None:

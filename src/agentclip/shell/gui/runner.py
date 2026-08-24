@@ -356,11 +356,8 @@ class GuiRunner:
     def set_service(self, key: str) -> None:
         self.schedule_call(self.view.set_service, key)
 
-    def set_chat_region(self) -> None:
-        self.schedule_call(self.view.set_chat_region)
-
-    def set_elements_visible(self, visible: bool) -> None:
-        self.schedule_call(self.view.set_elements_visible, visible)
+    def open_calibration(self) -> None:
+        self.schedule_call(self.view.open_calibration)
 
     def select_window(self, window: str) -> None:
         self.schedule_call(self.view.select_window, window)
@@ -410,68 +407,6 @@ class GuiRunner:
 
     def reconnect_now(self) -> None:
         self.schedule_call(self.view.reconnect_now)
-
-    # The service editor (F2). One one-line marshal per intent, for the reason
-    # the rest are one-line marshals: pywebview runs each js_api method on a
-    # thread of its own, and the editor's model is loop-owned state like every
-    # other.
-
-    def open_service_editor(self) -> None:
-        self.schedule_call(self.view.open_service_editor)
-
-    def svc_select(self, key: str) -> None:
-        self.schedule_call(self.view.svc_select, key)
-
-    def svc_form(self, fields: dict[str, Any]) -> None:
-        self.schedule_call(self.view.svc_form, fields)
-
-    def svc_detection(self, state: dict[str, Any]) -> None:
-        self.schedule_call(self.view.svc_detection, state)
-
-    def svc_edit_by_lines(self, on: bool) -> None:
-        self.schedule_call(self.view.svc_edit_by_lines, on)
-
-    def svc_after_delivery(self, state: dict[str, Any]) -> None:
-        self.schedule_call(self.view.svc_after_delivery, state)
-
-    def svc_scroll(self, action: str) -> None:
-        self.schedule_call(self.view.svc_scroll, action)
-
-    def svc_matcher(self, matcher: str) -> None:
-        self.schedule_call(self.view.svc_matcher, matcher)
-
-    def svc_tolerance(self, value: int) -> None:
-        self.schedule_call(self.view.svc_tolerance, value)
-
-    def svc_add(self) -> None:
-        self.schedule_call(self.view.svc_add)
-
-    def svc_reset(self) -> None:
-        self.schedule_call(self.view.svc_reset)
-
-    def svc_delete(self) -> None:
-        self.schedule_call(self.view.svc_delete)
-
-    def svc_prev(self, kind: str) -> None:
-        self.schedule_call(self.view.svc_prev, kind)
-
-    def svc_next(self, kind: str) -> None:
-        self.schedule_call(self.view.svc_next, kind)
-
-    def svc_capture(self, kind: str) -> None:
-        self.schedule_call(self.view.svc_capture, kind)
-
-    def svc_clear(self, kind: str) -> None:
-        self.schedule_call(self.view.svc_clear, kind)
-
-    def svc_click_point(self, kind: str, x: int, y: int) -> None:
-        self.schedule_call(self.view.svc_click_point, kind, x, y)
-
-    def svc_forget(self) -> None:
-        self.schedule_call(self.view.svc_forget)
-
-    def svc_close(self) -> None:
-        self.schedule_call(self.view.svc_close)
 
 
 def _no_close() -> None:

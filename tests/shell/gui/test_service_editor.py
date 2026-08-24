@@ -6,14 +6,18 @@ the capture guard, the discard confirm, the "+ add new" disabled set), §5 what
 each action does, §6 the invariants and §7 the terminal machinery that must NOT
 be carried over.
 
-Almost everything here drives :class:`agentclip.shell.gui.service_editor.ServiceEditor`
+Everything here drives :class:`agentclip.shell.gui.service_editor.ServiceEditor`
 DIRECTLY - it is a model with no window, no page and no toolkit behind it, which
 is the whole reason it was extracted. ``pick_region``/``capture_region`` are
 monkeypatched at that module's scope (exactly where the real ones are looked
 up), so the capture flow is exercised in full and no child process is ever
 spawned; the profile store and ``save_services`` are pointed at ``tmp_path``, so
-no run touches the user's captures or their config.toml. The page-side half is
-tested where it always is: the shape of the event that crosses the bridge.
+no run touches the user's captures or their config.toml.
+
+The PAGE-side half of this surface is not here any more. The editor is drawn by
+the calibration window now (ui-monitor.md 6.4), so its event, its js_api and its
+apply path are pinned in ``tests/shell/gui/calibration/`` - what stays here is
+the model both windows would have shared.
 """
 
 from __future__ import annotations
@@ -43,7 +47,6 @@ from agentclip.driver.screen.picker import ScreenPickError
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.profile_store import ProfileStoreError, load_profile, save_template
 from agentclip.driver.screen.region import ScreenRegion
-from agentclip.shell.gui.bridge import JsApi
 from agentclip.shell.gui.service_editor import (
     NEW_SENTINEL,
     OPENCV_MISSING_FROZEN,
@@ -52,12 +55,9 @@ from agentclip.shell.gui.service_editor import (
     TEMPLATE_UNSET,
     TEMPLATES_NONE,
     ServiceEditor,
-    kind_of,
     template_status,
     templates_line,
 )
-from agentclip.shell.gui.view import PROBE_UNCAPTURED, PROFILE_HINT, STALE_OFF, GuiView
-from tests.shell.gui.conftest import Harness, settle
 
 MODULE = "agentclip.shell.gui.service_editor"
 
@@ -1050,303 +1050,6 @@ def test_a_reset_builtin_disappears_from_the_file(
     )
 
 
-# == 12. the page-side half: the event, the keys, the apply path ==============
-
-
-def open_editor(harness: Harness) -> dict[str, Any]:
-    harness.view.open_service_editor()
-    return harness.flush().last("editor")
-
-
-def test_f2_crosses_as_one_event_carrying_the_whole_surface(harness: Harness) -> None:
-    event = open_editor(harness)
-    assert event["open"] and event["reload"]
-    assert event["selected"] == harness.view._config.general.service
-    assert len(event["kinds"]) == 7
-    assert set(event["form"]) == {
-        "key", "label", "max", "total", "stable", "repeat", "extra"
-    }
-    assert event["hint"].startswith("escape closes")
-    # The five stand-alone ticks are worded on this side, like the checklist.
-    assert event["labels"]["stream"] == "paste the payload in chunks"
-
-
-def test_the_editor_refuses_to_open_over_a_region_picker(harness: Harness) -> None:
-    harness.view._picker_open = True
-    harness.view.open_service_editor()
-    events = harness.flush()
-    assert not events.of_type("editor")
-    assert "a region picker is open" in events.last("toast")["message"]
-
-
-def test_reopening_while_open_is_a_no_op(harness: Harness) -> None:
-    open_editor(harness)
-    harness.recorder.clear()
-    harness.view.open_service_editor()
-    assert not harness.flush().of_type("editor")
-
-
-def test_a_keystroke_repaints_without_asking_the_page_to_rewrite_its_inputs(
-    harness: Harness,
-) -> None:
-    open_editor(harness)
-    harness.view.svc_form({"label": "renamed"})
-    event = harness.flush().last("editor")
-    assert event["reload"] is False
-    assert event["form"]["label"] == "renamed"
-    harness.view.svc_select("claude")
-    assert harness.flush().last("editor")["reload"] is True
-
-
-def test_an_arrow_press_crosses_and_comes_back_as_the_moved_row(
-    harness: Harness, tmp_path: Path
-) -> None:
-    """The arrows are a press like any other in this modal: they call the model
-    and the whole surface comes back repainted, with no page-side state."""
-    stack(tmp_path / "profiles", "chatgpt", TemplateKind.COPY, (24, 12), (30, 9))
-    harness.view.open_service_editor()
-    harness.view.svc_select("chatgpt")
-    before = harness.flush().last("editor")
-    row = next(r for r in before["kinds"] if r["kind"] == str(TemplateKind.COPY))
-    assert (row["shown"], row["count"]) == (0, 2)
-    harness.view.svc_next("copy")
-    after = harness.flush().last("editor")
-    moved = next(r for r in after["kinds"] if r["kind"] == str(TemplateKind.COPY))
-    assert moved["status"] == "30×9 · 2/2" and moved["png"] != row["png"]
-    # Not a form reload: the page must not rewrite its text inputs for this.
-    assert after["reload"] is False
-    harness.recorder.clear()
-    harness.view.svc_prev("not-an-appearance")  # names no kind: nothing to do
-    assert harness.flush().of_type("editor") == []
-
-
-def test_the_js_api_marshals_every_editor_action(harness: Harness) -> None:
-    """One typed door per intent - a page asking for something else fails here."""
-    calls: list[tuple[str, tuple[Any, ...]]] = []
-
-    class Spy:
-        def __getattr__(self, name: str) -> Any:
-            def record(*args: Any) -> None:
-                calls.append((name, args))
-
-            return record
-
-    api = JsApi(Spy())  # type: ignore[arg-type]
-    api.svc_open()
-    api.svc_select("claude")
-    api.svc_form({"label": "x"})
-    api.svc_detection({"signals": ["stale"]})
-    api.svc_edit_by_lines(True)
-    api.svc_after_delivery({"snap_back": False, "alert_sound": True})
-    api.svc_scroll("end")
-    api.svc_matcher("opencv")
-    api.svc_tolerance(12)
-    api.svc_add()
-    api.svc_reset()
-    api.svc_delete()
-    api.svc_capture("busy")
-    api.svc_prev("busy")
-    api.svc_next("busy")
-    api.svc_clear("busy")
-    api.svc_forget()
-    api.svc_close()
-    assert [name for name, _ in calls] == [
-        "open_service_editor",
-        "svc_select",
-        "svc_form",
-        "svc_detection",
-        "svc_edit_by_lines",
-        "svc_after_delivery",
-        "svc_scroll",
-        "svc_matcher",
-        "svc_tolerance",
-        "svc_add",
-        "svc_reset",
-        "svc_delete",
-        "svc_capture",
-        "svc_prev",
-        "svc_next",
-        "svc_clear",
-        "svc_forget",
-        "svc_close",
-    ]
-    assert ("svc_edit_by_lines", (True,)) in calls
-    assert ("svc_after_delivery", ({"snap_back": False, "alert_sound": True},)) in calls
-    assert ("svc_tolerance", (12,)) in calls
-    assert ("svc_capture", ("busy",)) in calls
-    assert ("svc_next", ("busy",)) in calls
-
-
-def test_kind_of_reads_a_row_id_back_and_refuses_anything_else() -> None:
-    assert kind_of("busy") is TemplateKind.BUSY
-    assert kind_of("send-ready") is TemplateKind.SEND_READY
-    assert kind_of("not-an-appearance") is None
-
-
-def test_the_visit_suspends_the_detectors_and_the_close_resumes_them(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    order: list[str] = []
-    monkeypatch.setattr(GuiView, "suspend_detectors", lambda self: order.append("suspend"))
-    monkeypatch.setattr(GuiView, "resume_detectors", lambda self: order.append("resume"))
-    harness.view.open_service_editor()
-    assert order == ["suspend"]
-    asyncio.run(harness.view._svc_close())
-    assert order == ["suspend", "resume"]
-    assert harness.flush().last("editor")["open"] is False
-
-
-def test_saving_persists_propagates_and_repaints(
-    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The GUI's copy of ``AgentClipApp._open_service_editor``, end to end."""
-    target = tmp_path / "saved-config.toml"
-    harness.view._global_config_path = target
-    adopted: list[Config] = []
-    harness.view._on_config_change = adopted.append
-    rebuilt: list[str] = []
-    monkeypatch.setattr(GuiView, "_start_detector_worker", lambda self: rebuilt.append("build"))
-    monkeypatch.setattr(GuiView, "suspend_detectors", lambda self: None)
-    monkeypatch.setattr(GuiView, "resume_detectors", lambda self: None)
-
-    harness.view.open_service_editor()
-    editor = harness.view._editor
-    assert editor is not None
-    key = editor.selected_key
-    assert key is not None
-    edit(editor, label="renamed by the gui")
-    # A cache entry nothing repaints would ever re-read: if it survives, the
-    # per-run profile cache was not dropped.
-    harness.view._profiles["stale-entry"] = ServiceProfile("stale-entry")
-    harness.recorder.clear()
-    asyncio.run(harness.view._svc_close())
-
-    # 1. persisted, minimally, into the path this shell was handed
-    assert f"[services.{key}]" in target.read_text(encoding="utf-8")
-    # 2. folded into the live Config, and handed to the engine factory's cell
-    assert harness.view._config.services[key].label == "renamed by the gui"
-    assert adopted and adopted[-1].services[key].label == "renamed by the gui"
-    # 3. the session controller sees it for the NEXT session
-    assert harness.view._controller._config.services[key].label == "renamed by the gui"
-    # 4. the per-run profile cache is dropped (the editor can delete captures)
-    #    and the poller is rebuilt around whatever is left on disk
-    assert "stale-entry" not in harness.view._profiles
-    assert rebuilt
-    events = harness.flush()
-    assert events.last("editor")["open"] is False
-    assert events.of_type("sidebar") and events.of_type("tabs") and events.of_type("status")
-    assert "service presets saved" in events.last("toast")["message"]
-
-
-def test_an_appearance_only_visit_toasts_the_other_sentence(
-    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(GuiView, "suspend_detectors", lambda self: None)
-    monkeypatch.setattr(GuiView, "resume_detectors", lambda self: None)
-    monkeypatch.setattr(GuiView, "_start_detector_worker", lambda self: None)
-    harness.view._global_config_path = tmp_path / "unused.toml"
-    harness.view.open_service_editor()
-    editor = harness.view._editor
-    assert editor is not None
-    wire_capture(monkeypatch, Picker(REGION))
-    harness.view.svc_capture("busy")
-    assert harness.view._picker_open is True
-    asyncio.run(harness.view._svc_capture(TemplateKind.BUSY))
-    assert harness.view._picker_open is False
-    harness.recorder.clear()
-    asyncio.run(harness.view._svc_close())
-    assert not (tmp_path / "unused.toml").exists()  # nothing to persist
-    assert "appearance updated" in harness.flush().last("toast")["message"]
-
-
-def test_a_deleted_service_a_window_was_pointed_at_is_re_pointed(
-    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(GuiView, "suspend_detectors", lambda self: None)
-    monkeypatch.setattr(GuiView, "resume_detectors", lambda self: None)
-    monkeypatch.setattr(GuiView, "_start_detector_worker", lambda self: None)
-    harness.view._global_config_path = tmp_path / "config.toml"
-    harness.view.open_service_editor()
-    editor = harness.view._editor
-    assert editor is not None
-    editor.select(NEW_SENTINEL)
-    editor.set_form(
-        {"key": "acme", "label": "Acme", "max": "5000", "total": "50000",
-         "stable": "2.0", "extra": ""}
-    )
-    editor.add()
-    harness.view._push_editor()
-    # Point the master window at it, then delete it from under the window.
-    harness.view._automation.set_service("m1", "acme")
-    editor.delete()
-    asyncio.run(harness.view._svc_close())
-    assert harness.view._automation.service_of("m1") in harness.view._config.services
-    assert harness.view._automation.service_of("m1") != "acme"
-
-
-def test_a_config_that_cannot_be_written_still_applies_in_memory(
-    harness: Harness, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(GuiView, "suspend_detectors", lambda self: None)
-    monkeypatch.setattr(GuiView, "resume_detectors", lambda self: None)
-    monkeypatch.setattr(GuiView, "_start_detector_worker", lambda self: None)
-    monkeypatch.setattr(
-        "agentclip.shell.gui.view.save_services",
-        lambda services, path: (_ for _ in ()).throw(OSError("read-only")),
-    )
-    harness.view.open_service_editor()
-    editor = harness.view._editor
-    assert editor is not None
-    key = editor.selected_key
-    assert key is not None
-    edit(editor, label="renamed anyway")
-    harness.recorder.clear()
-    asyncio.run(harness.view._svc_close())
-    assert harness.view._config.services[key].label == "renamed anyway"
-    texts = [event["message"] for event in harness.flush().of_type("toast")]
-    assert any("could not save the service presets" in text for text in texts)
-    assert not any("service presets saved" in text for text in texts)
-
-
-def test_the_sidebar_names_f2_again(harness: Harness) -> None:
-    """Increment 2's divergence reverses: there is a service editor now."""
-    harness.view._push_sidebar()
-    assert harness.flush().last("sidebar")["profile_note"].endswith(PROFILE_HINT)
-    assert PROBE_UNCAPTURED.endswith("F2") and STALE_OFF.endswith("F2 to configure")
-
-
-def test_the_page_ready_repaint_brings_an_open_editor_back(harness: Harness) -> None:
-    harness.view.open_service_editor()
-    harness.recorder.clear()
-    harness.view.page_ready()
-    assert harness.flush().last("editor")["open"] is True
-
-
-def test_every_editor_id_the_page_writes_into_exists_in_the_markup() -> None:
-    """The ids ``app.js``'s boot map looks up are really in ``index.html``."""
-    assets = Path(__file__).resolve().parents[3] / "src" / "agentclip" / "shell" / "gui" / "assets"
-    html = (assets / "index.html").read_text(encoding="utf-8")
-    for element_id in (
-        "svc-scrim", "svc-select", "svc-signals", "svc-hover-scan",
-        "svc-require-fenced", "svc-stream", "svc-auto-submit", "svc-signal-warning",
-        "svc-scroll", "svc-matcher", "svc-matcher-warning", "svc-tolerance",
-        "svc-tolerance-value", "svc-tolerance-label", "svc-key", "svc-label", "svc-max",
-        "svc-total", "svc-stable", "svc-extra", "svc-error", "svc-kinds", "svc-templates",
-        "svc-forget", "svc-hint", "svc-add", "svc-reset", "svc-delete", "svc-close",
-        "edit-services",
-        # AFTER DELIVERY: the two ticks, their label spans and the two rows the
-        # hover sentences are written onto.
-        "svc-snap-back", "svc-snap-back-label", "svc-snap-back-row",
-        "svc-alert-sound", "svc-alert-sound-label", "svc-alert-sound-row",
-        "svc-alert-repeat",
-    ):
-        assert f'id="{element_id}"' in html, element_id
-    js = (assets / "app.js").read_text(encoding="utf-8")
-    # A real range input, not a hand-built track+handle (brief §7).
-    assert 'type="range"' in html
-    assert 'case "editor":' in js and 'api("svc_open")' in js
-
-
 # == the click point: which pixel of an appearance gets the click =============
 
 
@@ -1412,36 +1115,3 @@ def test_clearing_the_last_picture_recentres_the_click_point(
 
     assert row_of(editor, TemplateKind.COPY)["click_x"] == 50
     assert load_profile(profiles, "chatgpt").click_point(TemplateKind.COPY) == (50, 50)
-
-
-def test_the_click_point_rides_the_bridge_as_a_kind_and_two_numbers(
-    harness: Harness, profiles: Path
-) -> None:
-    """The page's half: one call per change, kind-named like every other row
-    press, and answered by the same editor event."""
-    harness.view.open_service_editor()
-    api = JsApi(harness.view)
-
-    api.svc_click_point(str(TemplateKind.NEW_CHAT), 30, 70)
-
-    row = next(
-        row
-        for row in harness.flush().last("editor")["kinds"]
-        if row["kind"] == str(TemplateKind.NEW_CHAT)
-    )
-    assert (row["click_x"], row["click_y"]) == (30, 70)
-
-
-@pytest.mark.asyncio
-async def test_the_forget_confirm_rides_the_view_s_own_modal(harness: Harness) -> None:
-    """The dialog is the shell's ``confirm`` - one modal implementation, not
-    a second one the editor grew for itself."""
-    harness.view.open_service_editor()
-    editor = harness.view._editor
-    assert editor is not None
-    task = asyncio.ensure_future(editor.forget())
-    await settle()
-    modal = harness.flush().last("modal")
-    assert modal["modal"] == "confirm" and "Forget the" in modal["title"]
-    harness.view.answer_prompt(modal["prompt_id"], False)
-    await task

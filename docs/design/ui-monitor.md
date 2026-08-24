@@ -7,7 +7,7 @@
 > `remote-executor.md` did: when a phase lands, its section gets an "as built"
 > note and its status flips. Until then everything here is intent.
 >
-> **Exception: §2.12, §6.0, §6.1 and §6.3 are built, and binding.** Phase 0
+> **Exception: §2.12, §6.0, §6.1, §6.3 and §6.4 are built, and binding.** Phase 0
 > shipped on 2026-08-24: the default shell is the GUI, the TUI is behind
 > `--tui` and frozen, and every phase-0 row in §7 is applied. Phase 1 shipped
 > the same day, in its **Driver half only** — `driver/monitor/` exists, the
@@ -16,7 +16,8 @@
 > §6.1's status note is the ledger of what that rewire still owes, and until it
 > lands the shell suites do not run. §3's interface listing is the shipped
 > `driver/monitor/protocol.py`. §6.2 and everything from §6.4 on is still
-> plan.
+> plan, **except §6.4**, which shipped on 2026-08-24 (see its own status note)
+> and takes its phase-4 rows in §7 with it.
 >
 > **Where this document overrides others** — say it here so no two docs
 > disagree:
@@ -559,7 +560,56 @@ with a table test covering every pair the GUI can show. Both shells use it
 for the state label (`paint_loop_state`, tui `main.py:1726`, gui
 `view.py:3072`).
 
-### 6.4 The calibration window
+### 6.4 The calibration window — **AS BUILT**
+
+> **Status: built and binding (2026-08-24).** Two parts. Part A built the window
+> — `shell/gui/calibration/` (`window.py`, `view.py`, its own `assets/`), the
+> `--calibrate` flag, and `tests/shell/gui/calibration/`. Part B emptied the
+> chat GUI: the service editor, the `svc_*` bridge/runner/js_api families, the
+> ELEMENTS column (`paint_elements` is a no-op that satisfies the port and no
+> `crop_elements` is wired any more), the chat-region picker, `_picker_open`,
+> `_refuse_second_picker` and `/identify`'s overlay are all gone from
+> `view.py`/`bridge.py`/`runner.py`/`assets/`, together with their CSS, their
+> markup and `tests/shell/gui/test_elements.py`. `service_editor.py` stays where
+> it is: it is a MODEL with no window behind it, and the calibration package
+> imports it.
+>
+> What the plan below did not say, and the two windows made true:
+>
+> - **One `webview.start()` per process.** The native pump runs on the main
+>   thread and returns when the LAST window closes, so the two entry points are
+>   not symmetric: `run_calibration` owns the pump (standalone), and
+>   `open_calibration_window(webview, runner)` only creates the window and wires
+>   it, leaving the pump the chat shell is already running to pick it up.
+> - **A borrowed loop.** The chat GUI passes `GuiRunner.schedule` as the
+>   calibration runner's `schedule`, so both windows' coroutines run on the one
+>   loop that shell already owns. A runner that borrowed a loop does not close
+>   its own view on the way out — the chat GUI schedules `runner.view.close()`
+>   itself from the window's `closed` event.
+> - **A bridge and a `js_api` per window.** A bridge is a FIFO plus the one
+>   thread allowed to call a particular window's `evaluate_js`, so sharing one
+>   would serialise each window's paints behind the other's; pywebview binds
+>   `js_api` per window, so neither page can call the other's methods.
+> - **The suspend bracket is per VISIT, not per capture.** The plan said
+>   `monitor.suspend()`/`resume()` "around any capture". What shipped brackets
+>   the whole window: the chat GUI suspends its own detectors when the window
+>   opens and resumes when it closes. Two readers of one screen is fine; a
+>   fullscreen overlay over the browser those detectors watch is not, and there
+>   is no moment inside that window when one cannot appear.
+> - **One window at a time**, enforced in the chat GUI (`GuiView._calibration`):
+>   a second `F2` toasts rather than opening a second window.
+> - **Chat regions are still not persisted anywhere.** A box drawn in the
+>   calibration window reaches the chat GUI's controller through
+>   `on_calibration` and dies with the process, exactly as before; standalone
+>   (`--calibrate`) there is nobody to hand it to at all. Flagged for phase 5,
+>   which is where a monitor that outlives its brain has to answer the question.
+>
+> Entry points as built: `F2`, the titlebar's **calibrate** button and both
+> sidebar doors (**Edit services...**, **Set chat region...**) in the chat GUI;
+> `agentclip --calibrate` standalone. `/identify` opens the window rather than
+> drawing an overlay from the chat one. F7 and the `elements` event are gone
+> from the chat window entirely.
+
 
 A second pywebview window — the GUI has exactly **one** `create_window`
 today (`shell/gui/shell.py:276–285`), so this is new engineering, not a
@@ -626,12 +676,15 @@ green; exe and monitor exe rebuilt.
 | 0 | `docs/configuration.md:13, 109` | "F2 service editor" → the calibration window (once 4 lands, re-check) |
 | 1 | `docs/design/architecture.md:49–55` | seams table + the "deepens" note — **applied**, along with §0's layer text/diagram and §1's module tree |
 | 1 | `docs/design/gui.md`, `docs/design/tui.md` | **applied**: pointers where the monitor took `ScreenOps`, the delivery beats and the cadence out from under them |
-| 4 | `docs/design/ui-briefs/elements-panel.md`, `service-editor.md` | name the calibration window as their host |
+| 4 | `docs/design/ui-briefs/elements-panel.md`, `service-editor.md` | name the calibration window as their host — **applied**, as a status note at the top of each |
 | 5 | `docs/configuration.md`, `docs/commands.md` | `--monitor`, `--calibrate`, `agentclip-monitor` |
 | 6 | `docs/design/tui.md`, `remote-ssh.md` | historical headers |
 
-All **phase 0** and **phase 1** rows are applied (§6.0's and §6.1's as-built
-notes). The rest are still owed.
+All **phase 0**, **phase 1** and **phase 4** rows are applied (§6.0's, §6.1's
+and §6.4's as-built notes). Phase 5's row is half applied ahead of its phase:
+`--calibrate` is in `docs/commands.md` and `docs/configuration.md` already,
+because it shipped with §6.4; `--monitor` and `agentclip-monitor` are still
+owed. The rest are still owed.
 
 ## 8. Open points (**OPEN**)
 

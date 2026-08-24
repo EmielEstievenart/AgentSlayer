@@ -114,35 +114,14 @@ The sidebar's remaining blocks and the log::
     {type: "harness", kind: str, time: str, text: str, line: str}
     {type: "toggle", what: "log"}                           # /log, from Python
 
-The ELEMENTS column - one row per appearance the tool can recognise, showing the
-pixels it last matched (``ui-briefs/elements-panel.md``)::
-
-    {type: "elements", window: "MASTER"|"SUB-AGENT",
-     rows: [{kind: str,            # the TemplateKind name, in RUNTIME_KINDS order
-             label: str,           # "copy button" - the capture button's own words
-             state: "resting"|"missing"|"found",
-             text: str,            # "no match yet" / "not on screen" / "found · 1.2%"
-             png: str}, ...]}      # a data: URI - ONLY on a found row, and only
-                                   # while the column is open
-
-The three states are the brief's and they are not interchangeable: **resting**
-is "nothing has been searched for this kind at all", which after a rebuild means
-the live window's service has no capture of it; **missing** is "searched this
-tick, not on screen"; **found** carries the diff and the picture. All seven rows
-are searched every tick regardless of which finish signals the service ticks -
-the column is a picture of what the tool can SEE, not of what the automation is
-deciding from. ``window`` names the LIVE window (the one being driven), which is
-not the selected tab for the whole of a delegation, and a detector rebuild sends
-every row back to ``resting`` rather than showing the old window's crops under
-the new one's name.
-
-``png`` is a PNG data URI encoded on the Python side from the matched rectangle
-only, with the capture's undefined fourth byte written as opaque alpha
-(``screen/png.py``) - the BGRX-not-BGRA rule, which is the difference between a
-crop and an invisible one. It is ABSENT while the column is hidden: the rows
-still cross (so the state is current the instant F7 opens it) and only the
-encoding is skipped. Nothing about sixel, half blocks or a renderer readout
-carries over - a page has one rendering path and this is it (brief §7).
+The ELEMENTS column and the SERVICE EDITOR are NOT in this vocabulary any more.
+Both are the calibration window's, and that window has a bridge of its own with
+its own event names (``gui/calibration/window.py``, ui-monitor.md 6.4) - two
+windows on one bridge would put every calibration paint behind whatever this
+window's WebView2 was doing. What crosses HERE about them is one page-to-Python
+call (``calibrate``) and nothing coming back: the answers arrive as an ordinary
+``sidebar`` repaint, because a chat region drawn over there is a fact about this
+window's DETECTION block like any other.
 
 The window tabs and the per-window transcripts - one tab per browser WINDOW,
 one persistent transcript per tab (``ui-briefs/tabs-delegation-summary.md``)::
@@ -162,48 +141,6 @@ load-bearing invariant. ``state`` is derived from the window's run history
 rather than stored, and only the LAST run's outcome is reported: the tab is a
 status light, not a log.
 
-The SERVICE EDITOR (F2) - a page modal over the whole per-service profile, and
-the one family whose event is the entire surface rather than one block of it
-(``ui-briefs/service-editor.md``)::
-
-    {type: "editor", open: false}
-    {type: "editor", open: true,
-     reload: bool,          # rewrite the text inputs? only after a form RELOAD
-     services: [{key: str, label: str, builtin: bool}, ...],  # + the add row
-     selected: str,         # a key, or "+add-new+"
-     is_new: bool, key_locked: bool,
-     form: {key, label, max, total, stable, extra},   # all strings
-     error: str,            # why the candidate is not being applied, or ""
-     signals: [{name, label, on}, ...], hover_scan: bool,
-     require_fenced: bool, stream: bool, auto_submit: bool,
-     scroll: str, scrolls: [{value, label}, ...],
-     matcher: str, matchers: [{value, label}, ...], matcher_warning: str,
-     tolerance: int, tolerance_min: int, tolerance_max: int,
-     signal_warning: str, controls_disabled: bool, can_add: bool,
-     show_add: bool, show_reset: bool, show_delete: bool, show_forget: bool,
-     templates: str,        # "appearance: 3/7 captured"
-     kinds: [{kind, label, status, png, shown, count, can_clear}, ...],  # all 7
-     capturing: bool, hint: str}
-
-Two fields carry the whole of this surface's page-side contract. ``reload``
-is false on every push a keystroke caused and true on the ones a *reload*
-caused (a selection, an add, a reset, a delete): the model owns the form's
-values, but repainting a text box from it on every keystroke would fight the
-caret, so the page writes its inputs only when reload is true. ``controls_
-disabled`` is the "+ add new" state (brief §3.5) - the toggles, radios and
-slider are DISABLED, not blank, and keep showing what pressing "Add service"
-would create, because a blank checklist over a preset born with "screen stops
-changing" ticked is a lie about the only setting the form cannot otherwise
-show.
-
-``png`` on a kind row is a thumbnail of ONE image of that kind's stack, as a
-``data:`` URI, encoded by the same ``screen/png.py`` the elements column uses
-and only when the profile is re-read (a capture, a clear, a forget, a selection)
-or an arrow moves - never per keystroke. WHICH image is ``shown``, a 0-based
-index into a stack of ``count``, and it is the Python model's state rather than
-the page's: ``status`` names the same position ("2/3") and the dimensions on it
-are that variant's. ``count`` is what the arrows are disabled below two of.
-All seven rows are always present whether or not anything is captured.
 
 The SSH CONNECT DIALOG - the one surface with no TUI equivalent, and the only
 one whose event is a picture of a SEQUENCE running somewhere else
@@ -461,10 +398,10 @@ class JsCalls(Protocol):
     def reinstruct(self) -> None: ...
     def retry_insert(self) -> None: ...
     def set_service(self, key: str) -> None: ...
-    def set_chat_region(self) -> None: ...
-    # F7's other half: the page owns the show/hide, this side owns the pixels
-    # (see the ``elements`` family above).
-    def set_elements_visible(self, visible: bool) -> None: ...
+    # F2, the titlebar's button and both sidebar doors: open the calibration
+    # window (``gui/calibration/``). One method, because everything that surface
+    # decides it decides over there - this side only opens it and brackets it.
+    def open_calibration(self) -> None: ...
     # The window tabs. Both are pure view-side navigation - no controller call
     # is made for either - but they still cross here, because the page is where
     # the click happens and the SELECTION lives in the view.
@@ -482,7 +419,7 @@ class JsCalls(Protocol):
     # ``GuiRunner.window_closing`` instead, which cannot come through here.
     def request_quit(self) -> None: ...
     # The SSH connect dialog (``ui-briefs/ssh-connect.md``) - the one surface
-    # with no TUI equivalent. One method per intent, as the editor family below
+    # with no TUI equivalent. One method per intent, as the key family above
     # has: the form, the checklist and the three ways out of a failure are all
     # decisions on a Python-side model (``gui/remote.py``), so a page asking for
     # something this shell does not do fails at the bridge.
@@ -494,29 +431,6 @@ class JsCalls(Protocol):
     def connect_cancel(self) -> None: ...
     def connect_save(self, name: str) -> None: ...
     def reconnect_now(self) -> None: ...
-    # The service editor (F2). One method per intent for the reason the key
-    # family above has one: the modal's state is a MODEL on the Python side
-    # (``gui/service_editor.py``) and every press is a call on it, so a page
-    # asking for something this shell does not do fails at the bridge.
-    def open_service_editor(self) -> None: ...
-    def svc_select(self, key: str) -> None: ...
-    def svc_form(self, fields: dict[str, Any]) -> None: ...
-    def svc_detection(self, state: dict[str, Any]) -> None: ...
-    def svc_edit_by_lines(self, on: bool) -> None: ...
-    def svc_after_delivery(self, state: dict[str, Any]) -> None: ...
-    def svc_scroll(self, action: str) -> None: ...
-    def svc_matcher(self, matcher: str) -> None: ...
-    def svc_tolerance(self, value: int) -> None: ...
-    def svc_add(self) -> None: ...
-    def svc_reset(self) -> None: ...
-    def svc_delete(self) -> None: ...
-    def svc_capture(self, kind: str) -> None: ...
-    def svc_prev(self, kind: str) -> None: ...
-    def svc_next(self, kind: str) -> None: ...
-    def svc_clear(self, kind: str) -> None: ...
-    def svc_click_point(self, kind: str, x: int, y: int) -> None: ...
-    def svc_forget(self) -> None: ...
-    def svc_close(self) -> None: ...
 
 
 class JsApi:
@@ -612,18 +526,16 @@ class JsApi:
         """The sidebar's service picker - it edits the SELECTED window."""
         self._safely(lambda: self._calls.set_service(key))
 
-    def set_region(self) -> None:
-        """The sidebar's region button: draw the box around the SELECTED
-        window's browser. A fullscreen child process does the drawing, so the
-        answer comes back minutes later and through the sidebar, not from
-        here."""
-        self._safely(self._calls.set_chat_region)
+    def calibrate(self) -> None:
+        """F2, the titlebar's "calibrate" button and both sidebar doors: open
+        the calibration window.
 
-    def elements(self, visible: bool = False) -> None:
-        """F7 flipped the ELEMENTS column. The show/hide itself never leaves the
-        page; this is what stops the crops being encoded for a column nobody is
-        looking at (``ui-briefs/elements-panel.md`` §3.1)."""
-        self._safely(lambda: self._calls.set_elements_visible(bool(visible)))
+        One call for four affordances because they all ask for one thing - the
+        window where the pixels are (ui-monitor.md 2.6). Nothing comes back
+        through here: a chat region drawn over there arrives as a ``sidebar``
+        repaint, and a preset saved over there as the ordinary config adoption.
+        """
+        self._safely(self._calls.open_calibration)
 
     def window(self, key: str = "") -> None:
         """A window tab was clicked: show that window and point the sidebar at
@@ -704,105 +616,6 @@ class JsApi:
         """The link indicator's button: spend the lazy re-dial early. The same
         ``_ensure`` the next operation would have called, never a second path."""
         self._safely(self._calls.reconnect_now)
-
-    # -- the service editor (F2) ----------------------------------------------
-    # The modal is drawn by the page and DECIDED on the Python side: the working
-    # copy, what validates, what applies live and what waits for a press all
-    # live in ``gui/service_editor.py``, so every one of these is a call on that
-    # model followed by one ``editor`` event back. Nothing here is a refusal -
-    # the model owns those and toasts them.
-
-    def svc_open(self) -> None:
-        """F2 and the sidebar's appearance line: open the per-service editor.
-        Refused (out loud) while a capture overlay is up anywhere in the app."""
-        self._safely(self._calls.open_service_editor)
-
-    def svc_select(self, key: str = "") -> None:
-        """The editor's own service picker - a key, or the "+ add new" row."""
-        self._safely(lambda: self._calls.svc_select(key))
-
-    def svc_form(self, fields: Any = None) -> None:
-        """A keystroke in the form column: the WHOLE candidate, every time.
-        ``max <= total`` is a cross-field rule, so there is no per-field
-        validity for the page to send."""
-        self._safely(lambda: self._calls.svc_form(dict(fields or {})))
-
-    def svc_detection(self, state: Any = None) -> None:
-        """Any toggle on the left column, read as a SET: the checklist, the
-        hover scan, both delivery ticks and the two ingest ticks together."""
-        self._safely(lambda: self._calls.svc_detection(dict(state or {})))
-
-    def svc_edit_by_lines(self, on: bool = False) -> None:
-        """The ranged-edit tick, alone rather than in the detection set: it
-        lives in the form column and is about how the model EDITS, not about
-        how its reply is found."""
-        self._safely(lambda: self._calls.svc_edit_by_lines(bool(on)))
-
-    def svc_after_delivery(self, state: Any = None) -> None:
-        """The AFTER DELIVERY ticks, read as a pair: does the foreground come
-        back here once AgentClip has clicked in the browser itself, and does the
-        machine beep when the loop stalls and needs the user."""
-        self._safely(lambda: self._calls.svc_after_delivery(dict(state or {})))
-
-    def svc_scroll(self, action: str = "") -> None:
-        self._safely(lambda: self._calls.svc_scroll(action))
-
-    def svc_matcher(self, matcher: str = "") -> None:
-        self._safely(lambda: self._calls.svc_matcher(matcher))
-
-    def svc_tolerance(self, value: int = 0) -> None:
-        """The tolerance slider, live and ungated: a real ``<input
-        type=range>`` cannot express a value outside the range config.py
-        enforces (docs/design/gui.md §3)."""
-        self._safely(lambda: self._calls.svc_tolerance(int(value)))
-
-    def svc_add(self) -> None:
-        """"Add service": the one discrete commit in the whole editor."""
-        self._safely(self._calls.svc_add)
-
-    def svc_reset(self) -> None:
-        self._safely(self._calls.svc_reset)
-
-    def svc_delete(self) -> None:
-        self._safely(self._calls.svc_delete)
-
-    def svc_capture(self, kind: str = "") -> None:
-        """One appearance's "Capture": the same fullscreen child process the
-        chat-region picker runs, answered minutes later through the editor
-        event rather than from here."""
-        self._safely(lambda: self._calls.svc_capture(kind))
-
-    def svc_prev(self, kind: str = "") -> None:
-        """The arrow left of a thumbnail: the previous variant of that kind,
-        wrapping. A stack is a ring of pictures of one control, so there is no
-        end for an arrow to go dead at."""
-        self._safely(lambda: self._calls.svc_prev(kind))
-
-    def svc_next(self, kind: str = "") -> None:
-        """The arrow right of a thumbnail: the next variant of that kind."""
-        self._safely(lambda: self._calls.svc_next(kind))
-
-    def svc_clear(self, kind: str = "") -> None:
-        """The variant that row is SHOWING, off disk immediately and with no
-        confirm - it is one Capture press away from being back. The rest of the
-        stack stays: "Forget appearance" is the whole-service door."""
-        self._safely(lambda: self._calls.svc_clear(kind))
-
-    def svc_click_point(self, kind: str = "", x: int = 50, y: int = 50) -> None:
-        """One appearance's click point, as x%/y% of the picture that matches
-        it. Written straight to the profile store like a capture, and clamped
-        there - a number box can hold "999" for as long as it takes to type
-        "99"."""
-        self._safely(lambda: self._calls.svc_click_point(kind, int(x), int(y)))
-
-    def svc_forget(self) -> None:
-        """The whole service's captured appearances, behind a confirm."""
-        self._safely(self._calls.svc_forget)
-
-    def svc_close(self) -> None:
-        """Esc: apply the valid edits and leave. May be refused (a capture in
-        flight) or held for a confirm (invalid text that was never applied)."""
-        self._safely(self._calls.svc_close)
 
     @staticmethod
     def _safely(call: Callable[[], None]) -> None:

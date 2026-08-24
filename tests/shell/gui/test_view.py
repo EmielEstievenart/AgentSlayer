@@ -651,9 +651,11 @@ def test_the_automation_paints_all_reach_the_page(harness: Harness) -> None:
         },
         {"type": "detection", "kind": "STALE", "label": "", "text": "stale: unchanged for 2.0s"},
     ]
-    # The column's own contract is pinned in tests/shell/gui/test_elements.py; what
-    # matters here is that the paint reached the page at all.
-    assert recorder.last("elements")["rows"]
+    # ...and nothing at all for the ELEMENTS column, which is the calibration
+    # window's surface now: the port method is still implemented (a controller
+    # routes a mapping through it every tick) and its whole job is to say
+    # nothing here (ui-monitor.md 6.4, tests/shell/gui/calibration/).
+    assert not recorder.of_type("elements")
     assert recorder.of_type("flash") == [
         {"type": "flash", "show": True, "text": ">>> PRESS ENTER <<<", "retry": True},
         {"type": "flash", "show": False},
@@ -820,16 +822,14 @@ def test_no_port_method_is_reduced_scope_any_more(harness: Harness) -> None:
 
     ``toggle_harness_log`` came off it with parity increment 2 (the pane landed),
     the three session-view methods with increment 3, and the last two -
-    ``show_identify_overlay`` and ``paint_elements`` - with increment 4: the
-    overlay is the same child process the TUI shells out to, and the crops are
-    real PNGs (tests/shell/gui/test_elements.py). What is left is a guard: a method
-    re-reduced to a toast would be a parity regression, not a new smaller
-    implementation, and it should have to delete this test to happen.
+    ``show_identify_overlay`` and ``paint_elements`` - with increment 4. Neither
+    of those two is drawn by THIS window any more (ui-monitor.md 6.4), and that
+    is not a re-reduction: ``/identify`` opens the window it is drawn from, which
+    is a real answer to the command rather than a toast saying no.
     """
     view = harness.view
-    assert not view._elements  # nothing searched yet - the resting state
     view.show_identify_overlay()
-    assert harness.scheduled, "/identify went nowhere"
+    assert view._calibration is not None, "/identify went nowhere"
     assert not harness.flush().of_type("toast")
 
 

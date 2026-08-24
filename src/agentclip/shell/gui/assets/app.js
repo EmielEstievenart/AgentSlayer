@@ -9,13 +9,12 @@
 
    Some keys never leave this file. F3 (the sidebar) and F8 (the log pane) are
    pure show/hide of a page element. /log comes back the other way as a `toggle`
-   event, so the command and the key stay one implementation. F7 (the elements
-   column) is a show/hide with one exception: the flip is local, but Python is
-   told, because the crops are only encoded for a column somebody is looking at.
-   F1 (help) and `t` (put the caret back in the chat box) are wholly local; F4's
-   theme picker paints locally and tells Python, which is what persists it. F2
-   is not a toggle at all - the service editor's whole state is a model on the
-   Python side and this file only renders the `editor` event.
+   event, so the command and the key stay one implementation. F1 (help) and `t`
+   (put the caret back in the chat box) are wholly local; F4's theme picker
+   paints locally and tells Python, which is what persists it. F2 leaves this
+   file entirely - it opens the CALIBRATION WINDOW, which is a second pywebview
+   window with its own page, its own bridge and its own vocabulary
+   (gui/calibration/, ui-monitor.md 6.4); nothing it draws is drawn here.
 
    Two tables are the spine of the key surface, and both exist so that a thing
    cannot be done without being documented: KEYS below drives BOTH the keydown
@@ -136,20 +135,9 @@
   // tui/widgets/transcript.py's MAX_EVENTS, per WINDOW: a transcript is a
   // reading surface, not an archive, and the whole log is one `l` away.
   var MAX_EVENTS = 500;
-  // The service editor (F2). `svcBuilt` is once-per-page: the three control
-  // vocabularies and the seven appearance rows never change while the process
-  // runs, so they are built once and only their VALUES are repainted - which is
-  // what keeps a keystroke from yanking focus out of a checkbox.
-  var editorOpen = false;
-  var svcBuilt = false;
-  var svcSignals = {};
-  var svcScrolls = {};
-  var svcMatchers = {};
-  var svcKinds = {};
-  var svcOptions = "";
-  // The SSH connect dialog. Open/closed is mirrored here for the same reason
-  // `editorOpen` is: the form's text boxes may only be rewritten on a RELOAD,
-  // and "was it already open" is what tells a repaint which one it is.
+  // The SSH connect dialog. Open/closed is mirrored here because the form's
+  // text boxes may only be rewritten on a RELOAD, and "was it already open" is
+  // what tells a repaint which one it is.
   var connectOpen = false;
   var CONN_HINTS = {
     form: "the root is checked on the box, after connecting - a bad one is a retry",
@@ -1679,68 +1667,6 @@
     el.sidebar.hidden = !el.sidebar.hidden;
   }
 
-  /* == elements column (F7) =================================================
-     One row per appearance the detector can recognise, in the detector's own
-     report order, showing the pixels it last matched. The whole column is
-     repainted per tick: it is seven small rows, a row's state is only readable
-     against the others (the two chat-box rows are EXPECTED to disagree), and
-     the pictures arrive as ready-made data URIs - the sizing, the byte order
-     and the "has this crop changed" question are all settled on the Python side
-     (docs/design/ui-briefs/elements-panel.md).
-
-     Hiding is a pure show/hide here, but it is also TOLD to Python, which is
-     the one thing F3 and F8 do not do: a hidden column costs nothing to leave
-     un-drawn, and encoding a PNG per matched appearance twice a second for a
-     column nobody is looking at is the one part of this surface that is not
-     free. The rows keep arriving either way, so opening it shows the current
-     tick rather than the next one. */
-
-  function toggleElements() {
-    el.elements.hidden = !el.elements.hidden;
-    api("elements", !el.elements.hidden);
-  }
-
-  function paintElements(event) {
-    // The heading names the LIVE window - the one being driven - which parts
-    // company with the tab the user is reading for the whole of a delegation.
-    el.elementsTitle.textContent = event.window
-      ? "ELEMENTS · " + event.window
-      : "ELEMENTS";
-    el.elRows.innerHTML = "";
-    (event.rows || []).forEach(function (row) {
-      var item = document.createElement("li");
-      item.className = "el-row " + (row.state || "resting");
-      item.id = "el-" + row.kind;
-
-      var text = document.createElement("div");
-      text.className = "el-text";
-      var name = document.createElement("div");
-      name.className = "el-name";
-      name.textContent = row.label;
-      var verdict = document.createElement("div");
-      verdict.className = "el-verdict";
-      verdict.textContent = row.text;
-      text.appendChild(name);
-      text.appendChild(verdict);
-
-      // The crop box is drawn whether or not it holds a picture: a row that
-      // grew when its element appeared would make every row below it jump on a
-      // 0.5s timer.
-      var box = document.createElement("div");
-      box.className = "el-crop";
-      if (row.png) {
-        var img = document.createElement("img");
-        img.src = row.png;
-        img.alt = row.label;
-        box.appendChild(img);
-      }
-
-      item.appendChild(text);
-      item.appendChild(box);
-      el.elRows.appendChild(item);
-    });
-  }
-
   /* == harness log ==========================================================
      Follow/freeze is a PROPERTY, not a mode: "am I at the tail" is read fresh
      on every append, so there is no flag that can disagree with where the
@@ -1776,252 +1702,6 @@
     // log whose whole purpose is to say what just happened.
     if (logOpen) paintLog(true);
   }
-
-  /* == service editor (F2) ==================================================
-     A page modal whose STATE is a model on the Python side
-     (agentclip/shell/gui/service_editor.py): every press here is one call on it and
-     one `editor` event back, and every refusal (a second capture, a close over
-     an in-flight one) is toasted from down there. Nothing in this section
-     decides anything - not what validates, not which footer button shows, not
-     whether a Clear would do anything.
-
-     Two rules make the repaint safe to run on every keystroke. The dynamic
-     controls are built ONCE (their vocabularies - three signals, three scroll
-     actions, two matchers, seven appearances - are fixed for the process) and
-     afterwards only have their values written, so a change never yanks focus
-     out from under the keyboard. And the text inputs are written only when
-     `reload` is true, i.e. after a selection/add/reset/delete rather than after
-     a keystroke: the model owns the form's values, but repainting a box from it
-     on every input event would fight the caret. */
-
-  function svcForm() {
-    return {
-      key: el.svcKey.value,
-      label: el.svcLabel.value,
-      max: el.svcMax.value,
-      total: el.svcTotal.value,
-      stable: el.svcStable.value,
-      // The alert's seconds ride the FORM rather than the tick pair beside
-      // them: it is a validated number like the sizes and the stale window,
-      // and the model refuses a bad one the same way.
-      repeat: el.svcAlertRepeat.value,
-      extra: el.svcExtra.value
-    };
-  }
-
-  // Read as a SET on any single change, never per-box: that is the shape the
-  // TUI's detection handler has, and the reason carries over - a handler that
-  // trusted which control fired would have to know which repaints are echoes.
-  function svcDetection() {
-    var signals = [];
-    Object.keys(svcSignals).forEach(function (name) {
-      if (svcSignals[name].checked) signals.push(name);
-    });
-    return {
-      signals: signals,
-      hover_scan: el.svcHover.checked,
-      require_fenced: el.svcFenced.checked,
-      stream: el.svcStream.checked,
-      auto_submit: el.svcAutoSubmit.checked
-    };
-  }
-
-  // The AFTER DELIVERY pair, read together for svcDetection's reason: one
-  // handler on both boxes, never trusting which of them fired.
-  function svcAfterDelivery() {
-    return {
-      snap_back: el.svcSnapBack.checked,
-      alert_sound: el.svcAlertSound.checked
-    };
-  }
-
-  function svcToggle(input, on, disabled) {
-    input.checked = Boolean(on);
-    input.disabled = Boolean(disabled);
-    // Disabled, not hidden: the layout must not reflow while a new service is
-    // being filled in, and the boxes keep SHOWING what "Add service" will
-    // create (service-editor.md §3.5).
-    if (input.parentNode) input.parentNode.classList.toggle("off", Boolean(disabled));
-  }
-
-  function svcRadios(host, group, options, call) {
-    var made = {};
-    host.innerHTML = "";
-    (options || []).forEach(function (opt) {
-      var row = document.createElement("label");
-      row.className = "svc-check";
-      var input = document.createElement("input");
-      input.type = "radio";
-      input.name = group;
-      input.value = opt.value;
-      var text = document.createElement("span");
-      text.textContent = opt.label;
-      row.appendChild(input);
-      row.appendChild(text);
-      input.addEventListener("change", function () {
-        if (input.checked) api(call, opt.value);
-      });
-      host.appendChild(row);
-      made[opt.value] = input;
-    });
-    return made;
-  }
-
-  function svcClickBox(id, title) {
-    var box = document.createElement("input");
-    box.type = "number";
-    box.min = "0";
-    box.max = "100";
-    box.step = "1";
-    box.id = id;
-    // The line says "click %"; what 50 means, and which of the two is across
-    // and which is down, is more than three characters of label can carry, so
-    // the sentence lives on the box itself.
-    box.title = title || "";
-    return box;
-  }
-
-  function svcBuild(event) {
-    svcSignals = {};
-    el.svcSignalsBox.innerHTML = "";
-    (event.signals || []).forEach(function (sig) {
-      var row = document.createElement("label");
-      row.className = "svc-check";
-      var box = document.createElement("input");
-      box.type = "checkbox";
-      box.id = "svc-signal-" + sig.name;
-      var text = document.createElement("span");
-      text.textContent = sig.label;
-      row.appendChild(box);
-      row.appendChild(text);
-      box.addEventListener("change", function () {
-        api("svc_detection", svcDetection());
-      });
-      el.svcSignalsBox.appendChild(row);
-      svcSignals[sig.name] = box;
-    });
-    svcScrolls = svcRadios(el.svcScroll, "svc-scroll-set", event.scrolls, "svc_scroll");
-    svcMatchers = svcRadios(el.svcMatcher, "svc-matcher-set", event.matchers, "svc_matcher");
-    // One card per TemplateKind, the kind's own value as the id, so one pair
-    // of handlers serves all seven and an eighth appearance is an enum member
-    // and nothing else.
-    svcKinds = {};
-    el.svcKinds.innerHTML = "";
-    (event.kinds || []).forEach(function (kind) {
-      var item = document.createElement("li");
-      item.className = "svc-kind";
-      item.id = "svc-kind-" + kind.kind;
-
-      // The thumbnail is ONE of a stack, so it comes with the two arrows that
-      // walk it. Which variant is showing is the model's state, not this
-      // side's: a press asks, and the answer arrives as the next editor event
-      // like every other press in this modal.
-      var stack = document.createElement("div");
-      stack.className = "svc-variants";
-      var prev = document.createElement("button");
-      prev.type = "button";
-      prev.className = "svc-arrow";
-      prev.textContent = "‹";
-      prev.title = "previous variant";
-      prev.addEventListener("click", function () {
-        api("svc_prev", kind.kind);
-      });
-      var thumb = document.createElement("div");
-      thumb.className = "svc-thumb";
-      var img = document.createElement("img");
-      img.alt = kind.label;
-      img.hidden = true;
-      thumb.appendChild(img);
-      var next = document.createElement("button");
-      next.type = "button";
-      next.className = "svc-arrow";
-      next.textContent = "›";
-      next.title = "next variant";
-      next.addEventListener("click", function () {
-        api("svc_next", kind.kind);
-      });
-      stack.appendChild(prev);
-      stack.appendChild(thumb);
-      stack.appendChild(next);
-
-      var text = document.createElement("div");
-      text.className = "svc-kind-text";
-      var name = document.createElement("div");
-      name.className = "svc-kind-name";
-      name.textContent = kind.label;
-      var status = document.createElement("div");
-      status.className = "svc-kind-status";
-      text.appendChild(name);
-      text.appendChild(status);
-
-      // The two click-point boxes, on their own line under the picture they
-      // aim into. They send on "change" rather than on every keystroke - "5"
-      // on its way to "50" is not a click point anybody asked for - and the
-      // model clamps whatever arrives, so a box is never a way to aim outside
-      // the picture.
-      var click = document.createElement("div");
-      click.className = "svc-click";
-      var clickLabel = document.createElement("span");
-      clickLabel.className = "svc-click-label";
-      clickLabel.textContent = "click %";
-      var clickX = svcClickBox("svc-click-x-" + kind.kind, (event.click_labels || {}).x);
-      var times = document.createElement("span");
-      times.textContent = "×";
-      var clickY = svcClickBox("svc-click-y-" + kind.kind, (event.click_labels || {}).y);
-      click.appendChild(clickLabel);
-      click.appendChild(clickX);
-      click.appendChild(times);
-      click.appendChild(clickY);
-      var sendClick = function () {
-        var x = parseInt(clickX.value, 10);
-        var y = parseInt(clickY.value, 10);
-        // A box left empty (or mid-edit) is not a point: the next state push
-        // repaints it from the model, which is where the last saved one is.
-        if (isNaN(x) || isNaN(y)) return;
-        api("svc_click_point", kind.kind, x, y);
-      };
-      clickX.addEventListener("change", sendClick);
-      clickY.addEventListener("change", sendClick);
-
-      var actions = document.createElement("div");
-      actions.className = "svc-kind-actions";
-      var capture = document.createElement("button");
-      capture.type = "button";
-      capture.textContent = "Capture";
-      capture.addEventListener("click", function () {
-        api("svc_capture", kind.kind);
-      });
-      var clear = document.createElement("button");
-      clear.type = "button";
-      clear.textContent = "Clear";
-      clear.addEventListener("click", function () {
-        api("svc_clear", kind.kind);
-      });
-      actions.appendChild(capture);
-      actions.appendChild(clear);
-
-      // Top to bottom, one card: which appearance this is, the picture and the
-      // arrows that walk its stack, where in that picture the click goes, and
-      // the two buttons that make or unmake it.
-      item.appendChild(text);
-      item.appendChild(stack);
-      item.appendChild(click);
-      item.appendChild(actions);
-      el.svcKinds.appendChild(item);
-      svcKinds[kind.kind] = {
-        img: img,
-        status: status,
-        capture: capture,
-        clear: clear,
-        prev: prev,
-        next: next,
-        clickX: clickX,
-        clickY: clickY
-      };
-    });
-    svcBuilt = true;
-  }
-
 
   /* == the SSH connect dialog ==============================================
      The one surface with no TUI equivalent. Everything it DECIDES is Python's
@@ -2163,134 +1843,6 @@
     }
   }
 
-  function paintEditor(event) {
-    if (!event.open) {
-      editorOpen = false;
-      el.svcScrim.hidden = true;
-      return;
-    }
-    if (!svcBuilt) svcBuild(event);
-    var opening = !editorOpen;
-    editorOpen = true;
-    el.svcScrim.hidden = false;
-
-    var options = (event.services || [])
-      .map(function (row) {
-        return "<option value=\"" + escapeHtml(row.key) + "\">" + escapeHtml(row.label) + "</option>";
-      })
-      .join("");
-    if (options !== svcOptions) {
-      svcOptions = options;
-      el.svcSelect.innerHTML = options;
-    }
-    el.svcSelect.value = event.selected;
-
-    var form = event.form || {};
-    if (event.reload) {
-      el.svcKey.value = form.key || "";
-      el.svcLabel.value = form.label || "";
-      el.svcMax.value = form.max || "";
-      el.svcTotal.value = form.total || "";
-      el.svcStable.value = form.stable || "";
-      el.svcAlertRepeat.value = form.repeat || "";
-      el.svcExtra.value = form.extra || "";
-    }
-    // Immutable once created: only a new service may name itself.
-    el.svcKey.disabled = Boolean(event.key_locked);
-    el.svcError.textContent = event.error || "";
-
-    var labels = event.labels || {};
-    el.svcHoverLabel.textContent = labels.hover_scan || "";
-    el.svcFencedLabel.textContent = labels.require_fenced || "";
-    el.svcStreamLabel.textContent = labels.stream || "";
-    el.svcAutoSubmitLabel.textContent = labels.auto_submit || "";
-    el.svcEditByLinesLabel.textContent = labels.edit_by_lines || "";
-    el.svcSnapBackLabel.textContent = labels.snap_back || "";
-    el.svcAlertSoundLabel.textContent = labels.alert_sound || "";
-    el.svcToleranceLabel.textContent = labels.tolerance || "";
-
-    // The hover sentences for the AFTER DELIVERY block, on the whole row rather
-    // than on the box: three words of label is not room to say what unticking
-    // one of these DOES, and a title on the input alone would only answer while
-    // the pointer is on the 13 pixels of the checkbox itself.
-    var titles = event.titles || {};
-    el.svcSnapBackRow.title = titles.snap_back || "";
-    el.svcAlertSoundRow.title = titles.alert_sound || "";
-    el.svcAlertRepeat.title = titles.alert_repeat || "";
-
-    var off = Boolean(event.controls_disabled);
-    (event.signals || []).forEach(function (sig) {
-      if (svcSignals[sig.name]) svcToggle(svcSignals[sig.name], sig.on, off);
-    });
-    svcToggle(el.svcHover, event.hover_scan, off);
-    svcToggle(el.svcFenced, event.require_fenced, off);
-    svcToggle(el.svcStream, event.stream, off);
-    svcToggle(el.svcAutoSubmit, event.auto_submit, off);
-    svcToggle(el.svcEditByLines, event.edit_by_lines, off);
-    svcToggle(el.svcSnapBack, event.snap_back, off);
-    svcToggle(el.svcAlertSound, event.alert_sound, off);
-    Object.keys(svcScrolls).forEach(function (value) {
-      svcToggle(svcScrolls[value], value === event.scroll, off);
-    });
-    Object.keys(svcMatchers).forEach(function (value) {
-      svcToggle(svcMatchers[value], value === event.matcher, off);
-    });
-
-    el.svcTolerance.min = String(event.tolerance_min);
-    el.svcTolerance.max = String(event.tolerance_max);
-    el.svcTolerance.value = String(event.tolerance);
-    el.svcTolerance.disabled = off;
-    el.svcToleranceValue.textContent = String(event.tolerance);
-
-    el.svcSignalWarning.textContent = event.signal_warning || "";
-    el.svcMatcherWarning.textContent = event.matcher_warning || "";
-
-    (event.kinds || []).forEach(function (kind) {
-      var node = svcKinds[kind.kind];
-      if (!node) return;
-      node.status.textContent = kind.status;
-      if (kind.png) {
-        node.img.src = kind.png;
-        node.img.hidden = false;
-      } else {
-        node.img.removeAttribute("src");
-        node.img.hidden = true;
-      }
-      // Capture stays live while another capture is in flight: the second press
-      // is REFUSED, out loud, and a disabled button would swallow the sentence
-      // that explains why (brief §3.3).
-      node.capture.disabled = off;
-      node.clear.disabled = !kind.can_clear;
-      // Disabled below two variants rather than hidden, like Clear: a row that
-      // grew a pair of arrows the moment a second capture landed would reflow
-      // the column under the pointer.
-      var single = Number(kind.count || 0) < 2;
-      node.prev.disabled = single;
-      node.next.disabled = single;
-      // Never while the caret is in the box: the model clamps, so a box that
-      // repainted itself mid-edit would rewrite the number under the typing
-      // hand. Leaving on "change" is what commits it, and the push that
-      // follows lands on a box nobody is holding.
-      if (document.activeElement !== node.clickX) node.clickX.value = String(kind.click_x);
-      if (document.activeElement !== node.clickY) node.clickY.value = String(kind.click_y);
-      node.clickX.disabled = off;
-      node.clickY.disabled = off;
-    });
-    el.svcTemplates.textContent = event.templates || "";
-    el.svcForget.hidden = !event.show_forget;
-
-    el.svcAdd.hidden = !event.show_add;
-    el.svcAdd.disabled = !event.can_add;
-    el.svcReset.hidden = !event.show_reset;
-    el.svcDelete.hidden = !event.show_delete;
-    el.svcHint.textContent = event.hint || "";
-    if (opening) {
-      window.setTimeout(function () {
-        el.svcSelect.focus();
-      }, 0);
-    }
-  }
-
   /* == chrome ============================================================== */
 
   function paintState(event) {
@@ -2318,8 +1870,8 @@
     document.body.classList.toggle("yolo", Boolean(event.yolo));
     // Never steal the caret out of a reject note being written: the state push
     // that lands mid-typing is the gate's own, and it would take the box away.
-    // Nor out of the service editor, whose form is a dozen boxes deep and which
-    // is up for as long as somebody is configuring a service. Nor - the same
+    // Nor out of a selection somebody is making in the transcript - the
+    // same rule, one surface wider.
     // rule, one surface wider - out of a selection somebody is making in the
     // transcript: focusing a textarea collapses the document's selection, and a
     // state push landing between the drag and the ctrl+c is not a reason to
@@ -2327,7 +1879,6 @@
     if (
       event.composer_enabled &&
       !rejectOpen &&
-      !editorOpen &&
       !modalUp() &&
       !draggedOutText()
     ) {
@@ -2516,15 +2067,9 @@
         // for one thing, one implementation of it.
         if (event.what === "log") toggleLog();
         return;
-      case "elements":
-        paintElements(event);
-        return;
       case "connect":
         paintConnect(event);
         break;
-      case "editor":
-        paintEditor(event);
-        return;
       default:
         return;
     }
@@ -2576,8 +2121,8 @@
       foot: "help",
       what: "this help", run: function () { openHelp(); } },
     { keys: ["F2"], on: ["F2"], mods: "", hot: true, section: "App",
-      what: "service profiles: sizes, what each service LOOKS like, which finish signals it may watch",
-      run: function () { api("svc_open"); } },
+      what: "calibrate: what each service LOOKS like, where its chat window is, and what the tool is recognising right now (opens a second window)",
+      run: function () { api("calibrate"); } },
     { keys: ["F3"], on: ["F3"], mods: "", hot: true, section: "App",
       foot: "sidebar",
       what: "hide/show the sidebar", run: function () { toggleSidebar(); } },
@@ -2590,9 +2135,6 @@
     { keys: ["F6"], on: ["F6"], mods: "", hot: true, section: "App",
       what: "select the next window tab (view only - it never moves what the automation drives)",
       run: function () { api("next_window"); } },
-    { keys: ["F7"], on: ["F7"], mods: "", hot: true, section: "App",
-      what: "hide/show ELEMENTS - the pictures the automation is recognising right now",
-      run: function () { toggleElements(); } },
     { keys: ["F8"], on: ["F8"], mods: "", hot: true, section: "App",
       what: "hide/show the HARNESS DECISION LOG (also /log)", run: function () { toggleLog(); } },
     { keys: ["shift+tab"], on: ["Tab"], mods: "shift", hot: true, section: "App",
@@ -3050,7 +2592,7 @@
     var tag = ev.target && ev.target.tagName;
     var typing = tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
     var plain = !ev.ctrlKey && !ev.altKey && !ev.metaKey;
-    // ESC STAGE 5, part one: a modal owns the keyboard while it is up. The
+    // ESC STAGE 5: a modal owns the keyboard while it is up. The
     // session keys would otherwise fire into a screen that is asking a
     // question, and the summary has four keys of its own.
     if (modalUp()) {
@@ -3077,19 +2619,6 @@
       if (choice) {
         ev.preventDefault();
         answer(choice);
-      }
-      return;
-    }
-    // ESC STAGE 5, part two: the service editor owns the keyboard the same
-    // way, one layer below the confirm scrim above (its "Forget appearance"
-    // and discard dialogs open over it). Escape closes it - which may be
-    // REFUSED on the far side while a capture overlay is up, or held for the
-    // discard confirm - and every session key and page toggle is inert until
-    // it is gone.
-    if (editorOpen) {
-      if (ev.key === "Escape" && plain) {
-        ev.preventDefault();
-        api("svc_close");
       }
       return;
     }
@@ -3193,51 +2722,7 @@
       sideSlotNote: id("side-slot-note"),
       sideDetectionTitle: id("side-detection-title"),
       editServices: id("edit-services"),
-      svcScrim: id("svc-scrim"),
-      svcSelect: id("svc-select"),
-      svcSignalsBox: id("svc-signals"),
-      svcHover: id("svc-hover-scan"),
-      svcHoverLabel: id("svc-hover-scan-label"),
-      svcFenced: id("svc-require-fenced"),
-      svcFencedLabel: id("svc-require-fenced-label"),
-      svcStream: id("svc-stream"),
-      svcStreamLabel: id("svc-stream-label"),
-      svcAutoSubmit: id("svc-auto-submit"),
-      svcAutoSubmitLabel: id("svc-auto-submit-label"),
-      svcEditByLines: id("svc-edit-by-lines"),
-      svcEditByLinesLabel: id("svc-edit-by-lines-label"),
-      svcSnapBack: id("svc-snap-back"),
-      svcSnapBackLabel: id("svc-snap-back-label"),
-      svcSnapBackRow: id("svc-snap-back-row"),
-      svcAlertSound: id("svc-alert-sound"),
-      svcAlertSoundLabel: id("svc-alert-sound-label"),
-      svcAlertSoundRow: id("svc-alert-sound-row"),
-      svcAlertRepeat: id("svc-alert-repeat"),
-      svcSignalWarning: id("svc-signal-warning"),
-      svcScroll: id("svc-scroll"),
-      svcMatcher: id("svc-matcher"),
-      svcMatcherWarning: id("svc-matcher-warning"),
-      svcToleranceLabel: id("svc-tolerance-label"),
-      svcTolerance: id("svc-tolerance"),
-      svcToleranceValue: id("svc-tolerance-value"),
-      svcKey: id("svc-key"),
-      svcLabel: id("svc-label"),
-      svcMax: id("svc-max"),
-      svcTotal: id("svc-total"),
-      svcStable: id("svc-stable"),
-      svcExtra: id("svc-extra"),
-      svcError: id("svc-error"),
-      svcKinds: id("svc-kinds"),
-      svcTemplates: id("svc-templates"),
-      svcForget: id("svc-forget"),
-      svcHint: id("svc-hint"),
-      svcAdd: id("svc-add"),
-      svcReset: id("svc-reset"),
-      svcDelete: id("svc-delete"),
-      svcClose: id("svc-close"),
-      elements: id("elements"),
-      elementsTitle: id("elements-title"),
-      elRows: id("el-rows"),
+      calibrateOpen: id("calibrate-open"),
       logpane: id("logpane"),
       logLines: id("log-lines"),
       keyhints: id("keyhints"),
@@ -3369,86 +2854,27 @@
     el.serviceSelect.addEventListener("change", function () {
       api("service", el.serviceSelect.value);
     });
-    // The draw-a-box overlay is a fullscreen child process (screen/picker.py),
-    // so this click starts something that answers minutes later and through the
-    // sidebar - there is nothing to wait for here, and a second press while one
-    // is up is refused on the far side rather than queued.
+    // -- the calibration window's three doors -------------------------------
+    // F2, the titlebar's button and the sidebar's two buttons all ask for one
+    // thing: the window where the pixels are (ui-monitor.md 2.6). Both sidebar
+    // buttons keep their old words because they still name what the user goes
+    // there to do - the surface behind them moved, the errand did not. Nothing
+    // waits here: a chat region drawn over there comes back as a `sidebar`
+    // repaint, and a second press is refused on the far side rather than
+    // queued.
     el.setRegion.addEventListener("click", function () {
-      api("set_region");
+      api("calibrate");
     });
-
-    // -- the service editor's own wiring -----------------------------------
-    // The five text boxes and the note box all send the WHOLE candidate on any
-    // input, because "max <= total" is a cross-field rule: there is no
-    // per-field validity for this side to send.
     el.editServices.addEventListener("click", function () {
-      api("svc_open");
+      api("calibrate");
     });
-    [
-      el.svcKey,
-      el.svcLabel,
-      el.svcMax,
-      el.svcTotal,
-      el.svcStable,
-      el.svcAlertRepeat,
-      el.svcExtra
-    ].forEach(function (input) {
-      input.addEventListener("input", function () {
-        api("svc_form", svcForm());
-      });
-    });
-    [el.svcHover, el.svcFenced, el.svcStream, el.svcAutoSubmit].forEach(
-      function (box) {
-        box.addEventListener("change", function () {
-          api("svc_detection", svcDetection());
-        });
-      }
-    );
-    // Its own bridge call, not part of the detection SET: that set is the left
-    // column's toggles read together, and this one is in the form column and
-    // about a different thing entirely (how the model edits, not how its reply
-    // is found).
-    el.svcEditByLines.addEventListener("change", function () {
-      api("svc_edit_by_lines", el.svcEditByLines.checked);
-    });
-    // The AFTER DELIVERY pair, on one call of their own: they are about what
-    // happens to the user's attention once a delivery or a harvest is over,
-    // which is neither how a reply is found nor how the model edits.
-    [el.svcSnapBack, el.svcAlertSound].forEach(function (box) {
-      box.addEventListener("change", function () {
-        api("svc_after_delivery", svcAfterDelivery());
-      });
-    });
-    // A real range input, live and ungated: it cannot express a value outside
-    // the range config.py enforces, so there is no invalid state to withhold.
-    // The readout is updated locally as well as by the repaint, so dragging
-    // reads smoothly rather than one round trip behind the thumb.
-    el.svcTolerance.addEventListener("input", function () {
-      el.svcToleranceValue.textContent = el.svcTolerance.value;
-      api("svc_tolerance", Number(el.svcTolerance.value));
-    });
-    el.svcSelect.addEventListener("change", function () {
-      api("svc_select", el.svcSelect.value);
-    });
-    el.svcAdd.addEventListener("click", function () {
-      api("svc_add");
-    });
-    el.svcReset.addEventListener("click", function () {
-      api("svc_reset");
-    });
-    el.svcDelete.addEventListener("click", function () {
-      api("svc_delete");
-    });
-    el.svcForget.addEventListener("click", function () {
-      api("svc_forget");
-    });
-    el.svcClose.addEventListener("click", function () {
-      api("svc_close");
+    el.calibrateOpen.addEventListener("click", function () {
+      api("calibrate");
     });
     // -- the SSH connect dialog's own wiring --------------------------------
     // Both text boxes send the WHOLE form on any input and NOTHING comes back:
     // the model owns the values, but repainting an input the caret is in would
-    // fight it - the service editor's `reload` contract, one dialog over.
+    // fight it - the same contract the calibration window's editor keeps.
     el.connectRemote.addEventListener("click", function () {
       api("connect_open");
     });

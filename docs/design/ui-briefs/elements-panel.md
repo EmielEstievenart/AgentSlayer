@@ -1,4 +1,18 @@
-# UI Brief: Elements Panel (F7) + `/identify` Overlay
+# UI Brief: Elements Panel + `/identify` Overlay
+
+> **Status: BUILT, in the CALIBRATION WINDOW.** Both surfaces described here
+> live in `src/agentclip/shell/gui/calibration/` — a pywebview window of its
+> own, over a `LocalUIMonitor` of its own, never over the chat GUI's controller
+> (`docs/design/ui-monitor.md` §2.6, §6.4, phase 4). Two entry points, one
+> implementation: `agentclip --calibrate` runs it standalone on the machine the
+> browser is on, and the chat GUI opens it beside itself with `F2`, the
+> titlebar's **calibrate** button or either sidebar door. It is **not** in the
+> chat GUI's own window any more — there is no F7 column and no `elements`
+> event on that window's bridge, and `/identify` opens the calibration window
+> rather than drawing from the chat one. The behaviour below is otherwise
+> unchanged and still binding; §7's "do not carry over" list applies to the
+> calibration window's page exactly as written.
+
 
 Audience: engineers building a second frontend (pywebview/HTML/JS) that must reach
 feature parity with the Textual TUI, and maintainers keeping both UIs in sync.

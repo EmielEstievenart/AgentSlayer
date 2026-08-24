@@ -10,21 +10,24 @@ AgentClip reads two kinds of files: **TOML app config** (settings) and **JSON pe
 | Project config | TOML | `<project>/.agentclip.toml` | Same tables; project overrides |
 | Global permissions | JSON | `permissions.json`, same folder as the global config | Permission rules + MCP servers |
 | Project permissions | JSON | `<project>/.agentclip/permissions.json` | Same schema; project outranks global |
-| Appearance profiles | PNG + JSON | `profiles/<service-key>/`, same folder as the global config | Captured screen templates + click points — edited via the **service editor**, not by hand |
+| Appearance profiles | PNG + JSON | `profiles/<service-key>/`, same folder as the global config | Captured screen templates + click points — edited in the **calibration window**, not by hand |
 
-> **The service editor** is the GUI's appearance-and-presets window. Two doors,
-> both the same call: the **Edit services...** button under SERVICE in the
-> sidebar, and `F2`. It is where a preset's sizes, its captured screen templates,
-> its click points and its finish signals are edited, and `Esc` closes it (it
-> refuses while a capture overlay is on screen). In a later phase it is folded
-> into a standalone **calibration window** that runs where the pixels are — see
-> `docs/design/ui-monitor.md` §2.6 and §6.4; the settings it edits do not change.
+> **The calibration window** is where everything made of pixels is edited: the
+> per-service editor (sizes, finish signals, captured templates, click points),
+> the box you draw around a chat window, and the live ELEMENTS column showing
+> what the tool is recognising right now. It is a **window of its own**, not a
+> panel — open it from the chat GUI with `F2`, the titlebar's **calibrate**
+> button, or the sidebar's **Edit services...** / **Set chat region...**, and
+> run it alone with `agentclip --calibrate` on the machine the browser is on.
+> One at a time: a second press says it is already open. While it is up the chat
+> GUI stops polling the screen, because its capture overlays land on the very
+> browser the detectors watch. See `docs/design/ui-monitor.md` §2.6 and §6.4.
 
 TOML merge order: **built-in defaults → global config.toml → project .agentclip.toml → CLI flags.** Tables merge per key; scalars *and lists* replace (a project can tighten a list, never extend it by accident). A broken file never crashes startup — problems become warnings and the default wins.
 
 **Remote sessions** (`--ssh`): the project config and *both* permission files are read from the **target machine** — the machine running your code owns its policy. The global config.toml stays local (it describes this PC: clipboard, screen, themes).
 
-In-app changes (service editor, theme pickers, saved remote targets) are persisted to the **global** config.toml.
+In-app changes (the calibration window, theme pickers, saved remote targets) are persisted to the **global** config.toml.
 
 ## config.toml reference
 
@@ -114,7 +117,7 @@ A preset describes one chat service: its paste budget and how AgentClip drives i
 | `copilot-free` | 6k | 128k | | `unknown` | 6k | 100k |
 | `claude` | 24k | 700k | | `paranoid` | 4k | 50k |
 
-Built-ins can be edited but not deleted. Fields (all editable in the service editor — **Edit services...** in the sidebar, or `F2`):
+Built-ins can be edited but not deleted. Fields (all editable in the calibration window — `F2`, the titlebar's **calibrate** button, or `agentclip --calibrate`):
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -138,7 +141,7 @@ Built-ins can be edited but not deleted. Fields (all editable in the service edi
 | `alert_repeat_seconds` | `0` | 0 = alert once; N = repeat every N seconds while still waiting |
 | `edit_by_lines` | `false` | Add `replace_lines` (edit by line range) to the catalog and teach `read_file` its `numbered` gutter. For a host that cannot echo code back verbatim — M365 Copilot rewrites lambdas, so a find/replace edit can never match there. Costs ~900 chars of bootstrap |
 
-**Debugging delivery.** When a paste lands somewhere odd, set `snap_back = false` (or untick "focus back after send" in the service editor): AgentClip stops taking the foreground back after its own auto-sends and auto-copies, so the browser keeps focus and you can watch where the clicks actually go. The beep you hear when the loop stalls and needs you is `alert_sound` ("beep when it stalls", same block) — it is off by default, and `alert_repeat_seconds` is how often it nags.
+**Debugging delivery.** When a paste lands somewhere odd, set `snap_back = false` (or untick "focus back after send" in the calibration window): AgentClip stops taking the foreground back after its own auto-sends and auto-copies, so the browser keeps focus and you can watch where the clicks actually go. The beep you hear when the loop stalls and needs you is `alert_sound` ("beep when it stalls", same block) — it is off by default, and `alert_repeat_seconds` is how often it nags.
 
 ## permissions.json — the rules
 

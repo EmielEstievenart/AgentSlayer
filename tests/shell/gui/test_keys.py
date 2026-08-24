@@ -144,7 +144,7 @@ def test_the_help_sheet_is_rendered_from_the_key_table() -> None:
 
 @pytest.mark.parametrize(
     "key",
-    ["F1", "F2", "F3", "F4", "F5", "F6", "F7", "F8", "shift+tab", "ctrl+x", "ctrl+o",
+    ["F1", "F2", "F3", "F4", "F5", "F6", "F8", "shift+tab", "ctrl+x", "ctrl+o",
      "ctrl+q", "y", "n", "a", "u", "c", "i", "r", "w", "t", "e", "l", "x"],
 )
 def test_the_table_carries_every_binding_the_brief_lists(key: str) -> None:
@@ -162,7 +162,7 @@ def test_the_table_carries_every_binding_the_brief_lists(key: str) -> None:
 def test_every_row_is_described_and_filed_under_a_section() -> None:
     sections = {"App", "Approval", "Session"}
     rows = key_entries()
-    assert len(rows) >= 24
+    assert len(rows) >= 23
     for row in rows:
         assert row["what"].strip(), row
         assert row["section"] in sections, row
@@ -413,7 +413,7 @@ def test_the_composer_owns_stages_one_to_three_in_that_order() -> None:
 def test_the_document_handler_owns_stages_four_to_seven() -> None:
     fn = APP_JS[APP_JS.index("function onDocumentKey(ev)") :]
     fn = fn[: fn.index("\n  }\n")]
-    assert [int(n) for n in re.findall(r"ESC STAGE (\d)", fn)] == [5, 5, 4, 6, 7]
+    assert [int(n) for n in re.findall(r"ESC STAGE (\d)", fn)] == [5, 4, 6, 7]
     # Stage 5 first, and it returns: a modal owns the keyboard while it is up.
     assert fn.index("ESC STAGE 5") < fn.index("ESC STAGE 4")
     # ...and the question is LAST before the no-op: a pending gate's reject box
@@ -454,15 +454,8 @@ def test_each_modal_escapes_the_way_that_modal_says_no(surface: str, expected: s
     prompt cancels with None; a confirm denies, exactly as pressing n does."""
     fn = APP_JS[APP_JS.index("function onDocumentKey(ev)") :]
     fn = fn[: fn.index("\n  }\n")]
-    branch = fn[fn.index("ESC STAGE 5, part one") :]
+    branch = fn[fn.index("ESC STAGE 5") :]
     assert expected in branch, surface
-
-
-def test_the_service_editor_is_the_layer_below_the_scrim() -> None:
-    fn = APP_JS[APP_JS.index("function onDocumentKey(ev)") :]
-    fn = fn[: fn.index("\n  }\n")]
-    assert fn.index("if (modalUp())") < fn.index("if (editorOpen)")
-    assert fn.index("if (editorOpen)") < fn.index("if (rejectOpen) {")
 
 
 def test_a_nearer_handler_stops_the_chain() -> None:

@@ -9,7 +9,7 @@ Slash commands are typed in the chat box: Enter sends, and a newline is `shift+e
 | `/help` | List all commands (aliases: `/commands`, `/?`) |
 | `/new` | Start over: click "new chat" in the browser, clear the transcript, fresh session. Works mid-turn — the running turn is aborted first |
 | `/abort` | End a **sub-agent delegation** in flight (contrast `ctrl+x`, which only cancels the tool calls running right now) |
-| `/identify` | Draw boxes where AgentClip sees the chat window's parts — calibration aid, touches nothing |
+| `/identify` | Open the calibration window, where the boxes are drawn over the real screen — calibration aid, touches nothing |
 | `/log` | Toggle the harness decision-log pane |
 | `/mcp` | List MCP servers: state, tools, errors — including entries whose config was refused (`invalid`, with the reason) |
 | `/skills` | List loaded skills grouped by the folder they came from — name, description, and a `[hidden from the model]` mark on the ones only you can reach |
@@ -53,12 +53,11 @@ exception: a printable character never fires a shortcut mid-sentence.)
 | Key | Does |
 |---|---|
 | `F1` / `?` | This help sheet (`Esc` or `F1` closes it) |
-| `F2` | Service editor — sizes, what each service *looks* like, which finish signals it may watch. The sidebar's **Edit services...** button is the same door |
+| `F2` | Open the **calibration window**: what each service *looks* like, its sizes and finish signals, where its chat window is, and what the tool is recognising right now. The titlebar's **calibrate** button and the sidebar's **Edit services...** / **Set chat region...** are the same door |
 | `F3` | Hide/show the sidebar |
 | `F4` | Appearance (theme) |
 | `F5` | ARM / DISARM the tool (same as `/armed`). Disarmed it still watches and shows everything, but never clicks, pastes or reads your clipboard |
 | `F6` | Select the next window tab — view only, it never moves what the automation drives |
-| `F7` | Hide/show ELEMENTS: the pictures the automation is recognising right now |
 | `F8` | Hide/show the harness decision log (same as `/log`) |
 | `shift+tab` | Cycle the permission mode build ↔ plan. Works before a session and mid-turn |
 | `ctrl+enter` | Send the chat box without having to be in it |
@@ -76,7 +75,7 @@ keys `y` / `n` / `a` above live here too.
 | `c` | Re-copy the last outbound payload; press `c` **twice quickly** and it is pasted into the chat as well |
 | `i` | Force-ingest the clipboard now — "the reply is on the clipboard right now" |
 | `w` | Pause/resume the clipboard watcher |
-| `r` | Re-send this service's extra instructions with the next payload (set them with `F2`) |
+| `r` | Re-send this service's extra instructions with the next payload (set them in the calibration window, `F2`) |
 | `e` | End the session / show the summary |
 | `l` | Export the whole chat log to a file (raw blocks and payloads, for debugging) |
 | `x` | Expand/collapse the last collapsed output |
@@ -85,6 +84,14 @@ The key strip along the bottom carries the ones worth remembering, and fades a
 key that cannot fire yet (a turn has to finish, a gate has to open, a session
 has to start). A key the current setup rules out entirely — `w` with no
 clipboard watcher to run — leaves the strip instead of fading.
+
+## Command line
+
+| Flag | Does |
+|---|---|
+| `--calibrate` | Open the **calibration window alone** — no session, no engine, nothing running. This is what you launch on the machine the browser is on |
+| `--ssh <target>` | Run this session's tools, files and skills on another machine (`user@host`, an ssh-config alias, or a pasted `ssh …` command) |
+| `--tui` | The deprecated Textual shell. Frozen — no new features land there |
 
 **Inside the chat box:**
 
@@ -99,6 +106,6 @@ ever lost to a stray press:
 2. text in the box → clear it (`Ctrl+Z` restores it);
 3. empty box → blur it, which is what makes the single-key shortcuts reachable;
 4. the reject-reason box is open but has no caret → close it without rejecting;
-5. a modal, or the service editor, is up → close that (the editor may refuse while a capture overlay is on screen);
+5. a modal is up → close that;
 6. an `ask_user` question is pending → park it (`■ QUESTION PARKED`);
 7. nothing left to cancel → nothing happens.

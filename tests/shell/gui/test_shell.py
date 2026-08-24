@@ -367,13 +367,13 @@ def test_the_screen_reader_takes_the_first_screen() -> None:
 
 def test_the_stylesheet_reshapes_itself_for_a_narrow_window() -> None:
     """The minimum above is only honest if the page can be drawn at it: below
-    the breakpoint the side columns must FLOAT over the chat rather than go on
-    squeezing it, and the wide dialogs must stop being multi-column."""
+    the breakpoint the sidebar must FLOAT over the chat rather than go on
+    squeezing it, and the connect dialog must stop being multi-column."""
     css = asset_text("app.css")
-    for breakpoint in ("640px", "860px", "560px"):
+    for breakpoint in ("640px", "560px"):
         assert f"@media (max-width: {breakpoint})" in css
     narrow = css.split("@media (max-width: 640px)", 1)[1].split("@media", 1)[0]
-    assert ".sidebar,\n  .elements {" in narrow
+    assert ".sidebar {" in narrow
     assert "position: absolute;" in narrow
     # And above the breakpoint they give ground instead of holding a number.
     assert "width: clamp(220px, 28vw, 300px);" in css

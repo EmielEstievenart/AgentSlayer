@@ -12,6 +12,12 @@ provider is the manual one (no OS access at all) and the bridge is drained by
 the calling thread on demand, so every assertion is about what the page WOULD
 have been told and in what order.
 
+The second WINDOW is faked too, and by the same trick: ``GuiView`` reaches
+pywebview through one injected callable (``open_calibration``), so a test can
+press F2, read back the ``CalibrationRunner`` the view built and fire the close
+hook, with no toolkit imported and nothing on screen. The window's own surface
+is pinned one directory down, in ``tests/shell/gui/calibration/``.
+
 The machine is faked the same way. Since docs/design/ui-monitor.md phase 6.1
 everything on the far side of the screen - the poll thread, the detector, the
 mouse and the clipboard watcher - is one object the view is handed
@@ -26,7 +32,7 @@ start unless a test asks for a backend that can be polled.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +43,7 @@ from agentclip.config import Config, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.shell.gui.bridge import Bridge, payload_of
+from agentclip.shell.gui.calibration import CalibrationRunner
 from agentclip.shell.gui.view import GuiView
 
 
@@ -84,6 +91,13 @@ class Harness:
         # Every coroutine ``spawn``/the watcher handed to the (absent) loop.
         self.scheduled: list[str] = []
         self.exits = 0
+        # Every calibration window the view asked for, and the close hook it
+        # handed over with each. No toolkit is imported and no second window is
+        # created: what is under test up here is the DOOR (one at a time, the
+        # suspend bracket, the answers coming back), and the window itself has
+        # a suite of its own in tests/shell/gui/calibration/.
+        self.calibrations: list[CalibrationRunner] = []
+        self.closers: list[Callable[[], None]] = []
 
     def flush(self) -> Recorder:
         """Drain the queue on this thread and hand the recorder back.
@@ -101,6 +115,16 @@ class Harness:
 
     def on_exit(self) -> None:
         self.exits += 1
+
+    def open_calibration(
+        self, runner: CalibrationRunner, on_closed: Callable[[], None]
+    ) -> None:
+        self.calibrations.append(runner)
+        self.closers.append(on_closed)
+
+    def close_calibration(self) -> None:
+        """What pywebview's ``closed`` event does when the user shuts it."""
+        self.closers[-1]()
 
 
 @pytest.fixture
@@ -136,6 +160,9 @@ def harness(project: Path, app_config: Config, tmp_path: Path) -> Harness:
         monitor=monitor,
         schedule=lambda coro: holder["h"].schedule(coro),
         on_exit=lambda: holder["h"].on_exit(),
+        open_calibration=lambda runner, on_closed: holder["h"].open_calibration(
+            runner, on_closed
+        ),
     )
     holder["h"] = Harness(view, bridge, recorder, monitor)
     return holder["h"]

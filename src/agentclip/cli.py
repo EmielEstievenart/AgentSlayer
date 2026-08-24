@@ -405,6 +405,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="deprecated no-op: the GUI shell is the default (see --tui)",
     )
+    # The calibration window on its own (docs/design/ui-monitor.md 6.4): the
+    # service editor, the ELEMENTS column, the chat-region picker and
+    # /identify, over this machine's own screen. No engine, no session, no
+    # transcript - which is the whole point, because in split mode this is what
+    # runs on the VM the browser is on while the chat GUI stays on the
+    # operator's desk.
+    parser.add_argument(
+        "--calibrate",
+        action="store_true",
+        help="open the calibration window alone (no session, no engine) and exit when it closes",
+    )
     parser.add_argument(
         "--list-matchers",
         action="store_true",
@@ -502,6 +513,39 @@ def _gui_smoke() -> int:
         renderer = "missing" if webview2_missing() else "edgechromium"
     print(f"gui-smoke: ok renderer={renderer}")
     return 0
+
+
+def _calibrate(args: argparse.Namespace) -> int:
+    """``--calibrate``: the calibration window, alone (ui-monitor.md §6.4).
+
+    Deliberately NOT a ``Launch``. A launch is the answer to "where does the
+    session run", and this window runs no session: what it needs is a ``Config``
+    (which services exist and how each is recognised) and a clipboard backend
+    for the monitor it opens - and even that is only because ``LocalUIMonitor``
+    takes one, since nothing here ever starts the watcher. Everything else
+    ``main`` builds below this point - the engine factory, the session tree and
+    its pruning, the MCP runtime, an SSH dial - is about running a task, and
+    building any of it here would be paying for a machine this window never
+    touches.
+
+    The project root is still resolved and still used, for one reason: config is
+    layered per project (``load_config``), so which project you are in decides
+    which service presets you are editing.
+
+    The import is inside the function for ``run_gui``'s reason: pywebview is the
+    optional ``gui`` extra and importing ``cli`` must not pay for it.
+    """
+    from agentclip.shell.gui.calibration.window import run_calibration
+
+    try:
+        project_root = Path(args.project).resolve(strict=True)
+    except OSError as exc:
+        print(f"agentclip: cannot resolve --project {args.project!r}: {exc}", file=sys.stderr)
+        return 2
+    config = load_config(project_root, service_override=args.service)
+    for warning in config.warnings:
+        print(f"agentclip: {warning}", file=sys.stderr)
+    return run_calibration(config, provider=select_provider(config.clipboard.provider))
 
 
 @dataclass(frozen=True, slots=True)
@@ -696,6 +740,15 @@ def main(argv: list[str] | None = None) -> int:
         return _list_matchers()
     if args.gui_smoke:
         return _gui_smoke()
+    # ABOVE the launch, deliberately, and not below the shell fork: the
+    # calibration window needs a Config and a clipboard backend and nothing
+    # else. No engine factory is built, no session tree is created or pruned,
+    # no MCP runtime is spawned and no connection is dialled - every one of
+    # those is about running a TASK, and this window runs none
+    # (docs/design/ui-monitor.md 6.4). ``--ssh`` with it is meaningless for the
+    # same reason: calibration is about THIS machine's screen.
+    if args.calibrate:
+        return _calibrate(args)
 
     # WHICH shell, in one place: the GUI unless the user asked for the TUI by
     # name (docs/design/ui-monitor.md §2.12 - the TUI is deprecated and will be

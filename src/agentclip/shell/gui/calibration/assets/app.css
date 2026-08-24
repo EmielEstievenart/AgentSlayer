@@ -1,0 +1,706 @@
+/* The CALIBRATION window's chrome (docs/design/ui-monitor.md §6.4).
+
+   Its own bundle, not a second entry point into the chat window's: the two
+   windows share nothing at runtime (separate pywebview windows, separate
+   js_api objects, separate bridges), and a stylesheet shared across a file://
+   boundary would be one <link> that has to keep working for two page shapes.
+   What IS shared is the vocabulary - the `.svc-*` and `.el-*` class names are
+   the chat bundle's, verbatim, so the markup and the JS that renders it lifted
+   across as-is and the two surfaces cannot drift apart visually while they
+   both exist (phase 4B deletes the chat window's copy).
+
+   One palette. The chat window wears a theme the user picks (`[gui] theme`);
+   this window has no settings surface and no `settings` event, so it wears the
+   dark ground the window is created with (window.py:WINDOW_BACKGROUND) and
+   nothing here decides anything. Every colour is still a variable, so the day
+   this window grows a theme picker is a day of adding blocks, not of hunting
+   hexes. */
+
+:root {
+  --bg: #14161a;
+  --bg-sunken: #101215; /* under the shell: the status bar */
+  --bg-raised: #1b1e24;
+  --line: #2a2f38;
+  --text: #dfe3ea;
+  --text-dim: #8b93a1;
+  --accent: #6ea8fe;
+  --ok: #6fce8f;
+  --warn: #e3b341;
+  --warn-deep: #b98c22; /* the flash's off beat */
+  --err: #f0736a;
+  --magenta: #d98fe0; /* the SUB-AGENT status segment */
+  /* What text on a solid --warn/--err/--accent field is coloured. Not "black":
+     it flips with the theme, which is the whole reason it is a name. */
+  --on-solid: #14161a;
+  --scrim: rgba(0, 0, 0, 0.55);
+  --scrim-deep: rgba(0, 0, 0, 0.6);
+  --shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  --radius: 8px;
+  --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+}
+
+
+/* -- the frame -------------------------------------------------------------
+   Three bands: a title strip that says which window is being calibrated, the
+   working area, and the footer the editor's buttons live in. The working area
+   is the service editor's three lanes plus the ELEMENTS column as a fourth,
+   fixed-width one - the same column the chat window hides behind F7, here
+   permanently beside the thing it is a picture of, which is the whole reason
+   this window exists (ui-monitor.md §2.6). */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+
+/* Selection is ON for the window (window.py's `text_select=True`), so anything
+   the user READS can be dragged over and copied - a service key, a status line,
+   a diff percentage. The list below is the exception, and every entry earns it
+   the same way: it is a CLICK TARGET, so a drag across it is a mis-aimed click
+   rather than an attempt to keep the words. */
+button,
+.calib-tab,
+.svc-check {
+  user-select: none;
+}
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 12px 14px;
+}
+
+.calib-head {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+
+.calib-title {
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+/* Which window is being calibrated. Two buttons rather than a <select>: there
+   are exactly two and there always will be (MASTER and SUB-AGENT are the two
+   AgentSlots), and a pair of buttons says which one is current without being
+   opened. */
+.calib-tabs {
+  display: flex;
+  gap: 6px;
+}
+
+.calib-tab {
+  padding: 2px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.calib-tab.on {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--on-solid);
+}
+
+.calib-region {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.spacer {
+  flex: 1;
+}
+
+/* The two fullscreen child processes get their buttons up here, away from the
+   editor's own footer: neither of them is an edit, and both of them take the
+   screen away for as long as the user takes to answer. */
+.calib-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.calib-actions button {
+  padding: 3px 10px;
+  font-size: 12px;
+}
+
+/* The working area: the editor's lanes, then the crops. */
+.calib-main {
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+  flex: 1;
+  padding-top: 10px;
+}
+
+.calib-editor {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+/* The editor's shape, minus the modal it is a modal in over in the chat window:
+   here it IS the window, so there is no scrim, no dialog box and no centring -
+   the three lanes are the page. */
+.svc-body {
+  display: grid;
+  grid-template-columns: minmax(200px, 260px) minmax(220px, 1fr) minmax(260px, 380px);
+  gap: 18px;
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+}
+
+textarea:disabled,
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+button,
+input[type="text"] {
+  padding: 8px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+
+button:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.side-title {
+  margin: 14px 0 4px;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.side-status {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+/* -- toasts --------------------------------------------------------------- */
+
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 420px;
+  z-index: 20;
+}
+
+.toast {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow);
+}
+
+.toast.warning {
+  border-left-color: var(--warn);
+}
+
+.toast.error {
+  border-left-color: var(--err);
+}
+
+/* -- modals --------------------------------------------------------------- */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--scrim);
+  z-index: 30;
+}
+
+.modal {
+  width: min(720px, 90vw);
+  max-height: 82vh;
+  overflow: auto;
+  padding: 18px 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-raised);
+}
+
+.modal-title {
+  margin-bottom: 10px;
+  font-weight: 700;
+}
+
+.modal-body input[type="text"] {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.modal-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+/* The summary's keys line. The buttons above are this shell's real affordance;
+   this says the single letters work too. */
+.modal-hint {
+  margin-top: 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+
+/* -- ELEMENTS column -------------------------------------------------------
+   The fourth lane, and the surface this window exists to be looked at against:
+   one row per appearance the detector can recognise, showing the pixels it last
+   matched (elements-panel.md 2.1). Its own lane rather than a panel behind a
+   key, because here it is the FEEDBACK on the capture the user just took, not a
+   debugging aside. Scrolling, because seven rows of label-over-picture is
+   taller than most windows. */
+
+.elements {
+  flex: none;
+  /* The thumbnails scale with the row, so a narrower column loses detail rather
+     than content. */
+  width: clamp(160px, 20vw, 210px);
+  overflow-y: auto;
+  padding: 14px 14px 18px;
+  border-left: 1px solid var(--line);
+  background: var(--bg-raised);
+  font-size: 12.5px;
+}
+
+.elements > .side-title:first-child {
+  margin-top: 0;
+}
+
+.el-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* Every row is the same height whether or not it holds a picture, so a match
+   landing cannot make the column dance (elements-panel.md 2.2). */
+.el-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.el-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.el-name {
+  color: var(--text);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.el-verdict {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.el-row.found .el-verdict {
+  color: var(--ok);
+}
+
+/* "Searched and not there" is a live verdict, not an absence: it reads warm,
+   while "nothing has ever been searched for this" stays dim. */
+.el-row.missing .el-verdict {
+  color: var(--warn);
+}
+
+/* The crop box: a fixed slot the picture is fitted INTO, so an icon and a
+   848x5 chat-box strip both land in the same row height without either being
+   distorted. object-fit keeps the crop's own aspect ratio and pixelated
+   rendering keeps a doubled 12px icon the blocky thing the detector matched
+   rather than a smoothed guess at one (brief 7: the intent carries over, the
+   terminal cell arithmetic does not). */
+.el-crop {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 36px;
+}
+
+.el-crop img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  image-rendering: pixelated;
+}
+
+
+/* -- the service editor ----------------------------------------------------
+   The whole per-service profile, and here it is the PAGE rather than a modal
+   over one - the layout block above owns the three lanes for that reason. What
+   is below is unchanged from the chat window's copy: fixed lanes for the
+   settings and the appearance cards, one flexible column for the editable form,
+   and a footer whose width no column can squeeze
+   (ui-briefs/service-editor.md §7). The confirm scrim above it is still one
+   z-index higher, because two of these actions ("Forget appearance" and the
+   discard-the-pending-edit close) open a confirm over the page. */
+
+
+.svc-col {
+  min-width: 0;
+}
+
+.svc-col > .side-title:first-child {
+  margin-top: 0;
+}
+
+.svc-col select,
+.svc-col input[type="text"],
+.svc-col textarea {
+  width: 100%;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+}
+
+.svc-col textarea {
+  resize: vertical;
+}
+
+.svc-col input:disabled,
+.svc-col select:disabled,
+.svc-col textarea:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* Checkboxes and radios read as one list of sentences: the label carries the
+   row, and a disabled one is dimmed rather than removed so the column cannot
+   reflow while a new service is being filled in (brief §3.5). */
+.svc-check {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 0;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.svc-check input {
+  margin: 0;
+  flex: none;
+}
+
+.svc-check.off {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.svc-slider {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.svc-slider input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+
+.svc-slider-value {
+  min-width: 2.5em;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: right;
+}
+
+/* Both inline readouts are advisory, not failures: the matcher one says a
+   saved choice will silently fall back, the signal one says a ticked detector
+   has no appearance to run against. Empty most of the time, and collapsed when
+   it is (no reserved band that would make the column jump). */
+.svc-warn:empty {
+  display: none;
+}
+
+.svc-warn {
+  margin: 4px 0 2px;
+  color: var(--warn);
+  font-size: 11.5px;
+}
+
+.svc-error:empty {
+  display: none;
+}
+
+.svc-error {
+  margin-top: 8px;
+  color: var(--err);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+/* Every appearance is a CARD, not a row. Four things belong to one kind - a
+   picture, the arrows that walk its stack, a coordinate pair and two buttons -
+   and side by side they need some 350px of unshrinkable width, which is more
+   than this lane has at any window size: the buttons fell off the end and the
+   label was squeezed to nothing. Stacked, the card is only as wide as its
+   widest line - the click-point pair - which is about half a lane.
+
+   The cards then FLOW into as many columns as the lane can hold, so seven of
+   them are never a seven-deep tower: two columns in the lane below, more when
+   the modal stacks its lanes and this one gets the full width. */
+.svc-kinds {
+  display: grid;
+  /* 165px is the click-point line - the widest of the four - plus the card's
+     own padding. A column narrower than its content is what the old row was. */
+  grid-template-columns: repeat(auto-fill, minmax(165px, 1fr));
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 0;
+  list-style: none;
+}
+
+.svc-kind {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* The card's heading: which appearance this is, and what is on file for it. */
+.svc-kind-text {
+  min-width: 0;
+}
+
+.svc-kind-name {
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
+.svc-kind-status {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+/* The crop box and the two arrows that walk its stack, as one unit: the arrows
+   are drawn (disabled) even for a kind with one image, so a second capture
+   landing cannot reflow the column under the pointer. */
+.svc-variants {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.svc-arrow {
+  flex: none;
+  padding: 3px 5px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+/* The crop box is drawn whether or not it holds a picture, so a capture
+   landing cannot walk every card below it down the lane. It takes whatever
+   width the card has left over between the arrows; the height is fixed, which
+   is what keeps a row of cards level. */
+.svc-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  overflow: hidden;
+}
+
+.svc-thumb img {
+  max-width: 100%;
+  max-height: 100%;
+  image-rendering: pixelated;
+}
+
+/* Where inside the matched picture the click goes, x then y, as percentages.
+   One labelled line under the picture: the pair has to read as ONE setting
+   about the card it sits in, and the × between them is what says the two
+   numbers are coordinates rather than two independent knobs. */
+.svc-click {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* The one thing on the line that may give. It is the same label on every card,
+   so the boxes line up down a column of them with nothing spacing them. */
+.svc-click-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.svc-click input {
+  flex: none;
+  width: 3.6em;
+  padding: 2px 4px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: right;
+}
+
+/* A number box comes with a pair of spin buttons the engine draws INSIDE it on
+   hover; in a box three characters wide they land on top of the digits. The
+   arrow keys still step the value, which is the only stepping this pair was
+   ever going to get. */
+.svc-click input::-webkit-inner-spin-button,
+.svc-click input::-webkit-outer-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
+/* Pushed to the bottom of the card so the buttons of a row of cards line up
+   even where one kind's name wrapped onto a second line. */
+.svc-kind-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
+}
+
+.svc-kind-actions button {
+  flex: 1;
+  min-width: 0;
+  padding: 3px 6px;
+  font-size: 11.5px;
+}
+
+.svc-footer {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+
+.svc-footer .hint {
+  color: var(--text-dim);
+  font-size: 11.5px;
+}
+
+.calib-editor button.danger {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.calib-editor button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+
+/* == narrow windows =======================================================
+   The window's minimum is 420x320 (window.py), because it has to be able to sit
+   beside the browser it is calibrating on whatever panel that browser is on.
+   These are the places where squeezing stops working and the layout has to
+   CHANGE SHAPE instead. */
+
+/* Under this width the crops cannot take a lane of their own and leave the form
+   usable, so the column floats over the editor instead - still shown and hidden
+   by the same button, still only [hidden] to app.js. */
+@media (max-width: 700px) {
+  .calib-main {
+    position: relative;
+  }
+
+  .elements {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: min(210px, 62vw);
+    z-index: 12;
+    box-shadow: var(--shadow);
+  }
+
+  .svc-footer {
+    flex-wrap: wrap;
+  }
+}
+
+/* The editor's three lanes need roughly 700px between them before the middle
+   one stops being a form and starts being a gutter. Below that they stack in
+   document order - settings, form, appearance - and .svc-body's own scroll
+   carries the height. */
+@media (max-width: 860px) {
+  .svc-body {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

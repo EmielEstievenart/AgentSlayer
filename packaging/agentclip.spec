@@ -92,6 +92,21 @@ gui_datas = [
     if os.path.isfile(os.path.join(GUI_ASSETS, name))
 ]
 
+# The CALIBRATION window's page (docs/design/ui-monitor.md 6.4). A SECOND bundle
+# rather than more files in the one above: it is a second pywebview window with
+# its own file:// URL, its own bridge and its own js_api, and
+# shell/gui/calibration/window.py resolves it through
+# ``files("agentclip.shell.gui.calibration") / "assets"`` - so the destination
+# has to be that package's own relative path, exactly as the chat page's is.
+# Without this, `agentclip --calibrate` in a frozen build opens a window on
+# nothing (and neither shell would notice until somebody pressed the button).
+CALIB_ASSETS = os.path.join(SRC, "agentclip", "shell", "gui", "calibration", "assets")
+gui_datas += [
+    (os.path.join(CALIB_ASSETS, name), "agentclip/shell/gui/calibration/assets")
+    for name in sorted(os.listdir(CALIB_ASSETS))
+    if os.path.isfile(os.path.join(CALIB_ASSETS, name))
+]
+
 # The USER GUIDE - docs/commands.md and docs/configuration.md, which the GUI's
 # "docs" button renders (shell/gui/docs.py). The same argument as the page
 # assets above, one package up, with one wrinkle of its own: these files live at

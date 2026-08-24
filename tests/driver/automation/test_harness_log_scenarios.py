@@ -27,16 +27,29 @@ it. Anything else - a line vanishing, a new line appearing between two others,
 a state entry losing its reason - is the regression §4.8 exists to catch.
 
 Every scenario also pins the ``LoopState`` sequence the view was painted with,
-because the rail and the log are one act (``set_loop_state`` writes both under
-the same lock) and a refactor that keeps one while dropping the other is
-exactly the half-done inversion phase 2 risks. And ``on_fire`` is a recorder in
-every scenario, so the one-shot fire of §4.1 is pinned alongside: exactly one
-fire on every path that reaches the harvest, and none on the paths that do not.
+because the rail and the log are one act (the narration writes both through one
+door) and a refactor that keeps one while dropping the other is exactly the
+half-done inversion phase 2 risks. And ``on_fire`` is a recorder in every
+scenario, so the one-shot fire of §4.1 is pinned alongside: exactly one fire on
+every path that reaches the harvest, and none on the paths that do not.
+
+**What phase 2 changed here is the DRIVING, and nothing else.** The literals
+below are the same literals, taken at ``c341a82``. What moved is who consumes a
+tick: there is no push into the controller any more, so every scenario starts
+the loop task and every reading is fed into a recipe that is parked on
+``observe()`` (``conftest.feed_probe``, which is why these are ``async`` now).
+The harvest's own recipe is stubbed for the length of each test (``no_harvest``):
+a scenario that pins how the loop REACHES the auto-copy must not then drive a
+mouse across an imaginary screen, which is exactly what the old
+``run_auto_copy_flow(flow=...)`` seam was for.
 """
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass, field
+
+import pytest
 
 from agentclip.driver.automation.controller import AutomationController
 from agentclip.driver.automation.finish import (
@@ -50,7 +63,7 @@ from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
-from .conftest import FakeAutomationView, feed_probe
+from .conftest import FakeAutomationView, feed_probe, settle
 
 # The two appearances any of this turns on: a copy button is what a finish has
 # to click, a send button is what makes a gate exist at all.
@@ -70,11 +83,12 @@ PASTE_MISSED = "the chat box was focused but the synthetic Ctrl+V did not go thr
 class Scenario:
     """One controller, its view, and everything it fired at.
 
-    Only synchronous mutators are ever called on it: ``feed_probe`` (the seam
-    the monitor's tick push sits behind) plus the handful of bookkeeping calls a
-    shell makes from the UI thread. Nothing here touches the OS-acting
-    coroutines, so a scenario is a few microseconds of pure state and reproduces
-    exactly.
+    Two kinds of move are made on it: readings (``feed_probe``, which parks until
+    the loop is waiting for one and then hands it over) and the handful of
+    bookkeeping calls a shell makes on its own - a paste that landed, a gate that
+    opened, a flow that ended. Nothing here touches a real screen: the only recipe
+    that would is stubbed out, so a scenario is a few microseconds of pure state
+    and reproduces exactly.
     """
 
     controller: AutomationController
@@ -82,22 +96,28 @@ class Scenario:
     view: FakeAutomationView
     fires: list[None] = field(default_factory=list)
 
-    # -- the probes, as the poller pushes them --------------------------------
+    async def start(self) -> None:
+        """Run the loop. Everything below is a tick into a parked recipe."""
+        self.controller.start_loop()
+        _RUNNING.append(self.controller)
+        await settle(2)
 
-    def busy(self, state: BusyState) -> None:
+    # -- the probes, as the monitor pushes them -------------------------------
+
+    async def busy(self, state: BusyState) -> None:
         """One busy-appearance probe, its per-frame evidence honest to the
         verdict (the disagreement is ``test_finish_evaluation``'s subject)."""
-        feed_probe(self.monitor, "busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
+        await feed_probe(self.monitor, "busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
 
-    def stale(self, state: StaleState, *, diff: float = 0.001) -> None:
-        feed_probe(self.monitor, "stale", StaleProbe(state, diff, 0))
+    async def stale(self, state: StaleState, *, diff: float = 0.001) -> None:
+        await feed_probe(self.monitor, "stale", StaleProbe(state, diff, 0))
 
-    def send_ready(self, found: bool | None) -> None:
-        feed_probe(self.monitor, "send_ready", found)
+    async def send_ready(self, found: bool | None) -> None:
+        await feed_probe(self.monitor, "send_ready", found)
 
-    def big_delta(self) -> None:
+    async def big_delta(self) -> None:
         """One tick of the sustained large-delta run the stale detector arms on."""
-        self.stale(StaleState.CHANGING, diff=SEND_ARM_MIN_DIFF)
+        await self.stale(StaleState.CHANGING, diff=SEND_ARM_MIN_DIFF)
 
     # -- the shell's own moves ------------------------------------------------
 
@@ -130,6 +150,22 @@ class Scenario:
         assert [entry.text for entry in self.view.log_entries] == self.lines
 
 
+# Every controller whose loop this module started, so a parked recipe cannot
+# outlive the test that parked it.
+_RUNNING: list[AutomationController] = []
+
+# The harvest is stubbed for every scenario in this file (see the module
+# docstring), and the loops are stopped afterwards.
+pytestmark = pytest.mark.usefixtures("no_harvest")
+
+
+@pytest.fixture(autouse=True)
+def _stop_loops() -> Iterator[None]:
+    yield
+    while _RUNNING:
+        _RUNNING.pop().stop_loop()
+
+
 def scenario(
     view: FakeAutomationView,
     *,
@@ -152,15 +188,16 @@ def scenario(
 # -- the two roads to an arm ---------------------------------------------------
 
 
-def test_an_icon_finish_narrates_paste_arm_and_one_fire(view: FakeAutomationView) -> None:
+async def test_an_icon_finish_narrates_paste_arm_and_one_fire(view: FakeAutomationView) -> None:
     """The commonest turn there is: pasted, the reasoning icon shows up, it
     goes away for two ticks, the auto-copy flow fires once."""
     s = scenario(view)
+    await s.start()
 
     s.paste_landed()
-    s.busy(BusyState.MATCH)
-    s.busy(BusyState.CHANGED)
-    s.busy(BusyState.CHANGED)
+    await s.busy(BusyState.MATCH)
+    await s.busy(BusyState.CHANGED)
+    await s.busy(BusyState.CHANGED)
     s.controller.end_flow()
 
     assert s.lines == [
@@ -181,7 +218,7 @@ def test_an_icon_finish_narrates_paste_arm_and_one_fire(view: FakeAutomationView
     s.assert_mirrored()
 
 
-def test_a_stale_only_service_narrates_the_streak_that_armed_it(
+async def test_a_stale_only_service_narrates_the_streak_that_armed_it(
     view: FakeAutomationView,
 ) -> None:
     """No icon anywhere: the arm is an INFERENCE from a sustained large delta,
@@ -189,12 +226,13 @@ def test_a_stale_only_service_narrates_the_streak_that_armed_it(
     the streak completes write nothing at all - a run that has not been
     sustained yet is not a decision."""
     s = scenario(view, detectors=("stale",))
+    await s.start()
 
     s.paste_landed()
     for _ in range(SEND_ARM_TICKS):
-        s.big_delta()
-    s.stale(StaleState.STALE)
-    s.stale(StaleState.STALE)
+        await s.big_delta()
+    await s.stale(StaleState.STALE)
+    await s.stale(StaleState.STALE)
     s.controller.end_flow()
 
     assert s.lines == [
@@ -218,20 +256,21 @@ def test_a_stale_only_service_narrates_the_streak_that_armed_it(
 # -- the ready-to-send gate, both ways out -------------------------------------
 
 
-def test_the_send_gate_narrates_hold_then_sighting_then_release(
+async def test_the_send_gate_narrates_hold_then_sighting_then_release(
     view: FakeAutomationView,
 ) -> None:
     """A service with a captured send button: the gate holds from the paste,
     the button is sighted, its disappearance is the user's Enter, and only then
     does finish detection run."""
     s = scenario(view, captures=(COPY, SEND_READY))
+    await s.start()
 
     s.paste_landed()
-    s.send_ready(True)
-    s.send_ready(False)
-    s.busy(BusyState.MATCH)
-    s.busy(BusyState.CHANGED)
-    s.busy(BusyState.CHANGED)
+    await s.send_ready(True)
+    await s.send_ready(False)
+    await s.busy(BusyState.MATCH)
+    await s.busy(BusyState.CHANGED)
+    await s.busy(BusyState.CHANGED)
     s.controller.end_flow()
 
     assert s.lines == [
@@ -258,7 +297,7 @@ def test_the_send_gate_narrates_hold_then_sighting_then_release(
     s.assert_mirrored()
 
 
-def test_a_send_button_that_never_appears_times_the_gate_out_and_says_so(
+async def test_a_send_button_that_never_appears_times_the_gate_out_and_says_so(
     view: FakeAutomationView,
 ) -> None:
     """The gate may delay a session; it may never deadlock one. The timeout
@@ -266,13 +305,14 @@ def test_a_send_button_that_never_appears_times_the_gate_out_and_says_so(
     dismissed the toast can still find out what happened - and the turn then
     finishes exactly as an ungated one would."""
     s = scenario(view, captures=(COPY, SEND_READY))
+    await s.start()
 
     s.paste_landed()
     for _ in range(SEND_GATE_TIMEOUT_TICKS):
-        s.send_ready(False)
-    s.busy(BusyState.MATCH)
-    s.busy(BusyState.CHANGED)
-    s.busy(BusyState.CHANGED)
+        await s.send_ready(False)
+    await s.busy(BusyState.MATCH)
+    await s.busy(BusyState.CHANGED)
+    await s.busy(BusyState.CHANGED)
     s.controller.end_flow()
 
     assert s.lines == [
@@ -300,7 +340,7 @@ def test_a_send_button_that_never_appears_times_the_gate_out_and_says_so(
 # -- the ghost filter, in narration form ---------------------------------------
 
 
-def test_ticks_from_a_dead_poller_run_narrate_nothing_at_all(
+async def test_ticks_from_a_dead_poller_run_narrate_nothing_at_all(
     view: FakeAutomationView,
 ) -> None:
     """§4.2, read off the log: a cancelled run's in-flight probes are about a
@@ -309,18 +349,19 @@ def test_ticks_from_a_dead_poller_run_narrate_nothing_at_all(
     IDENTICAL to the clean icon finish above - the ghosts left no trace, and
     the fire that follows is still exactly one."""
     s = scenario(view)
+    await s.start()
 
     s.paste_landed()
     dead = s.controller.detector_generation
     s.monitor.retarget()
     # Everything a live run would have said, stamped with the run that ended.
-    feed_probe(s.monitor, "busy", BusyProbe(BusyState.MATCH, 0.2, True), dead)
-    feed_probe(s.monitor, "busy", BusyProbe(BusyState.CHANGED, 0.2, False), dead)
-    feed_probe(s.monitor, "send_ready", True, dead)
+    await feed_probe(s.monitor, "busy", BusyProbe(BusyState.MATCH, 0.2, True), dead)
+    await feed_probe(s.monitor, "busy", BusyProbe(BusyState.CHANGED, 0.2, False), dead)
+    await feed_probe(s.monitor, "send_ready", True, dead)
 
-    s.busy(BusyState.MATCH)
-    s.busy(BusyState.CHANGED)
-    s.busy(BusyState.CHANGED)
+    await s.busy(BusyState.MATCH)
+    await s.busy(BusyState.CHANGED)
+    await s.busy(BusyState.CHANGED)
     s.controller.end_flow()
 
     assert s.lines == [
@@ -344,7 +385,7 @@ def test_ticks_from_a_dead_poller_run_narrate_nothing_at_all(
 # -- the longest road, and the one that never fires ----------------------------
 
 
-def test_a_manual_insert_proved_by_the_send_button_ends_in_manual_copy(
+async def test_a_manual_insert_proved_by_the_send_button_ends_in_manual_copy(
     view: FakeAutomationView,
 ) -> None:
     """The full nine-line story, and the one path here that must NOT fire.
@@ -357,13 +398,14 @@ def test_a_manual_insert_proved_by_the_send_button_ends_in_manual_copy(
     draws one box for all of them: the log is where they are told apart.
     """
     s = scenario(view, captures=(SEND_READY,))
+    await s.start()
 
     s.paste_missed()
-    s.send_ready(True)
-    s.send_ready(False)
-    s.busy(BusyState.MATCH)
-    s.busy(BusyState.CHANGED)
-    s.busy(BusyState.CHANGED)
+    await s.send_ready(True)
+    await s.send_ready(False)
+    await s.busy(BusyState.MATCH)
+    await s.busy(BusyState.CHANGED)
+    await s.busy(BusyState.CHANGED)
 
     assert s.lines == [
         "IDLE → AUTO_INSERT — an outbound payload is ready to go into the chat box",

@@ -53,41 +53,18 @@ ATTENTION_STATES: frozenset[LoopState] = frozenset(
     {LoopState.MANUAL_INSERT, LoopState.MANUAL_COPY, LoopState.DISCONNECTED}
 )
 
-# The one destination that is not forward motion, and the one exception to the
-# header's rule. Losing the monitor link is not a step the loop takes - it is
-# something that happens TO it, at any point, from any state (§2.9), so every
-# row below carries it. It earns the exception ``IDLE`` is denied because it is
-# genuinely reachable from everywhere: a rail that drew it dim while the link
-# was about to drop would be dimming the one move the loop can always make.
-_ANY: frozenset[LoopState] = frozenset({LoopState.DISCONNECTED})
+# ``LOOP_TRANSITIONS`` is DERIVED as of phase 2 (docs/design/ui-monitor.md §2.4):
+# the authority is ``recipes/transitions.py``'s ``(state, outcome) -> state``
+# table, and this is the legal-next picture the sidebar's STATE rail draws its
+# brightness from - the same name, the same type, one fewer thing to keep in
+# step. The two moves that are not a recipe's outcome (losing the monitor link,
+# which happens TO the loop from any state, and the shell's own "the user copied
+# it" / "the turn is over") are folded in over there, beside the table that
+# earns them.
+#
+# Imported at the BOTTOM of this module on purpose: ``transitions`` needs
+# ``LoopState``, which is defined above, so by the time this line runs the name
+# it wants is already bound and the cycle costs nothing.
+from agentclip.driver.automation.recipes.transitions import legal_next  # noqa: E402
 
-LOOP_TRANSITIONS: dict[LoopState, frozenset[LoopState]] = {
-    # A chat message became an outbound payload (``copy_outbound``).
-    LoopState.IDLE: frozenset({LoopState.AUTO_INSERT}) | _ANY,
-    # The focus click + synthetic Ctrl+V either landed (wait for the send) or
-    # did not (the user is asked to paste).
-    LoopState.AUTO_INSERT: frozenset({LoopState.WAIT_SEND, LoopState.MANUAL_INSERT}) | _ANY,
-    # A manual paste is proven by the ready-to-send button appearing - or, for
-    # a service without that capture, only by the generation it leads to.
-    LoopState.MANUAL_INSERT: frozenset({LoopState.WAIT_SEND, LoopState.WAIT_GENERATE}) | _ANY,
-    # The send button going away, or a busy icon / sustained streaming delta,
-    # is the user's Enter.
-    LoopState.WAIT_SEND: frozenset({LoopState.WAIT_GENERATE}) | _ANY,
-    # The finish detectors agreeing "stopped" fires the auto-copy flow - unless
-    # there is no captured copy button, in which case the harvest is the user's.
-    LoopState.WAIT_GENERATE: frozenset({LoopState.AUTO_COPY, LoopState.MANUAL_COPY}) | _ANY,
-    # The flow's click puts the reply on the clipboard; any failure (capture,
-    # search, a click that did not take) hands the copy to the user.
-    LoopState.AUTO_COPY: frozenset({LoopState.INTERPRETING, LoopState.MANUAL_COPY}) | _ANY,
-    LoopState.MANUAL_COPY: frozenset({LoopState.INTERPRETING}) | _ANY,
-    # The turn runs (parse, gate, execute); its next outbound restarts the loop,
-    # and a turn that ends waiting on the user settles back to idle.
-    LoopState.INTERPRETING: frozenset({LoopState.AUTO_INSERT, LoopState.IDLE}) | _ANY,
-    # The redial landed. IDLE and nothing else, because a reconnect RE-DERIVES
-    # from the screen rather than resuming: the trackers are rebuilt, the
-    # streaks restart, and nothing about the run that was interrupted is
-    # replayed (§2.9). Phase 2's loop then re-runs, from its top, the recipe of
-    # the state the link dropped in - so the loop walks back out of IDLE by
-    # observing the screen, exactly as it would have the first time.
-    LoopState.DISCONNECTED: frozenset({LoopState.IDLE}),
-}
+LOOP_TRANSITIONS: dict[LoopState, frozenset[LoopState]] = legal_next()

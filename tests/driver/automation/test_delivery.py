@@ -54,7 +54,7 @@ from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot
 
-from .conftest import FakeAutomationView
+from .conftest import FakeAutomationView, settle
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 # The docked input box inside it, and where a click on it lands. Every delivery
@@ -362,11 +362,23 @@ async def test_the_reply_gate_opens_whether_or_not_the_paste_landed(
     delivery: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """The payload is out either way - by our Ctrl+V or by the one the banner is
-    about to ask for - so a reply is due either way."""
-    machine.paste_lands = False
-    await delivery.copy_outbound(PAYLOAD)
+    about to ask for - so a reply is due either way.
 
-    assert delivery.awaiting_pasted_reply is True
+    The one test in this file that runs the LOOP, because since phase 2 the gate
+    is opened by the state that has a reply to wait for (``WAIT_SEND`` /
+    ``MANUAL_INSERT``, whichever the delivery earns) rather than by the delivery
+    itself - which is what makes a manual paste and an automatic one open the
+    same one.
+    """
+    machine.paste_lands = False
+    delivery.start_loop()
+    try:
+        await delivery.copy_outbound(PAYLOAD)
+        await settle()
+        assert delivery.loop_state is LoopState.MANUAL_INSERT
+        assert delivery.reply is not None
+    finally:
+        delivery.stop_loop()
 
 
 async def test_a_click_that_never_landed_pastes_nothing(

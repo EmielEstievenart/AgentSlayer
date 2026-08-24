@@ -33,7 +33,7 @@ from typing import Any
 
 import pytest
 
-import agentclip.driver.automation.controller as controller_mod
+import agentclip.driver.automation.recipes.auto_copy as harvest_mod
 from agentclip.config import ServicePreset
 from agentclip.driver.automation.controller import AutomationController
 from agentclip.driver.automation.flow import ELEMENT_CLICK_SETTLE_S
@@ -213,7 +213,7 @@ def _preset(**overrides: Any) -> ServicePreset:
 def quick_beats(monkeypatch: pytest.MonkeyPatch) -> None:
     """The harvest's own beat, shrunk: three snap rounds at the real settle is
     over a second of a test waiting for a page that does not exist."""
-    monkeypatch.setattr(controller_mod, "SNAP_SETTLE_S", 0.0)
+    monkeypatch.setattr(harvest_mod, "SNAP_SETTLE_S", 0.0)
 
 
 @pytest.fixture
@@ -320,7 +320,7 @@ async def test_a_miss_re_snaps_and_then_hands_the_harvest_over(
 
     await flow.auto_copy_flow()
 
-    assert len(machine.snaps) == controller_mod.COPY_SNAP_ROUNDS
+    assert len(machine.snaps) == harvest_mod.COPY_SNAP_ROUNDS
     # ...and the choreography in front of the snap happened once: nothing
     # between rounds touches the mouse or the focus.
     assert len(machine.clicks) == 1
@@ -396,7 +396,7 @@ async def test_the_hover_scan_runs_after_the_last_static_miss(
     host.preset = _preset(hover_scan=True)
     flow = AutomationController(view=view, host=host, monitor=machine)
     flow.set_calibration(AgentSlot.MASTER, CHAT_REGION)
-    rounds = controller_mod.COPY_SNAP_ROUNDS
+    rounds = harvest_mod.COPY_SNAP_ROUNDS
     machine.looks = [MISS]
     machine.hover = MATCH_RECT
 
@@ -557,7 +557,7 @@ async def test_the_suspension_lifts_however_the_harvest_ends(
 
 
 async def test_the_bracket_runs_the_body_the_shell_handed_in(
-    flow: AutomationController
+    flow: AutomationController, machine: ScriptedMonitor
 ) -> None:
     """The shell's seam, not this object's own harvest: the Textual side keeps a
     stubbable ``_auto_copy_flow`` and hands it down, which is why the bracket
@@ -573,9 +573,10 @@ async def test_the_bracket_runs_the_body_the_shell_handed_in(
     assert ran == ["theirs"]
     assert flow.flow_running is False
     # ...and the frames the harvest's own scrolling produced go with it, so
-    # polling resumes from a clean post-flow baseline.
-    assert flow.stale_arm_streak == 0
-    assert flow.stale_diff is None
+    # polling resumes from a clean post-flow baseline. The streaks are the
+    # monitor's own counts now (ui-monitor.md 2.2), so what is asserted here is
+    # the reset that zeroes them.
+    assert machine.resets == 1
 
 
 # -- where inside an appearance the click lands -----------------------------------

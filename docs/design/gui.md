@@ -36,27 +36,30 @@ as it always has been.
 
 ### Parity policy
 
-- The briefs in `docs/design/ui-briefs/` are the parity contract for both shells.
-- Features land **core-first**: new behavior goes into the engine, `shell/app` and
-  the Driver, then each shell grows its view of it. A feature that only exists in one
-  shell's view layer is a design smell and needs a written exception here.
-- The TUI keeps full parity for now. Whether it eventually freezes is a decision for
-  after the GUI is proven — explicitly not decided in this wave.
-- Known parity carve-outs today:
+> **Amended 2026-08-24 by `ui-monitor.md` §2.12 (its phase 0).** The question this
+> section left open — "whether the TUI eventually freezes" — is answered: it has.
+> The TUI is **deprecated and frozen**, sits behind `--tui`, and is deleted in
+> `ui-monitor.md` phase 6. What follows replaces the original two-shell contract.
+
+- The briefs in `docs/design/ui-briefs/` are the parity contract for **the GUI
+  alone**. Where a brief and the TUI disagree, the TUI is the stale one — that is
+  no longer a bug against it.
+- Features still land **core-first**: new behavior goes into the engine, `shell/app`
+  and the Driver, then the GUI grows its view of it. A feature that exists only in
+  the GUI's view layer is **no longer a design smell** and needs no written
+  exception — the frozen TUI simply does not follow it.
+- Known carve-outs today — the *core* ones; the rows that were only "the TUI does
+  X, the GUI does Y" are gone with the parity contract that made them matter:
   - the chunked-send wizard (`tui.md` §6) is designed but not implemented anywhere
-    (controller short-circuits multi-chunk; M3). Both shells target current behavior;
+    (controller short-circuits multi-chunk; M3). The GUI targets current behavior;
     the wizard lands core-first later.
-  - SSH connect: the TUI keeps the launch-time CLI-flag flow; the in-app connect
-    dialog (§4) is GUI-only. This is a deliberate exception, not a smell — the
-    TUI *cannot* prompt before Textual owns the terminal.
-  - OSC-52 clipboard fallback is TUI-only (a terminal escape); the GUI uses the real
-    clipboard provider. Two things follow, and both shipped in slice 7:
-    `AutomationHost.park_off_clipboard(text)` is where a payload the provider
-    refused crosses back to a shell (the TUI writes the escape; the GUI does
-    nothing), and `AutomationController.deliver` takes `clipboard_ok: bool` so
-    the delivery is TOLD how the payload got parked rather than re-reading a
-    clipboard that may not be where it went - which is what makes the streamed
-    mode fall back to a single burst.
+  - the two core seams the TUI's OSC-52 clipboard fallback bought stay, because
+    they are core API and not shell trivia: `AutomationHost.park_off_clipboard(text)`
+    is where a payload the clipboard provider refused crosses back to a shell (the
+    GUI does nothing with it), and `AutomationController.deliver` takes
+    `clipboard_ok: bool` so the delivery is TOLD how the payload got parked rather
+    than re-reading a clipboard that may not be where it went — which is what makes
+    the streamed mode fall back to a single burst.
 
 ## 1. The automation package — the Driver's core (phase 0)
 

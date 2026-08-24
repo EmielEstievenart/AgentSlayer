@@ -35,7 +35,10 @@ Requires Python 3.11+.
 uv sync
 uv run agentclip            # in the project you want the agent to work on
 # or: uv run agentclip --project path/to/project --service chatgpt-attach
+uv run agentclip --tui      # the old Textual terminal shell (deprecated)
 ```
+
+Plain `agentclip` opens the **desktop GUI** — a native window rendering an HTML frontend in the WebView2 runtime Windows already ships. `--tui` opens the original Textual shell in your terminal instead; it is deprecated, frozen at the behavior it has today, and will be removed. (`--gui` is still accepted and does nothing.)
 
 Linux clipboard: the bundled backend works on X11 and Wayland-with-XWayland out of the box. On a pure-Wayland system install `wl-clipboard` (and `xclip` for X11 fallback).
 
@@ -58,7 +61,7 @@ port = 22
 root = "/home/emiel/code/thing"
 ```
 
-It connects, authenticates (agent, keys, then a password prompt) and probes the machine *before* the TUI starts, so a bad target fails in the terminal rather than inside the app. Your permission rules stay local; the project's `.agentclip.toml` and its skills come off the remote machine. Backups and transcripts are kept on your PC. See `docs/design/remote-ssh.md`.
+It connects, authenticates (agent, keys, then a password prompt) and probes the machine *before* the app window opens, so a bad target fails in the terminal rather than inside the app. Your permission rules stay local; the project's `.agentclip.toml` and its skills come off the remote machine. Backups and transcripts are kept on your PC. See `docs/design/remote-executor.md` (`remote-ssh.md` is the earlier per-call design, superseded where the two disagree).
 
 The target needs `agentclip-engine` on it — `uv tool install agentclip` over there, or the standalone binary below.
 
@@ -74,11 +77,11 @@ To use `agentclip` from any directory without the checkout, freeze it into a sin
 
 This builds `dist\agentclip.exe` (PyInstaller onefile, ~78 MB, no Python needed to run it), smoke-tests it, and copies it to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`. Re-run it to update after changing the source. Useful flags: `-Clean` (fresh build), `-NoInstall` (build only), `-InstallDir <path>`.
 
-The exe carries **both UI shells and every optional extra the desktop needs**: the TUI, the GUI shell (`agentclip.exe --gui`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the GUI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three against the exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
+The exe carries **both UI shells and every optional extra the desktop needs**: the GUI shell (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships), the deprecated TUI (`agentclip.exe --tui`) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the GUI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three against the exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
 
 The build is driven by `packaging/agentclip.spec`; a onefile exe unpacks to `%TEMP%` on each launch, costing a second or two of startup.
 
-> If `agentclip --gui` says the gui extra is not installed, you are running a *different* `agentclip` — most likely a stale `uv tool install`. Run `where.exe agentclip`; the build script prints the same warning when it spots one, and `uv tool uninstall agentclip` clears it.
+> If `agentclip` says the gui extra is not installed, you are running a *different* `agentclip` — most likely a stale `uv tool install`. Run `where.exe agentclip`; the build script prints the same warning when it spots one, and `uv tool uninstall agentclip` clears it.
 
 ### Standalone executables (Linux / macOS)
 
@@ -102,7 +105,15 @@ TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (
 
 ## Design documents
 
+- `docs/design/architecture.md` — module layout (Shell / Driver / Executor), config, persistence, tests
 - `docs/design/protocol.md` — the CLIP/1 wire protocol
-- `docs/design/tui.md` — TUI design (Textual)
-- `docs/design/architecture.md` — module layout, config, persistence, tests
+- `docs/design/gui.md` — the GUI wave: one core, two shells, and why pywebview. Per-surface behavior contracts live in `docs/design/ui-briefs/`
+- `docs/design/tui.md` — the Textual shell (deprecated and frozen; kept as the record of what it does)
+- `docs/design/remote-executor.md` — running the engine on the SSH target instead of round-tripping every call: the link seam, the wire codec, `agentclip-engine`
+- `docs/design/remote-ssh.md` — the earlier per-call SSH design, superseded by the above where they disagree
+- `docs/design/mcp.md` — MCP server support, reading OpenCode's config shape
+- `docs/design/skills.md` — Agent Skills: discovering `SKILL.md` files from the Claude Code / OpenCode folders and exposing them as a `skill` tool
+- `docs/design/ui-monitor.md` — **plan**: splitting the screen-automation half across a process boundary (a UI monitor where the pixels are, the brain where you are), and retiring the TUI
 - `docs/design/research-*.md` — paste-limit / clipboard / Textual research underpinning the design
+
+Each design doc carries a status header, and it qualifies the list above: a doc marked "plan, not yet binding" describes intent, and only the sections its header calls built describe code.

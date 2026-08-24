@@ -1,6 +1,6 @@
 # Commands
 
-Slash commands are typed in the chat box: Enter sends, and a newline is `ctrl+j` (both shells) or `shift+enter` (GUI). Keyboard shortcuts work when the chat box is *not* focused (press Esc in an empty box to get there). Both shells share the commands; the key list below is the TUI's.
+Slash commands are typed in the chat box: Enter sends, and a newline is `shift+enter` or `ctrl+j`. Most keyboard shortcuts only fire when the chat box is *not* focused (press Esc in an empty box to get there) — a focused text box swallows bare letters, which is the only thing keeping `y`/`n`/`a` out of a sentence you are typing. **The key list below is the GUI's** — the shell plain `agentclip` opens, and the one rendering this page behind the titlebar's **docs** button. The deprecated TUI (`agentclip --tui`) shares every slash command and most of the keys.
 
 ## Slash commands
 
@@ -44,26 +44,61 @@ Notes:
 
 ## Keyboard reference
 
-**Anywhere:** `F1`/`?` help · `F2` service editor · `F4` theme settings · `F5` toggle armed.
+`F1` (or `?`) opens the same list inside the app, drawn from the table the app
+actually dispatches from — so it cannot advertise a key that does not exist.
 
-**Main screen** (chat box unfocused):
+**Always live**, even while you are typing in the chat box. (`?` is the one
+exception: a printable character never fires a shortcut mid-sentence.)
 
 | Key | Does |
 |---|---|
-| `t` | Focus the chat box |
-| `u` | Undo the last turn's file changes |
-| `c` | Re-copy the last outbound payload; **double-tap within 1.5 s** re-delivers it into the chat |
-| `i` | Force-ingest: "the reply is on the clipboard right now" |
-| `w` | Toggle the clipboard watcher |
-| `r` | Arm/disarm the service's `extra_instructions` for the next send |
-| `e` | End the session (summary screen) |
-| `l` | Export the session log |
-| `x` | Expand/collapse the last transcript entry |
-| `shift+tab` | Cycle permission mode build ↔ plan (always live, even mid-turn) |
-| `ctrl+x` | Cancel the tool calls executing right now (the turn still reports) |
-| `ctrl+o` | Toggle the live output of a running command |
-| `ctrl+s` / `ctrl+enter` | Send the chat box |
-| `F3` / `F7` / `F8` | Toggle sidebar / elements panel / harness log |
-| `F6` | Cycle transcript tabs (master / sub-agent) |
+| `F1` / `?` | This help sheet (`Esc` or `F1` closes it) |
+| `F2` | Service editor — sizes, what each service *looks* like, which finish signals it may watch. The sidebar's **Edit services...** button is the same door |
+| `F3` | Hide/show the sidebar |
+| `F4` | Appearance (theme) |
+| `F5` | ARM / DISARM the tool (same as `/armed`). Disarmed it still watches and shows everything, but never clicks, pastes or reads your clipboard |
+| `F6` | Select the next window tab — view only, it never moves what the automation drives |
+| `F7` | Hide/show ELEMENTS: the pictures the automation is recognising right now |
+| `F8` | Hide/show the harness decision log (same as `/log`) |
+| `shift+tab` | Cycle the permission mode build ↔ plan. Works before a session and mid-turn |
+| `ctrl+enter` | Send the chat box without having to be in it |
+| `ctrl+x` | Cancel the tool calls running now (the turn still ends cleanly and the model is told) |
+| `ctrl+o` | Show/hide what the running command is printing (clicking the run panel does the same) |
+| `ctrl+q` | Quit (asks first when a turn is mid-flight, as closing the window does) |
 
-**Esc** is staged: text in the box → clear it (Ctrl+Z restores) → pending question → dismiss it → otherwise blur the box so the single-key shortcuts work.
+**Chat box unfocused** — press `Esc` in an empty box to get there. The approval
+keys `y` / `n` / `a` above live here too.
+
+| Key | Does |
+|---|---|
+| `t` | Jump back to the chat box |
+| `u` | Undo the last turn (confirm first; a revert notice is copied for the model) |
+| `c` | Re-copy the last outbound payload; press `c` **twice quickly** and it is pasted into the chat as well |
+| `i` | Force-ingest the clipboard now — "the reply is on the clipboard right now" |
+| `w` | Pause/resume the clipboard watcher |
+| `r` | Re-send this service's extra instructions with the next payload (set them with `F2`) |
+| `e` | End the session / show the summary |
+| `l` | Export the whole chat log to a file (raw blocks and payloads, for debugging) |
+| `x` | Expand/collapse the last collapsed output |
+
+The key strip along the bottom carries the ones worth remembering, and fades a
+key that cannot fire yet (a turn has to finish, a gate has to open, a session
+has to start). A key the current setup rules out entirely — `w` with no
+clipboard watcher to run — leaves the strip instead of fading.
+
+**Inside the chat box:**
+
+- `Enter` sends. `shift+enter` and `ctrl+j` insert a newline.
+- `↑` / `↓` recall your previous sends, but only from the very top or bottom edge of the text — anywhere else they move the caret, so a pasted traceback stays navigable.
+- Typing `/` pops the command autocomplete; `Enter` or `Tab` completes it.
+
+**Esc is staged** — each press spends exactly one stage, so nothing you typed is
+ever lost to a stray press:
+
+1. the command autocomplete is open → close it, text and caret untouched;
+2. text in the box → clear it (`Ctrl+Z` restores it);
+3. empty box → blur it, which is what makes the single-key shortcuts reachable;
+4. the reject-reason box is open but has no caret → close it without rejecting;
+5. a modal, or the service editor, is up → close that (the editor may refuse while a capture overlay is on screen);
+6. an `ask_user` question is pending → park it (`■ QUESTION PARKED`);
+7. nothing left to cancel → nothing happens.

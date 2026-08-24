@@ -10,7 +10,15 @@ AgentClip reads two kinds of files: **TOML app config** (settings) and **JSON pe
 | Project config | TOML | `<project>/.agentclip.toml` | Same tables; project overrides |
 | Global permissions | JSON | `permissions.json`, same folder as the global config | Permission rules + MCP servers |
 | Project permissions | JSON | `<project>/.agentclip/permissions.json` | Same schema; project outranks global |
-| Appearance profiles | PNG + JSON | `profiles/<service-key>/`, same folder as the global config | Captured screen templates + click points — edited via the service editor (F2), not by hand |
+| Appearance profiles | PNG + JSON | `profiles/<service-key>/`, same folder as the global config | Captured screen templates + click points — edited via the **service editor**, not by hand |
+
+> **The service editor** is the GUI's appearance-and-presets window. Two doors,
+> both the same call: the **Edit services...** button under SERVICE in the
+> sidebar, and `F2`. It is where a preset's sizes, its captured screen templates,
+> its click points and its finish signals are edited, and `Esc` closes it (it
+> refuses while a capture overlay is on screen). In a later phase it is folded
+> into a standalone **calibration window** that runs where the pixels are — see
+> `docs/design/ui-monitor.md` §2.6 and §6.4; the settings it edits do not change.
 
 TOML merge order: **built-in defaults → global config.toml → project .agentclip.toml → CLI flags.** Tables merge per key; scalars *and lists* replace (a project can tighten a list, never extend it by accident). A broken file never crashes startup — problems become warnings and the default wins.
 
@@ -106,7 +114,7 @@ A preset describes one chat service: its paste budget and how AgentClip drives i
 | `copilot-free` | 6k | 128k | | `unknown` | 6k | 100k |
 | `claude` | 24k | 700k | | `paranoid` | 4k | 50k |
 
-Built-ins can be edited but not deleted. Fields (all editable in the F2 service editor):
+Built-ins can be edited but not deleted. Fields (all editable in the service editor — **Edit services...** in the sidebar, or `F2`):
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -130,7 +138,7 @@ Built-ins can be edited but not deleted. Fields (all editable in the F2 service 
 | `alert_repeat_seconds` | `0` | 0 = alert once; N = repeat every N seconds while still waiting |
 | `edit_by_lines` | `false` | Add `replace_lines` (edit by line range) to the catalog and teach `read_file` its `numbered` gutter. For a host that cannot echo code back verbatim — M365 Copilot rewrites lambdas, so a find/replace edit can never match there. Costs ~900 chars of bootstrap |
 
-**Debugging delivery.** When a paste lands somewhere odd, set `snap_back = false` (or untick "focus back after send" in the service editor — F2 in either shell): AgentClip stops taking the foreground back after its own auto-sends and auto-copies, so the browser keeps focus and you can watch where the clicks actually go. The beep you hear when the loop stalls and needs you is `alert_sound` ("beep when it stalls", same block) — it is off by default, and `alert_repeat_seconds` is how often it nags.
+**Debugging delivery.** When a paste lands somewhere odd, set `snap_back = false` (or untick "focus back after send" in the service editor): AgentClip stops taking the foreground back after its own auto-sends and auto-copies, so the browser keeps focus and you can watch where the clicks actually go. The beep you hear when the loop stalls and needs you is `alert_sound` ("beep when it stalls", same block) — it is off by default, and `alert_repeat_seconds` is how often it nags.
 
 ## permissions.json — the rules
 

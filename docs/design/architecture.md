@@ -1,6 +1,6 @@
 # AgentClip Architecture Design
 
-Decisive design for codebase structure, config, persistence, sandboxing, and testing. Companion documents: protocol grammar (protocol designer), widget/UX detail (TUI designer). Cross-cutting requirements for them are in §11.
+Decisive design for codebase structure, config, persistence, sandboxing, and testing. Companion documents: protocol grammar (protocol designer), widget/UX detail (**GUI designer** — `gui.md` and the per-surface briefs in `docs/design/ui-briefs/`; the Textual shell's own `tui.md` is frozen, `ui-monitor.md` §2.12). Cross-cutting requirements for them are in §11.
 
 ---
 
@@ -975,7 +975,7 @@ tests/                               # mirrors src/agentclip: one directory per 
                                      #   transcript shows result, status bar shows AWAITING_REPLY
 ```
 
-Principles: the **engine round-trip never touches a real clipboard** — `ScriptedLLM` maps outbound payloads to canned reply strings, proving the loop headless (prime directive a). The watcher is tested against `FakeClipboard` (a `ClipboardProvider` with a settable buffer and change counter). Exactly one Textual Pilot test in MVP — TUI behavior beyond boot/approve/render is the TUI designer's snapshot-test territory. Golden files are byte-exact (committed with `* -text` in `.gitattributes` so CRLF fixtures survive checkout).
+Principles: the **engine round-trip never touches a real clipboard** — `ScriptedLLM` maps outbound payloads to canned reply strings, proving the loop headless (prime directive a). The watcher is tested against `FakeClipboard` (a `ClipboardProvider` with a settable buffer and change counter). Exactly one Textual Pilot test in MVP — shell behavior beyond boot/approve/render is the GUI designer's territory (the GUI's Python side is driven windowless, under `tests/shell/gui/`; the frozen TUI keeps only this smoke test). Golden files are byte-exact (committed with `* -text` in `.gitattributes` so CRLF fixtures survive checkout).
 
 ---
 
@@ -1027,10 +1027,10 @@ clipboard.write_text(step.outbound.chunks[0])        # results payload back to t
 5. Bootstrap text must include the **attachment note** ("the user's message may arrive as a file named pasted-text/paste.txt; read it entirely") and, when the preset sets `wrap_blocks_in_fence`, the instruction to emit all blocks inside one fenced code block.
 6. Call `id`s unique per turn; results payloads reference them. Parse issues ⇒ the whole turn is non-executable (no partial execution of a half-parsed reply).
 
-**TUI designer must honor:**
-1. The engine API in §1 is the **complete** surface — no reaching into `executor/tools/`, `engine/store/`, or `protocol/` from `shell/tui/`. Status bar reads `engine.status()` only.
-2. The engine is synchronous and **not thread-safe**: call it from exactly one `@work(thread=True)` worker; never from the event loop (`execute()` runs subprocesses for minutes). The single exception is `request_cancel()` — it only sets a `threading.Event`, and is *meant* to be called from the UI thread while that worker is inside `execute()`. Cancelling is not an abort: the interrupted call gets a `code=cancelled` error result (with its partial output), the calls after it get `cancelled` skip results, and the turn finishes through the normal `Send` path so the model is told what happened.
-3. The watcher is a plain function (`driver/clip/watcher.py`) — you own wrapping it in a thread worker and bridging via `post_message`; inject `FakeClipboard` in tests.
+**GUI designer must honor** (and the frozen TUI still does):
+1. The engine API in §1 is the **complete** surface — no reaching into `executor/tools/`, `engine/store/`, or `protocol/` from a shell (`shell/gui/`, `shell/tui/`). The status line reads `engine.status()` only.
+2. The engine is synchronous and **not thread-safe**: call it from exactly one worker off the UI thread — the GUI's `asyncio.to_thread` on `GuiRunner`'s loop thread, the TUI's single `@work(thread=True)` worker — never from the event loop (`execute()` runs subprocesses for minutes). The single exception is `request_cancel()` — it only sets a `threading.Event`, and is *meant* to be called from the UI thread while that worker is inside `execute()`. Cancelling is not an abort: the interrupted call gets a `code=cancelled` error result (with its partial output), the calls after it get `cancelled` skip results, and the turn finishes through the normal `Send` path so the model is told what happened.
+3. The watcher is a plain function (`driver/clip/watcher.py`) — you own wrapping it in a thread and bridging back to your UI (the GUI's bridge queue, the TUI's `post_message`); inject `FakeClipboard` in tests.
 4. Every outbound write must go through `SelfWriteSet.note(text)` before `provider.write_text` (self-detection suppression), and reads/writes should share one clipboard thread.
-5. Approval UX maps to exactly three `Decision` values (approve / reject / approve-all-edits-this-session); diff text arrives precomputed in `PendingAction.preview` — do not re-diff in the TUI.
-6. ASCII/BMP-only status chrome (`●`, `▶`, `✓`), no multi-codepoint emoji (Windows Terminal/conhost width bugs).
+5. Approval UX maps to exactly three `Decision` values (approve / reject / approve-all-edits-this-session); diff text arrives precomputed in `PendingAction.preview` — do not re-diff in the shell.
+6. Status chrome stays ASCII/BMP in the **TUI** (`●`, `▶`, `✓`), where multi-codepoint emoji trip Windows Terminal/conhost width bugs. The GUI paints into a WebView and has no such limit.

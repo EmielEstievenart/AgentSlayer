@@ -7,6 +7,11 @@
 > `remote-executor.md` did: when a phase lands, its section gets an "as built"
 > note and its status flips. Until then everything here is intent.
 >
+> **Exception: §2.12 and §6.0 are built, and binding.** Phase 0 shipped
+> (2026-08-24): the default shell is the GUI, the TUI is behind `--tui` and
+> frozen, and every phase-0 row in §7 is applied. Those two sections describe
+> code and docs as they are. Everything from §6.1 on is still plan.
+>
 > **Where this document overrides others** — say it here so no two docs
 > disagree:
 >
@@ -307,7 +312,20 @@ Order is 0 → 1 → 2 → 3 → 4 → 5 → 6, except: **3 and 4 depend only on
 either may run in parallel with 2 if 2 stalls. Nothing depends on 3 except the
 GUI label.
 
-### 6.0 Deprecate the TUI, flip the default shell
+### 6.0 Deprecate the TUI, flip the default shell — **AS BUILT**
+
+> **Status: built, binding (2026-08-24).** Plain `agentclip` opens the GUI;
+> `agentclip --tui` opens the Textual shell; `--gui` is accepted and does
+> nothing, kept for one release. Every phase-0 row in §7 is applied — AGENTS.md
+> now names two shells and says a doc's status header qualifies the blanket
+> "binding" claim, `gui.md`'s parity policy freezes the TUI and binds the
+> ui-briefs to the GUI alone, `architecture.md`'s "TUI designer" framing is the
+> GUI's, `README.md` cites `remote-executor.md` and lists every design doc,
+> `docs/commands.md`'s keyboard reference is the GUI's own key table (it is
+> rendered *inside* the GUI by the docs button), and `docs/configuration.md`
+> describes the service editor by its real doors (the sidebar's
+> **Edit services...** button and `F2`) with a forward pointer to §6.4's
+> calibration window. The paragraphs below are the plan this section shipped.
 
 Cheap, and a **prerequisite**, not hygiene: gui.md's parity policy makes a
 GUI-only feature "a design smell [that] needs a written exception" — every
@@ -454,6 +472,8 @@ green; exe and monitor exe rebuilt.
 | 4 | `docs/design/ui-briefs/elements-panel.md`, `service-editor.md` | name the calibration window as their host |
 | 5 | `docs/configuration.md`, `docs/commands.md` | `--monitor`, `--calibrate`, `agentclip-monitor` |
 | 6 | `docs/design/tui.md`, `remote-ssh.md` | historical headers |
+
+All **phase 0** rows are applied (§6.0's as-built note). The rest are still owed.
 
 ## 8. Open points (**OPEN**)
 

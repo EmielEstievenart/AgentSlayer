@@ -1,6 +1,11 @@
 # AgentClip — agent instructions
 
-AgentClip is a Python Textual TUI app, frozen into a single `agentclip.exe` with PyInstaller. Design docs in `docs/design/` are binding.
+AgentClip is a Python desktop app with **two UI shells**, frozen into a single `agentclip.exe` with PyInstaller:
+
+- the **GUI** (`agentclip.shell.gui`, pywebview + WebView2) — the primary shell, and what plain `agentclip` launches;
+- the **TUI** (`agentclip.shell.tui`, Textual) — **deprecated**. It sits behind `--tui`, is frozen (no new features land there) and is removed in a later phase (`docs/design/ui-monitor.md` §2.12). `--gui` is still accepted and does nothing.
+
+Design docs in `docs/design/` are binding — but **a status header inside a design doc qualifies that claim**: a document (or a section of one) whose header says "plan, not yet binding" is intent, not law, and only the parts its header calls built are binding.
 
 ## Build & deploy
 

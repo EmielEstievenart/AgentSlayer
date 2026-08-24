@@ -53,7 +53,7 @@ from pathlib import Path
 import platformdirs
 import tomli_w
 
-from agentclip.executor.hosts.base import Host
+from agentclip.executor.hosts.base import FileReader
 from agentclip.executor.mcp.config import McpTarget, load_mcp_servers
 from agentclip.executor.mcp.types import McpConfig, McpServers
 from agentclip.executor.permissions import (
@@ -745,7 +745,7 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
-def _read_toml(path: Path, warnings: list[str], host: Host | None = None) -> dict:
+def _read_toml(path: Path, warnings: list[str], host: FileReader | None = None) -> dict:
     """Parse one TOML file, from this PC or from ``host`` when one is given."""
     try:
         raw = host.read_bytes(path) if host is not None else path.read_bytes()
@@ -945,7 +945,7 @@ def _permissions_config_path(home: Path | None) -> Path:
 
 
 def _permission_blocks(
-    path: Path, warnings: list[str], host: Host | None
+    path: Path, warnings: list[str], host: FileReader | None
 ) -> tuple[object | None, dict[str, object]]:
     """One permissions.json's permission blocks: ``(shared, per_mode)``.
 
@@ -984,7 +984,7 @@ def _permission_blocks(
     return data.get("permission"), per_mode
 
 
-def _describe_path(path: Path, host: Host | None) -> str:
+def _describe_path(path: Path, host: FileReader | None) -> str:
     """How a config file is named to the user. In a remote session that has to
     include the machine: two boxes' ``~/.config/agentclip/permissions.json`` are
     indistinguishable in a screenshot otherwise. Spelled POSIX-style over
@@ -997,7 +997,7 @@ def _load_permission_rules(
     settings: PermissionConfig,
     project_root: Path,
     warnings: list[str],
-    host: Host | None = None,
+    host: FileReader | None = None,
     home: Path | None = None,
 ) -> tuple[ModeRules, str]:
     """Read the effective permission ruleset - one per MODE - off the machine the
@@ -1051,7 +1051,7 @@ def _load_permission_rules(
 
 
 def _mcp_target(
-    host: Host | None, home: Path | None, environ: Mapping[str, str] | None
+    host: FileReader | None, home: Path | None, environ: Mapping[str, str] | None
 ) -> McpTarget:
     """The machine :func:`load_mcp_servers` reads its files from.
 
@@ -1121,7 +1121,7 @@ def load_config(
     global_config_path: Path | None = None,
     remote_target: str | None = None,
     remote_root: str | None = None,
-    host: Host | None = None,
+    host: FileReader | None = None,
     home: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> Config:

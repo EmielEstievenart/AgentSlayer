@@ -218,10 +218,11 @@ from agentclip.driver.automation.harness_log import (
     HarnessEntry,
 )
 from agentclip.driver.automation.loop_state import LoopState
-from agentclip.driver.automation.ops import ElementClick, ScreenOps
+from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.driver.clip.chunking import STREAM_CHUNK_CHARS
 from agentclip.driver.clip.watcher import SelfWriteSet
+from agentclip.driver.monitor.ops import ScreenOps
 from agentclip.driver.screen.capture import CaptureError, RegionImage, capture_region
 from agentclip.driver.screen.detector import ScreenDetector, Sighting, build_detector
 from agentclip.driver.screen.focus import (

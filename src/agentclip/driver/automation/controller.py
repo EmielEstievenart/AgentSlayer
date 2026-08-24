@@ -184,11 +184,12 @@ from agentclip.driver.automation.harness_log import (
 )
 from agentclip.driver.automation.host import AutomationHost, NullHost
 from agentclip.driver.automation.loop_state import ATTENTION_STATES, LoopState
-from agentclip.driver.automation.ops import ElementClick, ScreenOps
+from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.automation.view import AutomationView
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.driver.clip.chunking import split_for_stream
 from agentclip.driver.clip.watcher import SelfWriteSet, watch, write_via
+from agentclip.driver.monitor.ops import ScreenOps
 from agentclip.driver.screen.busy import BusyProbe
 from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.detector import ScreenDetector, Sighting

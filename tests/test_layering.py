@@ -210,6 +210,24 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.config",
                 "agentclip.driver.automation",
                 "agentclip.driver.clip",
+                "agentclip.driver.monitor",
+                "agentclip.driver.screen",
+            }
+        ),
+    ),
+    # driver.monitor: the UI monitor (docs/design/ui-monitor.md §3) - pixels,
+    # matching, debounce, mouse, keyboard, clipboard. It sits BELOW automation:
+    # driver/automation -> driver/monitor -> driver/screen, driver/clip, and
+    # nothing here may import driver/automation (the monitor does not know what
+    # a LoopState is).
+    (
+        "agentclip.driver.monitor",
+        frozenset(
+            {
+                "agentclip",
+                "agentclip.config",
+                "agentclip.driver.clip",
+                "agentclip.driver.monitor",
                 "agentclip.driver.screen",
             }
         ),
@@ -275,7 +293,12 @@ UI_MODULES = ("agentclip.cli", "agentclip.__main__", "agentclip.shell.tui")
 # Modules allowed to import agentclip.driver.clip / agentclip.driver.screen: the
 # UI shells - both of them - plus the automation core they share (which is made
 # of exactly those seams).
-CLIP_SCREEN_IMPORTERS = (*UI_MODULES, "agentclip.shell.gui", "agentclip.driver.automation")
+CLIP_SCREEN_IMPORTERS = (
+    *UI_MODULES,
+    "agentclip.shell.gui",
+    "agentclip.driver.automation",
+    "agentclip.driver.monitor",
+)
 
 # OS side-effect layers (clipboard, screen overlay/click): only CLIP_SCREEN_IMPORTERS.
 OS_LAYERS = ("agentclip.driver.clip", "agentclip.driver.screen")

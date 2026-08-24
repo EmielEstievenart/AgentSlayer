@@ -29,7 +29,7 @@ from typing import Any
 import pytest
 
 import agentclip.driver.automation.controller as controller_mod
-import agentclip.driver.automation.ops as ops_mod
+import agentclip.driver.monitor.ops as ops_mod
 from agentclip.config import ServicePreset
 from agentclip.driver.automation.controller import AutomationController
 from agentclip.driver.automation.loop_state import LoopState

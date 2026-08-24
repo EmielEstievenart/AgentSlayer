@@ -40,8 +40,8 @@ from agentclip.driver.automation.delivery import (
     stream_flash_text,
 )
 from agentclip.driver.automation.loop_state import LoopState
-from agentclip.driver.automation.ops import ScreenOps
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor.ops import ScreenOps
 from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion, click_point_region

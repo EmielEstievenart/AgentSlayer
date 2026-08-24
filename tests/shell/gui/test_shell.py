@@ -473,3 +473,85 @@ def test_the_launch_protocol_matches_the_real_launch(tmp_path: Path) -> None:
     launch = _launch(tmp_path)
     for name in ("project_root", "config"):
         assert hasattr(launch, name), f"cli.Launch has no {name}"
+
+
+# == --monitor: split mode's whole entry (ui-monitor.md §6.5) ==================
+# The launch flag that moves the SCREEN onto another machine. All of it is
+# refused or resolved in ``cli.main``, so nothing below that line can ever be
+# handed a target it would have to re-parse or re-validate.
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("box:7777", ("box", 7777)),
+        ("127.0.0.1:1", ("127.0.0.1", 1)),
+        ("vm.local:65535", ("vm.local", 65535)),
+        # An IPv6 literal, written the only way a host:port string can carry
+        # one - the port is split off the RIGHT, so the colons inside survive.
+        ("[::1]:7777", ("::1", 7777)),
+    ],
+)
+def test_a_monitor_target_parses_into_a_host_and_a_port(
+    given: str, expected: tuple[str, int]
+) -> None:
+    assert cli.parse_monitor_target(given) == expected
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        "box",  # no port at all
+        "box:",  # ...nor here
+        ":7777",  # no host
+        "box:ssh",  # a service name is not a port
+        "box:0",  # out of range, both ends
+        "box:70000",
+    ],
+)
+def test_a_target_that_is_not_host_port_is_refused_rather_than_guessed_at(given: str) -> None:
+    """Guessing would mean dialling a port nobody asked for, on a channel that
+    reaches a machine's mouse and keyboard (§5)."""
+    assert cli.parse_monitor_target(given) is None
+
+
+def test_the_monitor_flag_is_refused_for_the_deprecated_tui(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The TUI is frozen (§2.12) and takes no new surfaces, so asking for both
+    is asking for something that will never work - said now, rather than after
+    a session starts watching the wrong screen."""
+    monkeypatch.setattr(cli, "local_launch", lambda args: pytest.fail("resolved a launch"))
+
+    assert cli.main(["--tui", "--monitor", "box:7777", "--project", str(tmp_path)]) == 2
+    assert cli.MONITOR_GUI_ONLY in capsys.readouterr().err
+
+
+def test_a_bad_monitor_target_is_fatal_before_anything_is_launched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "local_launch", lambda args: pytest.fail("resolved a launch"))
+
+    assert cli.main(["--monitor", "box:ssh", "--project", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert "--monitor wants HOST:PORT" in err
+    assert "box:ssh" in err  # ...and it says what it was given
+
+
+def test_the_monitor_target_reaches_the_gui_as_a_parsed_pair(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Threaded like ``pending_connect``: resolved in ``main``, handed to
+    ``run_gui`` as the pair, and absent (None) on a launch that did not ask."""
+    kwargs: dict[str, object] = {}
+    monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
+    monkeypatch.setattr(
+        "agentclip.shell.gui.shell.run_gui", lambda given, **rest: kwargs.update(rest) or 0
+    )
+
+    assert cli.main(["--monitor", "box:7777", "--project", str(tmp_path)]) == 0
+    assert kwargs["monitor_target"] == ("box", 7777)
+
+    kwargs.clear()
+    assert cli.main(["--project", str(tmp_path)]) == 0
+    assert kwargs["monitor_target"] is None

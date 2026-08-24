@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -81,7 +81,9 @@ from agentclip.driver.automation.loop_state import (
 from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.driver.monitor.local import LocalUIMonitor
-from agentclip.driver.monitor.protocol import MonitorSpec
+from agentclip.driver.monitor.protocol import MonitorSpec, UIMonitor
+from agentclip.driver.monitor.remote import RemoteUIMonitor
+from agentclip.driver.monitor.switchable import SwitchableMonitor
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.detector import ScreenDetector
 from agentclip.driver.screen.focus import foreground_window
@@ -191,6 +193,11 @@ _LOOP_ORDER: tuple[LoopState, ...] = (
     LoopState.AUTO_COPY,
     LoopState.MANUAL_COPY,
     LoopState.INTERPRETING,
+    # Last, and not a step of the round trip: the link to the monitor is gone
+    # and nothing above this row can happen until it is back (ui-monitor.md
+    # §2.9). Below the loop rather than inside it, so the picture the other
+    # eight rows draw is unchanged.
+    LoopState.DISCONNECTED,
 )
 _LOOP_LABEL: dict[LoopState, str] = {
     LoopState.IDLE: "idle",
@@ -201,6 +208,7 @@ _LOOP_LABEL: dict[LoopState, str] = {
     LoopState.AUTO_COPY: "auto copy",
     LoopState.MANUAL_COPY: "manual copy",
     LoopState.INTERPRETING: "interpreting",
+    LoopState.DISCONNECTED: "disconnected",
 }
 
 # The standing banner, the paste flash's quiet sibling: same place in the column,
@@ -305,6 +313,34 @@ CONNECT_DONE = "connected to {target} - this session's tools now run over there"
 # "nothing happened" and "it is already open, look behind you" are different
 # answers to the same press.
 CALIBRATION_OPEN = "the calibration window is already open"
+# What F2 says in SPLIT mode. The calibration window is a fullscreen capture
+# overlay over the browser being calibrated (ui-monitor.md §2.6), and in split
+# mode that browser is on another machine - so there is nothing here to draw a
+# box around and the door is closed rather than opened onto the wrong screen.
+CALIBRATION_REMOTE = (
+    "calibration runs on the monitor's machine: run agentclip --calibrate there"
+)
+
+# == the monitor link (--monitor host:port, ui-monitor.md §6.5) ================
+# Split mode's four sentences. Each one is a moment the user cannot see for
+# themselves: the screen the app is watching is on another machine, so a link
+# that came up, dropped, refused a dial or came back as a DIFFERENT process is
+# invisible unless it is said out loud.
+MONITOR_UP = "monitor link up: {peer}"
+MONITOR_LOST = "monitor link lost - redialling {peer}"
+MONITOR_RETRY = "cannot reach the monitor at {peer}: {reason}"
+# A different ``server_id`` means the process on the far side is not the one we
+# were talking to (remote.py's ``server_id``): it was restarted, so every
+# generation, every streak and every tracker we ever heard about belonged to a
+# monitor that no longer exists. The reconnect is a retarget, and the user is
+# told because a monitor that restarted is a monitor somebody restarted.
+MONITOR_RESTARTED = "the monitor at {peer} restarted - re-deriving everything from its screen"
+# The redial's backoff, doubling from the first up to the cap (§2.9's "the
+# brain redials"). Module constants rather than a schedule inside the loop so a
+# suite can flatten them without a clock, exactly as the wait they describe is
+# the only slow thing in the flow.
+MONITOR_BACKOFF_START = 1.0
+MONITOR_BACKOFF_CAP = 10.0
 
 REGION_UNSET = "not set - alt-tab to the chat yourself"
 # The CHAT WINDOW block's readiness line, per SELECTED window - ``tui/widgets/
@@ -452,6 +488,37 @@ class ShellMonitor(MonitorLike, Protocol):
     def detector(self) -> ScreenDetector | None: ...
 
 
+class DialledMonitor(UIMonitor, Protocol):
+    """A monitor reached over the wire: the contract, plus what only a LINK has.
+
+    ``RemoteUIMonitor`` structurally, but stated as a Protocol for the reason
+    every other seam here is: the dial is injected, so a suite scripts one
+    without a socket. The three extra members are exactly what split mode's
+    reconnect story needs and nothing else - who we are attached to (for the
+    toasts), whether the far PROCESS is still the one we handshook with, and the
+    hook that fires when the link goes away for a reason nobody asked for.
+    """
+
+    @property
+    def peer(self) -> str: ...
+
+    @property
+    def server_id(self) -> str: ...
+
+    def on_disconnect(self, hook: Callable[[], None]) -> Callable[[], None]: ...
+
+
+# How a host:port becomes a monitor. Injected exactly as ``open_calibration``
+# is, and for the same reason: the real one opens a TCP connection, and a suite
+# must be able to run the whole connect/disconnect/redial story without one.
+MonitorDial = Callable[[str, int], Awaitable[DialledMonitor]]
+
+
+async def _dial_remote_monitor(host: str, port: int) -> DialledMonitor:
+    """The real dial: one TCP connection and the monitor handshake (§6.5)."""
+    return await RemoteUIMonitor.connect(host, port)
+
+
 def _fence(body: str) -> str:
     """A backtick fence longer than any backtick run inside ``body``."""
     longest = run = 0
@@ -582,6 +649,8 @@ class GuiView:
         on_exit: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
         open_calibration: OpenCalibration | None = None,
+        monitor_target: tuple[str, int] | None = None,
+        dial: MonitorDial | None = None,
     ) -> None:
         self._bridge = bridge
         self._config = config
@@ -683,8 +752,33 @@ class GuiView:
         # is the shell's own profile cache keyed by SERVICE - the monitor is
         # handed a service KEY in its spec and resolves the template PNGs itself
         # (§2.10), which is why it takes a lookup rather than a profile.
+        # -- split mode (``--monitor host:port``, ui-monitor.md §6.5) ---------
+        # The one launch flag that changes WHICH MACHINE the screen is on. When
+        # it is set the monitor above is not built at all: what the controller
+        # gets is a :class:`SwitchableMonitor`, inert until the first dial lands
+        # after first paint and swapped again on every redial, so neither this
+        # object nor the automation core is ever rebuilt for a link event
+        # (§2.9). A ``monitor=`` handed in alongside it is ignored - the whole
+        # point of split mode is that the machine arrives later.
+        self._monitor_target = monitor_target
+        self._dial: MonitorDial = dial if dial is not None else _dial_remote_monitor
+        self._switch: SwitchableMonitor | None = (
+            SwitchableMonitor() if monitor_target is not None else None
+        )
+        # The far PROCESS's id from the last handshake, so a redial can tell a
+        # resumed monitor from a restarted one (``DialledMonitor.server_id``).
+        self._monitor_server_id: str | None = None
+        # Is a redial loop already running? One at a time: a disconnect that
+        # arrived while one was mid-backoff would otherwise start a second.
+        self._redialling = False
+        # Set when the window goes away, and the only thing that stops the
+        # redial loop - a backoff that outlived its window would keep dialling
+        # a machine nobody is watching any more.
+        self._monitor_closing = False
         self._monitor: ShellMonitor = (
-            monitor
+            self._switch
+            if self._switch is not None
+            else monitor
             if monitor is not None
             else LocalUIMonitor(
                 profile_for=self._profile,
@@ -812,6 +906,13 @@ class GuiView:
             self._push_mcp()
         for warning in self._config.warnings:
             self.notify(warning, severity="warning", timeout=8)
+        # ``--monitor``: same rule as the connect below, and for the same reason
+        # (gui.md §2, "everything slow happens after first paint"). The dial is
+        # a TCP connection to another machine and it is not allowed to hold the
+        # first frame - the chrome is already painted, the loop already says
+        # what it is doing, and the link arrives into a window the user can see.
+        if self._monitor_target is not None:
+            self._schedule(self._dial_monitor())
         # ``--gui --ssh``: the window is already up (gui.md §2, "everything slow
         # happens after first paint"), so the connect that used to block the
         # launch runs HERE, in the dialog, with its fields filled from the flags.
@@ -846,6 +947,10 @@ class GuiView:
         """
         if self._mcp_manager is not None:
             self._mcp_manager.set_status_hook(None)
+        # Before the two below, because it is the flag a redial loop parked on
+        # its backoff reads when it wakes: a window that is going away must not
+        # get its link back one second later.
+        self._monitor_closing = True
         self._automation.stop_input()
         self._automation.stop_alert()
 
@@ -853,6 +958,7 @@ class GuiView:
         """Stop the monitor's threads for good. Idempotent, like the verb below
         it - both the window's ``closing`` event and ``run_gui``'s ``finally``
         reach the runner that calls this."""
+        self._monitor_closing = True
         await self._monitor.close()
 
     # == what the page asks for (js_api, already on the loop) ==================
@@ -2446,6 +2552,14 @@ class GuiView:
         window: both would be throwing fullscreen capture overlays at the same
         browser, and the suspend below is a bracket, not a counter.
         """
+        if self._monitor_target is not None:
+            # Split mode: the pixels are on another machine (§2.6, §6.4). This
+            # window's calibration runs over a LocalUIMonitor of its own, which
+            # would capture THIS screen - a picture of the operator's desktop
+            # saved as the chat service's appearance. So the door is closed and
+            # the user is pointed at the machine that has the browser on it.
+            self.notify(CALIBRATION_REMOTE, severity="warning", timeout=10)
+            return
         if self._calibration is not None:
             self.notify(CALIBRATION_OPEN)
             return
@@ -2943,6 +3057,142 @@ class GuiView:
             # own silence: it is the one detector with no appearance behind it.
             self._paint_detection(STALE_CALIBRATED if "stale" in active else STALE_UNTICKED)
 
+    # == the monitor link (split mode) =========================================
+    # Everything ``--monitor host:port`` adds, and nothing else in this file
+    # knows about it: the automation core is handed a
+    # :class:`SwitchableMonitor` in the constructor and is never told which kind
+    # of machine is behind it (ui-monitor.md §2.9). What lives here is the three
+    # events only this object can see - a dial that landed, a link that went
+    # away, a redial that came back - and the one sequence all three share.
+    #
+    # That sequence is §2.9's "re-derive from the screen", in order:
+    #
+    #   1. ``swap`` the new link in, so every parked ``observe`` and every
+    #      subscriber is pointed at it before anything is asked of it;
+    #   2. register ``on_disconnect`` BEFORE the first round trip, so a link
+    #      that dies during the configure is still caught by the redial;
+    #   3. ``configure`` (through ``_retarget_monitor``, which also drops the
+    #      verdicts the old run left behind and repaints the DETECTION block) -
+    #      the monitor kept polling and kept counting while nobody was attached,
+    #      so until this lands we cannot tell a live tick from a ghost (§2.8);
+    #   4. re-arm the clipboard WATCHER, which is a far-side thread and died
+    #      with the far side's view of us;
+    #   5. park the loop back on IDLE, from which phase 2's loop re-runs the
+    #      recipe of the state the link dropped in.
+    #
+    # Nothing is buffered and nothing is replayed - the same honesty rule the
+    # remote executor keeps (remote-executor.md §2.3).
+
+    async def _dial_monitor(self) -> None:
+        """The first dial. A failure is not fatal - it starts the redial loop.
+
+        Split mode is a link to a machine that is *supposed* to outlive us
+        (§2.8), so "the monitor is not up yet" is a state to sit in rather than
+        a launch error: the window stays open, the loop says DISCONNECTED, and
+        the backoff keeps trying until somebody starts the monitor.
+        """
+        if not await self._attach_monitor():
+            self._begin_redial()
+
+    async def _attach_monitor(self) -> bool:
+        """One dial attempt and everything a successful one owes. Never raises.
+
+        Returns whether the link is up now. The two failure shapes are the same
+        answer to the user - park in DISCONNECTED and keep trying - but they
+        are caught separately because only the first has words worth showing:
+        the dial's own exception names what refused (a closed port, a busy
+        monitor, a version skew), while a configure that failed did so because
+        the link we just made is already gone and its own hook is telling the
+        story.
+        """
+        target, switch = self._monitor_target, self._switch
+        if target is None or switch is None:  # pragma: no cover - guarded by callers
+            return False
+        host, port = target
+        peer = f"{host}:{port}"
+        try:
+            link = await self._dial(host, port)
+        except Exception as exc:  # noqa: BLE001 - a dial fails in the transport's own ways
+            self._park_disconnected(MONITOR_RETRY.format(peer=peer, reason=exc))
+            return False
+        was = self._monitor_server_id
+        self._monitor_server_id = link.server_id
+        previous = switch.swap(link)
+        link.on_disconnect(lambda: self._monitor_dropped(peer))
+        try:
+            await self._retarget_monitor()
+        except Exception as exc:  # noqa: BLE001 - the link died inside the handshake
+            self._park_disconnected(MONITOR_RETRY.format(peer=peer, reason=exc))
+            return False
+        # The watcher is a thread on the FAR machine and there is none after a
+        # reconnect. Re-armed off the ARMED switch rather than off what the
+        # watcher was doing before the drop: the flag is the user's standing
+        # answer to "may this tool touch the machine", and it is the only one of
+        # the two that survived the link.
+        switch.watch_clipboard(self._automation.os_armed)
+        self._automation.set_loop_state(LoopState.IDLE, f"monitor link up ({peer})")
+        self.notify(MONITOR_UP.format(peer=peer))
+        if was is not None and was != link.server_id:
+            self.notify(MONITOR_RESTARTED.format(peer=peer), severity="warning", timeout=8)
+        self._schedule(previous.close())
+        return True
+
+    def _monitor_dropped(self, peer: str) -> None:
+        """``on_disconnect``: the link went away for a reason nobody asked for.
+
+        Called once per link, on whichever task noticed the EOF, and it does
+        exactly two things - says so and starts redialling. Deliberately not a
+        close of anything: the monitor on the other end is a standing process
+        (§2.8) and the socket under this one is already dead.
+        """
+        if self._monitor_closing:
+            return
+        self._park_disconnected(MONITOR_LOST.format(peer=peer))
+        self._begin_redial()
+
+    def _park_disconnected(self, reason: str) -> None:
+        """Loop → DISCONNECTED, and say why - once per outage, not per attempt.
+
+        ``set_loop_state`` already swallows a repeat, so the guard here is only
+        about the TOAST: a monitor that is down for ten minutes must not stack
+        one notification per backoff round on top of the one that already says
+        the true thing.
+        """
+        fresh = self._automation.loop_state is not LoopState.DISCONNECTED
+        self._automation.set_loop_state(LoopState.DISCONNECTED, reason)
+        if fresh:
+            self.notify(reason, severity="warning", timeout=8)
+
+    def _begin_redial(self) -> None:
+        """Start the redial loop, unless one is already running or we are going
+        away. One at a time: a second disconnect arriving mid-backoff must not
+        double the dial rate."""
+        if self._redialling or self._monitor_closing:
+            return
+        self._redialling = True
+        self._schedule(self._redial_loop())
+
+    async def _redial_loop(self) -> None:
+        """Dial again on a doubling backoff until it lands or the window closes.
+
+        The wait comes FIRST, before the attempt: the dial that just failed was
+        a moment ago, and a monitor that is restarting needs the second, not the
+        immediate retry. Nothing here gives up - the far side is a standing
+        process somebody will start again, and the only thing that ends this
+        loop is the window it belongs to going away.
+        """
+        try:
+            attempt = 0
+            while not self._monitor_closing:
+                await asyncio.sleep(min(MONITOR_BACKOFF_START * 2**attempt, MONITOR_BACKOFF_CAP))
+                if self._monitor_closing:
+                    return
+                if await self._attach_monitor():
+                    return
+                attempt += 1
+        finally:
+            self._redialling = False
+
     def _paint_detection(self, stale_line: str) -> None:
         """Repaint the DETECTION block for the LIVE window - the only writer.
 
@@ -3231,7 +3481,7 @@ class GuiView:
         return f"○ {describe(Phase.IDLE, loop)}", "st-dim"
 
     def _push_rail(self) -> None:
-        """The STATE rail: eight rows, one per LoopState, in loop order.
+        """The STATE rail: one row per LoopState, in loop order.
 
         The brightness table is computed here because ``LOOP_TRANSITIONS`` is
         the automation's own vocabulary and the rule reading it is one line -

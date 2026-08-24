@@ -206,6 +206,7 @@ def run_gui(
     on_config_change: Callable[[Config], None] | None = None,
     host: Any = None,
     remote: RemoteConnect | None = None,
+    monitor_target: tuple[str, int] | None = None,
 ) -> int:
     """Open the window, run the GUI loop, return an exit code when it closes.
 
@@ -230,6 +231,13 @@ def run_gui(
     this window cannot go remote, and the affordance is absent rather than
     broken. ``host`` is what the session runs on TODAY, read only for the
     sidebar's link indicator.
+
+    ``monitor_target`` is ``--monitor host:port``: the machine whose SCREEN this
+    window drives, when it is not this one (docs/design/ui-monitor.md §6.5).
+    ``None`` - every caller but a ``--monitor`` launch - is local mode, where
+    the window watches the screen it is drawn on. It is a launch fact for the
+    same reason the two above are, and it is GUI-only: the deprecated TUI never
+    takes one.
 
     Order matters and is the design's (gui.md section 2). The window is created
     with the ``js_api`` object first, because pywebview injects the API into the
@@ -269,6 +277,7 @@ def run_gui(
         host=host,
         remote=remote,
         on_config_change=on_config_change,
+        monitor_target=monitor_target,
     )
     width, height = initial_window_size(*primary_screen_size(webview))
     with asset_dir() as assets:

@@ -85,6 +85,7 @@ class GuiRunner:
         remote: RemoteConnect | None = None,
         on_close: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
+        monitor_target: tuple[str, int] | None = None,
     ) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread: threading.Thread | None = None
@@ -114,6 +115,7 @@ class GuiRunner:
             schedule=self.schedule,
             on_exit=self.request_close,
             on_config_change=on_config_change,
+            monitor_target=monitor_target,
         )
         self.js_api = JsApi(self)
 

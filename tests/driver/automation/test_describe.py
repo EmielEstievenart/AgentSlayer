@@ -4,8 +4,9 @@ Three things are worth pinning about :func:`describe`, and they are different
 kinds of claim:
 
 1. **Totality.** Every ``(Phase, LoopState)`` pair answers with words. A new
-   member of either enum (phase 5's ``LoopState.DISCONNECTED``) must fail here,
-   loudly, rather than reach a user as a ``KeyError`` inside a repaint.
+   member of either enum must fail here, loudly, rather than reach a user as a
+   ``KeyError`` inside a repaint - which is how phase 5's
+   ``LoopState.DISCONNECTED`` was made to answer for itself.
 2. **Distinctness.** Two situations that mean different things to the person
    watching must not read the same. Collapsing is fine where the situations
    ARE the same fact (a phase whose loop state is idle vs interpreting); it is
@@ -100,6 +101,16 @@ DISTINCT_PAIRS = [
         (Phase.DONE, LoopState.INTERPRETING),
         "answer needed vs the task finished",
     ),
+    (
+        (Phase.AWAITING_REPLY, LoopState.DISCONNECTED),
+        (Phase.AWAITING_REPLY, LoopState.MANUAL_COPY),
+        "the machine cannot be reached vs the machine is fine and it is your turn",
+    ),
+    (
+        (Phase.REVIEW, LoopState.DISCONNECTED),
+        (Phase.REVIEW, LoopState.WAIT_GENERATE),
+        "nothing can see the screen vs the model is visibly running on it",
+    ),
 ]
 
 
@@ -144,7 +155,23 @@ def test_collapsing_is_allowed_where_the_situation_is_the_same() -> None:
         (Phase.AWAITING_REPLY, LoopState.AUTO_INSERT, "pasting into the chat box"),
         (Phase.AWAITING_REPLY, LoopState.WAIT_SEND, "press Enter to send"),
         (Phase.AWAITING_REPLY, LoopState.AUTO_COPY, "copying the reply"),
+        # Phase 5's state (ui-monitor.md §2.9). It says "reconnecting" because
+        # the brain is already redialling on its own - the user is being told
+        # what happened, not asked to do anything about it.
+        (Phase.AWAITING_REPLY, LoopState.DISCONNECTED, "monitor link lost - reconnecting"),
+        (Phase.REVIEW, LoopState.DISCONNECTED, "monitor link lost - reconnecting"),
+        (Phase.IDLE, LoopState.DISCONNECTED, "monitor link lost - reconnecting"),
     ],
 )
 def test_exact_wording(phase: Phase, state: LoopState, expected: str) -> None:
     assert describe(phase, state) == expected
+
+
+def test_the_lost_link_outranks_even_the_finished_task() -> None:
+    """DISCONNECTED is an ``ATTENTION_STATES`` member, so the property above
+    already covers it - pinned again here as the ROW that surprised somebody:
+    a session that reached ``Phase.DONE`` while the monitor was gone must not
+    read "done - reply to continue", because replying is exactly what cannot
+    happen until the link is back."""
+    assert LoopState.DISCONNECTED in ATTENTION_STATES
+    assert describe(Phase.DONE, LoopState.DISCONNECTED) == "monitor link lost - reconnecting"

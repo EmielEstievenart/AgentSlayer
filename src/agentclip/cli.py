@@ -348,6 +348,37 @@ def _launch_verdict(channel: LinkChannel) -> tuple[int | None, str]:
     return channel.exit_status(), channel.stderr_tail()
 
 
+# ``--monitor``'s two refusals, spelled here so the suite pins the sentences
+# rather than a substring of them (docs/design/ui-monitor.md §6.5).
+MONITOR_GUI_ONLY = "the monitor link is GUI-only; the TUI is deprecated"
+MONITOR_BAD_TARGET = "--monitor wants HOST:PORT with a numeric port, not {given!r}"
+
+
+def parse_monitor_target(text: str) -> tuple[str, int] | None:
+    """``host:port`` → ``(host, port)``, or None when it is not one.
+
+    Split from ``main`` so the refusal has a test that needs no launch. The
+    port is split off the RIGHT, so an IPv6 literal written the only way a
+    ``host:port`` string can carry one (``[::1]:7777``) survives; anything whose
+    tail is not a port number in range is refused rather than guessed at,
+    because the alternative is dialling a port nobody asked for.
+    """
+    host, sep, port = text.rpartition(":")
+    if not sep or not host:
+        return None
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    if not host:
+        return None
+    try:
+        number = int(port)
+    except ValueError:
+        return None
+    if not 1 <= number <= 65535:
+        return None
+    return host, number
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentclip",
@@ -415,6 +446,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--calibrate",
         action="store_true",
         help="open the calibration window alone (no session, no engine) and exit when it closes",
+    )
+    # Split mode (docs/design/ui-monitor.md §6.5): the screen this window drives
+    # is on ANOTHER machine, reached over the monitor wire. GUI-only, and the
+    # refusal in ``main`` says so - the TUI is deprecated and takes no new
+    # surfaces (§2.12). There is deliberately no in-app connect field for this
+    # in phase 5: the flag is the whole entry.
+    parser.add_argument(
+        "--monitor",
+        default=None,
+        metavar="HOST:PORT",
+        help="drive the screen of a machine running agentclip-monitor (GUI only)",
     )
     parser.add_argument(
         "--list-matchers",
@@ -756,6 +798,27 @@ def main(argv: list[str] | None = None) -> int:
     # now names the default rather than selecting anything.
     gui = not args.tui
 
+    # WHICH MACHINE'S SCREEN, and it is a separate question from where the
+    # session runs (``--ssh``, below): the monitor link moves the pixels, the
+    # mouse and the clipboard onto another box, while the engine and the
+    # project stay wherever the launch put them (docs/design/ui-monitor.md §1's
+    # table - three halves, three flags). Refused for the TUI rather than
+    # quietly ignored: the shell is deprecated and frozen (§2.12), so a user who
+    # asked for both has asked for something that will never work and deserves
+    # to be told now instead of after a session starts watching the wrong screen.
+    monitor_target: tuple[str, int] | None = None
+    if args.monitor is not None:
+        if not gui:
+            print(f"agentclip: {MONITOR_GUI_ONLY}", file=sys.stderr)
+            return 2
+        monitor_target = parse_monitor_target(args.monitor)
+        if monitor_target is None:
+            print(
+                f"agentclip: {MONITOR_BAD_TARGET.format(given=args.monitor)}",
+                file=sys.stderr,
+            )
+            return 2
+
     # WHERE the session runs, decided before either shell exists - except on the
     # one path where it is decided AFTER: a GUI ``--ssh`` launch no longer blocks
     # on a terminal dial. The window opens on this PC and the connect
@@ -946,6 +1009,10 @@ def main(argv: list[str] | None = None) -> int:
                     service_override=args.service,
                     pending=pending_connect,
                 ),
+                # Split mode, and deliberately handed over as the parsed pair
+                # rather than the raw string: ``main`` is where a bad target is
+                # refused, so nothing below this line can be given one.
+                monitor_target=monitor_target,
             )
         finally:
             # The same hand-back the TUI path does below, over what is LIVE: a

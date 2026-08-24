@@ -1,11 +1,11 @@
 """Pilot tests for the sidebar's STATE rail (tui.md section 1.3).
 
-The rail is an eight-line readout of ``automation.loop_state.LoopState`` painted at
+The rail is a one-row-per-``automation.loop_state.LoopState`` readout painted at
 the very top of the sidebar - where in the browser-automation loop (idle, auto
 insert, manual insert, wait send, wait generate, auto copy, manual copy,
-interpreting) the live window is, and which states ``LOOP_TRANSITIONS`` says
-are legally next - so "what is the tool doing to the browser right now" never
-needs a click. Deliberately NOT ``engine.states.Phase``: the engine's machine
+interpreting) the live window is, plus the loop's absence (disconnected), and
+which states ``LOOP_TRANSITIONS`` says are legally next - so "what is the tool
+doing to the browser right now" never needs a click. Deliberately NOT ``engine.states.Phase``: the engine's machine
 says where the task is, this one where the paste-send-generate-copy round trip
 is.
 
@@ -45,7 +45,15 @@ _ALL_LOOP_STATES = (
     LoopState.AUTO_COPY,
     LoopState.MANUAL_COPY,
     LoopState.INTERPRETING,
+    LoopState.DISCONNECTED,
 )
+
+# The one destination every row carries (ui-monitor.md §2.9): the monitor link
+# can go away at any point, so it is legally next from wherever the loop is and
+# every expectation below is that state's own moves PLUS this one. Written as a
+# set to add rather than spelled into each literal, so the reason it is in all
+# of them is stated once.
+_ALWAYS = {LoopState.DISCONNECTED}
 
 UTILS_PY = '''"""Utility helpers."""
 
@@ -150,10 +158,10 @@ async def test_state_rail_shows_idle_on_launch(tmp_path: Path) -> None:
 
         assert _active_state(app) is LoopState.IDLE
         assert "idle" in str(_state_row(app, LoopState.IDLE).render())
-        assert _legal_states(app) == {LoopState.AUTO_INSERT}
+        assert _legal_states(app) == {LoopState.AUTO_INSERT} | _ALWAYS
         # everything else is neither active nor legal-next (dim).
         for state in _ALL_LOOP_STATES:
-            if state not in (LoopState.IDLE, LoopState.AUTO_INSERT):
+            if state not in (LoopState.IDLE, LoopState.AUTO_INSERT, LoopState.DISCONNECTED):
                 row = _state_row(app, state)
                 assert not row.has_class("side-state-active")
                 assert not row.has_class("side-state-legal")
@@ -183,7 +191,7 @@ async def test_state_rail_resolves_the_insert_attempt(tmp_path: Path) -> None:
         await _start_session(app, pilot)
 
         assert _active_state(app) is LoopState.MANUAL_INSERT
-        assert _legal_states(app) == {LoopState.WAIT_SEND, LoopState.WAIT_GENERATE}
+        assert _legal_states(app) == {LoopState.WAIT_SEND, LoopState.WAIT_GENERATE} | _ALWAYS
 
         idle_row = _state_row(app, LoopState.IDLE)
         assert not idle_row.has_class("side-state-active")
@@ -203,7 +211,7 @@ async def test_state_rail_walks_a_real_turn(tmp_path: Path) -> None:
         main.post_message(ClipboardCaptured(REPLY_WITH_EDIT))
         await _wait_for(pilot, lambda: main.pending_approval, "approval gate")
         assert _active_state(app) is LoopState.INTERPRETING
-        assert _legal_states(app) == {LoopState.AUTO_INSERT, LoopState.IDLE}
+        assert _legal_states(app) == {LoopState.AUTO_INSERT, LoopState.IDLE} | _ALWAYS
 
         await pilot.press("y")
         await _wait_for(pilot, lambda: main.phase_name == "AWAITING_REPLY", "re-armed")
@@ -231,4 +239,4 @@ async def test_state_rail_settles_idle_after_task_done(tmp_path: Path) -> None:
         await _wait_for(
             pilot, lambda: _active_state(app) is LoopState.IDLE, "rail settled back to idle"
         )
-        assert _legal_states(app) == {LoopState.AUTO_INSERT}
+        assert _legal_states(app) == {LoopState.AUTO_INSERT} | _ALWAYS

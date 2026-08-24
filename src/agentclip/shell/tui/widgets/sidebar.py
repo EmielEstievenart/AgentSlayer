@@ -28,10 +28,10 @@ are per-service settings that belong next to the service's other settings, and
 six capture buttons with six status lines had grown into two thirds of a 32-cell
 column. What is left is:
 
-* **STATE** - an eight-line rail at the very top of the column, one row per
+* **STATE** - a rail at the very top of the column, one row per
   ``driver.automation.loop_state.LoopState``: the browser-automation loop (idle, auto/manual
-  insert, wait send, wait generate, auto/manual copy, interpreting), NOT the
-  engine's task phase. The active state gets a ``▶`` marker and bold/reverse
+  insert, wait send, wait generate, auto/manual copy, interpreting) plus the
+  loop's absence (disconnected), NOT the engine's task phase. The active state gets a ``▶`` marker and bold/reverse
   styling, ``LOOP_TRANSITIONS[active]``'s legal next moves read at normal
   brightness, and everything else is dim. ``show_loop(state)`` repaints it, and
   MainScreen drives it straight from the automation's own events (the paste
@@ -130,6 +130,11 @@ _LOOP_ORDER: tuple[LoopState, ...] = (
     LoopState.AUTO_COPY,
     LoopState.MANUAL_COPY,
     LoopState.INTERPRETING,
+    # Last, and not a step of the round trip: the link to the monitor is gone
+    # and nothing above this row can happen until it is back (ui-monitor.md
+    # §2.9). Below the loop rather than inside it, so the picture the other
+    # eight rows draw is unchanged.
+    LoopState.DISCONNECTED,
 )
 _LOOP_LABEL: dict[LoopState, str] = {
     LoopState.IDLE: "idle",
@@ -140,6 +145,7 @@ _LOOP_LABEL: dict[LoopState, str] = {
     LoopState.AUTO_COPY: "auto copy",
     LoopState.MANUAL_COPY: "manual copy",
     LoopState.INTERPRETING: "interpreting",
+    LoopState.DISCONNECTED: "disconnected",
 }
 
 

@@ -202,8 +202,26 @@ class UIMonitor(Protocol):
     async def send_enter(self) -> bool: ...
     async def read_clipboard(self) -> str | None: ...
     async def write_clipboard(self, text: str) -> None: ...
-    async def start_clip_watch(self) -> None:
-        """Run the clipboard watcher (idempotent)."""
+
+    # -- the clipboard watcher ---------------------------------------------
+    # Sync, alone among the verbs below, because every caller is: the armed
+    # switch, a session starting and a session ending are all UI-thread acts
+    # that return a state the shell paints from (``set_os_armed``), and making
+    # them coroutines would ripple an ``await`` into every one of those call
+    # sites for a call that only raises or lowers a flag. Idempotent and
+    # thread-safe for the same reason.
+
+    def watch_clipboard(self, on: bool) -> bool:
+        """Start or stop the clipboard watcher; returns whether one is polling
+        now. ``False`` for ``on=False``, and also for an ``on=True`` there is
+        nothing to honour - no backend at all, or a write-only ("manual") one."""
         ...
 
-    async def stop_clip_watch(self) -> None: ...
+    @property
+    def clipboard_kind(self) -> str | None:
+        """Which backend is behind ``read_clipboard`` / ``write_clipboard`` /
+        ``watch_clipboard``: the provider's name, ``"manual"`` for the
+        write-only sentinel, ``None`` when there is no backend at all. A shell
+        tells the last two apart - manual mode is explained to the user, and no
+        backend at all was never promised anything."""
+        ...

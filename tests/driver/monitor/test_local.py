@@ -3,144 +3,31 @@
 The sibling of ``tests/driver/automation/test_detector_poller.py``, and the same
 bargain: what the detectors SEE has its own unit tests
 (``tests/driver/screen/test_detector.py``), and what a tick MEANS is the brain's
-(``tests/driver/automation/``). What is asserted here is what the monitor OWNS -
-who is polling, what comes out of a tick, which run it belongs to, when a parked
-``observe`` is allowed to wake up, and that a stop really ends a thread.
+(``tests/driver/automation/``). What is asserted here is what a tick IS and
+where it goes - the fields that come out of one, the cadence it was taken at,
+when a parked ``observe`` is allowed to wake up, and who hears about it.
 
-So the threads are real and every test joins its own: a poller that only *looks*
-stopped is exactly the bug this file could hide, and a mocked thread would hide
-it. The detector is the real composer's (``build_detector``) over fake frames,
-because the loop under test is a bridge and the thing it bridges should be the
-thing that ships.
+The THREAD that produces them is ``test_poller.py``'s subject, and the tracker
+swap underneath is ``test_tracker_reset.py``'s; the harness all three share -
+real threads, a teardown that joins them by name - lives in ``conftest.py``.
 """
 
 from __future__ import annotations
 
 import asyncio
 import threading
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 
 import pytest
 
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.monitor.local import POLL_SECONDS, LocalUIMonitor, required_ticks
-from agentclip.driver.monitor.protocol import MonitorSpec, Tick
+from agentclip.driver.monitor.protocol import Tick
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 
-# Fast enough that a test never waits on a tick, slow enough to still be a tick.
-POLL_S = 0.005
-TIMEOUT_S = 5.0
-
-REGION = ScreenRegion(10, 20, 4, 4)
-
-
-def _frame() -> RegionImage:
-    """One captured frame: 2x2 BGRX, flat black. The loop hands it straight to
-    the detector, so what is IN it only matters to the detector's own tests."""
-    return RegionImage(2, 2, bytes(4 * 4))
-
-
-async def _await_until(
-    predicate: Callable[[], bool], what: str, timeout: float = TIMEOUT_S
-) -> None:
-    """Wait for something the POLLER thread will do, without blocking the event
-    loop a parked ``observe`` is going to be woken through."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if predicate():
-            return
-        await asyncio.sleep(0.005)
-    raise AssertionError(f"timed out waiting for {what}")
-
-
-def _spec(
-    *,
-    region: ScreenRegion | None = REGION,
-    service: str = "svc",
-    finish_signals: tuple[str, ...] = ("stale",),
-    stable_seconds: float = 0.5,
-) -> MonitorSpec:
-    """The §2.10 payload, with everything a test is not about held still."""
-    return MonitorSpec(
-        service=service,
-        region=region,
-        finish_signals=finish_signals,
-        stable_seconds=stable_seconds,
-        tolerance=24,
-        matcher="anchors",
-        hover_scan=False,
-        scroll_action="wheel",
-        snap_back=False,
-        delivery="paste",
-        auto_submit=False,
-        send_arm_min_diff=0.02,
-        send_arm_ticks=2,
-        send_gate_timeout_ticks=240,
-        send_gate_seen_timeout_ticks=20,
-    )
-
-
-class Wiring:
-    """One monitor, everything that came out of it, and the frames it asked for."""
-
-    def __init__(self, monitor: LocalUIMonitor, captured: list[ScreenRegion]) -> None:
-        self.monitor = monitor
-        self.captured = captured
-        self.ticks: list[Tick] = []
-        self.clips: list[str] = []
-
-
-@pytest.fixture
-def wire() -> Iterator[Callable[..., Wiring]]:
-    """Build wired monitors, and make sure no thread outlives the test.
-
-    The teardown is the point: these are real threads capturing (a stub of) the
-    user's screen, so one a test forgot would leak into every test after it.
-    Joined BY NAME rather than by handle, because a test that reconfigures
-    leaves earlier runs' threads behind on purpose - that is what a ghost tick
-    is - and those are exactly the ones a handle-keeping teardown would miss.
-    """
-    built: list[Wiring] = []
-
-    def build(
-        *,
-        clipboard: FakeClipboard | None = None,
-        profile: ServiceProfile | None = None,
-        poll_seconds: float = POLL_S,
-        clip_poll_interval_ms: int = 5,
-    ) -> Wiring:
-        held = profile if profile is not None else ServiceProfile("svc")
-        captured: list[ScreenRegion] = []
-
-        def capture(region: ScreenRegion) -> RegionImage:
-            captured.append(region)
-            return _frame()
-
-        monitor = LocalUIMonitor(
-            profile_for=lambda key: held if key == "svc" else None,
-            clipboard=clipboard,
-            capture=capture,
-            poll_seconds=poll_seconds,
-            clip_poll_interval_ms=clip_poll_interval_ms,
-        )
-        wiring = Wiring(monitor, captured)
-        monitor.subscribe(wiring.ticks.append)
-        monitor.on_clip(wiring.clips.append)
-        built.append(wiring)
-        return wiring
-
-    yield build
-
-    for wiring in built:
-        asyncio.run(wiring.monitor.close())
-    for name in ("agentclip-detector", "agentclip-clipwatch"):
-        for leftover in [t for t in threading.enumerate() if t.name == name]:
-            leftover.join(timeout=TIMEOUT_S)
-            assert not leftover.is_alive(), f"a {name} thread outlived its test"
-
+from .conftest import REGION, TIMEOUT_S, Wiring, await_until, spec
 
 # == what a tick is, and where it goes =========================================
 
@@ -151,9 +38,9 @@ async def test_a_tick_reaches_the_subscribers_and_the_latest_read(
     """The whole of phase 1's plumbing in one assertion: the poller captures the
     configured window, folds the frame into a tick, and publishes it."""
     wiring = wire()
-    generation = await wiring.monitor.configure(_spec())
+    generation = await wiring.monitor.configure(spec())
 
-    await _await_until(lambda: bool(wiring.ticks), "the first tick")
+    await await_until(lambda: bool(wiring.ticks), "the first tick")
     tick = wiring.ticks[0]
     assert wiring.captured[0] == REGION
     assert tick.generation == generation == 1
@@ -163,7 +50,7 @@ async def test_a_tick_reaches_the_subscribers_and_the_latest_read(
     assert tick.active_detectors == ("stale",)
     assert wiring.monitor.latest is tick
 
-    await _await_until(lambda: len(wiring.ticks) > 1, "a second tick")
+    await await_until(lambda: len(wiring.ticks) > 1, "a second tick")
     assert wiring.ticks[1].seq == 2  # never repeats, and never goes backwards
 
 
@@ -174,9 +61,9 @@ async def test_a_spec_with_nothing_to_watch_starts_no_thread(
     or a service this machine has no profile for - is pure cost."""
     wiring = wire()
 
-    assert await wiring.monitor.configure(_spec(region=None)) == 1
+    assert await wiring.monitor.configure(spec(region=None)) == 1
     assert wiring.monitor.poller is None
-    assert await wiring.monitor.configure(_spec(service="nobody-has-this")) == 2
+    assert await wiring.monitor.configure(spec(service="nobody-has-this")) == 2
     assert wiring.monitor.poller is None
     assert wiring.monitor.latest is None
 
@@ -188,9 +75,9 @@ async def test_the_sightings_are_screen_rectangles_not_pixels(
     searches for nothing, so the map is empty and every kind reads "no answer"
     rather than "not on screen"."""
     wiring = wire()
-    await wiring.monitor.configure(_spec())
+    await wiring.monitor.configure(spec())
 
-    await _await_until(lambda: bool(wiring.ticks), "the first tick")
+    await await_until(lambda: bool(wiring.ticks), "the first tick")
     tick = wiring.ticks[0]
     assert dict(tick.sightings) == {}
     assert tick.present(TemplateKind.COPY) is None
@@ -206,7 +93,7 @@ async def test_observe_waits_for_a_tick_taken_after_the_call(
     """The bug this exists to stop is reading the screen from before the scroll.
     A tick that was already in hand when the call was made resolves nothing."""
     wiring = wire()
-    await wiring.monitor.configure(_spec(region=None))  # ticks come from feed only
+    await wiring.monitor.configure(spec(region=None))  # ticks come from feed only
     wiring.monitor.feed(wiring.monitor.stamp())
     stale = wiring.monitor.latest
     assert stale is not None
@@ -225,7 +112,7 @@ async def test_observe_is_woken_from_the_poller_thread(wire: Callable[..., Wirin
     """The hand-over that makes ``observe`` usable at all: the future belongs to
     the event loop and the tick arrives on a thread of its own."""
     wiring = wire()
-    await wiring.monitor.configure(_spec())
+    await wiring.monitor.configure(spec())
     tick = await asyncio.wait_for(wiring.monitor.observe(), TIMEOUT_S)
     assert tick.generation == 1
 
@@ -240,10 +127,10 @@ async def test_a_ghost_tick_is_dropped_and_never_resolves_an_observe(
     answers a recipe that is waiting to see the NEW window.
     """
     wiring = wire()
-    await wiring.monitor.configure(_spec(region=None))
+    await wiring.monitor.configure(spec(region=None))
     in_flight = wiring.monitor.stamp()  # taken under generation 1
 
-    assert await wiring.monitor.configure(_spec(region=None)) == 2
+    assert await wiring.monitor.configure(spec(region=None)) == 2
     task = asyncio.ensure_future(wiring.monitor.observe())
     await asyncio.sleep(0)
     await asyncio.sleep(0)
@@ -270,7 +157,7 @@ async def test_reset_trackers_swaps_the_identities_and_the_detector_sees_them(
     that is what the poller folds its frames through - a reset the detector
     never heard about is a reset the very next tick undoes."""
     wiring = wire()
-    await wiring.monitor.configure(_spec())
+    await wiring.monitor.configure(spec())
     detector = wiring.monitor.detector
     assert detector is not None
     before = wiring.monitor.stale_tracker
@@ -295,10 +182,10 @@ async def test_suspend_stops_the_thread_and_resume_restarts_it(
     finishing are honest readings of the same window, and the resume puts the
     same detector back on a thread rather than rebuilding it."""
     wiring = wire()
-    await wiring.monitor.configure(_spec())
+    await wiring.monitor.configure(spec())
     poller = wiring.monitor.poller
     assert poller is not None
-    await _await_until(lambda: bool(wiring.ticks), "the first tick")
+    await await_until(lambda: bool(wiring.ticks), "the first tick")
     detector = wiring.monitor.detector
 
     await wiring.monitor.suspend()
@@ -311,14 +198,14 @@ async def test_suspend_stops_the_thread_and_resume_restarts_it(
     await wiring.monitor.resume()
     assert wiring.monitor.poller is not None
     assert wiring.monitor.detector is detector, "resume rebuilt the detector"
-    await _await_until(lambda: len(wiring.ticks) > quiet, "ticks after the resume")
+    await await_until(lambda: len(wiring.ticks) > quiet, "ticks after the resume")
     assert wiring.monitor.generation == 1, "a suspend/resume is not a retarget"
     assert wiring.ticks[-1].generation == 1
 
 
 async def test_resume_while_polling_is_a_no_op(wire: Callable[..., Wiring]) -> None:
     wiring = wire()
-    await wiring.monitor.configure(_spec())
+    await wiring.monitor.configure(spec())
     poller = wiring.monitor.poller
 
     await wiring.monitor.resume()
@@ -328,7 +215,7 @@ async def test_resume_while_polling_is_a_no_op(wire: Callable[..., Wiring]) -> N
 
 async def test_close_ends_the_poller(wire: Callable[..., Wiring]) -> None:
     wiring = wire()
-    await wiring.monitor.configure(_spec())
+    await wiring.monitor.configure(spec())
     poller = wiring.monitor.poller
     assert poller is not None
 
@@ -369,7 +256,7 @@ async def test_configure_hands_the_converted_ticks_to_the_detector(
         return real(region, profile, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(local, "build_detector", spy)
-    await wire(poll_seconds=POLL_SECONDS).monitor.configure(_spec(stable_seconds=2.0))
+    await wire(poll_seconds=POLL_SECONDS).monitor.configure(spec(stable_seconds=2.0))
 
     assert seen["required_ticks"] == 4
     assert seen["signals"] == ("stale",)
@@ -380,7 +267,7 @@ async def test_configure_hands_the_converted_ticks_to_the_detector(
     # polling faster needs proportionally more quiet ticks to have watched the
     # same two seconds of screen. This is the half a shell could never get
     # right, and the reason the seconds ship raw.
-    await wire(poll_seconds=0.25).monitor.configure(_spec(stable_seconds=2.0))
+    await wire(poll_seconds=0.25).monitor.configure(spec(stable_seconds=2.0))
     assert seen["required_ticks"] == 8
 
 
@@ -400,7 +287,7 @@ async def test_the_watcher_delivers_an_external_copy_but_never_our_own_write(
     assert wiring.monitor.watch_clipboard(True) is True  # idempotent
 
     clipboard.set_text("a reply the user copied")
-    await _await_until(lambda: bool(wiring.clips), "the external copy")
+    await await_until(lambda: bool(wiring.clips), "the external copy")
 
     await wiring.monitor.write_clipboard("our own outbound payload")
     assert wiring.monitor.self_writes.contains_text("our own outbound payload")
@@ -409,7 +296,7 @@ async def test_the_watcher_delivers_an_external_copy_but_never_our_own_write(
     # The proof it was SKIPPED rather than merely late: a later external copy
     # lands, and the watcher polls one clipboard in order.
     clipboard.set_text("the next reply")
-    await _await_until(lambda: len(wiring.clips) > 1, "the second external copy")
+    await await_until(lambda: len(wiring.clips) > 1, "the second external copy")
     assert wiring.clips == ["a reply the user copied", "the next reply"]
 
     assert wiring.monitor.watch_clipboard(False) is False
@@ -457,7 +344,7 @@ async def test_one_subscriber_that_raises_does_not_stop_the_next(
     """Losing every tick after the first bad paint would look exactly like a
     frozen screen, so a hook that throws is logged and the fan-out goes on."""
     wiring = wire()
-    await wiring.monitor.configure(_spec(region=None))
+    await wiring.monitor.configure(spec(region=None))
     seen: list[Tick] = []
 
     def boom(_tick: Tick) -> None:
@@ -477,7 +364,7 @@ async def test_one_subscriber_that_raises_does_not_stop_the_next(
 
 async def test_unsubscribe_stops_the_delivery(wire: Callable[..., Wiring]) -> None:
     wiring = wire()
-    await wiring.monitor.configure(_spec(region=None))
+    await wiring.monitor.configure(spec(region=None))
     seen: list[Tick] = []
     off = wiring.monitor.subscribe(seen.append)
 
@@ -498,7 +385,7 @@ async def test_the_frame_hook_carries_the_pixels_the_tick_never_does(
     wiring = wire()
     frames: list[RegionImage] = []
     wiring.monitor.on_frame(lambda scene, _sightings: frames.append(scene))
-    await wiring.monitor.configure(_spec())
+    await wiring.monitor.configure(spec())
 
-    await _await_until(lambda: len(wiring.ticks) > 1, "a couple of ticks")
+    await await_until(lambda: len(wiring.ticks) > 1, "a couple of ticks")
     assert frames == [], "a frame with no sightings is no evidence about anything"

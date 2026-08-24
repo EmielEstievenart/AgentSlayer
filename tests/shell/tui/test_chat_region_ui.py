@@ -30,6 +30,7 @@ from agentclip.driver.screen.picker import ScreenPickError
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import patch_os
 
 from .conftest import focus_clicks, send_composer
 
@@ -199,7 +200,7 @@ async def test_outbound_copy_clicks_the_region_and_it_survives_new(
     where the window is, not what the session said, so it survives."""
     clicks: list[ScreenRegion] = []
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: REGION)
-    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
     app, fake = _make_app(tmp_path)
     async with app.run_test(size=(110, 40)) as pilot:
         main = app.main_screen

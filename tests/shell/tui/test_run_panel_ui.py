@@ -25,13 +25,13 @@ from pathlib import Path
 import pytest
 from textual.pilot import Pilot
 
-import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.messages import CallOutput, ClipboardCaptured
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import patch_os
 
 # id=1 announces itself with a marker file in the project root (run_command's
 # cwd) and then lingers; id=2 is queued behind it.
@@ -87,7 +87,7 @@ def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard, Path]:
 
 @pytest.fixture(autouse=True)
 def _no_real_paste(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
+    patch_os(monkeypatch, "send_paste", lambda: False)
 
 
 async def _start_session(app: AgentClipApp, pilot: Pilot) -> MainScreen:

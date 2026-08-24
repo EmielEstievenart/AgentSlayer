@@ -38,7 +38,6 @@ from textual.widgets import (
     TextArea,
 )
 
-import agentclip.shell.tui.screens.main as main_mod
 import agentclip.shell.tui.screens.service_editor as service_editor_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import (
@@ -83,6 +82,7 @@ from agentclip.shell.tui.screens.service_editor import (
 )
 from agentclip.shell.tui.widgets.sidebar import Sidebar
 from agentclip.shell.tui.widgets.slider import Slider
+from tests.shell.tui.conftest import fast_polling, patch_os
 
 
 async def _wait_for(
@@ -1620,8 +1620,8 @@ async def test_the_detector_worker_is_paused_for_the_whole_visit(
     auto-copy on staleness alone. Left polling, closing the editor read the
     settled screen as a finished response and fired the copy flow at a chat
     nobody had sent anything to."""
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: _image(8))
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+    patch_os(monkeypatch, "capture_region", lambda region: _image(8))
+    fast_polling(monkeypatch, 0.02)
     app, _global_path = _make_app(tmp_path, profile_root)
     async with app.run_test(size=(120, 45)) as pilot:
         main = app.main_screen
@@ -1630,18 +1630,18 @@ async def test_the_detector_worker_is_paused_for_the_whole_visit(
 
         main._slots[AgentSlot.MASTER].chat_region = ScreenRegion(0, 0, 400, 300)
         main._start_detector_worker()
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
         main._copy_armed = True  # as a real generation would have left it
 
         await _open_editor_via_f2(app, pilot)
-        assert main._detector_worker is None
+        assert main._monitor.poller is None
         # ...and the arm went with it: whatever the editor does to the screen
         # says nothing about whether the user sent a message.
         assert main._copy_armed is False
 
         await pilot.press("escape")
         await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller restarted")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller restarted")
 
 
 async def test_f2_is_refused_while_the_chat_region_picker_is_open(

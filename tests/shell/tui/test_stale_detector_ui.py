@@ -28,6 +28,7 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
 
+import agentclip.driver.monitor.local as local_mod
 import agentclip.driver.screen.detector as detector_mod
 import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
@@ -50,6 +51,7 @@ from agentclip.shell.tui.widgets.sidebar import (
     STALE_UNTICKED,
 )
 from agentclip.shell.tui.widgets.window_tabs import WindowTabs
+from tests.shell.tui.conftest import FrozenPoller, fast_polling, feed_probe, patch_os
 
 from .conftest import send_composer
 
@@ -155,42 +157,33 @@ def _patch_picker(
     """Stub the overlay, the GDI capture the tracker polls with, and the cadence."""
     picker = _Picker(region)
     monkeypatch.setattr(main_mod, "pick_region", picker)
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: FRAME)
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", poll_s)
+    patch_os(monkeypatch, "capture_region", lambda region: FRAME)
+    fast_polling(monkeypatch, poll_s)
     return picker
-
-
-class _FrozenWorker:
-    """A poll worker that never polls - cancellable, and above all *present*.
-
-    ``resume_detectors`` restarts only when nothing is running, so a stub that
-    left ``_detector_worker`` at None would turn every no-op resume into a
-    second rebuild the real app never performs, and the restart counts below
-    would be counting the stub.
-    """
-
-    def __init__(self) -> None:
-        self.is_cancelled = False
-
-    def cancel(self) -> None:
-        self.is_cancelled = True
 
 
 def _freeze_detector(monkeypatch: pytest.MonkeyPatch) -> list[None]:
     """Stop the poll THREAD and count how often one would have been started.
 
-    Only the spawn is stubbed, not the whole of ``_start_detector_worker``: the
-    composition (which detectors, and the DETECTION block that reports them) is
-    what most of these tests are about, and a live loop repaints ``#side-stale``
-    with a probe readout within milliseconds of it.
+    Only the thread is stubbed, not the whole configure: the composition (which
+    detectors, and the DETECTION block that reports them) is what most of these
+    tests are about, and a live loop repaints ``#side-stale`` with a probe
+    readout within milliseconds of it. The stand-in is *present* rather than
+    None for the same reason the real handle is - ``resume_detectors`` polls
+    again only when nothing is running, so a run that read as absent would turn
+    every no-op resume into a second start the real app never performs.
     """
     starts: list[None] = []
+    real = local_mod.LocalUIMonitor._start
 
-    def fake_spawn(self: MainScreen, loop: object) -> None:
+    def counted(self: local_mod.LocalUIMonitor, loop: object, stop: object) -> object:
         starts.append(None)
-        self._detector_worker = cast(Any, _FrozenWorker())
+        poller = FrozenPoller()
+        self._poller = cast(Any, poller)
+        return poller
 
-    monkeypatch.setattr(MainScreen, "_spawn_detector_worker", fake_spawn)
+    assert real is not None
+    monkeypatch.setattr(local_mod.LocalUIMonitor, "_start", counted)
     return starts
 
 
@@ -252,7 +245,7 @@ async def test_drawing_the_chat_window_is_the_whole_calibration(
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         assert STALE_UNSET in _stale_label(app)
-        assert main._detector_worker is None
+        assert main._monitor.poller is None
 
         await _press(app, pilot, "#set-region-btn")
         await _wait_for(pilot, lambda: main._chat_region == REGION, "chat region adopted")
@@ -262,7 +255,7 @@ async def test_drawing_the_chat_window_is_the_whole_calibration(
         assert main._active_profile().captured == ()  # nothing captured at all
         assert can_finish(main.live, main._active_profile())
 
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
         # ...and it really polls: the tracker's first frame reads as CHANGING.
         await _wait_for(pilot, lambda: "GENERATING" in _stale_label(app), "a stale probe arrives")
 
@@ -281,7 +274,7 @@ async def test_the_stale_detector_is_the_only_one_running_by_default(
         assert main._active_detectors == ()
 
         await _press(app, pilot, "#set-region-btn")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
         assert main._active_detectors == ("stale",)
         assert main._finish_tick_closed_by("stale")
         assert not main._finish_tick_closed_by("busy")
@@ -319,15 +312,15 @@ async def test_redrawing_replaces_the_poller(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _press(app, pilot, "#set-region-btn")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
-        first = main._detector_worker
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
+        first = main._monitor.poller
         assert first is not None
 
         await pilot.pause(_CLICK_CHAIN_S)
         await _press(app, pilot, "#set-region-btn")
         await _wait_for(pilot, lambda: first.is_cancelled, "the first poller was replaced")
-        assert main._detector_worker is not None
-        assert main._detector_worker is not first
+        assert main._monitor.poller is not None
+        assert main._monitor.poller is not first
 
 
 async def test_cancelled_pick_changes_nothing(
@@ -345,7 +338,7 @@ async def test_cancelled_pick_changes_nothing(
         await pilot.pause(0.2)
 
         assert main._chat_region is None
-        assert main._detector_worker is None
+        assert main._monitor.poller is None
         assert STALE_UNSET in _stale_label(app)
         assert any("cancelled" in note for note in notes)
 
@@ -365,7 +358,7 @@ async def test_a_shared_capture_failure_reaches_the_detector_as_an_error(
         def boom(region: ScreenRegion) -> RegionImage:
             raise CaptureError("no display")
 
-        monkeypatch.setattr(main_mod, "capture_region", boom)
+        patch_os(monkeypatch, "capture_region", boom)
         await _press(app, pilot, "#set-region-btn")
         await _wait_for(pilot, lambda: "capture failed" in _stale_label(app), "error reported")
 
@@ -423,7 +416,7 @@ async def test_finish_detection_off_survives_tab_clicks_and_f6(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _press(app, pilot, "#set-region-btn")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
         _with_signals(main)  # nothing ticked
         await pilot.pause()
         assert _stale_label(app) == STALE_OFF
@@ -468,7 +461,7 @@ async def test_reselecting_the_same_tab_never_wipes_a_live_verdict(
         _with_signals(main, "busy", "stale")
         await pilot.pause()
 
-        main._automation.feed_probe("busy", BusyProbe(BusyState.MATCH, 0.42))
+        feed_probe(main, "busy", BusyProbe(BusyState.MATCH, 0.42))
         await _wait_for(pilot, lambda: "GENERATING" in _label(app, "#side-tpl-busy"), "a verdict")
 
         main._on_window_selected(WindowTabs.WindowSelected(main._selected_window))
@@ -490,7 +483,7 @@ async def test_a_ticked_but_uncaptured_signal_says_so_on_its_own_line(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _press(app, pilot, "#set-region-btn")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
 
         _with_signals(main, "busy", "stale")  # busy ticked, nothing captured
         await pilot.pause()
@@ -594,7 +587,7 @@ async def test_the_box_lands_in_the_tab_that_opened_the_picker(
     """
     picker = _BlockingPicker(REGION)
     monkeypatch.setattr(main_mod, "pick_region", picker)
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: FRAME)
+    patch_os(monkeypatch, "capture_region", lambda region: FRAME)
     starts = _freeze_detector(monkeypatch)
     _record_notifications(monkeypatch)
     app = _make_app(tmp_path, profile_root)
@@ -646,8 +639,8 @@ async def test_new_keeps_the_window_and_restarts_the_poller(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _press(app, pilot, "#set-region-btn")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
-        worker = main._detector_worker
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
+        worker = main._monitor.poller
         assert worker is not None
         await _wait_for(pilot, lambda: "GENERATING" in _stale_label(app), "a stale probe arrives")
 
@@ -661,8 +654,8 @@ async def test_new_keeps_the_window_and_restarts_the_poller(
         assert main._chat_region == REGION
         assert STALE_UNSET not in _stale_label(app)
         await _wait_for(pilot, lambda: worker.is_cancelled, "old poller cancelled")
-        assert main._detector_worker is not None
-        assert main._detector_worker is not worker
+        assert main._monitor.poller is not None
+        assert main._monitor.poller is not worker
         # The fresh poller really is watching: a new verdict lands post-/new.
         await _wait_for(pilot, lambda: "GENERATING" in _stale_label(app), "polling resumed")
 
@@ -779,12 +772,12 @@ async def test_an_empty_checklist_runs_nothing_and_says_so(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _press(app, pilot, "#set-region-btn")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
 
         _with_signals(main)  # nothing ticked
         await pilot.pause()
         assert main._active_detectors == ()
-        assert main._detector_worker is None
+        assert main._monitor.poller is None
         assert _stale_label(app) == STALE_OFF
 
 
@@ -827,13 +820,15 @@ async def test_a_ticked_detector_needs_its_appearance_captured(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
 
         await _press(app, pilot, "#set-region-btn")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
         _capture_busy(main, seed_templates)
         await _wait_for(
             pilot, lambda: main._active_profile().has(TemplateKind.BUSY), "busy appearance known"
         )
         # Captured but not ticked: the default checklist is stale-only.
-        assert main._active_detectors == ("stale",)
+        await _wait_for(
+            pilot, lambda: main._active_detectors == ("stale",), "the rebuild landed"
+        )
 
         _with_signals(main, "busy", "stale")
         await _wait_for(
@@ -871,7 +866,7 @@ async def test_an_unticked_stale_detector_posts_no_stale_verdicts(
 
         _with_signals(main, "busy")
         await _wait_for(pilot, lambda: main._active_detectors == ("busy",), "busy alone")
-        assert main._stale_tracker is None
+        assert main._automation.stale_tracker is None
         main._stale_seen = False
         await pilot.pause(0.2)  # several ticks at the 0.02 s cadence
         assert main._stale_seen is False
@@ -886,7 +881,7 @@ async def test_no_window_means_no_poller_at_all(
         main = app.main_screen
         assert main is not None
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
-        assert main._detector_worker is None
+        assert main._monitor.poller is None
 
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
@@ -894,5 +889,5 @@ async def test_no_window_means_no_poller_at_all(
 
         await _send(app, pilot, "/new")
         await _wait_for(pilot, lambda: main.awaiting_new_session, "new session prompt re-armed")
-        assert main._detector_worker is None
+        assert main._monitor.poller is None
         assert main._active_detectors == ()

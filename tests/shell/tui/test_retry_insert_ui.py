@@ -4,13 +4,13 @@ The insert is a click into the chat's input box followed by a synthetic Ctrl+V
 (``MainScreen._insert_outbound``). Both halves here are about the gap between
 those two events:
 
-* the SETTLE (``main_mod.PASTE_SETTLE_DELAY``) - the click only tells us the OS
+* the SETTLE (``ops_mod.PASTE_SETTLE_DELAY``) - the click only tells us the OS
   accepted the input, never that the browser has finished taking focus, and a
   Ctrl+V that overtakes the activation is delivered to whatever had focus
   before. So the paste waits a beat, and it waits it on the event loop
   (``asyncio.sleep``) rather than blocking the UI thread. In front of that beat
   there is now an activation POLL as well (``_await_browser_activation``,
-  ``main_mod._ACTIVATION_POLL_S``, which the directory's conftest shrinks to
+  ``ops_mod.ACTIVATION_POLL_S``, which the directory's conftest shrinks to
   nothing) - the decisions it makes belong to the pure-unit suite next door
   (tests/driver/automation/test_delivery.py); what is pinned HERE is the flat
   beat, which is the half no window handle can report on and the half whose
@@ -35,15 +35,16 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Button, Static
 
-import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor import ops as ops_mod
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
 from agentclip.shell.tui.widgets.sidebar import ENTER_FLASH_TEXT, PASTE_FLASH_TEXT
+from tests.shell.tui.conftest import patch_os
 
 # Long enough that the gap it opens cannot be mistaken for scheduling noise,
 # short enough that a file full of these tests still runs in a blink.
@@ -121,9 +122,9 @@ def _said(notes: list[str], fragment: str) -> bool:
 
 @pytest.fixture(autouse=True)
 def _no_real_input(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "click_region", lambda region: True)
-    monkeypatch.setattr(main_mod, "send_paste", lambda: True)
-    monkeypatch.setattr(main_mod, "send_enter", lambda: True)
+    patch_os(monkeypatch, "click_region", lambda region: True)
+    patch_os(monkeypatch, "send_paste", lambda: True)
+    patch_os(monkeypatch, "send_enter", lambda: True)
 
 
 # -- the settle between the click and the paste ---------------------------------
@@ -132,11 +133,11 @@ def _no_real_input(monkeypatch: pytest.MonkeyPatch) -> None:
 def _timed(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float]]:
     """Every OS input event the insert sends, in order, with when it happened."""
     events: list[tuple[str, float]] = []
-    monkeypatch.setattr(
-        main_mod, "click_region", lambda region: events.append(("click", time.monotonic())) or True
+    patch_os(
+        monkeypatch, "click_region", lambda region: events.append(("click", time.monotonic())) or True
     )
-    monkeypatch.setattr(
-        main_mod, "send_paste", lambda: events.append(("paste", time.monotonic())) or True
+    patch_os(
+        monkeypatch, "send_paste", lambda: events.append(("paste", time.monotonic())) or True
     )
     return events
 
@@ -146,7 +147,7 @@ async def test_the_paste_waits_for_the_focus_click_to_settle(
 ) -> None:
     """The whole point of the beat: the Ctrl+V goes out AFTER the click, and not
     in the same instant - the window it is aimed at is still taking focus."""
-    monkeypatch.setattr(main_mod, "PASTE_SETTLE_DELAY", _TEST_SETTLE_S)
+    monkeypatch.setattr(ops_mod, "PASTE_SETTLE_DELAY", _TEST_SETTLE_S)
     events = _timed(monkeypatch)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
@@ -168,7 +169,7 @@ async def test_the_settle_does_not_block_the_ui(
     """It is an ``asyncio.sleep``, not a ``time.sleep``: the app keeps running
     its own timers while the browser takes focus, so the STATE rail and the
     blinking flash carry on being drawn."""
-    monkeypatch.setattr(main_mod, "PASTE_SETTLE_DELAY", _TEST_SETTLE_S)
+    monkeypatch.setattr(ops_mod, "PASTE_SETTLE_DELAY", _TEST_SETTLE_S)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -190,9 +191,9 @@ async def test_the_settle_covers_a_streamed_delivery_too(
 ) -> None:
     """A streaming service pastes its first chunk into the same freshly clicked
     box, so it waits out the same activation."""
-    monkeypatch.setattr(main_mod, "PASTE_SETTLE_DELAY", _TEST_SETTLE_S)
-    monkeypatch.setattr(main_mod, "_STREAM_CHUNK_SETTLE_S", 0.0)
-    monkeypatch.setattr(main_mod, "STREAM_CHUNK_CHARS", 8)
+    monkeypatch.setattr(ops_mod, "PASTE_SETTLE_DELAY", _TEST_SETTLE_S)
+    monkeypatch.setattr(ops_mod, "STREAM_CHUNK_SETTLE_S", 0.0)
+    monkeypatch.setattr(ops_mod, "STREAM_CHUNK_CHARS", 8)
     events = _timed(monkeypatch)
     app, _ = _make_app(tmp_path, delivery="stream")
     async with app.run_test(size=(110, 55)) as pilot:
@@ -209,7 +210,7 @@ def test_the_shipped_settle_is_long_enough_to_be_worth_having() -> None:
     """A guard on the constant itself: the failure it exists for is a focus race
     measured in tens of milliseconds, and shaving this to nothing would quietly
     bring the dropped pastes back."""
-    assert main_mod.PASTE_SETTLE_DELAY >= 0.2
+    assert ops_mod.PASTE_SETTLE_DELAY >= 0.2
 
 
 # -- the retry button ------------------------------------------------------------
@@ -218,7 +219,7 @@ def test_the_shipped_settle_is_long_enough_to_be_worth_having() -> None:
 async def test_a_failed_insert_offers_the_retry_button(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
+    patch_os(monkeypatch, "send_paste", lambda: False)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -252,9 +253,9 @@ async def test_the_retry_button_re_runs_the_click_and_the_paste(
     (a single press later) lands, and the loop moves on as if it always had."""
     pastes: list[bool] = []
     landing = False
-    monkeypatch.setattr(main_mod, "click_region", lambda region: True)
-    monkeypatch.setattr(
-        main_mod, "send_paste", lambda: pastes.append(landing) or landing
+    patch_os(monkeypatch, "click_region", lambda region: True)
+    patch_os(
+        monkeypatch, "send_paste", lambda: pastes.append(landing) or landing
     )
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
@@ -283,8 +284,8 @@ async def test_the_retry_delivers_the_payload_not_whatever_is_on_the_clipboard(
     the Ctrl+V it is about to send must not deliver a stray copy into the chat."""
     pasted_text: list[str] = []
     app, fake = _make_app(tmp_path)
-    monkeypatch.setattr(
-        main_mod, "send_paste", lambda: pasted_text.append(fake.read_text() or "") or False
+    patch_os(
+        monkeypatch, "send_paste", lambda: pasted_text.append(fake.read_text() or "") or False
     )
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -304,11 +305,11 @@ async def test_the_retry_taps_enter_for_an_auto_submitting_service(
     """It re-runs the WHOLE insert, submit and all - a retry that pasted but
     left the message sitting there would be a different flow than the one it is
     standing in for."""
-    monkeypatch.setattr(main_mod, "_SUBMIT_SETTLE_S", 0.0)
+    monkeypatch.setattr(ops_mod, "SUBMIT_SETTLE_S", 0.0)
     taps: list[None] = []
-    monkeypatch.setattr(main_mod, "send_enter", lambda: taps.append(None) or True)
+    patch_os(monkeypatch, "send_enter", lambda: taps.append(None) or True)
     landing = False
-    monkeypatch.setattr(main_mod, "send_paste", lambda: landing)
+    patch_os(monkeypatch, "send_paste", lambda: landing)
     app, _ = _make_app(tmp_path, auto_submit=True)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -326,7 +327,7 @@ async def test_the_retry_refuses_while_disarmed(
 ) -> None:
     """DISARMED is a promise that nothing here clicks or types, and a button is
     not an exemption from it - the toast names the switch that is."""
-    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
+    patch_os(monkeypatch, "send_paste", lambda: False)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -335,7 +336,7 @@ async def test_the_retry_refuses_while_disarmed(
 
         notes = _toasts(monkeypatch)
         clicks: list[None] = []
-        monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(None) or True)
+        patch_os(monkeypatch, "click_region", lambda region: clicks.append(None) or True)
         main.set_os_armed(False)
         notes.clear()  # the switch announces itself; what it says is not this test's
         await main.retry_insert()
@@ -354,7 +355,7 @@ async def test_the_retry_does_nothing_before_anything_has_been_copied(
         main = await _ready(app, pilot)
         notes = _toasts(monkeypatch)
         clicks: list[None] = []
-        monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(None) or True)
+        patch_os(monkeypatch, "click_region", lambda region: clicks.append(None) or True)
 
         await main.retry_insert()
 
@@ -366,7 +367,7 @@ async def test_a_session_reset_forgets_what_there_was_to_retry(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """/new tears the session down, and the last outbound belonged to it."""
-    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
+    patch_os(monkeypatch, "send_paste", lambda: False)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)

@@ -45,6 +45,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
 from agentclip.shell.tui.widgets.sidebar import PASTE_FLASH_TEXT
+from tests.shell.tui.conftest import feed_probe, patch_os
 
 from .conftest import focus_clicks, send_composer
 
@@ -154,14 +155,14 @@ def _patch_os(monkeypatch: pytest.MonkeyPatch, fake: FakeClipboard) -> _OsCalls:
         fake.write_text(f"copied {len(calls.clicks)}")  # a real click lands a copy
         return True
 
-    monkeypatch.setattr(main_mod, "click_region", fake_click)
-    monkeypatch.setattr(main_mod, "send_paste", lambda: bool(calls.pastes.append(1)) or True)
-    monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: bool(calls.moves.append((x, y))) or True)
-    monkeypatch.setattr(
-        main_mod, "scroll_region", lambda region, n: bool(calls.scrolls.append((region, n))) or True
+    patch_os(monkeypatch, "click_region", fake_click)
+    patch_os(monkeypatch, "send_paste", lambda: bool(calls.pastes.append(1)) or True)
+    patch_os(monkeypatch, "move_cursor", lambda x, y: bool(calls.moves.append((x, y))) or True)
+    patch_os(
+        monkeypatch, "scroll_region", lambda region, n: bool(calls.scrolls.append((region, n))) or True
     )
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda h: bool(calls.focuses.append(h)) or True)
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
+    patch_os(monkeypatch, "focus_window_verified", lambda h: bool(calls.focuses.append(h)) or True)
+    patch_os(monkeypatch, "capture_region", _frame)
     return calls
 
 
@@ -237,7 +238,7 @@ async def _fire(main: MainScreen, pilot: Pilot) -> None:
     main._active_detectors = ("busy",)
     main._open_reply_gate()
     for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
-        main._automation.feed_probe("busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
+        feed_probe(main, "busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
         await pilot.pause()
 
 
@@ -543,7 +544,7 @@ async def test_disarming_mid_turn_leaves_the_detectors_bookkeeping_alone(
         _calibrate(main)
         main._active_detectors = ("busy",)
         main._open_reply_gate()
-        main._automation.feed_probe("busy", BusyProbe(BusyState.MATCH, 0.2, True))
+        feed_probe(main, "busy", BusyProbe(BusyState.MATCH, 0.2, True))
         await pilot.pause()
         assert main._copy_armed is True
         assert main._awaiting_pasted_reply is True
@@ -568,15 +569,15 @@ async def test_disarming_stops_the_watcher_and_re_arming_starts_it_again(
     _toasts(monkeypatch)
     async with app.run_test(size=SIZE) as pilot:
         main = await _start_session(app, pilot)
-        await _wait_for(pilot, lambda: main._watch_worker is not None, "watcher running")
+        await _wait_for(pilot, lambda: main._watch_worker, "watcher running")
 
         main.set_os_armed(False)
         await pilot.pause()
-        assert main._watch_worker is None
+        assert main._watch_worker is False
         assert main.watch_paused is True
 
         main.set_os_armed(True)
-        await _wait_for(pilot, lambda: main._watch_worker is not None, "watcher restored")
+        await _wait_for(pilot, lambda: main._watch_worker, "watcher restored")
         assert main.watch_paused is False
 
 
@@ -593,18 +594,18 @@ async def test_re_arming_restores_the_watcher_the_user_had_not_the_one_they_paus
     _toasts(monkeypatch)
     async with app.run_test(size=SIZE) as pilot:
         main = await _start_session(app, pilot)
-        await _wait_for(pilot, lambda: main._watch_worker is not None, "watcher running")
+        await _wait_for(pilot, lambda: main._watch_worker, "watcher running")
 
         main.action_toggle_watch()  # the user's own `w`
         await pilot.pause()
-        assert main._watch_worker is None and main.watch_paused is True
+        assert main._watch_worker is False and main.watch_paused is True
 
         main.set_os_armed(False)
         await pilot.pause()
         main.set_os_armed(True)
         await pilot.pause(0.1)
 
-        assert main._watch_worker is None  # still paused, as the user left it
+        assert main._watch_worker is False  # still paused, as the user left it
         assert main.watch_paused is True
 
 
@@ -621,16 +622,16 @@ async def test_disarming_twice_does_not_lose_the_watcher_on_re_arm(
     notes = _toasts(monkeypatch)
     async with app.run_test(size=SIZE) as pilot:
         main = await _start_session(app, pilot)
-        await _wait_for(pilot, lambda: main._watch_worker is not None, "watcher running")
+        await _wait_for(pilot, lambda: main._watch_worker, "watcher running")
 
         main.set_os_armed(False)
         main.set_os_armed(False)  # the second one must be inert for the watcher
         await pilot.pause()
-        assert main._watch_worker is None
+        assert main._watch_worker is False
         assert notes.count(notes[-1]) == 2  # ...but it still confirmed itself
 
         main.set_os_armed(True)
-        await _wait_for(pilot, lambda: main._watch_worker is not None, "watcher restored")
+        await _wait_for(pilot, lambda: main._watch_worker, "watcher restored")
 
 
 async def test_the_watcher_key_is_refused_and_hidden_while_disarmed(
@@ -653,7 +654,7 @@ async def test_the_watcher_key_is_refused_and_hidden_while_disarmed(
         notes.clear()
         main.action_toggle_watch()
         await pilot.pause()
-        assert main._watch_worker is None
+        assert main._watch_worker is False
         assert _said(notes, "the clipboard watcher stays off until F5")
 
 
@@ -671,10 +672,10 @@ async def test_a_session_started_while_disarmed_gets_its_watcher_on_re_arm(
         main.set_os_armed(False)
         await _start_session(app, pilot)
         await pilot.pause(0.1)
-        assert main._watch_worker is None  # the session never got one
+        assert main._watch_worker is False  # the session never got one
 
         main.set_os_armed(True)
-        await _wait_for(pilot, lambda: main._watch_worker is not None, "watcher started on re-arm")
+        await _wait_for(pilot, lambda: main._watch_worker, "watcher started on re-arm")
 
 
 async def test_quitting_stops_the_watcher(
@@ -693,11 +694,12 @@ async def test_quitting_stops_the_watcher(
     _toasts(monkeypatch)
     async with app.run_test(size=SIZE) as pilot:
         main = await _start_session(app, pilot)
-        await _wait_for(pilot, lambda: main._watch_worker is not None, "watcher running")
-        thread = main._watch_worker
+        await _wait_for(pilot, lambda: main._watch_worker, "watcher running")
+        thread = main._monitor._watcher
     assert thread is not None
     thread.join(timeout=10)
     assert not thread.is_alive(), "the watcher thread outlived the app"
+    assert main._watch_worker is False
 
 
 # == what keeps working ========================================================
@@ -745,7 +747,7 @@ async def test_detection_and_the_state_rail_stay_live_while_disarmed(
         main._active_detectors = ("busy",)
         main._open_reply_gate()
 
-        main._automation.feed_probe("busy", BusyProbe(BusyState.MATCH, 0.2, True))
+        feed_probe(main, "busy", BusyProbe(BusyState.MATCH, 0.2, True))
         await pilot.pause()
 
         # The verdict reached the sidebar's DETECTION block...

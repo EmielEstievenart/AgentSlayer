@@ -41,6 +41,7 @@ from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import patch_os
 
 from .conftest import send_composer, template_image
 
@@ -191,7 +192,7 @@ async def test_identify_boxes_the_window_and_everything_found_inside_it(
     looks back at the terminal."""
     app = _make_app(tmp_path, profile_root)
     seed_templates(_service_key(app), TemplateKind.COPY, size=COPY_SIZE)
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: _scene_with_the_copy_icon())
+    patch_os(monkeypatch, "capture_region", lambda region: _scene_with_the_copy_icon())
     drawn = _record_overlay(monkeypatch)
     notes = _toasts(monkeypatch)
 
@@ -233,7 +234,7 @@ async def test_identify_suspends_the_detectors_around_the_overlay(
         order.append("capture")
         return _scene_with_the_copy_icon()
 
-    monkeypatch.setattr(main_mod, "capture_region", fake_capture)
+    patch_os(monkeypatch, "capture_region", fake_capture)
     _toasts(monkeypatch)
 
     async with app.run_test(size=SIZE) as pilot:
@@ -283,7 +284,7 @@ async def test_a_failed_capture_is_reported_instead_of_drawn(
         main = await _armed(app, pilot)
         _draw_the_region(main)
         order.clear()
-        monkeypatch.setattr(main_mod, "capture_region", boom)
+        patch_os(monkeypatch, "capture_region", boom)
 
         await send_composer(app, pilot, "/identify")
         await _wait_for(pilot, lambda: _said(notes, "could not capture"), "the capture error")
@@ -298,7 +299,7 @@ async def test_the_command_survives_an_overlay_that_will_not_run(
     """A machine with no tkinter must get the error, not a wedged screen that
     can never be identified again - the second attempt has to be allowed."""
     app = _make_app(tmp_path, profile_root)
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: _scene_with_the_copy_icon())
+    patch_os(monkeypatch, "capture_region", lambda region: _scene_with_the_copy_icon())
     attempts: list[int] = []
 
     def boom(elements: Sequence[IdentifiedElement]) -> None:
@@ -348,7 +349,7 @@ async def test_identify_runs_at_the_task_prompt_instead_of_becoming_the_task(
     parametrized because it is what the user reported typing."""
     app = _make_app(tmp_path, profile_root)
     seed_templates(_service_key(app), TemplateKind.COPY, size=COPY_SIZE)
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: _scene_with_the_copy_icon())
+    patch_os(monkeypatch, "capture_region", lambda region: _scene_with_the_copy_icon())
     drawn = _record_overlay(monkeypatch)
     _toasts(monkeypatch)
 

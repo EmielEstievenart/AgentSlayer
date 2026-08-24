@@ -24,9 +24,9 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Static
 
-import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
+from agentclip.driver.automation import finish as finish_mod
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.region import ScreenRegion
@@ -35,6 +35,7 @@ from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.messages import ClipboardCaptured
 from agentclip.shell.tui.screens.main import MainScreen
 from agentclip.shell.tui.widgets.sidebar import ENTER_FLASH_TEXT, PASTE_FLASH_TEXT
+from tests.shell.tui.conftest import feed_probe, patch_os
 
 
 async def _wait_for(
@@ -83,7 +84,7 @@ def _no_real_paste(monkeypatch: pytest.MonkeyPatch) -> None:
     """Never let a real Ctrl+V escape into the test runner's window - every
     path through ``copy_outbound`` is monkeypatched here, even the ones that
     should never reach ``send_paste`` (no click region drawn)."""
-    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
+    patch_os(monkeypatch, "send_paste", lambda: False)
 
 
 async def test_copy_outbound_turns_the_flash_on(tmp_path: Path) -> None:
@@ -104,7 +105,7 @@ async def test_no_click_region_shows_ctrl_v_and_never_pastes(
     """No chat region drawn means no focus click, so the paste is never
     attempted - focus could be on any window, and blind-pasting is unsafe."""
     paste_calls: list[None] = []
-    monkeypatch.setattr(main_mod, "send_paste", lambda: paste_calls.append(None) or True)
+    patch_os(monkeypatch, "send_paste", lambda: paste_calls.append(None) or True)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -122,8 +123,8 @@ async def test_landed_click_pastes_and_shows_enter(
     """A known click target + a click that lands means AgentClip pastes the
     payload itself - the banner then only has to ask for Enter."""
     paste_calls: list[None] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region: True)
-    monkeypatch.setattr(main_mod, "send_paste", lambda: paste_calls.append(None) or True)
+    patch_os(monkeypatch, "click_region", lambda region: True)
+    patch_os(monkeypatch, "send_paste", lambda: paste_calls.append(None) or True)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -151,11 +152,11 @@ async def test_busy_match_turns_the_flash_off(tmp_path: Path) -> None:
         # A MATCH the tracker actually SAW (``generating_now``): the settling
         # ticks after the paste's reset carry the same state on no evidence, and
         # those may not take the banner down - see test_finish_signal_ui.py.
-        main._automation.feed_probe("busy", BusyProbe(BusyState.MATCH, 0.01, True))
+        feed_probe(main, "busy", BusyProbe(BusyState.MATCH, 0.01, True))
         await _wait_for(pilot, lambda: _flash(app).display is False, "flash hidden on MATCH")
 
         # CHANGED probes (idle screen) must NOT re-show or re-hide anything.
-        main._automation.feed_probe("busy", BusyProbe(BusyState.CHANGED, 0.4))
+        feed_probe(main, "busy", BusyProbe(BusyState.CHANGED, 0.4))
         await pilot.pause()
         assert _flash(app).display is False
 
@@ -173,8 +174,8 @@ async def test_a_caret_sized_stale_change_leaves_the_flash_up(tmp_path: Path) ->
         assert _flash(app).display is True
 
         main._active_detectors = ("stale",)
-        for _ in range(main_mod.SEND_ARM_TICKS + 2):
-            main._automation.feed_probe("stale", StaleProbe(StaleState.CHANGING, 0.001, 0))
+        for _ in range(finish_mod.SEND_ARM_TICKS + 2):
+            feed_probe(main, "stale", StaleProbe(StaleState.CHANGING, 0.001, 0))
             await pilot.pause()
         assert _flash(app).display is True
         assert main._copy_armed is False
@@ -191,8 +192,8 @@ async def test_a_sustained_stale_change_turns_the_flash_off(tmp_path: Path) -> N
         assert _flash(app).display is True
 
         main._active_detectors = ("stale",)
-        for _ in range(main_mod.SEND_ARM_TICKS):
-            main._automation.feed_probe("stale", StaleProbe(StaleState.CHANGING, 0.5, 0))
+        for _ in range(finish_mod.SEND_ARM_TICKS):
+            feed_probe(main, "stale", StaleProbe(StaleState.CHANGING, 0.5, 0))
             await pilot.pause()
         await _wait_for(pilot, lambda: _flash(app).display is False, "flash hidden on arm")
         assert main._copy_armed is True

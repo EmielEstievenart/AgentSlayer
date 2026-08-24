@@ -29,12 +29,14 @@ import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor import ops as ops_mod
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
+from tests.shell.tui.conftest import fast_polling, patch_os
 
 from .conftest import aimed_at
 
@@ -100,9 +102,9 @@ def _patch_screen(
     clicks: list[ScreenRegion] = []
     probed: list[ScreenRegion] = []
     monkeypatch.setattr(main_mod, "pick_region", picker)
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "_NEW_CHAT_SETTLE_S", 0.01)
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+    patch_os(monkeypatch, "capture_region", _frame)
+    monkeypatch.setattr(ops_mod, "NEW_CHAT_SETTLE_S", 0.01)
+    fast_polling(monkeypatch, 0.02)
     async def fake_find_all(
         self: MainScreen,
         kind: TemplateKind,
@@ -128,8 +130,8 @@ def _patch_screen(
         ]
 
     monkeypatch.setattr(MainScreen, "_find_all", fake_find_all)
-    monkeypatch.setattr(
-        main_mod,
+    patch_os(
+        monkeypatch,
         "click_region",
         lambda region, **kw: bool(clicks.append(region)) or click_ok,
     )
@@ -262,7 +264,7 @@ async def test_start_browser_chat_clicks_the_slot_and_retargets_the_automation(
         captures.append(region)
         return _frame(region)
 
-    monkeypatch.setattr(main_mod, "capture_region", record_capture)
+    patch_os(monkeypatch, "capture_region", record_capture)
     app = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen

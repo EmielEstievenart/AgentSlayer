@@ -56,6 +56,7 @@ from agentclip.driver.screen.profile_store import save_template
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.template import RegionMatch, Template
 from agentclip.shell.tui.app import AgentClipApp
+from tests.shell.tui.conftest import patch_os
 
 from .conftest import aimed_at
 
@@ -127,10 +128,10 @@ def _make_app(
 
 @pytest.fixture(autouse=True)
 def _no_real_os(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: True)
-    monkeypatch.setattr(
-        main_mod, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, None)
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", lambda region, **kw: True)
+    patch_os(
+        monkeypatch, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, None)
     )
 
 
@@ -184,9 +185,9 @@ def _recorders(monkeypatch: pytest.MonkeyPatch, *, moved: bool = True) -> _Snap:
         snap.order.append("keys")
         return True
 
-    monkeypatch.setattr(main_mod, "move_cursor", move)
-    monkeypatch.setattr(main_mod, "scroll_region", scroll)
-    monkeypatch.setattr(main_mod, "send_scroll_key", scroll_key)
+    patch_os(monkeypatch, "move_cursor", move)
+    patch_os(monkeypatch, "scroll_region", scroll)
+    patch_os(monkeypatch, "send_scroll_key", scroll_key)
     return snap
 
 
@@ -194,8 +195,8 @@ def _clicks(monkeypatch: pytest.MonkeyPatch) -> list[ScreenRegion]:
     """Where the flow's focus click aims - the whole subject of the second half
     of this file. The copy click never happens: nothing is found."""
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(
-        main_mod, "click_region", lambda region, **kw: clicks.append(region) or True
+    patch_os(
+        monkeypatch, "click_region", lambda region, **kw: clicks.append(region) or True
     )
     return clicks
 
@@ -226,7 +227,7 @@ def _seed_chatbox(profile_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_find_all(template: Template, scene: RegionImage, **kw: object) -> list[RegionMatch]:
         return [local]
 
-    monkeypatch.setattr(main_mod, "find_all_in_region", fake_find_all)
+    patch_os(monkeypatch, "find_all_in_region", fake_find_all)
 
 
 # -- which primitive the snap uses ------------------------------------------------
@@ -462,7 +463,7 @@ async def test_a_missed_hunt_snaps_again_instead_of_giving_up(
         seen.append(1)
         return (None, 0.30) if len(seen) == 1 else (RegionMatch(20, 30, 0.02), None)
 
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", found_on_the_second_look)
+    patch_os(monkeypatch, "find_lowest_with_best_miss", found_on_the_second_look)
     app, _fake = _make_app(tmp_path, profile_root, scroll_action=None)
     seed_templates(SERVICE, TemplateKind.COPY, size=(24, 24))
     _seed_chatbox(profile_root, monkeypatch)

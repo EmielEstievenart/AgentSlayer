@@ -23,7 +23,6 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Static
 
-import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.automation.loop_state import LoopState
@@ -32,6 +31,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
 from agentclip.shell.tui.widgets.sidebar import AUTO_SEND_FLASH_TEXT, ENTER_FLASH_TEXT
+from tests.shell.tui.conftest import patch_os
 
 
 async def _wait_for(
@@ -81,15 +81,15 @@ def _flash_text(app: AgentClipApp) -> str:
 
 @pytest.fixture(autouse=True)
 def _no_real_input(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "click_region", lambda region: True)
-    monkeypatch.setattr(main_mod, "send_paste", lambda: True)
+    patch_os(monkeypatch, "click_region", lambda region: True)
+    patch_os(monkeypatch, "send_paste", lambda: True)
 
 
 async def test_a_successful_paste_taps_enter_for_an_opted_in_service(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     taps: list[None] = []
-    monkeypatch.setattr(main_mod, "send_enter", lambda: taps.append(None) or True)
+    patch_os(monkeypatch, "send_enter", lambda: taps.append(None) or True)
     app, _fake = _make_app(tmp_path, auto_submit=True)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -109,7 +109,7 @@ async def test_no_tap_without_the_opt_in(
     """The default service behaves exactly as before this existed: pasted,
     waiting on the user's Enter, and asked for it."""
     taps: list[None] = []
-    monkeypatch.setattr(main_mod, "send_enter", lambda: taps.append(None) or True)
+    patch_os(monkeypatch, "send_enter", lambda: taps.append(None) or True)
     app, _fake = _make_app(tmp_path, auto_submit=False)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -128,8 +128,8 @@ async def test_no_tap_when_the_paste_never_landed(
     when the click was refused) is exactly the accident the pasted-first order
     exists to prevent."""
     taps: list[None] = []
-    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
-    monkeypatch.setattr(main_mod, "send_enter", lambda: taps.append(None) or True)
+    patch_os(monkeypatch, "send_paste", lambda: False)
+    patch_os(monkeypatch, "send_enter", lambda: taps.append(None) or True)
     app, _fake = _make_app(tmp_path, auto_submit=True)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -145,7 +145,7 @@ async def test_a_refused_tap_falls_back_to_asking_for_enter(
 ) -> None:
     """``send_enter`` returning False means nothing was typed - so the flash
     must keep asking the user for their own Enter, not claim it was sent."""
-    monkeypatch.setattr(main_mod, "send_enter", lambda: False)
+    patch_os(monkeypatch, "send_enter", lambda: False)
     app, _fake = _make_app(tmp_path, auto_submit=True)
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)

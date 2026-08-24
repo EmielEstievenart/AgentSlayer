@@ -28,7 +28,6 @@ from pathlib import Path
 import pytest
 from textual.pilot import Pilot
 
-import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.clip.fake import FakeClipboard
@@ -38,6 +37,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.template import RegionMatch
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import patch_os
 
 CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 MATCH = RegionMatch(x=120, y=300, diff=0.03)
@@ -116,14 +116,14 @@ def _patch_flow(monkeypatch: pytest.MonkeyPatch, fake: FakeClipboard) -> None:
         fake.set_text(f"{PROSE_REPLY} ({clicks[0]})")
         return True
 
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", fake_click)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
-    monkeypatch.setattr(
-        main_mod, "find_lowest_with_best_miss", lambda template, scene, **kw: (MATCH, None)
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", fake_click)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
+    patch_os(
+        monkeypatch, "find_lowest_with_best_miss", lambda template, scene, **kw: (MATCH, None)
     )
-    monkeypatch.setattr(main_mod, "send_paste", lambda: True)
+    patch_os(monkeypatch, "send_paste", lambda: True)
 
 
 async def test_our_own_copy_click_shows_a_no_clip_reply_as_prose(

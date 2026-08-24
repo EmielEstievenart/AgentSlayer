@@ -22,16 +22,17 @@ import pytest
 from textual.pilot import Pilot
 from textual.widgets import Static
 
-import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.clip.chunking import split_for_stream
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor import ops as ops_mod
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
 from agentclip.shell.tui.widgets.sidebar import ENTER_FLASH_TEXT, PASTE_FLASH_TEXT
+from tests.shell.tui.conftest import patch_os
 
 # Small enough that a readable test payload is several chunks, big enough that a
 # short one is still exactly one.
@@ -85,10 +86,10 @@ def _flash_text(app: AgentClipApp) -> str:
 @pytest.fixture(autouse=True)
 def _fast_and_offline(monkeypatch: pytest.MonkeyPatch) -> None:
     """No real click, no real Ctrl+V, and no real waiting between chunks."""
-    monkeypatch.setattr(main_mod, "click_region", lambda region: True)
-    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
-    monkeypatch.setattr(main_mod, "_STREAM_CHUNK_SETTLE_S", 0.0)
-    monkeypatch.setattr(main_mod, "STREAM_CHUNK_CHARS", _LIMIT)
+    patch_os(monkeypatch, "click_region", lambda region: True)
+    patch_os(monkeypatch, "send_paste", lambda: False)
+    monkeypatch.setattr(ops_mod, "STREAM_CHUNK_SETTLE_S", 0.0)
+    monkeypatch.setattr(ops_mod, "STREAM_CHUNK_CHARS", _LIMIT)
 
 
 def _payload(lines: int = 12) -> str:
@@ -105,8 +106,8 @@ async def test_a_long_payload_is_delivered_one_chunk_at_a_time(
     rejoin into exactly the payload the controller handed over."""
     pastes: list[str] = []
     app, fake = _make_app(tmp_path, delivery="stream")
-    monkeypatch.setattr(
-        main_mod, "send_paste", lambda: pastes.append(fake.read_text() or "") or True
+    patch_os(
+        monkeypatch, "send_paste", lambda: pastes.append(fake.read_text() or "") or True
     )
     text = _payload()
     expected = split_for_stream(text, _LIMIT)
@@ -129,7 +130,7 @@ async def test_every_chunk_is_registered_as_a_self_write(
 ) -> None:
     """The watcher polls the same clipboard we are writing chunks to; a chunk
     that was not registered would come straight back in as a "reply"."""
-    monkeypatch.setattr(main_mod, "send_paste", lambda: True)
+    patch_os(monkeypatch, "send_paste", lambda: True)
     app, _fake = _make_app(tmp_path, delivery="stream")
     text = _payload()
     async with app.run_test(size=(110, 55)) as pilot:
@@ -146,7 +147,7 @@ async def test_a_finished_stream_ends_in_wait_send_and_asks_for_enter(
 ) -> None:
     """Streaming is one auto-insert that takes a while, not a state of its own:
     the loop comes out of it exactly where a single paste would."""
-    monkeypatch.setattr(main_mod, "send_paste", lambda: True)
+    patch_os(monkeypatch, "send_paste", lambda: True)
     app, _fake = _make_app(tmp_path, delivery="stream")
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -163,17 +164,31 @@ async def test_the_banner_counts_the_chunks_while_they_go_in(
     """The user is looking at the browser, so the count is the only thing that
     says a big payload is still going in rather than stuck."""
     seen: list[str] = []
+    asked: list[str] = []
     app, _fake = _make_app(tmp_path, delivery="stream")
     text = _payload()
     total = len(split_for_stream(text, _LIMIT))
 
+    # What the banner was last ASKED for, rather than what it has painted. The
+    # stream's chunk is a clipboard write and a Ctrl+V, and neither is a thread
+    # hop any more (the monitor's verbs are coroutines that do not suspend), so
+    # nothing pumps Textual's message queue between the banner and the paste -
+    # the widget would still be showing the previous chunk's line. That the text
+    # reaches the widget at all is pinned by the two tests either side of this
+    # one; what THIS one is about is that a count goes up while the payload goes
+    # in, which is the call, not the paint.
+    real_flash = MainScreen.show_paste_flash
+
+    def record(self: MainScreen, message: str, *, retry: bool = False) -> None:
+        asked.append(message)
+        real_flash(self, message, retry=retry)
+
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
+        monkeypatch.setattr(MainScreen, "show_paste_flash", record)
         # Sampled from inside send_paste: by the time copy_outbound returns the
         # banner has already moved on to ">>> PRESS ENTER <<<".
-        monkeypatch.setattr(
-            main_mod, "send_paste", lambda: seen.append(_flash_text(app)) or True
-        )
+        patch_os(monkeypatch, "send_paste", lambda: seen.append(asked[-1]) or True)
         await main.copy_outbound(text)
         await pilot.pause()
 
@@ -188,7 +203,7 @@ async def test_a_short_payload_in_stream_mode_is_a_single_burst(
     """Nothing to show progress about, so the stream costs one extra clipboard
     write and nothing else."""
     pastes: list[None] = []
-    monkeypatch.setattr(main_mod, "send_paste", lambda: pastes.append(None) or True)
+    patch_os(monkeypatch, "send_paste", lambda: pastes.append(None) or True)
     app, fake = _make_app(tmp_path, delivery="stream")
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -213,7 +228,7 @@ async def test_a_failed_chunk_stops_the_stream_and_restores_the_full_payload(
         attempts.append(None)
         return len(attempts) < 3  # the third chunk never lands
 
-    monkeypatch.setattr(main_mod, "send_paste", flaky)
+    patch_os(monkeypatch, "send_paste", flaky)
     app, fake = _make_app(tmp_path, delivery="stream")
     text = _payload()
     chunks = split_for_stream(text, _LIMIT)
@@ -236,7 +251,7 @@ async def test_a_failed_chunk_warns_that_the_box_holds_a_partial_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     notes: list[str] = []
-    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
+    patch_os(monkeypatch, "send_paste", lambda: False)
     app, _fake = _make_app(tmp_path, delivery="stream")
     async with app.run_test(size=(110, 55)) as pilot:
         main = await _ready(app, pilot)
@@ -255,8 +270,8 @@ async def test_a_click_that_never_landed_streams_nothing(
     """Unchanged from the paste mode: focus could be on any window, so nothing
     is typed into it - and the full payload is already on the clipboard."""
     pastes: list[None] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region: False)
-    monkeypatch.setattr(main_mod, "send_paste", lambda: pastes.append(None) or True)
+    patch_os(monkeypatch, "click_region", lambda region: False)
+    patch_os(monkeypatch, "send_paste", lambda: pastes.append(None) or True)
     app, fake = _make_app(tmp_path, delivery="stream")
     text = _payload()
     async with app.run_test(size=(110, 55)) as pilot:
@@ -278,7 +293,7 @@ async def test_paste_mode_is_still_one_write_and_one_paste(
     """A payload far past the chunk size delivered by a service that did not ask
     for streaming must behave exactly as it did before this existed."""
     pastes: list[None] = []
-    monkeypatch.setattr(main_mod, "send_paste", lambda: pastes.append(None) or True)
+    patch_os(monkeypatch, "send_paste", lambda: pastes.append(None) or True)
     app, fake = _make_app(tmp_path, delivery="paste")
     text = _payload()
     async with app.run_test(size=(110, 55)) as pilot:

@@ -59,6 +59,7 @@ from textual.widgets import Button, Static
 import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
+from agentclip.driver.automation import finish as finish_mod
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.screen.busy import BusyProbe, BusyState
@@ -81,6 +82,7 @@ from agentclip.shell.tui.widgets.sidebar import (
     SEND_READY_TIMEOUT,
     template_status_id,
 )
+from tests.shell.tui.conftest import fast_polling, feed_probe, freeze_polling, patch_os
 
 SIZE = (110, 100)
 # Somewhere for the picker to hand back, for the tests that need a tab whose
@@ -211,7 +213,7 @@ async def _busy(
     """
     if evidence is None:
         evidence = state is BusyState.MATCH
-    main._automation.feed_probe("busy", BusyProbe(state, 0.2, evidence))
+    feed_probe(main, "busy", BusyProbe(state, 0.2, evidence))
     await pilot.pause()
 
 
@@ -222,14 +224,14 @@ async def _idle(
     the evidence behind it is the appearance having been watched to GO."""
     if evidence is None:
         evidence = state is BusyState.CHANGED
-    main._automation.feed_probe("idle", BusyProbe(state, 0.2, evidence))
+    feed_probe(main, "idle", BusyProbe(state, 0.2, evidence))
     await pilot.pause()
 
 
 async def _stale(
     main: MainScreen, pilot: Pilot, state: StaleState, ticks: int = 0, diff: float = 0.001
 ) -> None:
-    main._automation.feed_probe("stale", StaleProbe(state, diff, ticks))
+    feed_probe(main, "stale", StaleProbe(state, diff, ticks))
     await pilot.pause()
 
 
@@ -242,8 +244,8 @@ async def _stale_send(main: MainScreen, pilot: Pilot) -> None:
     AgentClip's paste and the user's Enter is a CHANGING probe too, and arming
     on one of those fired the auto-copy at a reply-less screen.
     """
-    for _ in range(main_mod.SEND_ARM_TICKS):
-        await _stale(main, pilot, StaleState.CHANGING, diff=main_mod.SEND_ARM_MIN_DIFF)
+    for _ in range(finish_mod.SEND_ARM_TICKS):
+        await _stale(main, pilot, StaleState.CHANGING, diff=finish_mod.SEND_ARM_MIN_DIFF)
 
 
 async def _tick(main: MainScreen, pilot: Pilot, busy: BusyState, idle: BusyState) -> None:
@@ -571,11 +573,11 @@ async def test_the_ticks_that_land_during_the_fires_thread_hop_cannot_refire(
         # No ``pilot.pause`` anywhere in here: the whole burst is consumed while
         # the ``AutoCopyRequested`` from the third probe is still in the queue.
         for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
-            main._automation.feed_probe("busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
+            feed_probe(main, "busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
         assert main._flow_running is True  # up before the fire ever left the fold
         assert calls == []  # ...and the worker has not started yet
         for _ in range(4):
-            main._automation.feed_probe("busy", BusyProbe(BusyState.CHANGED, 0.2, False))
+            feed_probe(main, "busy", BusyProbe(BusyState.CHANGED, 0.2, False))
 
         await _wait_for(pilot, lambda: len(calls) == 1, "flow fired")
         await pilot.pause(0.1)
@@ -669,7 +671,7 @@ async def test_a_sustained_large_delta_takes_exactly_send_arm_ticks(
         main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "stale")
 
-        for _ in range(main_mod.SEND_ARM_TICKS - 1):
+        for _ in range(finish_mod.SEND_ARM_TICKS - 1):
             await _stale(main, pilot, StaleState.CHANGING, diff=0.5)
             assert main._copy_armed is False  # not sustained yet
 
@@ -688,12 +690,12 @@ async def test_one_small_delta_restarts_the_large_delta_run(
         main = await _arm_with_template(app, pilot, seed_templates)
         _detectors(main, "stale")
 
-        for _ in range(main_mod.SEND_ARM_TICKS - 1):
+        for _ in range(finish_mod.SEND_ARM_TICKS - 1):
             await _stale(main, pilot, StaleState.CHANGING, diff=0.5)
         await _stale(main, pilot, StaleState.CHANGING, diff=0.001)  # a caret blink
         assert main._stale_arm_streak == 0
 
-        for _ in range(main_mod.SEND_ARM_TICKS - 1):
+        for _ in range(finish_mod.SEND_ARM_TICKS - 1):
             await _stale(main, pilot, StaleState.CHANGING, diff=0.5)
         assert main._copy_armed is False  # the interruption cost a full restart
 
@@ -777,16 +779,18 @@ async def test_a_late_probe_from_the_previous_live_window_arms_nothing(
         main = await _arm_with_template(app, pilot, seed_templates)
         # No real poll threads: these are injected verdicts, and a live loop
         # would race the sequence with readings of its own.
-        monkeypatch.setattr(MainScreen, "_spawn_detector_worker", lambda self, loop: None)
+        freeze_polling(monkeypatch)
         main._slots[AgentSlot.MASTER].chat_region = ScreenRegion(0, 0, 400, 300)
         main._slots[AgentSlot.SUBAGENT].chat_region = ScreenRegion(900, 0, 400, 300)
 
         main._live = AgentSlot.SUBAGENT  # as start_browser_chat leaves it
         main._start_detector_worker()
+        await pilot.pause()  # the configure is a worker; let it land
         sub_generation = main._detector_generation
         assert main._active_detectors == ("stale",)
 
         main.end_browser_chat()  # /abort: the master gets the automation back
+        await pilot.pause()  # ...and its retarget is a worker too
         assert main._live is AgentSlot.MASTER
         assert main._detector_generation != sub_generation
         # The retarget shuts the session gate too; re-open it so the generation
@@ -797,8 +801,8 @@ async def test_a_late_probe_from_the_previous_live_window_arms_nothing(
 
         # ...and now the sub window's last tick lands: a sustained large delta,
         # which on the live window would arm the trigger outright.
-        for _ in range(main_mod.SEND_ARM_TICKS + 1):
-            main._automation.feed_probe(
+        for _ in range(finish_mod.SEND_ARM_TICKS + 1):
+            feed_probe(main,
                 "stale", StaleProbe(StaleState.CHANGING, 0.5, 0), sub_generation
             )
             await pilot.pause()
@@ -864,7 +868,7 @@ async def _calibrated_but_idle(
     one gets the gate and a service that has not behaves exactly as it always
     did.
     """
-    monkeypatch.setattr(MainScreen, "_spawn_detector_worker", lambda self, loop: None)
+    freeze_polling(monkeypatch)
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: CHAT_REGION)
     main = app.main_screen
     assert main is not None
@@ -1051,7 +1055,7 @@ def _record_notifications(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 async def _send_ready(main: MainScreen, pilot: Pilot, found: bool | None) -> None:
     """One look for the ready-to-send button (None = the tick's capture failed)."""
-    main._automation.feed_probe("send_ready", found)
+    feed_probe(main, "send_ready", found)
     await pilot.pause()
 
 
@@ -1187,7 +1191,7 @@ async def test_a_real_tracker_across_the_paste_holds_the_gate_until_the_icon_sho
 
         async def tick(scene: RegionImage) -> None:
             """One poller tick: one capture, through the tracker, onto the screen."""
-            main._automation.feed_probe("busy", tracker.observe(scene))
+            feed_probe(main, "busy", tracker.observe(scene))
             await pilot.pause()
 
         # The chat before the paste: settled, no icon, tracker long since sure.
@@ -1295,7 +1299,7 @@ async def test_a_button_that_never_shows_times_the_gate_out_and_says_so(
         await main.copy_outbound("the payload")
         await pilot.pause()
 
-        for _ in range(main_mod.SEND_GATE_TIMEOUT_TICKS - 1):
+        for _ in range(finish_mod.SEND_GATE_TIMEOUT_TICKS - 1):
             await _send_ready(main, pilot, False)
         assert main._send_gate is main_mod.SendGate.HOLD  # still waiting
         assert not any("never appeared" in note for note in notes)
@@ -1328,7 +1332,7 @@ async def test_a_blind_poller_runs_the_gates_clock_down_too(
         await main.copy_outbound("the payload")
         await pilot.pause()
 
-        for _ in range(main_mod.SEND_GATE_TIMEOUT_TICKS):
+        for _ in range(finish_mod.SEND_GATE_TIMEOUT_TICKS):
             await _send_ready(main, pilot, None)
         assert main._send_gate is None
 
@@ -1421,7 +1425,7 @@ async def test_a_button_that_never_goes_away_times_the_gate_out_too(
     """
     calls = _patch_flow(monkeypatch)
     notes = _record_notifications(monkeypatch)
-    monkeypatch.setattr(main_mod, "SEND_GATE_SEEN_TIMEOUT_TICKS", 6)
+    monkeypatch.setattr(finish_mod, "SEND_GATE_SEEN_TIMEOUT_TICKS", 6)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
@@ -1431,7 +1435,7 @@ async def test_a_button_that_never_goes_away_times_the_gate_out_too(
 
         # A sighting that only just beats the HOLD clock; the SEEN phase still
         # gets its whole budget afterwards.
-        for _ in range(main_mod.SEND_GATE_TIMEOUT_TICKS - 1):
+        for _ in range(finish_mod.SEND_GATE_TIMEOUT_TICKS - 1):
             await _send_ready(main, pilot, False)
         await _send_ready(main, pilot, True)
         assert main._send_gate is main_mod.SendGate.SEEN
@@ -1459,7 +1463,7 @@ def test_the_seen_phase_waits_far_longer_than_the_sighting_does() -> None:
     Five seconds is the right cost for a capture that never matches; it is the
     wrong one for a human deciding whether to send what AgentClip just wrote, so
     the phase that waits on a person is an order of magnitude more patient."""
-    assert main_mod.SEND_GATE_SEEN_TIMEOUT_TICKS > main_mod.SEND_GATE_TIMEOUT_TICKS * 10
+    assert finish_mod.SEND_GATE_SEEN_TIMEOUT_TICKS > finish_mod.SEND_GATE_TIMEOUT_TICKS * 10
 
 
 async def test_new_during_the_hold_clears_the_send_gate(
@@ -1516,8 +1520,8 @@ async def test_the_poller_thread_really_looks_for_the_button(
     _patch_flow(monkeypatch)
     _record_notifications(monkeypatch)
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: CHAT_REGION)
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: BLANK_FRAME)
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.01)
+    patch_os(monkeypatch, "capture_region", lambda region: BLANK_FRAME)
+    fast_polling(monkeypatch, 0.01)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
@@ -1560,8 +1564,8 @@ async def test_the_button_is_looked_for_whether_or_not_anyone_is_waiting(
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrated_but_idle(app, pilot, seed_templates, monkeypatch, send_ready=True)
         assert main._send_gate is None
-        assert main._detector is not None
-        assert main._detector.searches(TemplateKind.SEND_READY)
+        assert main._monitor.detector is not None
+        assert main._monitor.detector.searches(TemplateKind.SEND_READY)
 
         # The button is on screen (the composer holds something the user typed
         # themselves) and then goes. Outside a gate that is not a send, and not
@@ -1597,6 +1601,6 @@ async def test_a_probe_from_a_dead_poller_run_cannot_release_the_gate(
         await pilot.pause()
         await _send_ready(main, pilot, True)
 
-        main._automation.feed_probe("send_ready", False, main._detector_generation - 1)
+        feed_probe(main, "send_ready", False, main._detector_generation - 1)
         await pilot.pause()
         assert main._send_gate is main_mod.SendGate.SEEN

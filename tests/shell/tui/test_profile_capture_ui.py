@@ -47,6 +47,7 @@ from agentclip.shell.tui.screens.service_editor import (
     click_y_input_id,
     template_status_id,
 )
+from tests.shell.tui.conftest import fast_polling
 
 BOX = ScreenRegion(200, 150, 64, 64)
 OTHER_BOX = ScreenRegion(400, 300, 48, 32)
@@ -679,7 +680,7 @@ async def test_a_busy_capture_restarts_the_detector_poller(
     capture is what turns the detector on - and it only takes effect because
     the close rebuilds the poller."""
     _patch_picker(monkeypatch)
-    monkeypatch.setattr("agentclip.shell.tui.screens.main._BUSY_POLL_S", 0.02)
+    fast_polling(monkeypatch)
     app = _make_app(tmp_path, profile_root)
     key = app.app_config.general.service
     app.app_config = replace(
@@ -698,7 +699,7 @@ async def test_a_busy_capture_restarts_the_detector_poller(
         await pilot.pause()
         # Ticked, but there is no busy appearance to hunt: nothing runs.
         assert main._active_detectors == ()
-        assert main._detector_worker is None
+        assert main._monitor.poller is None
 
         editor = await _open_editor(app, pilot)
         await _press(editor, pilot, f"#{capture_button_id(TemplateKind.BUSY)}")
@@ -707,7 +708,7 @@ async def test_a_busy_capture_restarts_the_detector_poller(
         await _wait_for(pilot, lambda: app.screen is main, "editor closed back to the chat")
 
         assert main._active_detectors == ("busy",)
-        assert main._detector_worker is not None
+        assert main._monitor.poller is not None
 
 
 # -- the captures are the SERVICE's, not a slot's --------------------------------

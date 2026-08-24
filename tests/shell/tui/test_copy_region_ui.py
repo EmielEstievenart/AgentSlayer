@@ -46,6 +46,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.template import RegionMatch
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import feed_probe, patch_os
 
 from .conftest import aimed_at, send_composer
 
@@ -147,12 +148,12 @@ async def _post_probe(main: MainScreen, pilot: Pilot, state: BusyState, diff: fl
     test_finish_signal_ui.py's subject. The ``pause`` is what lets the paints
     the consumption asked for reach the sidebar: they cross as messages now.
     """
-    main._automation.feed_probe("busy", BusyProbe(state, diff, state is BusyState.MATCH))
+    feed_probe(main, "busy", BusyProbe(state, diff, state is BusyState.MATCH))
     await pilot.pause()
 
 
 def _patch_capture(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
+    patch_os(monkeypatch, "capture_region", _frame)
 
 
 def _freeze_detector(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -345,13 +346,13 @@ async def test_flow_searches_the_chat_region_and_clicks_the_lowest_match(
         fake.write_text(f"copied {len(clicks)}")
         return True
 
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", fake_click)
-    monkeypatch.setattr(
-        main_mod, "scroll_region", lambda region, n: scrolls.append((region, n)) or True
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", fake_click)
+    patch_os(
+        monkeypatch, "scroll_region", lambda region, n: scrolls.append((region, n)) or True
     )
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
+    patch_os(monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)
@@ -360,7 +361,7 @@ async def test_flow_searches_the_chat_region_and_clicks_the_lowest_match(
             searched.append(region)
             return _frame(region)
 
-        monkeypatch.setattr(main_mod, "capture_region", recording_capture)
+        patch_os(monkeypatch, "capture_region", recording_capture)
 
         await _fire(main, pilot)
         await _wait_for(
@@ -400,12 +401,12 @@ async def test_the_lowest_match_across_every_captured_image_wins(
         fake.write_text(f"copied {len(clicks)}")
         return True
 
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", fake_click)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
-    monkeypatch.setattr(
-        main_mod,
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", fake_click)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
+    patch_os(
+        monkeypatch,
         "find_lowest_with_best_miss",
         lambda template, scene, **kw: (higher if template.width == 24 else lower, None),
     )
@@ -434,9 +435,9 @@ async def test_no_chat_region_means_the_flow_does_nothing(
     _patch_capture(monkeypatch)
     clicks: list[ScreenRegion] = []
     scrolls: list[ScreenRegion] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: scrolls.append(region) or True)
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
+    patch_os(monkeypatch, "click_region", lambda region, **kw: clicks.append(region) or True)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: scrolls.append(region) or True)
+    patch_os(monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
 
     app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
@@ -456,14 +457,14 @@ async def test_not_found_notifies_and_does_not_click(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(
-        main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21)
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", lambda region, **kw: clicks.append(region) or True)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(
+        monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21)
     )
-    monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: False)  # no hover scan either
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
+    patch_os(monkeypatch, "move_cursor", lambda x, y: False)  # no hover scan either
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
 
     app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
@@ -480,9 +481,9 @@ async def test_a_failed_capture_of_the_chat_region_is_reported(
     seed_templates: Callable[..., None],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: True)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", lambda region, **kw: True)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
 
     app, _ = _app_with_copy(tmp_path, profile_root, seed_templates)
     async with app.run_test(size=SIZE) as pilot:
@@ -491,7 +492,7 @@ async def test_a_failed_capture_of_the_chat_region_is_reported(
         def boom(region: ScreenRegion) -> RegionImage:
             raise CaptureError("no display")
 
-        monkeypatch.setattr(main_mod, "capture_region", boom)
+        patch_os(monkeypatch, "capture_region", boom)
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "capture failed" in _copy_label(app), "capture failure shown")
@@ -506,7 +507,7 @@ async def test_flow_snaps_focus_back_to_the_tool(
     """After clicking the browser's copy button the flow hands focus back to
     the window recorded at mount - click first, snap-back strictly after."""
     events: list[str] = []
-    monkeypatch.setattr(main_mod, "foreground_window", lambda: 4242)
+    patch_os(monkeypatch, "foreground_window", lambda: 4242)
 
     app, fake = _app_with_copy(tmp_path, profile_root, seed_templates)
 
@@ -516,10 +517,10 @@ async def test_flow_snaps_focus_back_to_the_tool(
         fake.write_text(f"copied {len(events)}")
         return True
 
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", fake_click)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", fake_click)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
     focus_calls: list[int] = []
 
     def fake_focus(handle: int) -> bool:
@@ -527,7 +528,7 @@ async def test_flow_snaps_focus_back_to_the_tool(
         events.append("focus")
         return True
 
-    monkeypatch.setattr(main_mod, "focus_window_verified", fake_focus)
+    patch_os(monkeypatch, "focus_window_verified", fake_focus)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)
@@ -560,11 +561,11 @@ async def test_verified_click_retries_at_an_offset_on_no_change(
             fake.write_text("copied!")
         return True
 
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", fake_click)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", fake_click)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)
@@ -600,11 +601,11 @@ async def test_verified_click_exhausts_retries_and_leaves_focus(
         clicks.append((region, settle_s))
         return True  # the clipboard never actually changes
 
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", fake_click)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: focus_calls.append(handle) or True)
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", fake_click)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: focus_calls.append(handle) or True)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _armed(app, pilot, monkeypatch)

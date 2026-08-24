@@ -36,6 +36,7 @@ from textual.pilot import Pilot
 import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
+from agentclip.driver.automation import finish as finish_mod
 from agentclip.driver.automation.harness_log import EMPTY_LOG_LINE, HARNESS_LOG_MAX
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.screen.busy import BusyProbe, BusyState
@@ -46,6 +47,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.messages import ClipboardCaptured
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import feed_probe, patch_os
 
 from .conftest import send_composer
 
@@ -153,12 +155,12 @@ async def _busy(main: MainScreen, pilot: Pilot, state: BusyState) -> None:
     """One busy-appearance probe, as ``PresenceTracker.observe`` would make it.
     MATCH is the reasoning icon on screen; ``generating_now`` is the honest
     per-frame reading of that."""
-    main._automation.feed_probe("busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
+    feed_probe(main, "busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
     await pilot.pause()
 
 
 async def _send_ready(main: MainScreen, pilot: Pilot, found: bool | None) -> None:
-    main._automation.feed_probe("send_ready", found)
+    feed_probe(main, "send_ready", found)
     await pilot.pause()
 
 
@@ -467,11 +469,11 @@ def _patch_flow_io(monkeypatch: pytest.MonkeyPatch) -> None:
     about.
     """
     monkeypatch.setattr(MainScreen, "_start_detector_worker", lambda self: None)
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: _blank(region))
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: True)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: False)
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
+    patch_os(monkeypatch, "capture_region", lambda region: _blank(region))
+    patch_os(monkeypatch, "click_region", lambda region, **kw: True)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "move_cursor", lambda x, y: False)
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
 
 
 def _blank(region: ScreenRegion) -> RegionImage:
@@ -502,7 +504,7 @@ async def test_a_near_miss_on_the_copy_button_logs_how_close_it_came(
     came, and the rounds that missed on the way say so themselves, so a failure
     reads as a hunt rather than as one unlucky frame."""
     _patch_flow_io(monkeypatch)
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21))
+    patch_os(monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21))
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _fire_the_flow(app, pilot, seed_templates)
@@ -536,17 +538,21 @@ async def test_a_failed_harvest_also_says_what_the_poller_has_seen(
     remembers - it re-searches - so this is a sentence in a log and nothing else.
     """
     _patch_flow_io(monkeypatch)
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21))
+    patch_os(monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21))
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _at_the_task_prompt(app, pilot)
         _seed_and_reload(main, seed_templates, TemplateKind.COPY)
         main._chat_region = CHAT_REGION
-        # A detector of the kind the poller builds, and one frame with the
+        # A detector of the kind the monitor builds, and one frame with the
         # captured icon actually in it - so the memory has something in it.
-        main._detector = build_detector(
+        # Installed straight onto the monitor, because the detector is its object
+        # now (ui-monitor.md §6.1) and configuring for real would start a poll
+        # loop whose own sightings are the very thing under assertion here.
+        detector = build_detector(
             CHAT_REGION, main._live_profile(), signals=(), required_ticks=4
         )
+        main._monitor._detector = detector
         assert (
             main._copy_last_seen_note() == "; the poller has never seen it in this window either"
         )
@@ -557,7 +563,7 @@ async def test_a_failed_harvest_also_says_what_the_poller_has_seen(
         for line in range(icon.height):
             start = ((40 + line) * CHAT_REGION.width + 30) * 4
             scene[start : start + row] = icon.pixels[line * row : (line + 1) * row]
-        main._detector.observe(RegionImage(CHAT_REGION.width, CHAT_REGION.height, bytes(scene)))
+        detector.observe(RegionImage(CHAT_REGION.width, CHAT_REGION.height, bytes(scene)))
         assert "the poller last saw one 0s ago" in main._copy_last_seen_note()
 
         main._open_reply_gate()
@@ -576,7 +582,7 @@ async def test_a_search_with_nothing_even_shaped_like_it_says_so_in_words(
     """The other cause: no candidate was judged at all, so there is no number to
     print and a fabricated one would be worse than none."""
     _patch_flow_io(monkeypatch)
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (None, None))
+    patch_os(monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (None, None))
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _fire_the_flow(app, pilot, seed_templates)
@@ -601,7 +607,7 @@ async def test_a_failed_capture_of_the_chat_region_is_logged_as_such(
     def _explode(region: ScreenRegion) -> RegionImage:
         raise CaptureError("the window is minimised")
 
-    monkeypatch.setattr(main_mod, "capture_region", _explode)
+    patch_os(monkeypatch, "capture_region", _explode)
     app, _ = _make_app(tmp_path)
     async with app.run_test(size=SIZE) as pilot:
         main = await _fire_the_flow(app, pilot, seed_templates)
@@ -672,7 +678,7 @@ async def test_the_send_gate_logs_a_timeout_with_the_case_that_applies(
         _seed_and_reload(main, seed_templates, TemplateKind.SEND_READY)
         main._open_reply_gate()
 
-        for _ in range(main_mod.SEND_GATE_TIMEOUT_TICKS):
+        for _ in range(finish_mod.SEND_GATE_TIMEOUT_TICKS):
             await _send_ready(main, pilot, False)  # never appears at all
 
         text = await _read_log(app, pilot)

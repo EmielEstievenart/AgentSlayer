@@ -305,34 +305,6 @@ def _no_fire() -> None:
     still reached and still narrated; nothing is launched."""
 
 
-class DetectorPoller:
-    """VESTIGIAL. One running poll loop: the thread, and the flag that ends it.
-
-    Everything this described - the loop, the thread, the stop flag - moved into
-    the monitor in phase 6.1, and nothing in this module builds one any more. It
-    survives here for exactly one reason and for exactly as long as that reason
-    does: **both shells import this name at module scope**
-    (``shell/tui/screens/main.py``, ``shell/gui/view.py``), and the root
-    ``tests/conftest.py`` imports the TUI screen to install the OS gate - so
-    deleting it makes the whole suite un-collectable, this phase's own tests
-    included, before the shells have been rewired.
-
-    The phase that rewires them deletes it: the shells stop mirroring a poller in
-    their own chrome and ask the monitor instead.
-    """
-
-    def __init__(self, thread: threading.Thread, stop: threading.Event) -> None:
-        self.thread = thread
-        self._stop = stop
-
-    @property
-    def is_cancelled(self) -> bool:
-        return self._stop.is_set()
-
-    def cancel(self) -> None:
-        self._stop.set()
-
-
 class AutomationController:
     """The automation's state, driving one :class:`AutomationView`."""
 

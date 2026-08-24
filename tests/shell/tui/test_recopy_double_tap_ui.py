@@ -32,14 +32,15 @@ import pytest
 from textual.pilot import Pilot
 
 import agentclip.shell.app.controller as controller_mod
-import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor import ops as ops_mod
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.protocol.types import Outbound
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import patch_os
 
 PAYLOAD = "===CLIP:BEGIN=== the last outbound ===CLIP:END==="
 
@@ -105,9 +106,9 @@ def _os_events(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """Every OS input the delivery would send, in order. An empty list is the
     stage-one contract."""
     events: list[str] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region: events.append("click") or True)
-    monkeypatch.setattr(main_mod, "send_paste", lambda: events.append("paste") or True)
-    monkeypatch.setattr(main_mod, "send_enter", lambda: events.append("enter") or True)
+    patch_os(monkeypatch, "click_region", lambda region: events.append("click") or True)
+    patch_os(monkeypatch, "send_paste", lambda: events.append("paste") or True)
+    patch_os(monkeypatch, "send_enter", lambda: events.append("enter") or True)
     return events
 
 
@@ -127,9 +128,9 @@ def _said(notes: list[str], fragment: str) -> bool:
 def _no_real_input(monkeypatch: pytest.MonkeyPatch) -> None:
     """The belt to every test's braces: even a test that never records events
     must not be able to fire a real click or Ctrl+V at the machine."""
-    monkeypatch.setattr(main_mod, "click_region", lambda region: True)
-    monkeypatch.setattr(main_mod, "send_paste", lambda: True)
-    monkeypatch.setattr(main_mod, "send_enter", lambda: True)
+    patch_os(monkeypatch, "click_region", lambda region: True)
+    patch_os(monkeypatch, "send_paste", lambda: True)
+    patch_os(monkeypatch, "send_enter", lambda: True)
 
 
 # -- stage one: the clipboard, and nothing else ---------------------------------
@@ -222,7 +223,7 @@ async def test_the_re_delivery_obeys_the_service_auto_submit(
     """Reusing the send path means reusing ALL of it: a service that taps Enter
     for itself taps it for a re-delivery too, without this feature knowing that
     such a tick exists."""
-    monkeypatch.setattr(main_mod, "_SUBMIT_SETTLE_S", 0.0)
+    monkeypatch.setattr(ops_mod, "SUBMIT_SETTLE_S", 0.0)
     events = _os_events(monkeypatch)
     app, fake = _make_app(tmp_path, auto_submit=True)
     async with app.run_test(size=(110, 55)) as pilot:

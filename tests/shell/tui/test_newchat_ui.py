@@ -49,6 +49,7 @@ import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor import ops as ops_mod
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion, click_point_region
@@ -57,6 +58,7 @@ from agentclip.driver.screen.template import RegionMatch, Template
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.messages import ClipboardCaptured
 from agentclip.shell.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
+from tests.shell.tui.conftest import patch_os
 
 from .conftest import focus_clicks, send_composer
 
@@ -222,7 +224,7 @@ def _patch_found(
         scenes.append(scene)
         return list(matches)
 
-    monkeypatch.setattr(main_mod, "find_all_in_region", fake_find_all)
+    patch_os(monkeypatch, "find_all_in_region", fake_find_all)
     return scenes
 
 
@@ -233,7 +235,7 @@ async def _draw_chat_region(
     hunted inside, and the other half of "calibrated"."""
     main = app.main_screen
     assert main is not None
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
+    patch_os(monkeypatch, "capture_region", _frame)
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: CHAT_REGION)
     await _press(app, pilot, "#set-region-btn")
     await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
@@ -250,16 +252,16 @@ async def test_the_action_finds_it_clicks_it_and_hands_focus_back(
     events: list[str] = []
     clicks: list[tuple[ScreenRegion, float]] = []
     focus_calls: list[int] = []
-    monkeypatch.setattr(main_mod, "foreground_window", lambda: 4242)
-    monkeypatch.setattr(
-        main_mod,
+    patch_os(monkeypatch, "foreground_window", lambda: 4242)
+    patch_os(
+        monkeypatch,
         "click_region",
         lambda region, *, settle_s=0.0: (
             bool(clicks.append((region, settle_s))) or bool(events.append("click")) or True
         ),
     )
-    monkeypatch.setattr(
-        main_mod,
+    patch_os(
+        monkeypatch,
         "focus_window_verified",
         lambda handle: bool(focus_calls.append(handle)) or bool(events.append("focus")) or True,
     )
@@ -302,10 +304,10 @@ async def test_the_button_learns_our_window_before_it_hands_focus_away(
     (mid focus switch) and whose composer was never used has nothing to snap
     back to, and the press leaves the user staring at the browser."""
     readings: list[int | None] = [None]  # mount catches a focus switch: no handle
-    monkeypatch.setattr(main_mod, "foreground_window", lambda: readings[-1])
+    patch_os(monkeypatch, "foreground_window", lambda: readings[-1])
     focus_calls: list[int] = []
-    monkeypatch.setattr(
-        main_mod, "focus_window_verified", lambda handle: focus_calls.append(handle) or True
+    patch_os(
+        monkeypatch, "focus_window_verified", lambda handle: focus_calls.append(handle) or True
     )
     _record_clicks(monkeypatch)
 
@@ -334,7 +336,7 @@ async def test_not_on_screen_warns_and_clicks_nothing(
 ) -> None:
     """The page moved on: clicking blind could hit anything, so nothing is."""
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region, **kw: clicks.append(region) or True)
 
     app, _ = _make_app(tmp_path, profile_root)
     _seed_newchat(app, seed_templates)
@@ -366,7 +368,7 @@ async def test_two_of_them_in_the_region_warns_and_clicks_nothing(
     toss between two conversations - so neither is clicked, and the fix the user
     is told about is a redraw, not a recapture."""
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region, **kw: clicks.append(region) or True)
 
     app, _ = _make_app(tmp_path, profile_root)
     _seed_newchat(app, seed_templates)
@@ -397,7 +399,7 @@ async def test_two_hits_on_the_same_button_are_still_one_button(
     pixel of drift is well inside the diff threshold - so counting raw matches
     would refuse every click on a perfectly ordinary screen."""
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region, **kw: clicks.append(region) or True)
 
     app, _ = _make_app(tmp_path, profile_root)
     _seed_newchat(app, seed_templates)
@@ -425,8 +427,8 @@ async def test_a_refused_click_is_reported_separately(
     """Found fine but the OS swallowed the input (not Windows): a different
     story to tell than "this button is not on screen"."""
     focus_calls: list[int] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: False)
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: focus_calls.append(handle) or True)
+    patch_os(monkeypatch, "click_region", lambda region, **kw: False)
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: focus_calls.append(handle) or True)
 
     app, _ = _make_app(tmp_path, profile_root)
     _seed_newchat(app, seed_templates)
@@ -450,7 +452,7 @@ async def test_nothing_captured_means_nothing_is_even_searched_for(
     """The window is drawn, so there IS somewhere to look - but this service has
     never been shown what it is looking for, and a search needs both."""
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region, **kw: clicks.append(region) or True)
     scenes = _patch_found(monkeypatch, FOUND)
 
     app, _ = _make_app(tmp_path, profile_root)
@@ -494,8 +496,8 @@ async def test_no_chat_region_means_nowhere_to_look(
         assert main._active_profile().has(TemplateKind.NEW_CHAT)
 
         scenes = _patch_found(monkeypatch, FOUND)
-        monkeypatch.setattr(
-            main_mod, "click_region", lambda region, **kw: clicks.append(region) or True
+        patch_os(
+            monkeypatch, "click_region", lambda region, **kw: clicks.append(region) or True
         )
 
         await _press(app, pilot, "#newchat-btn")
@@ -559,13 +561,13 @@ async def test_new_preserves_the_capture(
 @pytest.fixture
 def _fast_new_chat(monkeypatch: pytest.MonkeyPatch) -> None:
     """The fresh chat's render beat, shrunk. Real value is 0.4 s per paste."""
-    monkeypatch.setattr(main_mod, "_NEW_CHAT_SETTLE_S", 0.01)
+    monkeypatch.setattr(ops_mod, "NEW_CHAT_SETTLE_S", 0.01)
 
 
 def _record_clicks(monkeypatch: pytest.MonkeyPatch) -> list[ScreenRegion]:
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(
-        main_mod, "click_region", lambda region, **kw: clicks.append(region) or True
+    patch_os(
+        monkeypatch, "click_region", lambda region, **kw: clicks.append(region) or True
     )
     return clicks
 
@@ -573,7 +575,7 @@ def _record_clicks(monkeypatch: pytest.MonkeyPatch) -> list[ScreenRegion]:
 def _no_real_paste(monkeypatch: pytest.MonkeyPatch) -> list[None]:
     """Ctrl+V must never escape into the runner's window; record it instead."""
     pastes: list[None] = []
-    monkeypatch.setattr(main_mod, "send_paste", lambda: pastes.append(None) or True)
+    patch_os(monkeypatch, "send_paste", lambda: pastes.append(None) or True)
     return pastes
 
 
@@ -747,7 +749,7 @@ async def test_the_button_on_an_idle_session_resets_the_tool_side_too(
 ) -> None:
     clicks = _record_clicks(monkeypatch)
     _no_real_paste(monkeypatch)
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
 
     app, _ = _make_app(tmp_path, profile_root)
     _seed_newchat(app, seed_templates)
@@ -791,7 +793,7 @@ async def test_the_button_mid_turn_aborts_the_turn_and_starts_over(
     for never came."""
     clicks = _record_clicks(monkeypatch)
     _no_real_paste(monkeypatch)
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
 
     app, _ = _make_app(tmp_path, profile_root)
     target = tmp_path / "project" / "notes.txt"
@@ -877,7 +879,7 @@ async def test_the_button_on_the_sub_tab_only_clicks(
     session it is having stays exactly where it was."""
     clicks = _record_clicks(monkeypatch)
     _no_real_paste(monkeypatch)
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
 
     app, _ = _make_app(tmp_path, profile_root)
     _seed_newchat(app, seed_templates)

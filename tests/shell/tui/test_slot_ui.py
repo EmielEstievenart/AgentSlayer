@@ -48,6 +48,7 @@ from agentclip.driver.screen.slot import (
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MASTER_WINDOW, SUBAGENT_WINDOW, MainScreen
 from agentclip.shell.tui.widgets.sidebar import SLOT_NOTE_MASTER, SLOT_NOTE_READY
+from tests.shell.tui.conftest import patch_os
 
 from .conftest import aimed_at, send_composer
 
@@ -121,8 +122,8 @@ def _make_app(tmp_path: Path, profile_root: Path) -> AgentClipApp:
 def _patch_screen(monkeypatch: pytest.MonkeyPatch) -> _Picker:
     picker = _Picker()
     monkeypatch.setattr(main_mod, "pick_region", picker)
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "click_region", lambda region, **kw: True)
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "click_region", lambda region, **kw: True)
     # No live poller: nothing here is about the finish detectors, and its stale
     # readout rewrites a wrapping line in the sidebar on its own schedule -
     # which reflows every button below it, so a probe landing between a click's
@@ -650,8 +651,8 @@ async def test_the_new_browser_chat_button_targets_the_selected_window(
     window, which is what sends the click to the sub-agent's."""
     picker = _patch_screen(monkeypatch)
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(
-        main_mod, "click_region", lambda region, **kw: bool(clicks.append(region)) or True
+    patch_os(
+        monkeypatch, "click_region", lambda region, **kw: bool(clicks.append(region)) or True
     )
     app = _make_app(tmp_path, profile_root)
     seed_templates(_service_key(app), TemplateKind.NEW_CHAT)

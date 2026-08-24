@@ -40,11 +40,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 from textual.pilot import Pilot
 
 from agentclip.driver.automation.controller import AutomationController
+from agentclip.driver.monitor import local as local_mod
+from agentclip.driver.monitor import ops as ops_mod
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.profile_store import save_template
@@ -218,12 +221,12 @@ def _no_real_activation_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     not exist. The poll still runs and still asks its full ``attempts``; only
     the sleep between two asks goes.
     """
-    monkeypatch.setattr(main_mod, "_ACTIVATION_POLL_S", 0.0)
+    monkeypatch.setattr(ops_mod, "ACTIVATION_POLL_S", 0.0)
     # Same argument for the gap between the two halves of the focus click: it is
     # a real beat every delivery in this directory pays, and no suite here is
     # about how long it is - only that the second click happens (which is what
     # ``focus_clicks`` below counts).
-    monkeypatch.setattr(main_mod, "_FOCUS_CLICK_GAP_S", 0.0)
+    monkeypatch.setattr(ops_mod, "FOCUS_CLICK_GAP_S", 0.0)
 
 
 @pytest.fixture(autouse=True)
@@ -270,3 +273,110 @@ def _no_real_global_config(monkeypatch: pytest.MonkeyPatch, default_global_confi
         fake_default_global_config_path,
         raising=False,
     )
+
+
+# -- the machine, and where a suite substitutes it ----------------------------
+#
+# Since docs/design/ui-monitor.md phase 6.1 the hand AgentClip puts on the
+# machine is the monitor's (``agentclip.driver.monitor.ops.ScreenOps``), which
+# reaches ``agentclip.driver.screen`` through names imported into THAT module.
+# The screen still calls a handful of the same primitives for itself (the region
+# picker's preview, ``/identify``, the profile capture), from names imported into
+# ``screens/main.py``. Two use sites, one substitution: :func:`patch_os` patches
+# both, so a suite says what the machine does once and does not have to know
+# which side of the seam the call it is about comes out of.
+
+
+def patch_os(monkeypatch: pytest.MonkeyPatch, name: str, value: object) -> None:
+    """Substitute one OS primitive at BOTH use sites (the monitor's and the
+    screen's), whichever of them the test under it reaches."""
+    monkeypatch.setattr(ops_mod, name, value, raising=False)
+    monkeypatch.setattr(main_mod, name, value, raising=False)
+
+
+def fast_polling(monkeypatch: pytest.MonkeyPatch, seconds: float = 0.02) -> None:
+    """Poll the screen every ``seconds`` instead of every half second.
+
+    The cadence belongs to the monitor now (§2.10: the brain ships raw seconds,
+    the monitor converts them against its own tick rate), and it reaches one
+    through a keyword default - the screen builds its ``LocalUIMonitor`` inside
+    the app's own construction, so there is no seam between the two to pass a
+    faster one through. Shrinking the default is therefore what shrinking the
+    cadence means here, and it is undone with the rest of the patches.
+    """
+    kwdefaults = local_mod.LocalUIMonitor.__init__.__kwdefaults__
+    assert kwdefaults is not None
+    monkeypatch.setitem(kwdefaults, "poll_seconds", seconds)
+
+
+# -- driving the consumer without a poll thread -------------------------------
+
+
+def feed_probe(
+    main: MainScreen,
+    detector: str,
+    probe: object = None,
+    generation: int | None = None,
+) -> None:
+    """One reading, folded in as the monitor's tick would have folded it.
+
+    The suites' one door onto the consumer, and the same vocabulary it always
+    had. It goes straight at the ``consume_*`` seam rather than through a whole
+    ``Tick``, because that seam is public for exactly this reason: the readings
+    are what these suites are about, the run's stamp is what makes one count,
+    and a Pilot test has no poll thread to produce either.
+
+    The stamp defaults to the LIVE run, which is what nearly every caller wants;
+    pass one explicitly to speak as a run the monitor has been retargeted away
+    from, and the controller's own ghost filter drops it exactly as it would
+    drop a real one.
+    """
+    stamp = main._detector_generation if generation is None else generation
+    automation = main._automation
+    if detector == "busy":
+        automation.consume_busy_probe(cast("Any", probe), stamp)
+    elif detector == "idle":
+        automation.consume_idle_probe(cast("Any", probe), stamp)
+    elif detector == "stale":
+        automation.consume_stale_probe(cast("Any", probe), stamp)
+    elif detector == "send_ready":
+        automation.consume_send_ready(cast("Any", probe), stamp)
+    elif detector == "elements":
+        automation.consume_elements(cast("Any", probe), stamp)
+    else:
+        raise ValueError(f"no such detector: {detector!r}")
+
+
+class FrozenPoller:
+    """A poll run that never polls - what ``freeze_polling`` leaves behind.
+
+    Present rather than absent on purpose: "a run exists for this window" and
+    "the screen is being captured twice a second" are different facts, and the
+    suites that freeze the thread are asserting the first one while suppressing
+    the second (a live loop repaints the DETECTION block within milliseconds,
+    which is exactly what makes its resting lines otherwise unassertable).
+    """
+
+    def __init__(self) -> None:
+        self.is_cancelled = False
+
+    def cancel(self) -> None:
+        self.is_cancelled = True
+
+
+def freeze_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stop the poll THREAD, keep the configuration that would have started it.
+
+    The thread is the monitor's since ui-monitor.md phase 6.1 and there is no
+    seam above it to intercept - so this replaces the one private call that
+    starts one, and leaves the poller handle a frozen stand-in. Everything
+    ``configure`` decides (which detectors run, what the DETECTION block says,
+    what the trackers are) happens exactly as it would have.
+    """
+
+    def frozen(self: local_mod.LocalUIMonitor, loop: object, stop: object) -> object:
+        poller = FrozenPoller()
+        self._poller = cast("Any", poller)
+        return poller
+
+    monkeypatch.setattr(local_mod.LocalUIMonitor, "_start", frozen)

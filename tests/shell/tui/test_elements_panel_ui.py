@@ -39,7 +39,6 @@ import time
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
 
 import pytest
 from textual.pilot import Pilot
@@ -77,6 +76,7 @@ from agentclip.shell.tui.widgets.elements import (
     element_crop_image,
     element_label_id,
 )
+from tests.shell.tui.conftest import fast_polling, feed_probe, freeze_polling, patch_os
 
 from .conftest import template_image
 
@@ -164,29 +164,14 @@ class _Picker:
 
 def _patch_picker(monkeypatch: pytest.MonkeyPatch, *, poll_s: float = 0.02) -> None:
     monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", poll_s)
-
-
-class _FrozenWorker:
-    """A poll worker that never polls - see test_stale_detector_ui for why it
-    has to be present rather than None."""
-
-    def __init__(self) -> None:
-        self.is_cancelled = False
-
-    def cancel(self) -> None:
-        self.is_cancelled = True
+    patch_os(monkeypatch, "capture_region", _frame)
+    fast_polling(monkeypatch, poll_s)
 
 
 def _freeze_detector(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stop the poll THREAD, keep the composition - so the tests below can post
-    crops themselves without a live loop painting over them."""
-
-    def fake_spawn(self: MainScreen, loop: object) -> None:
-        self._detector_worker = cast(Any, _FrozenWorker())
-
-    monkeypatch.setattr(MainScreen, "_spawn_detector_worker", fake_spawn)
+    """Stop the poll THREAD, keep the configuration - so the tests below can
+    post crops themselves without a live loop painting over them."""
+    freeze_polling(monkeypatch)
 
 
 async def _press(app: AgentClipApp, pilot: Pilot, button_id: str) -> None:
@@ -201,7 +186,7 @@ def _post(app: AgentClipApp, crops: dict[TemplateKind, ElementCrop | None], *, a
     injection point (``AutomationController.feed_probe``)."""
     assert app.main_screen is not None
     main = app.main_screen
-    main._automation.feed_probe("elements", crops, main._detector_generation + ahead)
+    feed_probe(main, "elements", crops, main._detector_generation + ahead)
 
 
 async def _polling(app: AgentClipApp, pilot: Pilot) -> MainScreen:
@@ -210,7 +195,7 @@ async def _polling(app: AgentClipApp, pilot: Pilot) -> MainScreen:
     assert main is not None
     await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed")
     await _press(app, pilot, "#set-region-btn")
-    await _wait_for(pilot, lambda: main._detector_worker is not None, "poller built")
+    await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller built")
     return main
 
 
@@ -511,8 +496,8 @@ async def test_the_running_poller_draws_what_it_recognised(
     frame = RegionImage(REGION.width, REGION.height, bytes(scene))
 
     monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: frame)
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+    patch_os(monkeypatch, "capture_region", lambda region: frame)
+    fast_polling(monkeypatch, 0.02)
 
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
@@ -520,7 +505,7 @@ async def test_the_running_poller_draws_what_it_recognised(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed")
         _with_signals(main, "busy")
         await _press(app, pilot, "#set-region-btn")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
 
         await _wait_for(
             pilot, lambda: _drawn(app, TemplateKind.BUSY), "the busy crop reaches the column"
@@ -562,8 +547,8 @@ async def test_the_send_and_copy_rows_are_alive_with_nothing_going_on(
     frame = RegionImage(REGION.width, REGION.height, bytes(scene))
 
     monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: frame)
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+    patch_os(monkeypatch, "capture_region", lambda region: frame)
+    fast_polling(monkeypatch, 0.02)
 
     async with app.run_test(size=SIZE) as pilot:
         main = await _polling(app, pilot)
@@ -614,8 +599,8 @@ async def test_the_chat_box_and_new_chat_rows_are_alive_too(
     frame = RegionImage(REGION.width, REGION.height, bytes(scene))
 
     monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: frame)
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+    patch_os(monkeypatch, "capture_region", lambda region: frame)
+    fast_polling(monkeypatch, 0.02)
 
     async with app.run_test(size=SIZE) as pilot:
         await _polling(app, pilot)
@@ -649,8 +634,8 @@ async def test_an_uncaptured_appearance_is_the_row_that_stays_resting(
     seed_templates(service, TemplateKind.COPY, size=COPY_ICON)
 
     monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+    patch_os(monkeypatch, "capture_region", _frame)
+    fast_polling(monkeypatch, 0.02)
 
     async with app.run_test(size=SIZE) as pilot:
         await _polling(app, pilot)
@@ -697,8 +682,8 @@ async def test_an_unticked_busy_capture_still_reaches_the_column(
     frame = RegionImage(REGION.width, REGION.height, bytes(scene))
 
     monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
-    monkeypatch.setattr(main_mod, "capture_region", lambda region: frame)
-    monkeypatch.setattr(main_mod, "_BUSY_POLL_S", 0.02)
+    patch_os(monkeypatch, "capture_region", lambda region: frame)
+    fast_polling(monkeypatch, 0.02)
 
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
@@ -706,7 +691,7 @@ async def test_an_unticked_busy_capture_still_reaches_the_column(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed")
         _with_signals(main, "stale")
         await _press(app, pilot, "#set-region-btn")
-        await _wait_for(pilot, lambda: main._detector_worker is not None, "poller started")
+        await _wait_for(pilot, lambda: main._monitor.poller is not None, "poller started")
 
         await _wait_for(
             pilot, lambda: _drawn(app, TemplateKind.BUSY), "the busy crop reaches the column"
@@ -715,7 +700,7 @@ async def test_an_unticked_busy_capture_still_reaches_the_column(
         # ...and it decides nothing: no tracker was built, so nothing about it
         # can close a tick or fold into a finish verdict.
         assert main._active_detectors == ("stale",)
-        assert main._busy_tracker is None
+        assert main._automation.busy_tracker is None
 
 
 async def test_the_auto_copy_flow_posts_the_copy_buttons_crop(
@@ -733,11 +718,11 @@ async def test_the_auto_copy_flow_posts_the_copy_buttons_crop(
     seed_templates(service, TemplateKind.COPY, size=COPY_ICON)
 
     monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "click_region", lambda region, settle_s=0.0: True)
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
-    monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "click_region", lambda region, settle_s=0.0: True)
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
+    patch_os(monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (MATCH, None))
     _freeze_detector(monkeypatch)
 
     async with app.run_test(size=SIZE) as pilot:
@@ -766,11 +751,11 @@ async def test_a_copy_button_that_is_not_there_clears_its_row(
     seed_templates(service, TemplateKind.COPY, size=COPY_ICON)
 
     monkeypatch.setattr(main_mod, "pick_region", _Picker(REGION))
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "click_region", lambda region, settle_s=0.0: True)
-    monkeypatch.setattr(
-        main_mod, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21)
+    patch_os(monkeypatch, "capture_region", _frame)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "click_region", lambda region, settle_s=0.0: True)
+    patch_os(
+        monkeypatch, "find_lowest_with_best_miss", lambda t, s, **kw: (None, 0.21)
     )
     _freeze_detector(monkeypatch)
 

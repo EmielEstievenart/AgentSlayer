@@ -34,6 +34,7 @@ import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.clip.fake import FakeClipboard
+from agentclip.driver.monitor import ops as ops_mod
 from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.hover import hover_scan_points
@@ -42,6 +43,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.template import RegionMatch, Template
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import feed_probe, patch_os
 
 from .conftest import aimed_at
 
@@ -133,7 +135,7 @@ async def _fire(main: MainScreen, pilot: Pilot) -> None:
     # The MATCH is a frame that really found the busy appearance - the third
     # field - because only a sighting arms the trigger (test_finish_signal_ui).
     for state in (BusyState.MATCH, BusyState.CHANGED, BusyState.CHANGED):
-        main._automation.feed_probe("busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
+        feed_probe(main, "busy", BusyProbe(state, 0.2, state is BusyState.MATCH))
         await pilot.pause()
 
 
@@ -161,7 +163,7 @@ async def _calibrate(
     )
 
     monkeypatch.setattr(main_mod, "pick_region", lambda prompt=None: CHAT_REGION)
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
+    patch_os(monkeypatch, "capture_region", _frame)
     await _press(app, pilot, "#set-region-btn")
     await _wait_for(pilot, lambda: main._chat_region == CHAT_REGION, "chat region adopted")
     return main
@@ -185,12 +187,12 @@ def _patch_flow_io(
         captures.append(region)
         return _frame(region)
 
-    monkeypatch.setattr(main_mod, "click_region", fake_click)
-    monkeypatch.setattr(main_mod, "capture_region", fake_capture)
-    monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: bool(moves.append((x, y))) or True)
-    monkeypatch.setattr(main_mod, "scroll_region", lambda region, n: True)
-    monkeypatch.setattr(main_mod, "focus_window_verified", lambda handle: True)
-    monkeypatch.setattr(main_mod, "_HOVER_STEP_DELAY_S", 0.0)
+    patch_os(monkeypatch, "click_region", fake_click)
+    patch_os(monkeypatch, "capture_region", fake_capture)
+    patch_os(monkeypatch, "move_cursor", lambda x, y: bool(moves.append((x, y))) or True)
+    patch_os(monkeypatch, "scroll_region", lambda region, n: True)
+    patch_os(monkeypatch, "focus_window_verified", lambda handle: True)
+    monkeypatch.setattr(ops_mod, "STEP_DELAY_S", 0.0)
     return clicks, moves, captures
 
 
@@ -228,7 +230,7 @@ async def test_hover_scan_stops_at_the_first_appearance_and_clicks(
             looks["n"] += 1
             return (match, None) if looks["n"] > static + 2 else (None, 0.21)
 
-        monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", fake_find)
+        patch_os(monkeypatch, "find_lowest_with_best_miss", fake_find)
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "clicked (diff 0.04)" in _copy_label(app), "copy clicked")
@@ -260,8 +262,8 @@ async def test_a_static_hit_never_starts_a_scan(
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
-        monkeypatch.setattr(
-            main_mod,
+        patch_os(
+            monkeypatch,
             "find_lowest_with_best_miss",
             lambda template, scene, **kw: (RegionMatch(x=7, y=7, diff=0.01), None),
         )
@@ -286,8 +288,8 @@ async def test_an_exhausted_scan_reports_not_found_and_never_clicks_the_icon(
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
-        monkeypatch.setattr(
-            main_mod, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, 0.21)
+        patch_os(
+            monkeypatch, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, 0.21)
         )
 
         await _fire(main, pilot)
@@ -312,10 +314,10 @@ async def test_a_refused_cursor_move_ends_the_scan_immediately(
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         _clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
-        monkeypatch.setattr(
-            main_mod, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, 0.21)
+        patch_os(
+            monkeypatch, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, 0.21)
         )
-        monkeypatch.setattr(main_mod, "move_cursor", lambda x, y: bool(moves.append((x, y))))
+        patch_os(monkeypatch, "move_cursor", lambda x, y: bool(moves.append((x, y))))
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "not found" in _copy_label(app), "not-found reported")
@@ -335,8 +337,8 @@ async def test_hover_scan_is_opt_in_per_service(
     async with app.run_test(size=SIZE) as pilot:
         main = await _calibrate(app, pilot, monkeypatch, seed_templates)
         clicks, moves, _captures = _patch_flow_io(monkeypatch, fake)
-        monkeypatch.setattr(
-            main_mod, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, 0.21)
+        patch_os(
+            monkeypatch, "find_lowest_with_best_miss", lambda template, scene, **kw: (None, 0.21)
         )
 
         await _fire(main, pilot)
@@ -375,7 +377,7 @@ async def test_the_scan_runs_off_the_ui_thread(
             scan_threads.append(threading.get_ident())
             return RegionMatch(x=12, y=12, diff=0.02), None
 
-        monkeypatch.setattr(main_mod, "find_lowest_with_best_miss", fake_find)
+        patch_os(monkeypatch, "find_lowest_with_best_miss", fake_find)
 
         await _fire(main, pilot)
         await _wait_for(pilot, lambda: "clicked (diff 0.02)" in _copy_label(app), "copy clicked")

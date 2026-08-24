@@ -47,6 +47,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.template import RegionMatch, Template
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import patch_os
 
 from .conftest import aimed_at, focus_clicks, send_composer
 
@@ -166,7 +167,7 @@ async def _send(app: AgentClipApp, pilot: Pilot, text: str) -> None:
 
 
 def _patch_capture(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(main_mod, "capture_region", _frame)
+    patch_os(monkeypatch, "capture_region", _frame)
 
 
 def _local(rect: ScreenRegion) -> RegionMatch:
@@ -187,7 +188,7 @@ def _patch_found(monkeypatch: pytest.MonkeyPatch, *rects: ScreenRegion) -> None:
         rect = wanted.get(bytes(template.image.pixels[:4]))
         return [] if rect is None else [_local(rect)]
 
-    monkeypatch.setattr(main_mod, "find_all_in_region", fake_find_all)
+    patch_os(monkeypatch, "find_all_in_region", fake_find_all)
 
 
 async def _draw_chat_region(app: AgentClipApp, pilot: Pilot, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,7 +297,7 @@ async def test_the_ongoing_box_found_in_the_region_wins(
     and it is hunted first, so the fresh-chat layout is never even asked for."""
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
-    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
     app, fake = _make_app(tmp_path, profile_root)
     _seed_boxes(profile_root, app, TemplateKind.CHATBOX_INITIAL, TemplateKind.CHATBOX_ONGOING)
     async with app.run_test(size=SIZE) as pilot:
@@ -320,7 +321,7 @@ async def test_the_initial_box_wins_when_only_it_is_on_screen(
     """A fresh chat: the docked box is not on screen, the centred one is."""
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
-    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
     app, _ = _make_app(tmp_path, profile_root)
     _seed_boxes(profile_root, app, TemplateKind.CHATBOX_INITIAL, TemplateKind.CHATBOX_ONGOING)
     async with app.run_test(size=SIZE) as pilot:
@@ -351,7 +352,7 @@ async def test_neither_on_screen_means_no_click_and_no_paste(
     """
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
-    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
     app, fake = _make_app(tmp_path, profile_root)
     _seed_boxes(profile_root, app, TemplateKind.CHATBOX_INITIAL, TemplateKind.CHATBOX_ONGOING)
     async with app.run_test(size=SIZE) as pilot:
@@ -378,7 +379,7 @@ async def test_a_second_image_of_one_layout_is_ored_in_not_counted_twice(
     fallback would read a second picture as a second window."""
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
-    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
     app, _ = _make_app(tmp_path, profile_root)
     key = _service_key(app)
     # Two images of the ongoing box: the one the scene shows, and a second the
@@ -401,7 +402,7 @@ async def test_a_second_image_of_one_layout_is_ored_in_not_counted_twice(
         def both_here(template: Template, scene: RegionImage, **kw: object) -> list[RegionMatch]:
             return [_local(ONGOING_BOX)]
 
-        monkeypatch.setattr(main_mod, "find_all_in_region", both_here)
+        patch_os(monkeypatch, "find_all_in_region", both_here)
         assert await main._chatbox_region() == ONGOING_BOX
 
 
@@ -419,7 +420,7 @@ async def test_two_boxes_of_one_layout_refuse_the_delivery(
     and no payload rides on it."""
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
-    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
     app, _ = _make_app(tmp_path, profile_root)
     _seed_boxes(profile_root, app, TemplateKind.CHATBOX_INITIAL, TemplateKind.CHATBOX_ONGOING)
     async with app.run_test(size=SIZE) as pilot:
@@ -439,7 +440,7 @@ async def test_two_boxes_of_one_layout_refuse_the_delivery(
                 return []
             return [_local(ONGOING_BOX), _local(second)]
 
-        monkeypatch.setattr(main_mod, "find_all_in_region", fake_find_all)
+        patch_os(monkeypatch, "find_all_in_region", fake_find_all)
         assert await main._chatbox_region() == CHAT_REGION
 
         await _send(app, pilot, "Say hello.")
@@ -458,7 +459,7 @@ async def test_the_chat_region_alone_is_not_enough_to_click(
     banner asks for the Ctrl+V until the box has been captured (F2)."""
     clicks: list[ScreenRegion] = []
     _patch_capture(monkeypatch)
-    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
     app, _ = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
@@ -492,8 +493,8 @@ async def test_a_failed_capture_of_the_region_clicks_nothing(
         def boom(region: ScreenRegion) -> RegionImage:
             raise CaptureError("no display")
 
-        monkeypatch.setattr(main_mod, "capture_region", boom)
-        monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+        patch_os(monkeypatch, "capture_region", boom)
+        patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
 
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")
@@ -506,7 +507,7 @@ async def test_nothing_drawn_means_no_click(
     tmp_path: Path, profile_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clicks: list[ScreenRegion] = []
-    monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+    patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
     app, _ = _make_app(tmp_path, profile_root)
     async with app.run_test(size=SIZE) as pilot:
         main = app.main_screen
@@ -540,7 +541,7 @@ async def test_new_preserves_the_region_and_the_appearances(
         await _wait_for(pilot, lambda: main.awaiting_new_session, "composer armed for a task")
         await _draw_chat_region(app, pilot, monkeypatch)
         _patch_found(monkeypatch, ONGOING_BOX)
-        monkeypatch.setattr(main_mod, "click_region", lambda region: clicks.append(region) or True)
+        patch_os(monkeypatch, "click_region", lambda region: clicks.append(region) or True)
 
         await _send(app, pilot, "Say hello.")
         await _wait_for(pilot, lambda: main.session_active, "session armed")

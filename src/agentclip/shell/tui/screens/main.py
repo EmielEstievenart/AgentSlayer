@@ -34,21 +34,19 @@ and ``render_log`` slices it back apart per run, because an export wants one
 heading per sub-task, not one over five.
 
 Threading: the clipboard watcher and the detector poller are plain
-``threading.Thread``s the AutomationController owns (docs/design/gui.md §1) and
-this screen only starts, stops and mirrors; captures come back through
-``_clipboard_captured``, which bridges them via the thread-safe
-``post_message(ClipboardCaptured)`` -> the controller. The screen's own workers -
-the flow coroutines ``spawn`` starts - are ``run_worker``s Textual cancels on
-unmount, where both controller threads are stopped by name instead. The
-detectors are the same shape as the watcher: ONE poll loop takes a single
-capture of the live chat region per tick and hands it to one
-``screen.detector.ScreenDetector`` - a plain, Textual-free object that searches
-for every appearance the live window's service is CALIBRATED for and answers
-with a snapshot - and the loop feeds that snapshot straight into the
-controller's own ``consume_*`` calls, on the poller thread, in the busy -> idle
--> stale -> send-ready -> elements order, all in one call stack per tick. What a
-probe MEANS never reaches this screen at all: the bookkeeping, both gates, the
-loop's narration and the combined verdict are one object below both shells.
+``threading.Thread``s the ``LocalUIMonitor`` owns
+(docs/design/ui-monitor.md §6.1) and this screen only configures, suspends and
+mirrors; captures come back through ``_clipboard_captured``, which bridges them
+via the thread-safe ``post_message(ClipboardCaptured)`` -> the controller. The
+screen's own workers - the flow coroutines ``spawn`` starts - are ``run_worker``s
+Textual cancels on unmount, where the monitor is closed by name instead. This
+screen no longer builds a detector or a loop at all: it hands the monitor one
+``MonitorSpec`` (§2.10 - the live window's rectangle, its service KEY and that
+service's scalars, never its template PNGs) and the monitor decides what a tick
+searches for, takes one capture per tick, and pushes a ``Tick`` the controller
+consumes. What a tick MEANS never reaches this screen: the bookkeeping, both
+gates, the loop's narration and the combined verdict are one object below both
+shells.
 
 What comes back up is paint, and ONLY paint. Every ``AutomationView`` method
 this screen implements - ``paint_detection``/``paint_stale``/``paint_elements``/
@@ -72,9 +70,9 @@ answers only this screen has, which cross as ``AutomationHost``: which service a
 window is on and what it looks like, the seam the search for an appearance is
 asked through (``_find_all``, a one-liner onto the controller that the suites
 stub), handing a prose reply to the SESSION, and rebuilding the detector set
-after a retarget. The primitives themselves are reached through
-``_MainScreenOps``, whose only job is to resolve THIS module's names per call so
-the suites' patches still bite.
+after a retarget. The primitives themselves are the monitor's own hand on the
+machine (``agentclip.driver.monitor.ops``), which is also where the suites patch
+them.
 
 That split is deliberate and load-bearing: **the detector detects, the state
 machine consumes**. Nothing about the send gate, the auto-copy flow or the
@@ -175,7 +173,6 @@ user has selected. The two coincide constantly and are never the same question.
 from __future__ import annotations
 
 import asyncio
-import threading
 from collections import deque
 from collections.abc import Callable, Coroutine, Mapping, Sequence
 from contextlib import suppress
@@ -200,16 +197,11 @@ from agentclip.config import (
     ServicePreset,
     save_active_services,
 )
-from agentclip.driver.automation import delivery as _delivery
+from agentclip.driver.automation import finish as _finish
 from agentclip.driver.automation import flow as _flow
-from agentclip.driver.automation.controller import AutomationController, DetectorPoller
-from agentclip.driver.automation.finish import (
-    SEND_ARM_MIN_DIFF,
-    SEND_ARM_TICKS,
-    SEND_GATE_SEEN_TIMEOUT_TICKS,
-    SEND_GATE_TIMEOUT_TICKS,
-    SendGate,
-)
+from agentclip.driver.automation.controller import AutomationController
+from agentclip.driver.automation.describe import describe
+from agentclip.driver.automation.finish import SendGate
 from agentclip.driver.automation.harness_log import (
     HARNESS_LOG_MAX,
     KIND_ARMED,
@@ -220,25 +212,14 @@ from agentclip.driver.automation.harness_log import (
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
-from agentclip.driver.clip.chunking import STREAM_CHUNK_CHARS
 from agentclip.driver.clip.watcher import SelfWriteSet
-from agentclip.driver.monitor.ops import ScreenOps
+from agentclip.driver.monitor.local import LocalUIMonitor
+from agentclip.driver.monitor.protocol import MonitorSpec
 from agentclip.driver.screen.capture import CaptureError, RegionImage, capture_region
-from agentclip.driver.screen.detector import ScreenDetector, Sighting, build_detector
-from agentclip.driver.screen.focus import (
-    click_region,
-    focus_window_verified,
-    foreground_window,
-    move_cursor,
-    scroll_region,
-    send_enter,
-    send_paste,
-    send_scroll_key,
-)
-from agentclip.driver.screen.hover import STEP_DELAY_S as _HOVER_STEP_DELAY_S
+from agentclip.driver.screen.detector import Sighting
+from agentclip.driver.screen.focus import foreground_window
 from agentclip.driver.screen.identify import IdentifiedElement, identify_elements, summarise
 from agentclip.driver.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
-from agentclip.driver.screen.presence import PresenceTracker
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.profile_store import load_profile
 from agentclip.driver.screen.region import ScreenRegion
@@ -248,16 +229,10 @@ from agentclip.driver.screen.slot import (
     can_delegate,
     missing,
 )
-from agentclip.driver.screen.stale import StaleTracker
-from agentclip.driver.screen.template import (
-    CandidateSource,
-    RegionMatch,
-    Template,
-    find_all_in_region,
-    find_lowest_with_best_miss,
-)
+from agentclip.driver.screen.template import CandidateSource
 from agentclip.engine.engine import Decision, PendingAction, StatusSnapshot
 from agentclip.engine.link.factory import EngineRequest
+from agentclip.engine.states import Phase
 from agentclip.protocol.parser import looks_like_protocol
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
@@ -316,44 +291,19 @@ from agentclip.shell.tui.widgets.window_tabs import WindowSpec, WindowTabs
 if TYPE_CHECKING:  # only for the action_settings hand-off; importing it for real would cycle
     from agentclip.shell.tui.app import AgentClipApp
 
-# Finish-detector poll cadence (tests monkeypatch this to something tiny).
-_BUSY_POLL_S = 0.5
-# The finish decision's four tunables are the AutomationController's now
-# (agentclip.driver.automation.finish) and are imported above rather than spelled here.
-# They stay reachable under this module's names on purpose: the Pilot suites read
-# them to size a probe sequence and patch one of them to shrink a two-minute gate
-# budget, and this screen hands the values it can see to the controller at
-# construction, so patching this module's name still moves the clock.
+# Nothing about the machine is spelled here any more. The poll cadence belongs to
+# the monitor (docs/design/ui-monitor.md §2.10: the brain ships raw seconds and
+# the monitor converts them against its own tick rate); the delivery's beats, the
+# activation wait and the finish decision's four tick budgets belong to the layer
+# that paces itself by them (``agentclip.driver.monitor.beats``,
+# ``agentclip.driver.automation.finish``), and the Pilot suites shrink them where
+# they live rather than through a copy kept here.
 #
-# Beat between opening a fresh browser chat and treating it as the live slot -
-# the page still has to render its (centred) input box. Tests shrink this, which
-# is why ``_MainScreenOps`` reads it per call rather than at import.
-_NEW_CHAT_SETTLE_S = 0.4
-# The delivery's beats moved down with the sequence that paces itself by them
-# (agentclip.driver.automation.delivery, which documents what each one is FOR). They
-# stay reachable - and PATCHABLE - under this module's names, because that is
-# where the Pilot suites shrink them: ``_MainScreenOps`` reads all three per
-# call, so a monkeypatch here still bites exactly as it did when the paste path
-# lived on this screen.
-#
-# The first is the one worth naming here too: the click is what gives the browser
-# window the OS focus, focus is granted ASYNCHRONOUSLY, and a Ctrl+V that
-# overtakes the activation is delivered to whatever held focus a moment ago.
-PASTE_SETTLE_DELAY = _delivery.PASTE_SETTLE_DELAY
-_FOCUS_CLICK_GAP_S = _delivery.FOCUS_CLICK_GAP_S
-_SUBMIT_SETTLE_S = _delivery.SUBMIT_SETTLE_S
-_STREAM_CHUNK_SETTLE_S = _delivery.STREAM_CHUNK_SETTLE_S
-# ...and so are the activation wait in front of that first beat and the beat
-# before a snap back, for exactly the same reason: a suite that waited out a
-# real foreground poll on every delivery is a suite nobody runs.
-_ACTIVATION_ATTEMPTS = _delivery.ACTIVATION_ATTEMPTS
-_ACTIVATION_POLL_S = _delivery.ACTIVATION_POLL_S
-_SNAP_BACK_SETTLE_S = _delivery.SNAP_BACK_SETTLE_S
-# The auto-copy harvest's own tuning numbers moved down with the sequence that
-# reads them (agentclip.driver.automation.flow). They stay reachable under this
-# module's names because the Pilot suites size their assertions off them - how
-# many snap rounds a miss gets, how big the flick is, where the keyboard snap's
-# focus click lands.
+# What DOES stay: the auto-copy harvest's own tuning numbers, which moved down
+# with the sequence that reads them (agentclip.driver.automation.flow) but are
+# still reachable under this module's names, because the Pilot suites size their
+# assertions off them - how many snap rounds a miss gets, how big the flick is,
+# where the keyboard snap's focus click lands.
 _SNAP_WHEEL_DETENTS = _flow.SNAP_WHEEL_DETENTS
 _PAGE_DOWN_TAPS = _flow.PAGE_DOWN_TAPS
 _COPY_SNAP_ROUNDS = _flow.COPY_SNAP_ROUNDS
@@ -447,128 +397,6 @@ def _element_crop(scene: RegionImage, sighting: Sighting | None) -> ElementCrop 
     template, match = sighting.template, sighting.match
     image = element_crop_image(crop(scene, match.x, match.y, template.width, template.height))
     return None if image is None else ElementCrop(image, match.diff)
-
-
-def _poll_capture(region: ScreenRegion) -> RegionImage:
-    """The detector poller's capture, resolved HERE at every tick.
-
-    The loop lives in the AutomationController now, so the function it captures
-    with has to be handed in - and handing in ``capture_region`` itself would
-    freeze whatever this module's name pointed at when the run started. The
-    Pilot suites patch that name (``main_mod.capture_region``), some of them
-    while a poller is already running, so the indirection keeps the late binding
-    the in-line loop had for free.
-    """
-    return capture_region(region)
-
-
-class _MainScreenOps(ScreenOps):
-    """``ScreenOps`` with THIS module's names resolved at every call.
-
-    ``_poll_capture``'s reason, generalised to the whole hand the automation
-    puts on the machine. The OS-acting sequences live in the
-    AutomationController now and reach ``agentclip.driver.screen`` through
-    :class:`~agentclip.driver.automation.ops.ScreenOps`; the default implementation
-    calls those functions directly, which is right for the app and wrong for
-    this shell's test suites - they patch every one of them at
-    ``agentclip.shell.tui.screens.main``'s scope, because that is where the code used
-    to live, and several of them re-patch mid-run. Overriding here keeps the
-    late binding those stubs have always relied on: each method below is a name
-    lookup in this module, per call, and nothing else.
-
-    The two beats are here for the same reason and no other: the suites shrink
-    them so a test does not sleep its way up a chat region or wait out a fresh
-    chat's render.
-    """
-
-    def capture(self, region: ScreenRegion) -> RegionImage:
-        return capture_region(region)
-
-    def click(self, region: ScreenRegion, *, settle_s: float | None = None) -> bool:
-        return click_region(region) if settle_s is None else click_region(region, settle_s=settle_s)
-
-    def move_cursor(self, x: int, y: int) -> bool:
-        return move_cursor(x, y)
-
-    def scroll(self, region: ScreenRegion, detents: int) -> bool:
-        return scroll_region(region, detents)
-
-    def scroll_key(self, key: str, taps: int = 1) -> bool:
-        return send_scroll_key(key, taps)
-
-    def focus_window(self, handle: int) -> bool:
-        return focus_window_verified(handle)
-
-    def foreground_window(self) -> int | None:
-        return foreground_window()
-
-    def send_paste(self) -> bool:
-        return send_paste()
-
-    def send_enter(self) -> bool:
-        return send_enter()
-
-    def lowest_match(
-        self,
-        template: Template,
-        scene: RegionImage,
-        *,
-        tolerance: int,
-        max_diff: float,
-        matcher: CandidateSource | None,
-    ) -> tuple[RegionMatch | None, float | None]:
-        return find_lowest_with_best_miss(
-            template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher
-        )
-
-    def all_matches(
-        self,
-        template: Template,
-        scene: RegionImage,
-        *,
-        tolerance: int,
-        max_diff: float,
-        limit: int,
-        matcher: CandidateSource | None,
-    ) -> list[RegionMatch]:
-        return find_all_in_region(
-            template,
-            scene,
-            tolerance=tolerance,
-            max_diff=max_diff,
-            limit=limit,
-            matcher=matcher,
-        )
-
-    def hover_step_delay(self) -> float:
-        return _HOVER_STEP_DELAY_S
-
-    def new_chat_settle(self) -> float:
-        return _NEW_CHAT_SETTLE_S
-
-    def activation_attempts(self) -> int:
-        return _ACTIVATION_ATTEMPTS
-
-    def activation_poll(self) -> float:
-        return _ACTIVATION_POLL_S
-
-    def focus_click_gap(self) -> float:
-        return _FOCUS_CLICK_GAP_S
-
-    def paste_settle(self) -> float:
-        return PASTE_SETTLE_DELAY
-
-    def snap_back_settle(self) -> float:
-        return _SNAP_BACK_SETTLE_S
-
-    def submit_settle(self) -> float:
-        return _SUBMIT_SETTLE_S
-
-    def stream_chunk_settle(self) -> float:
-        return _STREAM_CHUNK_SETTLE_S
-
-    def stream_chunk_chars(self) -> int:
-        return STREAM_CHUNK_CHARS
 
 
 # Leading state glyphs the watcher segment prefixes its text with; a sub-agent
@@ -751,6 +579,22 @@ class MainScreen(Screen[None]):
         # Every delegated run so far, in order, as slices of the sub-agent
         # window's transcript (see ``_SubRun``). Cleared with the session.
         self._sub_runs: list[_SubRun] = []
+        # The machine, as one object below both shells (docs/design/ui-monitor.md
+        # §3): the poll thread and its cadence, the detector the thread feeds,
+        # the trackers behind it, the generation stamp, the clipboard watcher
+        # and the hand that clicks, scrolls and types. It is handed a way to
+        # resolve a service KEY into what that service LOOKS like, because
+        # template PNGs are the monitor's machine's business and never ride a
+        # spec (§2.10) - here that is this screen's own per-run profile cache.
+        self._monitor = LocalUIMonitor(
+            profile_for=self._profile,
+            clipboard=provider,
+            clip_poll_interval_ms=config.clipboard.poll_interval_ms,
+            # The protocol pre-filter, handed in because ``agentclip.protocol``
+            # is above the driver layer (tests/test_layering.py) - so what counts
+            # as a reply is decided up here and applied down there.
+            clip_accepts=looks_like_protocol,
+        )
         # The screen-automation core, driven through the AutomationView port
         # this screen implements structurally - the same arrangement as the
         # SessionController/ChatView pair below (docs/design/gui.md §1). It owns
@@ -760,10 +604,8 @@ class MainScreen(Screen[None]):
         #   remaining consequences (three of the four chokepoints, the status
         #   bar, the toasts) stay here while the decision itself, and the
         #   clipboard watcher it stops, live down there;
-        # * the clipboard watcher thread: the provider is handed in (cli.py
-        #   picks the backend at startup and it comes down through this screen),
-        #   the protocol pre-filter is handed in (the automation layer may not
-        #   import ``agentclip.protocol``), and captures come back out through
+        # * whether a clipboard watcher is wanted at all - the thread itself is
+        #   the monitor's above, and captures come back out through
         #   ``_clipboard_captured`` below;
         # * every user-drawn calibration, one per agent slot, plus the two
         #   pointers into them - *calibrating* is the slot behind the SELECTED
@@ -783,12 +625,9 @@ class MainScreen(Screen[None]):
             # that cannot live below (handing prose to the SESSION, rebuilding
             # the detector set). Structural, like the two view ports.
             host=self,
-            # ...and the hand they put on the machine, resolved at this module's
-            # scope so the suites' patches still bite (see ``_MainScreenOps``).
-            ops=_MainScreenOps(),
+            # ...and the machine they act on, built just above.
+            monitor=self._monitor,
             services=self._initial_services(config),
-            clipboard=provider,
-            poll_interval_ms=config.clipboard.poll_interval_ms,
             accepts=looks_like_protocol,
             on_clipboard_captured=self._clipboard_captured,
             # The one thing a tick still asks this screen for on its way into the
@@ -807,13 +646,6 @@ class MainScreen(Screen[None]):
             # from an immutable snapshot and ``_fire_auto_copy`` posts.
             has_appearance=self._live_has,
             on_fire=self._fire_auto_copy,
-            # The tunables are read off THIS module rather than the automation
-            # package's, because that is the name the Pilot suites patch (see
-            # the constants block at the top).
-            send_arm_ticks=SEND_ARM_TICKS,
-            send_arm_min_diff=SEND_ARM_MIN_DIFF,
-            send_gate_timeout_ticks=SEND_GATE_TIMEOUT_TICKS,
-            send_gate_seen_timeout_ticks=SEND_GATE_SEEN_TIMEOUT_TICKS,
         )
         self._delegation_ready = False  # last-seen SUBAGENT can_delegate, for the one-shot toast
         self._region_click_warned = False
@@ -827,21 +659,6 @@ class MainScreen(Screen[None]):
         # logged them - see ``paint_harness_entry``. Bounded like the log
         # itself, because before the pane exists there is nowhere to drain to.
         self._log_pending: deque[HarnessEntry] = deque(maxlen=HARNESS_LOG_MAX)
-        # This screen's mirror of the controller's poller: set by
-        # ``_spawn_detector_worker``, dropped by ``_stop_detector_worker``, and
-        # the thing ``resume_detectors`` asks "is one already up?". A mirror
-        # rather than a read-through, because a test freezes the spawn and puts
-        # its own stand-in here.
-        self._detector_worker: DetectorPoller | None = None
-        # What is looking at the live window: one ``ScreenDetector``, rebuilt
-        # per poller run, searching for every appearance that window's service
-        # is calibrated for and for nothing else. It is a SOURCE, never a
-        # participant - everything below consumes it, and nothing below may
-        # decide what it looks for. Its three finish trackers, what they have
-        # said, the trigger they arm, both gates, the loop's state and the
-        # harness log are all the AutomationController's now (the compatibility
-        # proxies further down are what the older suites still poke).
-        self._detector: ScreenDetector | None = None
         # One running command's output, per call id, as complete LINES - the run
         # panel's tail is a view of this and nothing else (widgets/run_panel.py).
         # Bounded and per-turn: ``stop_working`` empties both, because the
@@ -990,29 +807,10 @@ class MainScreen(Screen[None]):
     def _active_detectors(self, names: tuple[str, ...]) -> None:
         self._automation.active_detectors = names
 
-    @property
-    def _busy_tracker(self) -> PresenceTracker | None:
-        return self._automation.busy_tracker
-
-    @_busy_tracker.setter
-    def _busy_tracker(self, tracker: PresenceTracker | None) -> None:
-        self._automation.busy_tracker = tracker
-
-    @property
-    def _idle_tracker(self) -> PresenceTracker | None:
-        return self._automation.idle_tracker
-
-    @_idle_tracker.setter
-    def _idle_tracker(self, tracker: PresenceTracker | None) -> None:
-        self._automation.idle_tracker = tracker
-
-    @property
-    def _stale_tracker(self) -> StaleTracker | None:
-        return self._automation.stale_tracker
-
-    @_stale_tracker.setter
-    def _stale_tracker(self, tracker: StaleTracker | None) -> None:
-        self._automation.stale_tracker = tracker
+    # The three finish trackers are not mirrored here at all any more: they are
+    # built, swapped and read by the monitor (ui-monitor.md §4.3), and a reader
+    # that wants one asks ``self._automation.busy_tracker`` (or the monitor
+    # itself) rather than a name on this screen.
 
     @property
     def _busy_seen(self) -> bool:
@@ -1312,22 +1110,21 @@ class MainScreen(Screen[None]):
         self._remember_own_window()  # the user just launched us - focus is our terminal
         self._controller.start()
 
-    def on_unmount(self) -> None:
+    async def on_unmount(self) -> None:
         """Quitting must not leave a thread polling the user's clipboard - or
         capturing their screen twice a second.
 
         This is the same seam Textual's own teardown used when both were thread
         WORKERS: ``Widget._on_unmount`` cancels every worker the node started,
-        and this screen's unmount is dispatched on app shutdown. Now that the
-        threads belong to the AutomationController, that teardown has to be
-        asked for by name - once per thread, because "stopped" is a flag each
-        loop reads and not a group cancel. Both loops notice between ticks and
-        both threads are daemons besides, so nothing here can hang the exit;
-        this is what makes them stop *promptly*, and what keeps a test run from
-        accumulating one live watcher and one live poller per app it booted.
+        and this screen's unmount is dispatched on app shutdown. Now that both
+        threads belong to the monitor, ``close`` is the one call that ends them -
+        idempotent, and never a join: both loops notice between ticks and both
+        threads are daemons besides, so nothing here can hang the exit. It is
+        what keeps a test run from accumulating one live watcher and one live
+        poller per app it booted.
         """
         self._automation.stop_input()
-        self._stop_detector_worker()
+        await self._monitor.close()
         # ...and the third thread, for the same reason: an alarm still repeating
         # into a closed app is a beep with nobody left to answer it.
         self._automation.stop_alert()
@@ -2456,20 +2253,21 @@ class MainScreen(Screen[None]):
     # -- clipboard watcher ----------------------------------------------------
 
     @property
-    def _watch_worker(self) -> threading.Thread | None:
-        """The watcher, as a truthiness this screen (and its tests) can read.
+    def _watch_worker(self) -> bool:
+        """Is a clipboard watcher polling right now?
 
-        Compatibility surface: it was a Textual thread worker owned here and is
-        now a ``threading.Thread`` owned by the AutomationController, but every
-        reader only ever asked whether one exists.
+        Compatibility surface: it was a Textual thread worker owned here, then a
+        ``threading.Thread`` owned by the AutomationController, and it is the
+        monitor's now (ui-monitor.md §2.11) - but every reader only ever asked
+        whether one exists, so what is left is that answer.
         """
-        return self._automation.watcher_thread
+        return self._automation.watching
 
     def _start_watcher(self) -> None:
         """Resume the watcher and mirror it into the chrome (the `w` key's other
         half). The start rules - manual mode, already running - are the
         controller's; this is the two-line shell wrapper around them."""
-        self._automation.start_watching()
+        self._automation.start_input()
         self._mirror_watcher()
 
     def _clipboard_captured(self, text: str) -> None:
@@ -3048,29 +2846,78 @@ class MainScreen(Screen[None]):
         except OSError as exc:
             self.notify(f"couldn't remember the service: {exc}", severity="warning")
 
-    # -- detector polling ------------------------------------------------------
+    # -- the monitor's run -----------------------------------------------------
+
+    def _monitor_spec(self) -> MonitorSpec:
+        """Everything the monitor needs to watch the LIVE window (§2.10).
+
+        Scalars and a rectangle, and deliberately nothing else: the service is
+        named by its KEY, and what that key LOOKS like is resolved on the
+        monitor's own machine through the ``profile_for`` callback this screen
+        handed it at construction. Read off the live window's preset rather than
+        the selected tab's - a user reading the master's transcript
+        mid-delegation must not re-aim the poller - and read fresh on every
+        configure, because an edited service is adopted by rebuilding.
+
+        ``stable_seconds`` goes over RAW: converting a stillness wish into a
+        number of ticks is the monitor's arithmetic now, against its own
+        cadence, and this screen no longer knows what a tick is worth. The four
+        send-gate budgets ARE counted in ticks, which is why they ride here too
+        - the monitor is what a tick is, so it is what carries them (they are
+        read off ``agentclip.driver.automation.finish`` per call, so a suite that
+        shrinks a two-minute gate budget there still moves this clock).
+        """
+        preset = self._live_preset()
+        return MonitorSpec(
+            service=self._service_for(self._automation.live_slot),
+            region=self.live.chat_region,
+            finish_signals=tuple(preset.finish_signals),
+            stable_seconds=preset.stable_seconds,
+            tolerance=preset.tolerance,
+            matcher=preset.matcher,
+            hover_scan=preset.hover_scan,
+            scroll_action=preset.scroll_action,
+            snap_back=preset.snap_back,
+            delivery=preset.delivery,
+            auto_submit=preset.auto_submit,
+            send_arm_min_diff=_finish.SEND_ARM_MIN_DIFF,
+            send_arm_ticks=_finish.SEND_ARM_TICKS,
+            send_gate_timeout_ticks=_finish.SEND_GATE_TIMEOUT_TICKS,
+            send_gate_seen_timeout_ticks=_finish.SEND_GATE_SEEN_TIMEOUT_TICKS,
+        )
 
     def _start_detector_worker(self) -> None:
-        """Mirrors ``_start_watcher``: one thread worker watching the live
-        slot's chat region and bridging each tick back to the UI via
-        ``post_message``. It replaces any previous run, so a recapture or a
-        slot move mid-session cannot leave two loops watching two windows.
+        """Retarget the monitor onto the live window, and repaint what watches it.
 
-        ONE capture per tick, handed to ONE ``ScreenDetector``. That is not only
-        cheaper: every verdict then describes the same instant of a moving
-        screen rather than four moments of it, and a failed capture reaches all
-        of them as the same ERROR instead of some seeing a frame and others not.
+        The synchronous door every caller here already used - a config adopted,
+        a region drawn, a service re-picked, a slot moved, the screen mounting -
+        onto a contract that is coroutines all the way down. The work itself is
+        one ``await monitor.configure(spec)``, so it goes on a worker - and
+        never an exclusive one: ``configure`` is what makes a run the current
+        one, so two rebuilds asked for in an order have to HAPPEN in that order,
+        and the second is the state that stands.
 
-        What that detector searches for is entirely
-        ``screen.detector.build_detector``'s business, and it decides from
-        calibration alone: the drawn window, the checklist of the service THAT
-        WINDOW is pointed at (never the selected tab's - the user reading the
-        master's transcript mid-delegation must not re-aim the poller), and that
-        service's captured appearances. This method knows nothing about which
-        kinds those are, and deliberately: the loop below is a bridge, not a
-        policy. With no region drawn there is nothing to watch and no worker at
-        all; with nothing calibrated at all (``ScreenDetector.watching``) the
-        worker is likewise not started.
+        What does NOT wait for that worker is dropping the verdicts. Every
+        tracker is about to be rebuilt, so the verdicts they produced belong to
+        detectors that will no longer exist - and they have to stop counting the
+        moment the caller asked, not one scheduling hop later, or a tick still
+        in flight could fire a trigger against a window the automation has
+        already left. The trigger's ARM survives either way: it records that the
+        model was generating, which recapturing a button does not un-observe.
+        """
+        self._automation.forget_verdicts()
+        self.run_worker(self._reconfigure_monitor(), group="monitor")
+
+    async def _reconfigure_monitor(self) -> None:
+        """One ``configure``, and the DETECTION block that describes it.
+
+        Replaces whatever was watching the old window, so a recapture or a slot
+        move mid-session cannot leave two runs watching two windows. What that
+        run searches for is entirely the monitor's business and it decides from
+        calibration alone: the drawn rectangle, the checklist of the service
+        THAT WINDOW is pointed at, and that service's captured appearances. This
+        method knows nothing about which kinds those are, deliberately - it
+        hands over a spec and reads back what came of it.
 
         This is also the ONLY writer of the sidebar's DETECTION block
         (``_paint_detection``): those lines report what is being watched in the
@@ -3079,63 +2926,25 @@ class MainScreen(Screen[None]):
         tab may touch them, because the tab and the live window part company for
         the whole of a delegation.
 
-        ``_active_detectors`` records which of the FINISH detectors will
-        report, in the fixed busy -> idle -> stale order, which is what makes
-        the last one the tick's closing probe (see ``finish_tick_closed_by`` on
-        the controller). It is
-        not the same question as whether a worker runs: a service with a
-        captured send button and an empty checklist has nothing that can decide
-        a response finished, and still has something to show the user in the
-        ELEMENTS column every half second.
-
-        Everything is read once here rather than per tick: restarting the worker
-        is how the poller follows the live slot across a delegation, so an
-        in-flight loop must keep watching the window it was started for. The
-        detector is likewise built once per run - its trackers carry streaks and
-        a previous frame, and all of that describes one window - with the
-        "stable for N seconds" wish converted to ticks of the poll cadence here,
-        from the live window's service preset.
-
-        The THREAD is the AutomationController's, and so is the run's generation
-        stamp: ``retarget_detectors`` below ends whatever was polling and opens a
-        new run, which is why it is called before the two exits that start
-        nothing at all - a rebuild that finds no window still has to invalidate
-        the probes the old one has in flight (see ``is_ghost`` on the
-        controller). What stays here is
-        every question about MEANING: which detectors this composition runs, what
-        the sidebar says about them, and every verdict they will produce.
+        ``_active_detectors`` records which of the FINISH detectors will report,
+        in the fixed busy -> idle -> stale order, which is what makes the last
+        one the tick's closing probe (see ``finish_tick_closed_by`` on the
+        controller). It is not the same question as whether a run polls: a
+        service with a captured send button and an empty checklist has nothing
+        that can decide a response finished, and still has something to show the
+        user in the ELEMENTS column every half second. The monitor holds no
+        detector at all for the run that would poll for nothing, which is
+        exactly the case that reads back as "finish detection off".
         """
-        self._stop_detector_worker()
-        self._automation.retarget_detectors()
-        # Every tracker is rebuilt below, so the verdicts they produced belong
-        # to detectors that no longer exist. The trigger's ARM survives: it
-        # records that the model was generating, which recapturing a button
-        # does not un-observe.
-        self._automation.forget_verdicts()
-        self._detector = None
-        region = self.live.chat_region
-        if region is None:
+        spec = self._monitor_spec()
+        await self._monitor.configure(spec)
+        if spec.region is None:
             self._paint_detection(STALE_UNSET)
             return
-        preset = self._live_preset()
-        ticks = max(1, round(preset.stable_seconds / _BUSY_POLL_S))
-        detector = build_detector(
-            region,
-            self._live_profile(),
-            signals=preset.finish_signals,
-            required_ticks=ticks,
-            tolerance=preset.tolerance,
-            matcher=preset.matcher,
-        )
-        self._detector = detector
-        # The trackers stay reachable under their own names: the flow, the paste
-        # and the slot move all reset the DEBOUNCE without touching what the
-        # detector has seen, and that is a per-tracker act.
-        self._busy_tracker = detector.busy
-        self._idle_tracker = detector.idle
-        self._stale_tracker = detector.stale
-        self._active_detectors = detector.active_detectors
-        if not self._active_detectors:
+        detector = self._monitor.detector
+        active = () if detector is None else detector.active_detectors
+        self._active_detectors = active
+        if not active:
             # The service's checklist is empty, or asks only for appearances it
             # has none of. Say so where the stale verdict would go: an unexplained
             # silent readout is indistinguishable from a detector that is simply
@@ -3146,42 +2955,7 @@ class MainScreen(Screen[None]):
             # Whether the stale line is a live verdict or an explanation of its
             # silence: it is the one detector with no appearance behind it, so
             # "unticked" is otherwise indistinguishable from "not reporting yet".
-            self._paint_detection(
-                STALE_CALIBRATED if "stale" in self._active_detectors else STALE_UNTICKED
-            )
-        if not detector.watching:
-            # Nothing calibrated at all: no tracker to feed and no picture to
-            # look for, so a loop would be pure cost. Note this is NOT the same
-            # test as the one above - a captured send or copy button with an
-            # empty checklist still has something to show, even though nothing
-            # can decide a response finished.
-            return
-
-        # ONE search pass over the frame per tick, for everything the live
-        # window's service is calibrated for, folded by the controller's own
-        # consumer in the same call stack, in the fixed busy -> idle -> stale
-        # order the tick-closing rule reads. The loop belongs to the controller;
-        # what it watches, how fast, and with what capture are decided here.
-        self._spawn_detector_worker(
-            self._automation.detector_loop(
-                detector,
-                region,
-                capture=_poll_capture,
-                poll_seconds=_BUSY_POLL_S,
-            )
-        )
-
-    def _spawn_detector_worker(self, loop: Callable[[], None]) -> None:
-        """Run the composed poll loop on the controller's poller thread.
-
-        The seam between deciding *what* to watch and actually watching it, so
-        a test can freeze the polling and still observe the composition - the
-        live loop repaints the DETECTION block within milliseconds, which is
-        exactly what makes its resting lines otherwise unassertable. It stayed a
-        method of this screen for that reason alone: the thread it starts is the
-        controller's now, and this is only where the screen learns of it.
-        """
-        self._detector_worker = self._automation.start_detectors(loop)
+            self._paint_detection(STALE_CALIBRATED if "stale" in active else STALE_UNTICKED)
 
     def _paint_detection(self, stale_line: str) -> None:
         """Repaint the sidebar's DETECTION block for the LIVE window.
@@ -3244,18 +3018,6 @@ class MainScreen(Screen[None]):
             sidebar.update_template(TemplateKind.COPY, COPY_RESTING)
             sidebar.update_stale(stale_line)
 
-    def _stop_detector_worker(self) -> None:
-        """Cancel the mirrored run, and tell the controller the same thing.
-
-        Both halves, because they are not always the same object: a test freezes
-        the spawn and leaves its own stand-in in ``_detector_worker``, and the
-        controller is the one that actually holds a thread.
-        """
-        if self._detector_worker is not None:
-            self._detector_worker.cancel()
-            self._detector_worker = None
-        self._automation.stop_detectors()
-
     def suspend_detectors(self) -> None:
         """Stop polling (and disarm the trigger) while a modal owns the screen.
 
@@ -3266,19 +3028,42 @@ class MainScreen(Screen[None]):
         staleness alone. Left running, closing the editor would then read the
         settled screen as a finished response and fire the copy flow at a chat
         nobody sent anything to. ``resume_detectors`` puts it back.
+
+        A suspend, not a retarget: nothing has MOVED, so the monitor keeps its
+        generation and the ticks the interrupted loop is still finishing stay
+        honest readings of the same window.
         """
-        self._stop_detector_worker()
+        self._schedule_monitor(self._monitor.suspend())
         self._reset_finish_trigger()
 
     def resume_detectors(self) -> None:
-        """Restart polling after ``suspend_detectors``.
+        """Poll again after ``suspend_detectors``.
 
-        A no-op when something already restarted it - adopting an edited Config
-        does - so the guaranteed call in the caller's ``finally`` cannot cost a
-        second rebuild of a poller that is already watching the right window.
+        A no-op while something is already polling - adopting an edited Config
+        restarts it - so the guaranteed call in the caller's ``finally`` cannot
+        cost a second run over the one already watching the right window. The
+        detector never went anywhere, only its thread did, so this rebuilds
+        nothing.
         """
-        if self._detector_worker is None:
-            self._start_detector_worker()
+        self._schedule_monitor(self._monitor.resume())
+
+    def _schedule_monitor(self, work: Coroutine[Any, Any, Any]) -> None:
+        """Put one monitor coroutine on the running loop and do not wait for it.
+
+        The bridge between this screen's synchronous chrome (a modal opening, a
+        picker closing) and a contract that is coroutines all the way down - the
+        AutomationController's own ``_schedule``, for the two calls this screen
+        makes directly. With no loop running there is nothing to put it on and
+        nothing to await it either, so the coroutine is closed rather than left
+        to warn about never having been awaited - which is exactly the state a
+        synchronous test is in, asking to suspend a poller that never started.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            work.close()
+            return
+        loop.create_task(work)
 
     # -- the poller thread's one question --------------------------------------
 
@@ -3458,15 +3243,14 @@ class MainScreen(Screen[None]):
     def _copy_last_seen_note(self) -> str:
         """What the always-running detector remembers about the copy button.
 
-        The other half of a failed harvest's report, and the reason it is still
-        here: the ``ScreenDetector`` is built and held by this screen. ``how_close``
+        The other half of a failed harvest's report. ``how_close``
         says how close THIS frame came; this says whether the poller has ever
         seen the icon in this window at all - which separates "the capture no
         longer matches anything, ever" from "it was there thirty seconds ago and
         this response has not drawn one yet". Read-only, and never a coordinate:
         the harvest re-searches for what it clicks.
         """
-        detector = self._detector
+        detector = self._monitor.detector
         if detector is None or not detector.searches(TemplateKind.COPY):
             return ""
         ago = detector.seen_ago(TemplateKind.COPY)
@@ -4021,8 +3805,20 @@ class MainScreen(Screen[None]):
         return text, style
 
     def _base_watch_segment(self) -> tuple[str, str]:
+        """The segment's words, before a delegation rebadges them.
+
+        Three of the rows below are the pair (engine ``Phase``, browser
+        ``LoopState``) said out loud, and those three are
+        ``automation.describe`` - one table shared with the GUI, so a round trip
+        through the browser cannot read one way here and another way there
+        (ui-monitor.md §2.5/§6.3). Everything else is this shell's own chrome
+        talking about itself: an approval, a parked question, a manual
+        clipboard, a paused watcher and the two "technically busy but nothing is
+        in flight" cases, none of which either state machine knows about.
+        """
+        label = describe(self._snap.phase if self._snap else Phase.IDLE, self._automation.loop_state)
         if self.phase_name == "DONE":
-            return "✓ done - reply to continue", "st-done"
+            return f"✓ {label}", "st-done"
         if self.pending_approval:
             return "■ APPROVE NEEDED", "st-attn"
         if self.awaiting_answer:
@@ -4044,7 +3840,7 @@ class MainScreen(Screen[None]):
         if self.watch_paused:
             return "○ paused", "st-dim"
         if self.session_active and self.phase_name == "AWAITING_REPLY":
-            return "● ready - paste the reply", "st-armed"
+            return f"● {label}", "st-armed"
         return "○ idle", "st-dim"
 
     def _paint_status(self) -> None:

@@ -17,13 +17,13 @@ from pathlib import Path
 import pytest
 from textual.pilot import Pilot
 
-import agentclip.shell.tui.screens.main as main_mod
 from agentclip.cli import make_engine_factory
 from agentclip.config import load_config
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.shell.tui.app import AgentClipApp
 from agentclip.shell.tui.messages import ClipboardCaptured
 from agentclip.shell.tui.screens.main import MainScreen
+from tests.shell.tui.conftest import patch_os
 
 UTILS_PY = '''"""Utility helpers."""
 
@@ -85,7 +85,7 @@ def _make_app(tmp_path: Path) -> tuple[AgentClipApp, FakeClipboard, Path]:
 def _no_real_paste(monkeypatch: pytest.MonkeyPatch) -> None:
     """Nothing here draws a click region, so the paste is never attempted - but
     a real Ctrl+V escaping into the test runner's window is unforgivable."""
-    monkeypatch.setattr(main_mod, "send_paste", lambda: False)
+    patch_os(monkeypatch, "send_paste", lambda: False)
 
 
 async def _start_session(app: AgentClipApp, pilot: Pilot) -> MainScreen:

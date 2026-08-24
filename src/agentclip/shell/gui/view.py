@@ -58,18 +58,31 @@ from agentclip.config import (
     save_remote_target,
     save_services,
 )
-from agentclip.driver.automation.controller import AutomationController, DetectorPoller
+from agentclip.driver.automation.controller import AutomationController, MonitorLike
+from agentclip.driver.automation.describe import describe
+from agentclip.driver.automation.finish import (
+    SEND_ARM_MIN_DIFF,
+    SEND_ARM_TICKS,
+    SEND_GATE_SEEN_TIMEOUT_TICKS,
+    SEND_GATE_TIMEOUT_TICKS,
+)
 from agentclip.driver.automation.harness_log import (
     KIND_ARMED,
     KIND_CLIPBOARD,
     KIND_SESSION,
     HarnessEntry,
 )
-from agentclip.driver.automation.loop_state import LOOP_TRANSITIONS, LoopState
+from agentclip.driver.automation.loop_state import (
+    ATTENTION_STATES,
+    LOOP_TRANSITIONS,
+    LoopState,
+)
 from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
+from agentclip.driver.monitor.local import LocalUIMonitor
+from agentclip.driver.monitor.protocol import MonitorSpec
 from agentclip.driver.screen.capture import CaptureError, RegionImage, capture_region, crop
-from agentclip.driver.screen.detector import RUNTIME_KINDS, ScreenDetector, Sighting, build_detector
+from agentclip.driver.screen.detector import RUNTIME_KINDS, Sighting
 from agentclip.driver.screen.focus import foreground_window
 from agentclip.driver.screen.identify import IdentifiedElement, identify_elements, summarise
 from agentclip.driver.screen.picker import ScreenPickError, draw_identify_overlay, pick_region
@@ -80,6 +93,7 @@ from agentclip.driver.screen.slot import AgentSlot, can_delegate, missing
 from agentclip.engine.engine import Decision, PendingAction
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.engine.link.wire import EngineLinkError
+from agentclip.engine.states import Phase
 from agentclip.executor.hosts.connect import (
     PASSWORD_ATTEMPTS,
     STEP_ENGINE,
@@ -109,11 +123,6 @@ from agentclip.shell.gui.remote import (
     saved_rows,
 )
 from agentclip.shell.gui.service_editor import ServiceEditor, kind_of, png_data_uri
-
-# The finish-detector poll cadence, the TUI's own (shell/tui/screens/main.py). Spelled
-# here rather than imported: the two shells may not import each other, and this
-# is a number the detector composition needs, not a shared decision.
-_BUSY_POLL_S = 0.5
 
 # Where a model's stated reason is clipped at the gate. The tools layer's own
 # number (``tools/shell.py``), spelled here with ``_reason_line``.
@@ -469,6 +478,20 @@ class McpStatusSource(Protocol):
     def set_status_hook(self, cb: Callable[[Any], None] | None) -> None: ...
 
 
+class ShellMonitor(MonitorLike, Protocol):
+    """The monitor as a SHELL needs it: the controller's requirement, plus the
+    one verb only the object that owns the window ever calls.
+
+    ``AutomationController.MonitorLike`` is the automation's own share of the
+    contract and deliberately says nothing about lifetime - the controller never
+    starts the monitor and never ends it. This shell does both: it constructs
+    the monitor, hands it down, and closes it when the window goes away, which
+    is the whole of the difference between the two protocols.
+    """
+
+    async def close(self) -> None: ...
+
+
 def _fence(body: str) -> str:
     """A backtick fence longer than any backtick run inside ``body``."""
     longest = run = 0
@@ -654,6 +677,7 @@ class GuiView:
         skills: Callable[[], SkillReport] | None = None,
         host: Any = None,
         remote: RemoteConnect | None = None,
+        monitor: ShellMonitor | None = None,
         schedule: Callable[[Coroutine[Any, Any, Any]], None] | None = None,
         on_exit: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
@@ -737,13 +761,36 @@ class GuiView:
         self._prompts: dict[str, asyncio.Future[Any]] = {}
         self._prompt_ids = itertools.count(1)
 
-        # -- the automation core, exactly as MainScreen builds it ------------
+        # -- the machine, and the automation core over it --------------------
+        # One :class:`~agentclip.driver.monitor.protocol.UIMonitor` owns
+        # everything on the far side of the screen: the poll loop and its
+        # cadence, the detector and its trackers, the generation stamp, the
+        # mouse, the keyboard and the clipboard watcher
+        # (docs/design/ui-monitor.md §6.1). What is left up here is which window
+        # to point it at (``_live_spec``) and what its answers mean to the
+        # chrome.
+        #
+        # Injected so a suite can hand in ``FakeUIMonitor`` and push ticks by
+        # hand; the default is the real local one, because a GUI nobody
+        # configured is still a GUI watching this machine's screen. ``profile_for``
+        # is the shell's own profile cache keyed by SERVICE - the monitor is
+        # handed a service KEY in its spec and resolves the template PNGs itself
+        # (§2.10), which is why it takes a lookup rather than a profile.
+        self._monitor: ShellMonitor = (
+            monitor
+            if monitor is not None
+            else LocalUIMonitor(
+                profile_for=self._profile,
+                clipboard=provider,
+                clip_poll_interval_ms=config.clipboard.poll_interval_ms,
+                clip_accepts=looks_like_protocol,
+            )
+        )
         self._automation = AutomationController(
             view=self,
+            monitor=self._monitor,
             host=self,
             services=self._initial_services(config),
-            clipboard=provider,
-            poll_interval_ms=config.clipboard.poll_interval_ms,
             accepts=looks_like_protocol,
             on_clipboard_captured=self._clipboard_captured,
             crop_elements=self._crop_elements,
@@ -784,10 +831,6 @@ class GuiView:
         # this object owns is the bracket around the visit (detectors suspended
         # for its whole duration) and the apply path on the way out.
         self._editor: ServiceEditor | None = None
-        # The detector the current poller run watches through, and the run
-        # itself. Mirrors ``MainScreen._detector`` / ``_detector_worker``.
-        self._detector: ScreenDetector | None = None
-        self._detector_worker: DetectorPoller | None = None
         self._logged_session_active = False
         # Is the quit-mid-turn confirm already up? ``AgentClipApp.action_quit``'s
         # ``isinstance(self.screen, ConfirmScreen)`` guard: hammering the window's
@@ -850,6 +893,13 @@ class GuiView:
         """The automation core this view drives (the runner stops it)."""
         return self._automation
 
+    @property
+    def monitor(self) -> ShellMonitor:
+        """The machine the automation acts on - this shell's window onto the
+        screen, the mouse and the clipboard. Read by the calibration surfaces
+        (the ELEMENTS crops, ``/identify``) and closed by the runner."""
+        return self._monitor
+
     def start(self) -> None:
         """Mount: paint the resting chrome, then let the session flow begin.
 
@@ -868,9 +918,10 @@ class GuiView:
         self._push_settings()
         self._push_docs()
         self._remember_own_window()
-        # Nothing is drawn yet, so this starts no worker - but it is the only
-        # writer of the DETECTION block, and the block has to name the window it
-        # is about from the first frame rather than after the first calibration.
+        # Nothing is drawn yet, so the monitor is configured onto a window with
+        # no region and polls nothing - but this is the only writer of the
+        # DETECTION block, and the block has to name the window it is about from
+        # the first frame rather than after the first calibration.
         self._start_detector_worker()
         if self._mcp_manager is not None:
             # Hook first, paint second, so no transition can fall in the gap.
@@ -901,16 +952,25 @@ class GuiView:
     def shutdown(self) -> None:
         """The window is closing: stop everything that touches the machine.
 
-        The GUI's ``MainScreen.on_unmount`` - the watcher and the poller are
-        plain threads the AutomationController owns, so they are stopped by
-        name. Cancelling the session worker is the RUNNER's half (it owns the
-        loop the flows run on), exactly as Textual's unmount cancels workers.
+        The GUI's ``MainScreen.on_unmount``, and the half of it that needs no
+        event loop - the clipboard watcher is stopped through a synchronous
+        monitor verb and the alarm is a thread of the automation's own. The
+        poller is the other half: ``UIMonitor.close`` is a coroutine by
+        contract, so it is :meth:`close`, which the runner awaits on the loop
+        before it cancels everything left on it. Cancelling the session worker
+        is the RUNNER's half too (it owns the loop the flows run on), exactly as
+        Textual's unmount cancels workers.
         """
         if self._mcp_manager is not None:
             self._mcp_manager.set_status_hook(None)
         self._automation.stop_input()
-        self._stop_detector_worker()
         self._automation.stop_alert()
+
+    async def close(self) -> None:
+        """Stop the monitor's threads for good. Idempotent, like the verb below
+        it - both the window's ``closing`` event and ``run_gui``'s ``finally``
+        reach the runner that calls this."""
+        await self._monitor.close()
 
     # == what the page asks for (js_api, already on the loop) ==================
 
@@ -1727,8 +1787,8 @@ class GuiView:
         finally:
             self._picker_open = False
             # After the adoption above, so the common case (the live window was
-            # the one drawn) restarted the poller already and this is the no-op
-            # ``resume_detectors`` is written to be.
+            # the one drawn) has already retargeted the monitor and this only
+            # puts the polling back - which is what ``resume_detectors`` is.
             self.resume_detectors()
 
     def _after_calibration(self) -> None:
@@ -1820,17 +1880,24 @@ class GuiView:
         precisely what arms the auto-copy on staleness alone. Left running, the
         overlay closing would then read the settled screen as a finished
         response and fire the copy flow at a chat nobody sent anything to.
+
+        A SUSPEND rather than a retarget, and that is the monitor's own
+        distinction: nothing has moved, so the ticks the interrupted loop is
+        still finishing are honest readings of the same window and the
+        generation is deliberately left alone (ui-monitor.md §6.1).
         """
-        self._stop_detector_worker()
+        self._schedule(self._monitor.suspend())
         self._automation.reset_finish_trigger()
 
     def resume_detectors(self) -> None:
-        """Restart polling after ``suspend_detectors``. A no-op when something
-        already restarted it, so the guaranteed call in a caller's ``finally``
-        cannot cost a second rebuild of a poller that is already watching the
-        right window."""
-        if self._detector_worker is None:
-            self._start_detector_worker()
+        """Poll again after ``suspend_detectors``, under the same configuration.
+
+        Free to call in a ``finally`` beside a path that already retargeted: the
+        detector never went anywhere - only its thread did - so a resume of a
+        monitor that is already polling is a no-op down there rather than a
+        second rebuild up here.
+        """
+        self._schedule(self._monitor.resume())
 
     def toggle_harness_log(self) -> None:
         """``/log`` and F8: the same show/hide, two ways to ask for one thing.
@@ -2590,7 +2657,7 @@ class GuiView:
             self._push_status()
             self.notify("clipboard watcher paused - w resumes, i ingests manually")
             return
-        self._automation.start_watching()
+        self._automation.start_input()
         self._mirror_watcher()
         self._push_status()
         self.notify("clipboard watcher resumed")
@@ -2916,8 +2983,8 @@ class GuiView:
                     timeout=4,
                 )
         finally:
-            # A no-op when the propagation above already restarted the poller,
-            # which is the common case (``_adopt_config`` rebuilds it).
+            # The propagation above has already retargeted the monitor (that is
+            # what ``_adopt_config`` does); this only puts the polling back.
             self.resume_detectors()
 
     def _adopt_config(self, config: Config) -> None:
@@ -3073,7 +3140,14 @@ class GuiView:
         # Drawn from the CONTROLLER rather than from the payload: this may be
         # raised on the poller thread, and the flag is re-readable while a state
         # that crossed as data would be whatever was true when it was sent.
+        #
+        # Two surfaces, not one. The rail draws every state at once and marks
+        # this one; the status bar's watch segment draws the single sentence for
+        # where BOTH machines are (``describe``), and the loop is half of that
+        # pair - so a state change that never repainted the bar would leave it
+        # saying the phase's story while the browser had moved on.
         self._push_rail()
+        self._push_status()
 
     def paint_harness_entry(self, entry: HarnessEntry) -> None:
         # ``line`` is the entry as the pane prints it - the fixed-width kind
@@ -3288,7 +3362,7 @@ class GuiView:
     def copy_seen_note(self) -> str:
         """What the always-running detector remembers about the copy button -
         the other half of a failed harvest's report."""
-        detector = self._detector
+        detector = self._monitor.detector
         if detector is None or not detector.searches(TemplateKind.COPY):
             return ""
         ago = detector.seen_ago(TemplateKind.COPY)
@@ -3339,41 +3413,76 @@ class GuiView:
         )
         self._controller.submit_clipboard(text)
 
-    # == the detector poller ===================================================
+    # == the monitor's target ==================================================
 
-    def _start_detector_worker(self) -> None:
-        """Compose and start one poll run against the LIVE window.
+    def _live_spec(self) -> MonitorSpec:
+        """What the monitor has to know to watch the LIVE window - §2.10's payload.
 
-        ``MainScreen._start_detector_worker`` minus the sidebar it paints: what
-        stays is every question about meaning - which detectors this composition
-        runs, what a rebuild invalidates, and the run that replaces the last one.
-        With no region drawn (every GUI session in this slice) it stops at the
-        retarget, which is what keeps the outgoing run's in-flight probes from
-        being read as the new one's.
+        Scalars only, and every one of them read fresh: the service KEY (never
+        the profile - the template PNGs are the monitor's own machine's
+        business), the drawn rectangle, the preset's whole finish checklist, and
+        the send gate's four tick budgets. ``stable_seconds`` goes over RAW: the
+        conversion into a tick count belongs to whatever is doing the ticking,
+        which is why this shell no longer holds a poll cadence of its own.
         """
-        self._stop_detector_worker()
-        self._automation.retarget_detectors()
-        self._automation.forget_verdicts()
-        self._detector = None
-        region = self._automation.live.chat_region
-        if region is None:
-            self._paint_detection(STALE_UNSET)
-            return
-        preset = self.live_preset()
-        detector = build_detector(
-            region,
-            self.profile_for(self._automation.live_slot),
-            signals=preset.finish_signals,
-            required_ticks=max(1, round(preset.stable_seconds / _BUSY_POLL_S)),
+        slot = self._automation.live_slot
+        preset = self._preset_for(slot)
+        return MonitorSpec(
+            service=self._service_for(slot),
+            region=self._automation.live.chat_region,
+            finish_signals=tuple(preset.finish_signals),
+            stable_seconds=preset.stable_seconds,
             tolerance=preset.tolerance,
             matcher=preset.matcher,
+            hover_scan=preset.hover_scan,
+            scroll_action=preset.scroll_action,
+            snap_back=preset.snap_back,
+            delivery=preset.delivery,
+            auto_submit=preset.auto_submit,
+            send_arm_min_diff=SEND_ARM_MIN_DIFF,
+            send_arm_ticks=SEND_ARM_TICKS,
+            send_gate_timeout_ticks=SEND_GATE_TIMEOUT_TICKS,
+            send_gate_seen_timeout_ticks=SEND_GATE_SEEN_TIMEOUT_TICKS,
         )
-        self._detector = detector
-        self._automation.busy_tracker = detector.busy
-        self._automation.idle_tracker = detector.idle
-        self._automation.stale_tracker = detector.stale
-        self._automation.active_detectors = detector.active_detectors
-        if not detector.active_detectors:
+
+    def _start_detector_worker(self) -> None:
+        """Retarget the monitor onto the LIVE window - the synchronous door.
+
+        Every caller here is chrome (a service picked, a region drawn, a config
+        adopted, ``/new``) and none of them can await, while ``configure`` is a
+        coroutine by contract - a remote monitor's is a round trip. So the door
+        stays synchronous and the retarget goes on the loop, where it runs in
+        the order it was asked for: the monitor's own verbs never suspend
+        half-way, so a suspend, a retarget and a resume queued back to back land
+        in that order.
+        """
+        self._schedule(self._retarget_monitor())
+
+    async def _retarget_monitor(self) -> None:
+        """Point the monitor at the LIVE window, then repaint what that changed.
+
+        ``MainScreen._start_detector_worker`` minus everything that was
+        machinery: composing the detector, converting the stillness window into
+        ticks and starting a thread are all the monitor's now (ui-monitor.md
+        §6.1). What stays is the two questions of MEANING that were always this
+        shell's - which finish detectors this configuration ends up running, and
+        what the DETECTION block should therefore say - and they are asked of
+        the monitor's answer rather than of a detector this object built.
+
+        ``forget_verdicts`` comes after the configure and not before it: the
+        generation is bumped by then, so a probe still in flight from the run
+        that just ended is a ghost and cannot land on the state we have just
+        cleared.
+        """
+        spec = self._live_spec()
+        await self._monitor.configure(spec)
+        self._automation.forget_verdicts()
+        detector = self._monitor.detector
+        active = detector.active_detectors if detector is not None else ()
+        self._automation.active_detectors = active
+        if spec.region is None:
+            self._paint_detection(STALE_UNSET)
+        elif not active:
             # The service's checklist is empty, or asks only for appearances it
             # has none of. Say so where the stale verdict would go: the
             # consequence (auto-copy will never fire) is otherwise invisible
@@ -3382,24 +3491,7 @@ class GuiView:
         else:
             # Whether the stale line is a live verdict or an explanation of its
             # own silence: it is the one detector with no appearance behind it.
-            self._paint_detection(
-                STALE_CALIBRATED
-                if "stale" in detector.active_detectors
-                else STALE_UNTICKED
-            )
-        if not detector.watching:
-            return
-        self._detector_worker = self._automation.start_detectors(
-            self._automation.detector_loop(
-                detector, region, capture=capture_region, poll_seconds=_BUSY_POLL_S
-            )
-        )
-
-    def _stop_detector_worker(self) -> None:
-        if self._detector_worker is not None:
-            self._detector_worker.cancel()
-            self._detector_worker = None
-        self._automation.stop_detectors()
+            self._paint_detection(STALE_CALIBRATED if "stale" in active else STALE_UNTICKED)
 
     def _paint_detection(self, stale_line: str) -> None:
         """Repaint the DETECTION block for the LIVE window - the only writer.
@@ -3641,11 +3733,29 @@ class GuiView:
         return text, style
 
     def _base_watch_segment(self) -> tuple[str, str]:
+        """The words come from ``describe``; the glyph and the colour are ours.
+
+        AgentClip runs two state machines on purpose (ui-monitor.md §2.5) and
+        this segment is the one line that has to hold both - so the sentence is
+        looked up rather than composed here, and what is left in this method is
+        the shell's own two contributions: the styling, and the handful of
+        situations only a SESSION knows about (an approval, a question, a start
+        prompt, a machine with no clipboard, a paused watcher). Those sit
+        between the loop's own claim and the phase's, in the order they are
+        evaluated - first match wins.
+        """
         view = self._last_view
         snap = view.snapshot if view is not None else None
-        phase = snap.phase.name if snap else "IDLE"
-        if phase == "DONE":
-            return "✓ done - reply to continue", "st-done"
+        phase = snap.phase if snap else Phase.IDLE
+        loop = self._automation.loop_state
+        label = describe(phase, loop)
+        if loop in ATTENTION_STATES:
+            # The two moments the app is stuck on a human at the browser end.
+            # Above everything below, which is ``describe``'s own precedence
+            # rule: no phase wording may bury "paste it yourself".
+            return f"■ {label}", "st-attn"
+        if phase is Phase.DONE:
+            return f"✓ {label}", "st-done"
         if view is not None and view.pending_approval:
             return "■ APPROVE NEEDED", "st-attn"
         if view is not None and view.awaiting_answer:
@@ -3659,16 +3769,20 @@ class GuiView:
             # The session worker is technically busy here too (parked on the
             # inline prompt) but there is no turn in flight - nothing for the
             # user to wait on - so the bar must not say "working".
-            return "○ idle", "st-dim"
+            return f"○ {describe(Phase.IDLE, loop)}", "st-dim"
         if view is not None and view.busy:
-            return "● working...", "st-busy"
+            # ``busy`` IS ``Phase.REVIEW``'s meaning - a turn in flight - stated
+            # by the session rather than by the snapshot, so it is asked as that
+            # phase. The loop still outranks it: a turn running while the browser
+            # is mid-generation reads "generating...", not "working...".
+            return f"● {describe(Phase.REVIEW, loop)}", "st-busy"
         if self._provider.name == "manual":
             return "✗ manual paste", "st-err"
         if self._watch_paused:
             return "○ paused", "st-dim"
-        if view is not None and view.session_active and phase == "AWAITING_REPLY":
-            return "● ready - paste the reply", "st-armed"
-        return "○ idle", "st-dim"
+        if view is not None and view.session_active and phase is Phase.AWAITING_REPLY:
+            return f"● {label}", "st-armed"
+        return f"○ {describe(Phase.IDLE, loop)}", "st-dim"
 
     def _push_rail(self) -> None:
         """The STATE rail: eight rows, one per LoopState, in loop order.

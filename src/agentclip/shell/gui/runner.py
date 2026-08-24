@@ -229,22 +229,46 @@ class GuiRunner:
         if self._stopped:
             return
         self._stopped = True
-        # 1. Nothing may keep touching the machine: the watcher and the poller
-        #    are threads, so they are stopped by name (MainScreen.on_unmount).
+        # 1. Nothing may keep touching the machine: the clipboard watcher and
+        #    the attention alarm are threads with a synchronous off switch, so
+        #    they are stopped by name (MainScreen.on_unmount).
         self.view.shutdown()
-        # 2. Cancel the session worker - here, every task on the loop. Textual
-        #    does this for a screen's workers on unmount; this loop's tasks ARE
-        #    those workers.
         thread = self._thread
         if thread is not None and self._loop.is_running():
+            # 2. The monitor's poll thread. ``UIMonitor.close`` is a coroutine by
+            #    contract - a remote monitor's is a round trip - so it needs a
+            #    loop, and this is the last moment there is one: step 3 cancels
+            #    everything left on it. Waited for rather than fired off, because
+            #    what it stops is a thread that captures the screen.
+            closed = threading.Event()
+            self._loop.call_soon_threadsafe(self._close_view, closed)
+            closed.wait(SHUTDOWN_TIMEOUT_S)
+            # 3. Cancel the session worker - here, every task on the loop.
+            #    Textual does this for a screen's workers on unmount; this loop's
+            #    tasks ARE those workers.
             done = threading.Event()
             self._loop.call_soon_threadsafe(self._cancel_all, done)
             done.wait(SHUTDOWN_TIMEOUT_S)
             self._loop.call_soon_threadsafe(self._loop.stop)
             thread.join(SHUTDOWN_TIMEOUT_S)
         self._thread = None
-        # 3. Last, so anything the teardown said still reaches the page.
+        # 4. Last, so anything the teardown said still reaches the page.
         self.bridge.stop()
+
+    def _close_view(self, done: threading.Event) -> None:
+        """Close the view's monitor. Runs ON the loop, by call_soon.
+
+        A task rather than a call because the verb is a coroutine; the event is
+        set from its completion callback, so the waiting thread learns about a
+        failure the same way it learns about a success rather than hanging on
+        one.
+        """
+        try:
+            task = self._loop.create_task(self.view.close())
+        except RuntimeError:  # the loop went away between the check and here
+            done.set()
+            return
+        task.add_done_callback(lambda _task: done.set())
 
     def _cancel_all(self, done: threading.Event) -> None:
         """Cancel every task on the loop. Runs ON the loop, by call_soon."""

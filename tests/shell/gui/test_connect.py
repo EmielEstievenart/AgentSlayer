@@ -22,6 +22,7 @@ import pytest
 from agentclip.cli import make_engine_factory
 from agentclip.config import Config, RemoteTarget, load_config, project_permissions_path
 from agentclip.driver.clip.base import select_provider
+from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.engine.link.wire import EngineLinkError
 from agentclip.executor.hosts.connect import (
     CHECKLIST_STEPS,
@@ -96,8 +97,10 @@ class RemoteHarness(Harness):
     controller, so the loop has to be the real one.
     """
 
-    def __init__(self, view: GuiView, bridge: Bridge, recorder: Recorder) -> None:
-        super().__init__(view, bridge, recorder)
+    def __init__(
+        self, view: GuiView, bridge: Bridge, recorder: Recorder, monitor: FakeUIMonitor
+    ) -> None:
+        super().__init__(view, bridge, recorder, monitor)
         self.tasks: list[asyncio.Task[Any]] = []
 
     def schedule(self, coro: Coroutine[Any, Any, Any]) -> None:
@@ -195,14 +198,17 @@ def harness(
         built.append(runtime)
         return runtime
 
+    provider = select_provider("manual")
+    monitor = FakeUIMonitor(clipboard=provider)
     view = GuiView(
         bridge,
         config=config,
-        provider=select_provider("manual"),
+        provider=provider,
         engine_factory=make_engine_factory(lambda: config, project),
         project_root=project,
         profile_root=tmp_path / "profiles",
         global_config_path=global_config,
+        monitor=monitor,
         schedule=lambda coro: holder["h"].schedule(coro),
         on_exit=lambda: holder["h"].on_exit(),
         remote=RemoteConnect(
@@ -212,7 +218,7 @@ def harness(
             ssh_config_path=ssh_config,
         ),
     )
-    holder["h"] = RemoteHarness(view, bridge, recorder)
+    holder["h"] = RemoteHarness(view, bridge, recorder, monitor)
     holder["h"].built = built  # type: ignore[attr-defined]
     holder["h"].remote_mcp = remote_mcp  # type: ignore[attr-defined]
     holder["h"].launch_error = launch_error  # type: ignore[attr-defined]

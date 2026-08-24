@@ -23,6 +23,7 @@ import pytest
 
 from agentclip.driver.automation.harness_log import HARNESS_LOG_MAX, KIND_GATE
 from agentclip.driver.automation.loop_state import LOOP_TRANSITIONS, LoopState
+from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.engine.engine import Phase
@@ -89,12 +90,12 @@ def use_real_provider(harness: Harness) -> FakeProvider:
     """Point BOTH halves at a non-manual provider.
 
     The view reads its own for the watch segment's "manual paste" branch; the
-    automation holds the one the watcher would actually poll, and
-    ``start_watching`` refuses a manual backend outright.
+    MONITOR holds the one the watcher would actually poll (ui-monitor.md §2.11),
+    and ``start_input`` refuses a manual backend outright.
     """
     provider = FakeProvider()
     harness.view._provider = provider  # type: ignore[assignment]
-    harness.view.automation._clipboard = provider  # type: ignore[assignment]
+    harness.monitor.clipboard = provider  # type: ignore[assignment]
     return provider
 
 
@@ -354,6 +355,55 @@ def test_the_watch_segments_precedence_order(
     assert (seg["text"], seg["cls"]) == (text, cls)
 
 
+@pytest.mark.parametrize(
+    ("state", "text", "cls"),
+    [
+        (LoopState.WAIT_GENERATE, "● generating...", "st-armed"),
+        (LoopState.WAIT_SEND, "● press Enter to send", "st-armed"),
+        (LoopState.AUTO_INSERT, "● pasting into the chat box", "st-armed"),
+        (LoopState.AUTO_COPY, "● copying the reply", "st-armed"),
+        # The two "the next move is yours" states outrank everything the
+        # session could say, which is ``describe``'s own precedence rule.
+        (LoopState.MANUAL_INSERT, "■ paste it yourself - Ctrl+V into the chat box", "st-attn"),
+        (LoopState.MANUAL_COPY, "■ copy the reply yourself", "st-attn"),
+        # Both deferring states hand the label back to the phase.
+        (LoopState.IDLE, "● ready - paste the reply", "st-armed"),
+        (LoopState.INTERPRETING, "● ready - paste the reply", "st-armed"),
+    ],
+)
+def test_the_watch_segment_speaks_for_the_browser_too(
+    harness: Harness, state: LoopState, text: str, cls: str
+) -> None:
+    """One label for two state machines (ui-monitor.md §2.5, §6.3).
+
+    The words are ``describe(phase, loop_state)``'s, not this shell's: where the
+    round trip through the browser has something to say it outranks the phase,
+    and where it has not the phase speaks. What stays the shell's is the glyph
+    and the colour.
+    """
+    view = harness.view
+    view._provider = FakeProvider()  # type: ignore[assignment]
+    view.render_state(session_view())  # AWAITING_REPLY, session live
+    view.automation.set_loop_state(state, "the test put it here")
+    seg = segments(harness)["watch"]
+    assert (seg["text"], seg["cls"]) == (text, cls)
+
+
+def test_a_loop_state_repaints_the_status_bar_as_well_as_the_rail(harness: Harness) -> None:
+    """``paint_loop_state`` writes two surfaces: the rail marks the row, and the
+    bar re-reads the sentence - a rail that moved without the label following it
+    would leave the bar telling the phase's story about a browser that had gone
+    somewhere else."""
+    harness.view._provider = FakeProvider()  # type: ignore[assignment]
+    harness.view.render_state(session_view())
+    harness.flush().clear()
+    harness.view.automation.set_loop_state(LoopState.WAIT_GENERATE, "the model started")
+    recorder = harness.flush()
+    assert recorder.last("rail")["loop"] == "WAIT_GENERATE"
+    watch = {seg["id"]: seg for seg in recorder.last("status")["segments"]}["watch"]
+    assert watch["text"] == "● generating..."
+
+
 def test_a_sub_agent_run_rebadges_the_whole_watch_segment(harness: Harness) -> None:
     """Everything the segment reports during a delegation - the phase, the
     approval, the question - is the SUB-AGENT's, not the conversation the user
@@ -431,11 +481,16 @@ def test_the_service_picker_is_locked_except_between_sessions(harness: Harness) 
     assert harness.flush().last("sidebar")["locked"] is False
 
 
-def test_a_rebuilt_detector_paints_the_resting_lines_it_owns(harness: Harness) -> None:
+async def test_a_rebuilt_detector_paints_the_resting_lines_it_owns(harness: Harness) -> None:
     """The DETECTION block's only writer is the detector machinery, and every
     exit - including the two that start nothing - leaves the lines saying what
-    just became true. With no region drawn that is the "no chat region" one."""
-    harness.view._start_detector_worker()
+    just became true. With no region drawn that is the "no chat region" one.
+
+    Awaited rather than pressed through ``_start_detector_worker``: retargeting
+    the monitor is a coroutine (``UIMonitor.configure``), and the synchronous
+    door only puts it on the loop.
+    """
+    await harness.view._retarget_monitor()
     painted = {
         event["kind"]: event["text"] for event in harness.flush().of_type("detection")
     }
@@ -444,6 +499,44 @@ def test_a_rebuilt_detector_paints_the_resting_lines_it_owns(harness: Harness) -
     assert painted["IDLE"] == PROBE_RESTING
     assert painted["COPY"] == COPY_RESTING
     assert "SEND_READY" in painted  # re-derived from the gate, never reset
+
+
+def test_a_tick_from_the_monitor_reaches_the_detection_block(harness: Harness) -> None:
+    """The subscription the controller takes out on the machine, end to end.
+
+    Since ui-monitor.md phase 6.1 nothing up here polls: the monitor pushes one
+    :class:`~agentclip.driver.monitor.protocol.Tick` per observation and the
+    controller unpacks it into the ``consume_*`` calls that write these lines.
+    So the check that this shell is still plugged into the screen is a tick fed
+    by hand - no poller, no capture, no template search.
+    """
+    # What a retarget onto a calibrated window would have set: a probe from a
+    # detector this run does not report is dropped by name, so the run has to
+    # say it reports one.
+    harness.view.automation.active_detectors = ("busy",)
+    harness.flush().clear()
+    harness.monitor.feed(
+        harness.monitor.make_tick(busy=BusyProbe(state=BusyState.MATCH, diff=0.4))
+    )
+    painted = {event["kind"]: event["text"] for event in harness.flush().of_type("detection")}
+    assert "BUSY" in painted
+    assert painted["BUSY"] != PROBE_RESTING
+
+
+def test_a_tick_from_a_run_the_monitor_has_left_never_lands(harness: Harness) -> None:
+    """The ghost filter, from this end: a verdict about the window the
+    automation was driving before a retarget must not repaint a block that now
+    names the other one (ui-monitor.md §4.2)."""
+    harness.view.automation.active_detectors = ("busy",)
+    stale_run = harness.monitor.generation
+    harness.monitor.retarget()
+    harness.flush().clear()
+    harness.monitor.feed(
+        harness.monitor.make_tick(
+            generation=stale_run, busy=BusyProbe(state=BusyState.MATCH, diff=0.4)
+        )
+    )
+    assert harness.flush().of_type("detection") == []
 
 
 def test_only_the_four_deciding_kinds_get_a_detection_line(harness: Harness) -> None:
@@ -677,7 +770,7 @@ def test_w_pauses_and_resumes_a_running_watcher(harness: Harness) -> None:
     view = harness.view
     use_real_provider(harness)
     view.render_state(session_view())
-    view.automation.start_watching()
+    view.automation.start_input()
     assert view.automation.watching is True
 
     try:

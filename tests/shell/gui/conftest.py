@@ -11,6 +11,16 @@ Nothing here opens a window, starts a loop or touches the clipboard: the
 provider is the manual one (no OS access at all) and the bridge is drained by
 the calling thread on demand, so every assertion is about what the page WOULD
 have been told and in what order.
+
+The machine is faked the same way. Since docs/design/ui-monitor.md phase 6.1
+everything on the far side of the screen - the poll thread, the detector, the
+mouse and the clipboard watcher - is one object the view is handed
+(:class:`~agentclip.driver.monitor.fake.FakeUIMonitor` here), so a test that
+wants the automation to see something pushes a tick
+(``harness.monitor.feed(harness.monitor.make_tick(...))``) rather than waiting
+for a poller that would be capturing the developer's actual screen. Its
+clipboard is the manual provider, which is what makes the watcher refuse to
+start unless a test asks for a backend that can be polled.
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ import pytest
 from agentclip.cli import make_engine_factory
 from agentclip.config import Config, load_config
 from agentclip.driver.clip.base import select_provider
+from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.shell.gui.bridge import Bridge, payload_of
 from agentclip.shell.gui.view import GuiView
 
@@ -61,10 +72,15 @@ class Recorder:
 class Harness:
     """A ``GuiView`` wired to a recorder, plus the flushing every read needs."""
 
-    def __init__(self, view: GuiView, bridge: Bridge, recorder: Recorder) -> None:
+    def __init__(
+        self, view: GuiView, bridge: Bridge, recorder: Recorder, monitor: FakeUIMonitor
+    ) -> None:
         self.view = view
         self.bridge = bridge
         self.recorder = recorder
+        # The machine, so a test can push a tick, script an action's answer or
+        # swap the clipboard backend under the watcher.
+        self.monitor = monitor
         # Every coroutine ``spawn``/the watcher handed to the (absent) loop.
         self.scheduled: list[str] = []
         self.exits = 0
@@ -106,18 +122,22 @@ def harness(project: Path, app_config: Config, tmp_path: Path) -> Harness:
     bridge = Bridge(recorder)
     holder: dict[str, Harness] = {}
 
+    # ManualOnlyProvider: no OS clipboard is touched by anything below, and the
+    # monitor holds the same one - "manual" is what the watcher refuses.
+    provider = select_provider("manual")
+    monitor = FakeUIMonitor(clipboard=provider)
     view = GuiView(
         bridge,
         config=app_config,
-        # ManualOnlyProvider: no OS clipboard is touched by anything below.
-        provider=select_provider("manual"),
+        provider=provider,
         engine_factory=make_engine_factory(lambda: app_config, project),
         project_root=project,
         profile_root=tmp_path / "profiles",
+        monitor=monitor,
         schedule=lambda coro: holder["h"].schedule(coro),
         on_exit=lambda: holder["h"].on_exit(),
     )
-    holder["h"] = Harness(view, bridge, recorder)
+    holder["h"] = Harness(view, bridge, recorder, monitor)
     return holder["h"]
 
 

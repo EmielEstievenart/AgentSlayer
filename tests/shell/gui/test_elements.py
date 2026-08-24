@@ -193,17 +193,65 @@ def test_a_kind_absent_from_a_tick_keeps_the_row_it_had(harness: Harness) -> Non
     assert rows["BUSY"]["state"] == STATE_MISSING
 
 
-def test_a_rebuild_sends_every_row_home(harness: Harness) -> None:
+async def test_a_rebuild_sends_every_row_home(harness: Harness) -> None:
     """A crop cut from the old window must never be shown under the new one's
-    name, so a detector rebuild clears the column (§3.1)."""
+    name, so a retarget clears the column (§3.1)."""
     view = harness.view
     view.set_elements_visible(True)
     view.paint_elements({TemplateKind.COPY: ElementCrop(bgrx([(1, 2, 3)], 1, 1), 0.05)})
     harness.flush().clear()
 
-    view._start_detector_worker()  # the rebuild every calibration change makes
+    await view._retarget_monitor()  # the retarget every calibration change makes
     rows = rows_of(harness.flush().last("elements"))
     assert {row["state"] for row in rows.values()} == {STATE_RESTING}
+
+
+def test_a_frame_from_the_monitor_reaches_the_column_as_pictures(harness: Harness) -> None:
+    """The whole crop path, driven from the machine end.
+
+    Pixels never ride a ``Tick`` (ui-monitor.md §2.2), so the ELEMENTS column is
+    fed by the monitor's local-only frame hook - which the controller registers
+    for itself and routes back out through this shell's ``crop_elements``
+    callback. Pushing one frame is therefore the real check that the wiring the
+    poll thread depends on is still connected: nothing here calls
+    ``paint_elements``, and a row still comes back with a picture in it.
+    """
+    view = harness.view
+    view.set_elements_visible(True)
+    scene = bgrx([(0, 0, 0)] * 4 + [(10, 20, 30)] + [(0, 0, 0)] * 4, width=3, height=3)
+
+    harness.monitor.push_frame(
+        {
+            TemplateKind.COPY: sighting(TemplateKind.COPY, 1, 1, 1, 1, 0.012),
+            TemplateKind.BUSY: None,
+        },
+        scene=scene,
+    )
+
+    rows = rows_of(harness.flush().last("elements"))
+    assert rows["COPY"]["state"] == STATE_FOUND
+    assert rows["COPY"]["png"].startswith("data:image/png;base64,")
+    assert rows["BUSY"]["state"] == STATE_MISSING
+    # Never searched at all: the frame said nothing about it.
+    assert rows["NEW_CHAT"]["state"] == STATE_RESTING
+
+
+def test_a_frame_from_a_run_the_monitor_has_left_paints_nothing(harness: Harness) -> None:
+    """A retarget makes everything in flight a ghost, pictures included: a crop
+    cut from the window the automation was driving before a delegation must
+    never appear under the new one's name (§4.2)."""
+    view = harness.view
+    view.set_elements_visible(True)
+    stale_run = harness.monitor.generation
+    harness.monitor.retarget()  # ...and now the automation moved
+    harness.flush().clear()
+
+    harness.monitor.push_frame(
+        {TemplateKind.COPY: sighting(TemplateKind.COPY, 0, 0, 1, 1, 0.01)},
+        scene=bgrx([(1, 2, 3)], width=1, height=1),
+        generation=stale_run,
+    )
+    assert harness.flush().of_type("elements") == []
 
 
 def test_the_heading_names_the_live_window_not_the_selected_tab(harness: Harness) -> None:
@@ -297,28 +345,18 @@ def test_f7_tells_python_which_way_it_went() -> None:
 # == the region picker ========================================================
 
 
-class FakeRun:
-    """What a started poller leaves behind, minus the thread and the capture."""
-
-    def cancel(self) -> None:
-        return None
-
-
 def stub_rebuilds(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Record detector rebuilds instead of performing them.
+    """Record monitor retargets instead of performing them.
 
-    Every test that draws a region over the LIVE window needs this: the real
-    rebuild starts a poller that captures the screen twice a second, and the
-    stale detector needs no captured appearance to be worth running - so an
-    empty profile is not enough to keep the machine out of it. The stub leaves a
-    run behind exactly as the real one does, so ``resume_detectors``' "something
-    already restarted it" branch is the one under test rather than an artifact.
+    Every test that draws a region over the LIVE window needs this: a real
+    retarget hands the monitor a rectangle, and the stale detector needs no
+    captured appearance to be worth running - so an empty profile is not enough
+    to keep a poll thread off the developer's actual screen.
     """
     rebuilds: list[str] = []
 
     def fake(view: GuiView) -> None:
         rebuilds.append("build")
-        view._detector_worker = FakeRun()  # type: ignore[assignment]
 
     monkeypatch.setattr(GuiView, "_start_detector_worker", fake)
     return rebuilds
@@ -396,8 +434,8 @@ async def test_the_slot_is_frozen_when_the_overlay_opens(
 
     assert view.automation.calibration(AgentSlot.MASTER).chat_region == drawn
     assert view.automation.calibration(AgentSlot.SUBAGENT).chat_region is None
-    # The drawn window is the live one, so the poller is rebuilt around it -
-    # once, by the adoption; ``resume_detectors`` finds a run already going.
+    # The drawn window is the live one, so the monitor is retargeted around it -
+    # once, by the adoption; the ``finally``'s resume only puts polling back.
     assert rebuilds == ["build"]
 
 
@@ -413,9 +451,10 @@ async def test_drawing_a_window_the_poller_is_not_watching_leaves_it_alone(
         "agentclip.shell.gui.view.pick_region", PickerSpy(ScreenRegion(0, 0, 400, 300))
     )
     await view._pick_chat_region(AgentSlot.SUBAGENT)
-    # The suspension's ``resume`` is the only rebuild, and it is the one that
-    # puts back exactly the run that was already there.
-    assert rebuilds == ["build"]
+    # Nothing is retargeted at all: the box belongs to a window the automation
+    # is not driving, and the suspension's ``resume`` puts back the run that was
+    # already there rather than composing a new one.
+    assert rebuilds == []
     assert view.automation.calibration(AgentSlot.MASTER).chat_region is None
 
 

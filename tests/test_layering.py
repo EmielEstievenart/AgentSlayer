@@ -263,6 +263,14 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.config",
                 "agentclip.driver.automation",
                 "agentclip.driver.clip",
+                # The machine the automation acts on. A shell CONSTRUCTS the
+                # monitor and hands it to the controller (ui-monitor.md §6.1) -
+                # which is a shell's job precisely because it is the launch
+                # question "whose screen is this?", the same shape as deciding
+                # which machine the executor runs on. The chat GUI builds a
+                # ``LocalUIMonitor``; §6.4's calibration window is built over one
+                # too, and only ever over a local one.
+                "agentclip.driver.monitor",
                 "agentclip.driver.screen",
                 # The engine's VALUE types, and only ever as values: `Decision`
                 # is what an approval answer IS (the same call the TUI makes),

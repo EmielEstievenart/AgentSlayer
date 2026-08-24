@@ -63,6 +63,21 @@ as it always has been.
 
 ## 1. The automation package — the Driver's core (phase 0)
 
+> **Amended 2026-08-24 by `ui-monitor.md` §6.1 (its phase 1).** Half of what
+> this section put in `driver/automation` moved one layer down into the new
+> `driver/monitor`: `ScreenOps` is `driver/monitor/ops.py`, the delivery beats
+> are `driver/monitor/beats.py` (re-exported by `driver/automation/delivery.py`
+> under their old names), and the poller thread, the trackers, the generation
+> stamp and the clipboard watcher are one object's now,
+> `driver/monitor/local.py:LocalUIMonitor`. The controller *consumes* a
+> `UIMonitor` instead of owning any of that. Nothing about the decisions below
+> is reversed — `AutomationView` and `AutomationHost` are untouched, and the
+> paint contract still holds — but read a `driver/automation/ops.py` or a
+> thread-ownership claim below as history. The GUI's own `_BUSY_POLL_S`,
+> `build_detector` call and detector-poller mirror in `view.py` are what
+> `ui-monitor.md` §6.1's shell rewire deletes; until that lands they are still
+> there, and §6.1's status note is the ledger of what is owed.
+
 Decisions ratified from the extraction plan:
 
 - New package `agentclip.driver.automation`, sibling of `shell/app`, holding
@@ -137,11 +152,12 @@ Slices (each one commit, suite green, layering test run first):
    exclusive=True)`) and hands the body in, because that name is what the Pilot
    suites stub. (a) The OS primitives stay off the view port as decided, but
    they are reached through one substitutable object,
-   `driver/automation/ops.py:ScreenOps`, whose default implementation *is* the
-   direct `agentclip.driver.screen` call — the Textual suites monkeypatch those
-   names at `shell/tui/screens/main.py`'s scope, so the shell hands in a
-   subclass that resolves its own module's names per call (slice 4's
-   `_poll_capture`, generalised).
+   `driver/automation/ops.py:ScreenOps` (since `ui-monitor.md` phase 1:
+   `driver/monitor/ops.py`, reached as `monitor.ops`), whose default
+   implementation *is* the direct `agentclip.driver.screen` call — the Textual
+   suites monkeypatch those names at `shell/tui/screens/main.py`'s scope, so
+   the shell hands in a subclass that resolves its own module's names per call
+   (slice 4's `_poll_capture`, generalised).
    (b) What the sequences still have to ASK a shell is a second port,
    `driver/automation/host.py:AutomationHost` — the live preset/profile,
    `find_all`, the verified copy click, the prose ingest (the session is

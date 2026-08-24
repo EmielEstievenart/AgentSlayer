@@ -7,10 +7,16 @@
 > `remote-executor.md` did: when a phase lands, its section gets an "as built"
 > note and its status flips. Until then everything here is intent.
 >
-> **Exception: §2.12 and §6.0 are built, and binding.** Phase 0 shipped
-> (2026-08-24): the default shell is the GUI, the TUI is behind `--tui` and
-> frozen, and every phase-0 row in §7 is applied. Those two sections describe
-> code and docs as they are. Everything from §6.1 on is still plan.
+> **Exception: §2.12, §6.0, §6.1 and §6.3 are built, and binding.** Phase 0
+> shipped on 2026-08-24: the default shell is the GUI, the TUI is behind
+> `--tui` and frozen, and every phase-0 row in §7 is applied. Phase 1 shipped
+> the same day, in its **Driver half only** — `driver/monitor/` exists, the
+> controller consumes a `UIMonitor` instead of owning the poller, and §6.3's
+> `describe()` is written and tested. The SHELL half is not in those commits;
+> §6.1's status note is the ledger of what that rewire still owes, and until it
+> lands the shell suites do not run. §3's interface listing is the shipped
+> `driver/monitor/protocol.py`. §6.2 and everything from §6.4 on is still
+> plan.
 >
 > **Where this document overrides others** — say it here so no two docs
 > disagree:
@@ -218,31 +224,50 @@ Lives in a new package `src/agentclip/driver/monitor/`. Layering
 `driver/screen`, `driver/clip`. Nothing in `driver/monitor` imports
 `driver/automation`.
 
+As built in phase 1 (`driver/monitor/protocol.py`, §6.1) — this listing is the
+file, not a sketch of it:
+
 ```python
 class UIMonitor(Protocol):
     # -- lifecycle / configuration ---------------------------------------
-    async def configure(self, spec: MonitorSpec) -> None: ...   # §2.10 payload; a retarget
-    async def suspend(self) -> None: ...                         # stop polling (capture overlay is up)
+    async def configure(self, spec: MonitorSpec) -> int: ...       # §2.10 payload; a retarget. Returns the new generation
+    async def suspend(self) -> None: ...                           # stop polling (capture overlay is up)
     async def resume(self) -> None: ...
+    async def close(self) -> None: ...                             # end every thread/task for good; idempotent
     # -- observation (local reads; no round trip) ------------------------
     @property
-    def latest(self) -> Tick | None: ...
-    async def observe(self) -> Tick: ...                         # next tick captured after this call
-    def subscribe(self, hook: Callable[[Tick], None]) -> None: ... # the GUI's live detection panel
-    def on_clip(self, hook: Callable[[str], None]) -> None: ...  # clipboard watcher events
+    def generation(self) -> int: ...
+    @property
+    def latest(self) -> Tick | None: ...                           # the newest non-ghost tick
+    async def observe(self) -> Tick: ...                           # next tick captured after this call
+    def subscribe(self, hook: TickHook) -> Callable[[], None]: ...   # the GUI's live detection panel; returns the unsubscribe
+    def on_clip(self, hook: ClipHook) -> Callable[[], None]: ...     # clipboard watcher events
     # -- actions (round trips) -------------------------------------------
-    async def focus_window(self) -> bool: ...
-    async def foreground_is_target(self) -> bool: ...
-    async def click(self, region: ScreenRegion) -> bool: ...
-    async def click_element(self, kind: TemplateKind) -> ElementClick: ...  # MISMATCH/AMBIGUOUS/CLICKED/NOT_CLICKED only
+    async def focus_window(self, handle: int) -> bool: ...
+    async def foreground_window(self) -> int | None: ...
+    async def click(self, region: ScreenRegion, *, settle_s: float | None = None) -> bool: ...
     async def move_cursor(self, x: int, y: int) -> bool: ...
-    async def scroll(self, detents: int) -> bool: ...
+    async def scroll(self, region: ScreenRegion, detents: int) -> bool: ...
     async def scroll_key(self, key: str, taps: int = 1) -> bool: ...
     async def send_paste(self) -> bool: ...
     async def send_enter(self) -> bool: ...
-    async def read_clipboard(self) -> str: ...
+    async def read_clipboard(self) -> str | None: ...
     async def write_clipboard(self, text: str) -> None: ...
+    # -- the clipboard watcher: SYNC, alone among the verbs, because every
+    #    caller is (the armed switch, a session starting, a session ending are
+    #    all UI-thread acts that return a state the shell paints from) -------
+    def watch_clipboard(self, on: bool) -> bool: ...                # is one polling now?
+    @property
+    def clipboard_kind(self) -> str | None: ...                    # provider name | "manual" | None
 ```
+
+Two verbs §2.3 asks for are **not** here yet; they arrive in phase 2 with the
+recipes that need them: `click_element(kind) -> ElementClick` (the
+MISMATCH/AMBIGUOUS/CLICKED/NOT_CLICKED half of `click_profile_element`) and
+`foreground_is_target()`, which shipped as the rawer `foreground_window() ->
+int | None` because the delivery's activation poll is what needed it first.
+Until phase 2 the controller does that pixel work itself, through the monitor's
+local-only `ops` — see §6.1's note.
 
 Two implementations, mirroring `shell/app/link.py:LocalLink` and
 `remote_link.py:RemoteLink` (structural conformance pinned with a
@@ -253,9 +278,15 @@ Two implementations, mirroring `shell/app/link.py:LocalLink` and
   702–817), the trackers and their swap discipline (`reset_trackers`,
   controller.py:968–1011), the generation stamp / ghost filter, and the
   clipboard watcher thread. It also exposes a **local-only tier** the wire
-  never carries: `capture(region) -> RegionImage`, `pick_region()`,
-  `identify_overlay(...)`, `profile_for(key)` — used exclusively by the
-  calibration window (§2.6).
+  never carries. As built (§6.1) that tier is `ops`, `detector`,
+  `capture(region) -> RegionImage`, `on_frame(hook)` (the ELEMENTS panel's
+  crops, delivered beside the tick rather than inside it), the three trackers,
+  `reset_trackers()`, `self_writes`, `spec`, `poller`, and
+  `stamp(...)`/`feed(tick)` — the `tick_feed` test seam. `pick_region()`,
+  `identify_overlay(...)` and `profile_for(key)` are still owed: they arrive
+  with the calibration window (§2.6, §6.4). The controller names the subset it
+  needs as its own `MonitorLike` Protocol at the call site, because a
+  `RemoteUIMonitor` will never answer the local half.
 - `RemoteUIMonitor` — a TCP client with a reader task; every action is one
   `call`/`result` round trip; `latest`/`observe`/`subscribe` are fed by pushed
   `tick` frames.
@@ -264,6 +295,9 @@ The `Tick` dataclass is frozen and is the **only** thing recipes may reason
 about. Its exact field list is derived, not invented: enumerate what the five
 `consume_*` methods (controller.py:925–1385) and `evaluate_finish`
 (1653–1842) *read* from the detector and the streak fields, and carry those.
+Phase 1 carried the detector half of that list (§6.1 names every field); the
+streak fields `evaluate_finish` keeps are still the controller's and cross in
+phase 2.
 
 ## 4. Invariants to preserve
 
@@ -342,7 +376,109 @@ Docs (all of §7's phase-0 rows). Rebuild the exe at the end.
 **Done when:** `agentclip` opens the GUI, `agentclip --tui` opens the TUI,
 suite green, §7 phase-0 rows all amended, this section marked as built.
 
-### 6.1 Extract `LocalUIMonitor` (local only, no RPC)
+### 6.1 Extract `LocalUIMonitor` (local only, no RPC) — **AS BUILT (the Driver half)**
+
+> **Status: built and binding for `driver/`; the shell half is NOT done
+> (2026-08-24).** Four commits: `9dcfd12` (the package exists — `ScreenOps` and
+> the delivery beats move under it, plus the `UIMonitor`/`Tick`/`MonitorSpec`
+> contract), `6870f4d` (the §4.8 diff-check, recorded first so the refactor
+> could be measured against it), `4a36959` (`LocalUIMonitor`) and `566a364`
+> (the controller consumes one). What shipped, deviations included — the
+> paragraphs under this note are the plan it shipped from:
+>
+> - **`Tick`** (`driver/monitor/protocol.py`) carries `seq`, `generation`,
+>   `at`, `captured`, `busy`, `idle`, `stale`, `sightings` and
+>   `active_detectors`, with `searched`/`present`/`visible`/`locate` over the
+>   sightings map and `TICK_KINDS` beside it. `sightings` is the detector's
+>   three-state map with the pixels taken out: a kind mapped to a
+>   **`ScreenRegion`** (absolute screen coordinates) was found there, mapped to
+>   `None` was searched and is not on screen, absent was not searched at all.
+>   **Deviation from §2.2:** the streak counters are NOT on the tick. The
+>   stale-arm streak and the copy-changed streak are still `AutomationController`
+>   fields; they cross in phase 2, when `evaluate_finish` splits into a recipe.
+> - **`MonitorSpec`** carries `service` (the profile KEY — the PNGs never
+>   cross, §2.10), `region`, `finish_signals`, `stable_seconds` (raw seconds,
+>   converted by the monitor), `tolerance`, `matcher`, `hover_scan`,
+>   `scroll_action`, `snap_back`, `delivery`, `auto_submit`, and the four
+>   send-gate budgets `send_arm_min_diff`, `send_arm_ticks`,
+>   `send_gate_timeout_ticks`, `send_gate_seen_timeout_ticks`.
+> - **The Protocol as actually shaped** — §3's listing was rewritten to match
+>   it. Where it deviates from the sketch, the code is the more honest of the
+>   two: `configure(spec)` returns the new `generation` (a caller that just
+>   retargeted needs the stamp it retargeted to); `close()` was added, because
+>   something has to end the threads for good and `suspend()` deliberately does
+>   not; `focus_window(handle)` takes the window handle the shell recorded, the
+>   monitor holding no idea of "the target window"; `click(region, *,
+>   settle_s=None)` and `scroll(region, detents)` are told where, for the same
+>   reason; `foreground_window() -> int | None` shipped in place of
+>   `foreground_is_target()`, since the raw handle is what the delivery's
+>   activation poll compares; `read_clipboard()` returns `str | None`;
+>   `watch_clipboard(on) -> bool` and `clipboard_kind` are **sync**, alone among
+>   the verbs, because every caller of them is a UI-thread act that paints from
+>   the answer. **Deferred to phase 2:** `click_element(kind) -> ElementClick`
+>   and `foreground_is_target()` — §2.3's pixel verdicts, which stay in the
+>   controller for now (see below).
+> - **The local-only tier** (§3) on `LocalUIMonitor`: `ops`, `detector`,
+>   `capture(region)`, `on_frame(hook)`, `busy_tracker`/`idle_tracker`/
+>   `stale_tracker`, `reset_trackers()`, `self_writes`, `spec`, `poller`, and
+>   `stamp(...)`/`feed(tick)` — which is the `tick_feed` seam this section
+>   asked for, in `feed_probe`'s place: there is no probe to inject any more,
+>   so a suite stamps a whole tick and feeds it through the same ghost check
+>   and the same subscribers. `POLL_SECONDS = 0.5` and `required_ticks()` live
+>   here too. The controller declares the subset it needs as its own
+>   `MonitorLike` Protocol at the call site (contract + local tier), because a
+>   `RemoteUIMonitor` will never answer the second half; it shrinks in phase 2.
+> - **`FakeUIMonitor`** (`driver/monitor/fake.py`) is the in-memory double the
+>   whole automation suite now drives: `make_tick`/`feed`/`push_clip`/
+>   `push_frame`, a `calls` log, an `answers` script, and every action
+>   delegating to a real `ScreenOps` unless scripted — so the suites that
+>   patched `ops` at their own module scope keep working. It lives in `src/`
+>   for `driver/clip/fake.py`'s reason: two test packages drive the same seam.
+>   The two suites whose subject moved —
+>   `tests/driver/automation/test_detector_poller.py` and `test_tracker_reset.py`
+>   — were deleted; what they asserted is `tests/driver/monitor/test_local.py`'s
+>   now, where the poll thread is real and only the ops are faked.
+> - **The delivery beats** live in `driver/monitor/beats.py` — cadence belongs
+>   to the machine being driven (§2.10) — and `driver/automation/delivery.py`
+>   re-exports them under the names its suites already reach for.
+>   `driver/automation/ops.py` is now `ElementClick` and one re-export.
+> - **Still pixel work in the controller, deliberately:** `find_all`,
+>   `_chatbox_match`, `hover_scan_for_copy`, `verified_copy_click` and the
+>   matching inside `auto_copy_flow` all reach `monitor.ops` directly this
+>   phase (capture, `all_matches`, `lowest_match`, `move_cursor`). Those are
+>   §2.3's pixel verdicts and they are **phase-2 work** — flagged here so
+>   nothing reads "the controller consumes a UIMonitor" as "the controller has
+>   stopped touching pixels".
+> - **Layering** (`tests/test_layering.py`): `driver/automation` →
+>   `driver/monitor` → `driver/screen`, `driver/clip` is pinned, and
+>   `driver/monitor` may not import `driver/automation`. One carve-out was
+>   needed: `agentclip.driver.automation.describe` — that ONE module, first
+>   match wins — may import `agentclip.engine.states`, because §2.5's label is
+>   a function of both machines. The Driver stays engine-free otherwise.
+> - **The diff-check is a file**:
+>   `tests/driver/automation/test_harness_log_scenarios.py` pins **39 literal
+>   harness-log lines** over six recorded scenarios, generated at `c341a82`
+>   (before any of this landed) and unchanged by the whole phase. §4.8 is
+>   enforced, not intended.
+> - **Docs**: `architecture.md`'s seams table has its fourth row (`UIMonitor`)
+>   and the "deepens" note; its §0 layer text and diagram and its §1 module
+>   tree name `driver/monitor`.
+>
+> **What the four commits above do NOT contain** — the shell half. As of
+> `566a364` neither shell had been touched: `shell/gui/view.py` and
+> `shell/tui/screens/main.py` still built `AutomationController(...)` with the
+> pre-phase-1 keywords (`clipboard=`, `poll_interval_ms=`, and in the TUI also
+> `ops=`) and passed no `monitor=`, so constructing either one raised
+> `TypeError` and `tests/shell/` was red; both still held their own
+> `_BUSY_POLL_S = 0.5`, still called `build_detector`, and still mirrored a
+> poller in their own chrome — which is why a vestigial `DetectorPoller`
+> survives in `controller.py`, and why `describe()` (§6.3) had no caller. This
+> section's own "Done when" is that rewire: both shells construct one
+> `LocalUIMonitor` and hand it over, neither mentions `_BUSY_POLL_S`,
+> `build_detector` or `ScreenOps`, the vestigial `DetectorPoller` goes, the 39
+> pinned harness lines are still identical, and the suite is green again. Until
+> it lands, §2.10's "the shells lose the constant entirely" is true of
+> `driver/` only.
 
 Create `driver/monitor/` with `protocol.py` (`UIMonitor`, `Tick`,
 `MonitorSpec`), `local.py` (`LocalUIMonitor`), and a `tick_feed` test seam
@@ -396,7 +532,27 @@ a `Tick` to decide something belongs in a recipe.
 diff-check passes on the recorded scenarios; `controller.py` < 600 lines; no
 `threading` import outside `driver/monitor`; suite green.
 
-### 6.3 `describe()`
+### 6.3 `describe()` — **AS BUILT**
+
+> **Status: built, binding (2026-08-24, `85904e1`).**
+> `driver/automation/describe.py` is one function over two **total** tables:
+> `PHASE_LABEL` (a word for every `Phase`) and `LOOP_LABEL` (a word for every
+> `LoopState`, where `None` is the explicit precedence marker meaning "the
+> phase says this better"). The rule is precedence, not prose: a loop state the
+> user has to act on, or that is visibly moving on screen, outranks the phase;
+> `IDLE` and `INTERPRETING` defer to it. Wording is inherited verbatim from the
+> GUI's watch segment, glyph stripped — the glyph and its colour stay the
+> shell's styling decision. `tests/driver/automation/test_describe.py` is the
+> table test this section asked for: every `(Phase, LoopState)` pair, plus a
+> totality check that fails the moment either enum grows a member with no words
+> — which is where phase 5's `LoopState.DISCONNECTED` will first be noticed.
+> Layering: this one module may import `agentclip.engine.states` (§6.1's note).
+>
+> **Deviation:** this commit is the FUNCTION only. At `85904e1` neither shell
+> called it — `paint_loop_state` in `tui/screens/main.py` and `gui/view.py`
+> still built its own label — so adopting it belongs to the shell rewire §6.1
+> owes, and this section is not finished until both shells read their label
+> from here.
 
 `driver/automation/describe.py`, one function, `(Phase, LoopState) -> str`,
 with a table test covering every pair the GUI can show. Both shells use it
@@ -468,12 +624,14 @@ green; exe and monitor exe rebuilt.
 | 0 | `README.md:103–108` | design-docs list is missing `gui.md`, `remote-executor.md`, `mcp.md`, `skills.md`, this file |
 | 0 | `docs/commands.md:3, 45–69` | keyboard reference is TUI-labelled and is rendered *inside the GUI* by the docs button — replace with the GUI's keys |
 | 0 | `docs/configuration.md:13, 109` | "F2 service editor" → the calibration window (once 4 lands, re-check) |
-| 1 | `docs/design/architecture.md:49–55` | seams table + the "deepens" note |
+| 1 | `docs/design/architecture.md:49–55` | seams table + the "deepens" note — **applied**, along with §0's layer text/diagram and §1's module tree |
+| 1 | `docs/design/gui.md`, `docs/design/tui.md` | **applied**: pointers where the monitor took `ScreenOps`, the delivery beats and the cadence out from under them |
 | 4 | `docs/design/ui-briefs/elements-panel.md`, `service-editor.md` | name the calibration window as their host |
 | 5 | `docs/configuration.md`, `docs/commands.md` | `--monitor`, `--calibrate`, `agentclip-monitor` |
 | 6 | `docs/design/tui.md`, `remote-ssh.md` | historical headers |
 
-All **phase 0** rows are applied (§6.0's as-built note). The rest are still owed.
+All **phase 0** and **phase 1** rows are applied (§6.0's and §6.1's as-built
+notes). The rest are still owed.
 
 ## 8. Open points (**OPEN**)
 

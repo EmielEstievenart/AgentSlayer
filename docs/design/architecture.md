@@ -13,7 +13,7 @@ The **engine is sans-IO with respect to clipboard and UI**: it is a synchronous 
 Above the engine the codebase is three packages, and they are the vocabulary the rest of these documents use:
 
 - **Shell** (`shell/`: `app/`, `tui/`, `gui/`) — the user-facing surfaces. `tui` is the Textual terminal app, `gui` the pywebview desktop window, and `app` is the UI-agnostic session controller both of them drive through the `ChatView` port. Two shells, one behaviour: neither may own anything the other cannot have.
-- **Driver** (`driver/`: `automation/`, `screen/`, `clip/`) — everything AgentClip does **to the desktop chat app it operates**. `automation` is the loop that watches, clicks, pastes and harvests the reply; `screen` and `clip` are the OS seams it is made of (capture, focus click, detection; clipboard providers and the watcher).
+- **Driver** (`driver/`: `automation/`, `monitor/`, `screen/`, `clip/`) — everything AgentClip does **to the desktop chat app it operates**. `automation` is the loop that watches, clicks, pastes and harvests the reply; `monitor` is the machine it watches *through* — the poll loop, the trackers, the mouse, the keyboard and the clipboard behind one `UIMonitor` object, destined for a process of its own (docs/design/ui-monitor.md §3); `screen` and `clip` are the OS seams `monitor` is made of (capture, focus click, detection; clipboard providers and the watcher).
 - **Executor** (`executor/`: `tools/`, `hosts/`, `mcp/`, `permissions.py`) — permission-gated execution **on behalf of the agent**, reaching the machine only through the **Host seam**. `tools` is the catalogue the model may call, `permissions` decides which calls are allowed, `hosts` is the one route to files and commands (local or over SSH), and `mcp` bolts external servers onto the same catalogue.
 
 Below them sit `engine/` (the state machine and its `store/`), `protocol/` (the shared wire vocabulary) and `config.py` (the leaf everyone reads). A Shell may reach down into the Driver, the Executor and the engine; nothing below may reach back up.
@@ -26,7 +26,10 @@ SHELL  ──►  DRIVER, ENGINE           the UIs: shell/tui (Textual) | shell/
  └──►  driver/automation             (UI-agnostic screen automation)
  │
  ▼
-DRIVER ──►  driver/clip (watcher/providers), driver/screen (capture, click, detect)
+DRIVER ──►  driver/automation  ──►  driver/monitor  (the UI monitor: poll loop, trackers,
+ │            (recipes, policy)          │              mouse, keyboard, clipboard — ui-monitor.md §3)
+ │                                       ▼
+ │                                      driver/clip (watcher/providers), driver/screen (capture, click, detect)
  │
  ▼
 ENGINE ──►  EXECUTOR: executor/tools  ──►  sandbox (Workspace)
@@ -40,19 +43,22 @@ EXECUTOR leaves: executor/hosts        ◄── config, tools, engine/store, en
                  executor/mcp          ◄── config (the servers), tools (the client runtime)
 ```
 
-`driver/clip` and `driver/screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `shell/tui`, `shell/gui`, `cli` and `driver/automation`. `protocol`, `config`, `executor/hosts`, `executor/permissions` and `executor/mcp` are leaves. `executor/tools` never imports `engine`. Anything violating this is a bug.
+`driver/clip` and `driver/screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `shell/tui`, `shell/gui`, `cli`, `driver/automation` and `driver/monitor`. `protocol`, `config`, `executor/hosts`, `executor/permissions` and `executor/mcp` are leaves. `executor/tools` never imports `engine`. Anything violating this is a bug.
 
-**`driver/automation` is the second UI-agnostic layer**, added when the desktop GUI shell was decided (docs/design/gui.md §1) and extracted from `MainScreen` over phase 0. It is `shell/app`'s sibling and its opposite number: `app` drives the *engine* through the `ChatView` port, `automation` drives the *screen* through the `AutomationView` port, and a UI shell is what plugs into both. Allowed imports: `agentclip.driver.screen`, `agentclip.driver.clip`, `agentclip.config`, itself. Banned: `textual`, `agentclip.shell.app`, `agentclip.shell.tui` — a shell depends on the Driver, never the other way round.
+**`driver/automation` is the second UI-agnostic layer**, added when the desktop GUI shell was decided (docs/design/gui.md §1) and extracted from `MainScreen` over phase 0. It is `shell/app`'s sibling and its opposite number: `app` drives the *engine* through the `ChatView` port, `automation` drives the *screen* through the `AutomationView` port, and a UI shell is what plugs into both. Allowed imports: `agentclip.driver.monitor`, `agentclip.driver.screen`, `agentclip.driver.clip`, `agentclip.config`, itself (plus `agentclip.engine.states`, for `describe.py` alone — tests/test_layering.py). Banned: `textual`, `agentclip.shell.app`, `agentclip.shell.tui` — a shell depends on the Driver, never the other way round.
 
 That inverts what used to be true of the acting primitives, and the note in `shell/app/view.py` that said so was reversed in the same wave: mouse clicks, synthetic keystrokes, focus snap-back, screen capture, the detector poll threads, the clipboard watcher AND the clipboard write are **not** called from a view layer any more. They are called from `AutomationController`, below every shell, so that two frontends cannot drift into two different automations. `os_armed` — the standing "do not touch the world" switch — lives there for the same reason; `ChatView.set_os_armed` only forwards the intent. What a shell still owns is scheduling (Textual's `run_worker`) and painting.
 
-Three seams carry the split, and they are deliberately not one object (docs/design/gui.md §1):
+Four seams carry the split, and they are deliberately not one object (docs/design/gui.md §1):
 
 | seam | direction | thread contract |
 |---|---|---|
 | `driver/automation/view.py:AutomationView` | controller → shell | paint-only, callable from the poller/watcher threads, must be non-blocking and thread-safe (the TUI posts a message; a GUI enqueues to its JS bridge) |
 | `driver/automation/host.py:AutomationHost` | controller → shell | the handful of answers only a shell has (live preset/profile, `find_all`, the verified copy click, prose ingest, detector rebuild, the OSC-52 park-off-clipboard). Event-loop thread only — which is exactly why it is not folded into `AutomationView` |
-| `driver/automation/ops.py:ScreenOps` | controller → OS | `agentclip.driver.screen` behind one substitutable object, so the OS primitives stay off the paint port and a shell's test suite can patch them at its own module scope |
+| `driver/monitor/protocol.py:UIMonitor` | controller → the machine that can see the chat | the whole machine behind one object: `configure`/`suspend`/`resume`, the `Tick` stream (`latest`, `observe`, `subscribe`), the clipboard (`watch_clipboard`, `on_clip`, read/write) and every OS action, each a coroutine. In-process today (`driver/monitor/local.py:LocalUIMonitor`, which owns the poll thread); a TCP client tomorrow (docs/design/ui-monitor.md §3, §6.5). Awaited from the event-loop thread; the `subscribe`/`on_clip` hooks fire on the monitor's own thread and must not block |
+| `driver/monitor/ops.py:ScreenOps` | monitor → OS | `agentclip.driver.screen` behind one substitutable object, so the OS primitives stay off the paint port and a shell's test suite can patch them at its own module scope. It is a tier *inside* the monitor now (reached as `monitor.ops`), not a seam a shell wires up — it moved out of `driver/automation` in ui-monitor.md phase 1 |
+
+The `ScreenOps` seam **deepens** into `UIMonitor` (docs/design/ui-monitor.md §3): the OS adapter is one tier inside the object that also owns the poll loop, the trackers, the ghost stamp and the clipboard watcher, and the controller reaches the machine only through it. `AutomationView` and `AutomationHost` are untouched by that split.
 
 `executor/hosts` is the **OS seam** the whole Executor is built on: filesystem and command execution reach the machine only through a `Host` (`spawn`/`read_bytes`/`write_bytes`/`delete`/`mkdir`/`rmdir`/`stat`/`lstat`/`listdir`/`realpath`, plus the `case_sensitive` fact), carried on `ToolContext`. `LocalHost` is this PC; `SshHost` is a machine over SSH (docs/design/remote-ssh.md), chosen once at launch in `cli.py` and shared by the workspace jail, the tool context, the backup store and the engine — one session is one machine. Rule for new tools: write against Host primitives and it works everywhere. Process execution is `spawn` + an `ExecHandle` the caller polls (`wait`/`peek`/`kill`/`drain`), because cancellation, timeouts and the live output tail are policy above the seam, not OS access.
 
@@ -122,13 +128,24 @@ src/agentclip/
 │   │   ├── host.py        # AutomationHost Protocol: what only a shell can answer (live
 │   │   │                  #   preset/profile, find_all, verified copy click, prose ingest,
 │   │   │                  #   detector rebuild, park_off_clipboard). Event-loop thread only
-│   │   ├── ops.py         # ScreenOps: agentclip.driver.screen behind one substitutable object,
-│   │   │                  #   plus ElementClick and the sequences' beats/offsets
+│   │   ├── ops.py         # ElementClick: what one find-then-click can come to (ScreenOps
+│   │   │                  #   itself is the monitor's now, ui-monitor.md §6.1)
+│   │   ├── describe.py    # describe(Phase, LoopState) -> the one state label both shells show
 │   │   ├── finish.py      # the finish vocabulary: SendGate, the verdict folds, the phrasing
 │   │   ├── flow.py        # the auto-copy flow's geometry: lowest_match, above_chatbox, snap
 │   │   ├── delivery.py    # the paste banner's four wordings and the delivery beats
 │   │   ├── loop_state.py  # LoopState: where the browser-automation loop is (the STATE rail)
 │   │   └── harness_log.py # HarnessEntry + the /log renderer: the decision log's vocabulary
+│   ├── monitor/           # THE UI MONITOR (docs/design/ui-monitor.md): everything that watches
+│   │   │                  #   and touches the machine showing the chat. Imports screen/clip/
+│   │   │                  #   config only — never automation
+│   │   ├── protocol.py    # UIMonitor Protocol + Tick (booleans, locations, counts — never
+│   │   │                  #   pixels) + MonitorSpec (what watching one chat window needs)
+│   │   ├── local.py       # LocalUIMonitor: the poll thread, the detector + its trackers, the
+│   │   │                  #   generation stamp, the clipboard watcher, POLL_SECONDS
+│   │   ├── fake.py        # FakeUIMonitor: ticks pushed by hand, for the brain's suites
+│   │   ├── ops.py         # ScreenOps: agentclip.driver.screen behind one substitutable object
+│   │   └── beats.py       # the cadence every OS-acting sequence paces itself by
 │   ├── clip/
 │   │   ├── base.py        # ClipboardProvider Protocol + select_provider()
 │   │   ├── copykitten_provider.py
@@ -963,9 +980,12 @@ tests/                               # mirrors src/agentclip: one directory per 
 │   │                                #   non-protocol noise ignored, None (non-text) tolerated
 │   ├── screen/                      # the OS screen seam without a screen: capture, the detectors,
 │   │                                #   the matchers and the template search, on fixture pixels
-│   └── automation/                  # the Driver's core, driven through FakeAutomationView:
-│                                    #   no Textual, no terminal, no mouse. The threads are REAL
-│                                    #   (watcher, detector poller) and every test joins its own
+│   ├── monitor/                     # LocalUIMonitor with its poll thread REAL and its ops faked:
+│   │                                #   ghosts, tracker swaps, observe()'s freshness, the watcher
+│   └── automation/                  # the Driver's core, driven through FakeAutomationView and
+│                                    #   FakeUIMonitor: no Textual, no terminal, no mouse, and
+│                                    #   since ui-monitor.md §6.1 no threads either — ticks are
+│                                    #   pushed by hand through the tick_feed seam
 └── shell/
     ├── app/                         # the session controller against a fake ChatView: no UI at all
     ├── gui/                         # the pywebview shell's Python side, driven without a window

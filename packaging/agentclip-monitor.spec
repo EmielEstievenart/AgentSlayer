@@ -69,6 +69,7 @@ this spec wants only the ``cv`` extra where the main one wants ``cv`` and
 """
 
 import os
+import sys
 
 # SPECPATH is injected by PyInstaller. Relative paths in Analysis() resolve
 # against the invoking CWD, which would make the build directory-sensitive;
@@ -91,6 +92,19 @@ hiddenimports = [
     # machine can still run the rest.
     "tkinter",
 ]
+
+# The X11 backend (driver/screen/x11.py) - capture, XTest input and EWMH focus
+# on Linux. Same lazy shape as everything above, and the same consequence if it
+# were missed: a monitor binary that starts, polls, and can neither see the
+# screen nor click on it. Guarded by platform because python-xlib is a
+# Linux-only dependency (pyproject's marker) and naming it on a Windows build
+# box would only produce a warning. `collect_submodules` rather than the bare
+# package: x11.py reaches Xlib.display, Xlib.X, Xlib.XK, Xlib.ext.xtest and
+# Xlib.protocol.event, and Xlib/__init__.py imports none of them.
+if sys.platform.startswith("linux"):
+    from PyInstaller.utils.hooks import collect_submodules
+
+    hiddenimports += collect_submodules("Xlib")
 
 excludes = [
     # SHELL: both UIs and their trees. `textual` and `pillow`/`textual_image`

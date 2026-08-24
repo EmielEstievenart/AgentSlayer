@@ -238,6 +238,14 @@ hiddenimports = (
     + ["webview"]
     + webview_platforms
     + webview_runtime
+    # The X11 backend (driver/screen/x11.py): capture, XTest input and EWMH
+    # focus on Linux, which is what `agentclip --calibrate` and the in-process
+    # monitor use there. Lazy inside functions like every other OS binding, so
+    # nothing static reaches it; guarded by platform because python-xlib is a
+    # Linux-only dependency (pyproject's marker). Submodules, not the bare
+    # package: Xlib/__init__.py imports none of Xlib.display, Xlib.X, Xlib.XK,
+    # Xlib.ext.xtest or Xlib.protocol.event.
+    + (collect_submodules("Xlib") if sys.platform.startswith("linux") else [])
 )
 
 # The dev group shares the same .venv. None of this is reachable from our

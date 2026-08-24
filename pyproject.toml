@@ -21,6 +21,13 @@ dependencies = [
     # SFTP in one synchronous library. Imported lazily, so a local session never
     # pays for it (docs/design/remote-ssh.md decision 7).
     "paramiko>=3.4,<4",
+    # The X11 backend (driver/screen/x11.py): capture, XTest input and EWMH
+    # focus on Linux, so `agentclip-monitor` works on the VM it was designed to
+    # run on. A CORE dependency rather than an extra, under a platform marker:
+    # the monitor is expected to run there with no extras at all, and on
+    # Windows/macOS the marker means it is never even resolved. Imported lazily
+    # inside functions, like every other OS binding in that layer.
+    "python-xlib>=0.33; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -125,6 +132,14 @@ mypy_path = "src"
 # annotated - what is untyped is the library surface, not our use of it.
 [[tool.mypy.overrides]]
 module = ["paramiko", "paramiko.*"]
+ignore_missing_imports = true
+
+# python-xlib ships no py.typed either (its stubs live in a separate
+# types-python-xlib package that only makes sense on Linux). Only
+# driver/screen/x11.py imports it, inside functions, and that module's own
+# signatures are annotated - what is untyped is the library surface.
+[[tool.mypy.overrides]]
+module = ["Xlib", "Xlib.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

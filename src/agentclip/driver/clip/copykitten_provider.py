@@ -15,8 +15,18 @@ from typing import Any
 from agentclip.driver.clip.base import ClipboardUnavailable
 from agentclip.driver.clip.winseq import get_clipboard_sequence_number
 
-# On Windows reads/writes retry on transient failures; elsewhere one attempt.
-_RETRIES = 4 if sys.platform == "win32" else 0
+# Reads and writes retry on transient failures, with a per-platform budget.
+# Windows gets the biggest one (Win+V history, clipboard managers and RDP all
+# hold the clipboard open for a beat). Linux gets a smaller one for a different
+# reason: an X11 clipboard manager takes ownership of the selection right after
+# a copy, and a read that lands inside that hand-off comes back empty or
+# refused. macOS needs none.
+if sys.platform == "win32":
+    _RETRIES = 4
+elif sys.platform.startswith("linux"):
+    _RETRIES = 2
+else:
+    _RETRIES = 0
 _BACKOFF_S = 0.075
 
 # Message fragments of copykitten/arboard errors that mean "the backend works,

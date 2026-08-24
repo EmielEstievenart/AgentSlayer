@@ -1,4 +1,5 @@
-"""Capture the pixels of a screen region (Windows GDI via ctypes, pure stdlib).
+"""Capture the pixels of a screen region (Windows GDI via ctypes, pure stdlib;
+X11 via ``screen.x11`` on Linux).
 
 Feeds the busy detector (screen.busy): the calibration snapshot and every later
 probe both come from here. Same physical-pixel coordinate space as the overlay
@@ -134,11 +135,19 @@ def _gdi():
 def capture_region(region: ScreenRegion) -> RegionImage:
     """Grab the region's current pixels from the virtual screen.
 
-    Raises CaptureError off-Windows and on any GDI failure - callers treat both
-    the same way (the detector reports ERROR instead of a match verdict).
+    Raises CaptureError on an unsupported platform and on any GDI failure -
+    callers treat both the same way (the detector reports ERROR instead of a
+    match verdict).
+
+    Linux is served by ``screen.x11`` (XGetImage), which produces the same
+    RegionImage layout; every other platform still refuses outright.
     """
     if sys.platform != "win32":
-        raise CaptureError("screen capture needs Windows")
+        if sys.platform.startswith("linux"):
+            from agentclip.driver.screen import x11  # lazy: it imports THIS module
+
+            return x11.capture_region(region)
+        raise CaptureError("screen capture needs Windows or a Linux X11 desktop")
     width, height = int(region.width), int(region.height)
     if width <= 0 or height <= 0:
         raise CaptureError("region has no area")

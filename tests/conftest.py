@@ -87,6 +87,11 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
     ``send_paste``/``focus_window`` all report a plain False - the same answer
     they give on an unsupported platform, which every caller already handles.
 
+    On Linux the same functions dispatch to ``screen.x11`` instead, so the gate
+    has a second pair of seams there (``_fake_input`` and ``_activate``, see
+    below): a Linux ``uv run pytest`` must be no more able to type into the
+    developer's browser than a Windows one is.
+
     Read-only calls stay real (GetForegroundWindow, GetSystemMetrics, and the
     GDI capture in ``screen.capture``, which uses a private WinDLL anyway): they
     tell tests about the desktop without touching it.
@@ -124,6 +129,22 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
         raising=False,
     )
 
+    if sys.platform.startswith("linux"):
+        # The same choke point, one platform over. ``screen.x11`` funnels EVERY
+        # injecting call through two functions - ``_fake_input`` (the XTest
+        # event behind every click, wheel detent, cursor move and keystroke) and
+        # ``_activate`` (the EWMH client message that yanks a window forward) -
+        # so neutering those two leaves click_region/scroll_region/move_cursor/
+        # send_paste/focus_window reporting the same plain False the Windows
+        # branch below produces, whatever name a caller imported. Read-only
+        # calls stay real here too: XGetImage, the root geometry and the
+        # _NET_ACTIVE_WINDOW read tell tests about the desktop without touching
+        # it.
+        monkeypatch.setattr(
+            "agentclip.driver.screen.x11._fake_input", lambda *args, **kwargs: False
+        )
+        monkeypatch.setattr("agentclip.driver.screen.x11._activate", lambda *args, **kwargs: False)
+        return
     if sys.platform != "win32":
         return  # nothing else here can inject; ctypes.windll does not exist
     import ctypes

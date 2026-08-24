@@ -18,6 +18,7 @@ killing the app at startup.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -49,8 +50,30 @@ IDENTIFY_COLOURS = ("#00ff88", "#4cc9f0", "#ff6b6b", "#c77dff", "#ffe066", "#80f
 # The drawn chat region's badge. Not a number: the finds are numbered 1..n to
 # match the toast's count, which excludes the container the user drew.
 IDENTIFY_REGION_BADGE = "#R"
-_BADGE_FONT = ("Segoe UI", 10, "bold")
-_LEGEND_FONT = ("Segoe UI", 11)
+# The UI face, per platform. Tk resolves an unknown family by silently falling
+# back to a default one, so a hard-coded "Segoe UI" is not an error on Linux -
+# it is a legend drawn in whatever Tk picked, at a width nothing here measured.
+# DejaVu Sans is what a desktop with tkinter installed effectively always has
+# (it rides along with the fontconfig package set every distro pulls); the
+# TkDefaultFont behind it is Tk's own answer for anywhere else.
+if sys.platform == "win32":
+    UI_FONT_FAMILY = "Segoe UI"
+elif sys.platform.startswith("linux"):
+    UI_FONT_FAMILY = "DejaVu Sans"
+else:
+    UI_FONT_FAMILY = "TkDefaultFont"
+
+
+def ui_font(size: int, *modifiers: str) -> tuple[str, int, *tuple[str, ...]]:
+    """A Tk font tuple in the platform's UI face - ``("Segoe UI", 11)`` and its
+    equivalents. One helper because all four fonts drawn here are the same face
+    at three sizes, and the only thing that varies between platforms is which
+    family that is."""
+    return (UI_FONT_FAMILY, size, *modifiers)
+
+
+_BADGE_FONT = ui_font(10, "bold")
+_LEGEND_FONT = ui_font(11)
 # Roughly one badge wide at _BADGE_FONT: how far a badge steps sideways when it
 # would land on top of one already placed, which is what several matches of one
 # appearance on one physical element look like.
@@ -110,7 +133,7 @@ def run_overlay(prompt: str | None = None) -> ScreenRegion | None:
         width // 2,
         40,
         fill="white",
-        font=("Segoe UI", 14),
+        font=ui_font(14),
         text=prompt or DEFAULT_PROMPT,
     )
 
@@ -296,7 +319,7 @@ def run_identify_overlay(elements: Sequence[IdentifiedElement]) -> None:
         width // 2,
         40,
         fill="white",
-        font=("Segoe UI", 14),
+        font=ui_font(14),
         text=IDENTIFY_PROMPT,
     )
 

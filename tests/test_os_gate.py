@@ -4,7 +4,9 @@
 silent and expensive: nothing goes red, a Ctrl+V just lands in the user's
 editor. So it gets tests of its own - each one calls the real
 ``agentclip.driver.screen.focus`` entry point (not a patched alias) and asserts the
-gate answered instead of the desktop.
+gate answered instead of the desktop. The Linux branch gets the same treatment
+one section down, simulated with a monkeypatched ``sys.platform`` so it is
+covered from the Windows machine this suite usually runs on.
 
 These call the OS layer unmocked on purpose, which means they must NOT run when
 the gate is disarmed - they would become exactly the thing they guard against.
@@ -17,7 +19,7 @@ import sys
 
 import pytest
 
-from agentclip.driver.screen import focus, overlay, picker
+from agentclip.driver.screen import focus, overlay, picker, x11
 from agentclip.driver.screen.region import ScreenRegion
 
 REGION = ScreenRegion(40, 40, 20, 20)
@@ -25,6 +27,10 @@ REGION = ScreenRegion(40, 40, 20, 20)
 # Captured at import time, i.e. during collection - before any fixture runs.
 REAL_PICK_REGION = picker.pick_region
 REAL_IDENTIFY_OVERLAY = picker.draw_identify_overlay
+# The X11 backend's two injection seams, same rule. Importing the module costs
+# nothing anywhere: it reaches python-xlib only inside its functions.
+REAL_FAKE_INPUT = x11._fake_input
+REAL_ACTIVATE = x11._activate
 
 gated_only = pytest.mark.skipif(
     os.environ.get("AGENTCLIP_OS_TESTS") == "1",
@@ -134,6 +140,54 @@ def test_the_gate_swaps_sendinput_out_by_default() -> None:
     import ctypes
 
     assert not isinstance(ctypes.windll.user32.SendInput, _funcptr_type())
+
+
+# == the Linux branch =========================================================
+
+
+@gated_only
+def test_the_linux_gate_neuters_the_x11_input_seams(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Linux half of the gate, simulated on whatever platform runs this.
+
+    ``sys.platform`` is monkeypatched rather than the fixture re-run - the gate
+    is autouse and has already made its choice by the time a test body starts -
+    so this asserts the two halves that make the Linux branch work: the focus
+    layer really does hand off to ``screen.x11``, and the two seams conftest
+    neuters there really are the ones every injecting call passes through. The
+    real Xlib is swapped for a recorded one, so the call reaches ``_fake_input``
+    instead of dying at the import.
+    """
+    from agentclip.driver.screen import x11
+    from tests.driver.screen.fake_xlib import FakeDisplay, install_fake_xlib, keycodes_for
+
+    display = install_fake_xlib(
+        monkeypatch, FakeDisplay(active_window=0x99, keymap=keycodes_for("Control_L", "v", "Return", "Page_Down", "End"))
+    )
+    monkeypatch.setattr(sys, "platform", "linux")
+    # Exactly what tests/conftest.py's Linux branch installs.
+    monkeypatch.setattr(x11, "_fake_input", lambda *args, **kwargs: False)
+    monkeypatch.setattr(x11, "_activate", lambda *args, **kwargs: False)
+
+    assert focus.send_paste() is False
+    assert focus.send_enter() is False
+    assert focus.send_scroll_key("page_down", 4) is False
+    assert focus.click_region(REGION) is False
+    assert focus.scroll_region(REGION, -3) is False
+    assert focus.move_cursor(60, 60) is False
+    assert focus.focus_window(0x99) is False
+    assert display.events == []  # nothing was injected...
+    assert display.messages == []  # ...and no window was yanked forward
+
+
+@gated_only
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="the Linux branch of the gate")
+def test_the_gate_swaps_the_x11_seams_out_by_default() -> None:
+    """On a real Linux box, the branch above is live: the seams a poll tick
+    would inject through are not the module's own functions any more."""
+    from agentclip.driver.screen import x11
+
+    assert x11._fake_input is not REAL_FAKE_INPUT
+    assert x11._activate is not REAL_ACTIVATE
 
 
 @pytest.mark.real_os

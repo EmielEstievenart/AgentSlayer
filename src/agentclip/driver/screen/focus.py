@@ -46,11 +46,13 @@ Window focus, for snapping back to AgentClip after the auto-copy click:
   request loses the race often enough that "back to AgentClip" silently did not
   happen. This is the form the TUI uses.
 
-Windows-only, pure stdlib: ``SetCursorPos`` + ``SendInput`` via ctypes. Other
-platforms return False/None so the caller can tell the user once instead of
-failing on every copy. DPI awareness is forced first (see ``make_dpi_aware``)
-so these coordinates live in the same physical-pixel space the overlay
-measured in.
+Windows first, pure stdlib: ``SetCursorPos`` + ``SendInput`` via ctypes. On
+Linux every one of these hands off to ``screen.x11`` (XTest + EWMH, the same
+primitives spelled in X11) so the monitor works on the VM it was designed to
+run on; any OTHER platform still returns False/None so the caller can tell the
+user once instead of failing on every copy. DPI awareness is forced first (see
+``make_dpi_aware``) so these coordinates live in the same physical-pixel space
+the overlay measured in - a Windows-only concern, and a no-op elsewhere.
 """
 
 from __future__ import annotations
@@ -93,6 +95,23 @@ SCROLL_KEYS: dict[str, int] = {"page_down": _VK_NEXT, "end": _VK_END}
 WHEEL_DELTA = 120
 
 
+def _x11() -> Any | None:
+    """The Linux X11 backend, or None where this layer has no implementation.
+
+    The single platform switch every function below shares: on Linux it hands
+    the call to ``screen.x11``, on macOS (and anything else) it answers None and
+    the caller keeps its documented False/None. Imported inside the call, like
+    every ctypes import here, so nothing platform-specific happens at import
+    time - and so ``screen.x11`` may import ``screen.capture``, which imports
+    this module.
+    """
+    if not sys.platform.startswith("linux"):
+        return None
+    from agentclip.driver.screen import x11
+
+    return x11
+
+
 def make_dpi_aware() -> None:
     """Opt this process out of DPI virtualization (Windows; no-op elsewhere).
 
@@ -101,6 +120,10 @@ def make_dpi_aware() -> None:
     pixel is. Harmless for the TUI itself - the console window belongs to the
     terminal process, not us. Safe to call repeatedly (a failed/duplicate set
     just leaves whatever awareness is already in effect).
+
+    Nothing to do on Linux: X11 reports one pixel grid to every client and does
+    no per-process scaling, so the X11 backend inherits this no-op rather than
+    implementing anything.
     """
     global _dpi_aware
     if _dpi_aware or sys.platform != "win32":
@@ -123,10 +146,12 @@ def virtual_screen_bounds() -> tuple[int, int, int, int] | None:
 
     ``left``/``top`` are negative when a monitor sits left of / above the
     primary one, which is exactly the case ``move_cursor`` and the overlay both
-    have to normalize against.
+    have to normalize against. On Linux the X11 backend answers with the root
+    window's geometry, whose origin is always (0, 0).
     """
     if sys.platform != "win32":
-        return None
+        backend = _x11()
+        return backend.virtual_screen_bounds() if backend else None
     import ctypes
 
     make_dpi_aware()  # metrics must come back in the same physical pixels
@@ -147,7 +172,8 @@ def move_cursor(x: int, y: int) -> bool:
     desktop, so monitors at negative coordinates work like any other.
     """
     if sys.platform != "win32":
-        return False
+        backend = _x11()
+        return backend.move_cursor(x, y) if backend else False
     bounds = virtual_screen_bounds()
     if bounds is None:
         return False
@@ -283,6 +309,9 @@ def click_region(region: ScreenRegion, *, settle_s: float = 0.0) -> bool:
     goes down. Pass it when the target only appears on hover (a chat's copy
     button); leave it at 0 for a plain focus click, which needs no pause.
     """
+    if sys.platform != "win32":
+        backend = _x11()
+        return backend.click_region(region, settle_s=settle_s) if backend else False
     return _send_at_center(
         region, [(_MOUSEEVENTF_LEFTDOWN, 0), (_MOUSEEVENTF_LEFTUP, 0)], settle_s=settle_s
     )
@@ -298,6 +327,9 @@ def scroll_region(region: ScreenRegion, clicks: int) -> bool:
     """
     if clicks == 0:
         return False
+    if sys.platform != "win32":
+        backend = _x11()
+        return backend.scroll_region(region, clicks) if backend else False
     delta = WHEEL_DELTA if clicks > 0 else -WHEEL_DELTA
     return _send_at_center(region, [(_MOUSEEVENTF_WHEEL, delta)] * abs(clicks))
 
@@ -312,6 +344,9 @@ def send_paste() -> bool:
     CTRL up - go out in one burst so nothing can slip between the modifier and
     the key.
     """
+    if sys.platform != "win32":
+        backend = _x11()
+        return backend.send_paste() if backend else False
     return _send_keys(
         [
             (_VK_CONTROL, 0),
@@ -331,6 +366,9 @@ def send_enter() -> bool:
     sends the message the way the user's own Enter would. Both events go out in
     one burst.
     """
+    if sys.platform != "win32":
+        backend = _x11()
+        return backend.send_enter() if backend else False
     return _send_keys([(_VK_RETURN, 0), (_VK_RETURN, _KEYEVENTF_KEYUP)])
 
 
@@ -348,6 +386,9 @@ def send_scroll_key(key: str, taps: int = 1) -> bool:
     vk = SCROLL_KEYS.get(key)
     if vk is None or taps < 1:
         return False
+    if sys.platform != "win32":
+        backend = _x11()
+        return backend.send_scroll_key(key, taps) if backend else False
     return _send_keys([(vk, 0), (vk, _KEYEVENTF_KEYUP)] * taps)
 
 
@@ -360,7 +401,8 @@ def foreground_window() -> int | None:
     ``focus_window`` later snaps back to.
     """
     if sys.platform != "win32":
-        return None
+        backend = _x11()
+        return backend.foreground_window() if backend else None
     import ctypes
     from ctypes import wintypes
 
@@ -378,9 +420,13 @@ def focus_window(handle: int) -> bool:
     ``SetForegroundWindow`` is refused for processes that have not received
     input recently, so a zero-effect ALT press+release goes out through
     SendInput first - the long-documented loophole that marks this process as
-    "recently interacted with" without typing anything anywhere.
+    "recently interacted with" without typing anything anywhere. X11 has no
+    such rule; the backend there asks the window manager as a pager instead.
     """
-    if sys.platform != "win32" or not handle:
+    if sys.platform != "win32":
+        backend = _x11()
+        return backend.focus_window(handle) if backend and handle else False
+    if not handle:
         return False
     import ctypes
     from ctypes import wintypes
@@ -425,7 +471,12 @@ def focus_window_verified(
     beats, which is fine - callers do this off the UI thread, and the budget is
     documented above.
     """
-    if sys.platform != "win32" or not handle:
+    if sys.platform != "win32":
+        backend = _x11()
+        if backend is None or not handle:
+            return False
+        return backend.focus_window_verified(handle, attempts=attempts, settle_s=settle_s)
+    if not handle:
         return False
     import time
 

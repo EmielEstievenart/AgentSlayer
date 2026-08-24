@@ -35,7 +35,12 @@ def test_empty_region_raises(size: tuple[int, int]) -> None:
         capture_region(ScreenRegion(0, 0, *size))
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="only other platforms refuse outright")
-def test_capture_is_unavailable_off_windows() -> None:
-    with pytest.raises(CaptureError):
+@pytest.mark.skipif(
+    sys.platform == "win32" or sys.platform.startswith("linux"),
+    reason="Windows has GDI and Linux has the X11 backend; only the rest refuse outright",
+)
+def test_capture_is_unavailable_off_windows_and_linux() -> None:
+    """macOS and friends: no backend, so the caller gets told once rather than
+    failing on every probe. Linux's own path is tests/driver/screen/test_x11.py."""
+    with pytest.raises(CaptureError, match="needs Windows or a Linux X11 desktop"):
         capture_region(ScreenRegion(0, 0, 16, 12))

@@ -775,3 +775,104 @@ def test_every_slot_resolves_to_a_service_that_exists(calib: CalibHarness) -> No
     calib.flush().clear()
     view.select_slot(MASTER)
     assert calib.flush().of_type("calib") == []
+
+
+# == what this machine already remembers ======================================
+# ui-monitor.md §8 / ``driver/monitor/regions.py``: a rectangle is a fact about
+# THIS desktop, so the monitor keeps it. The window opening over a monitor that
+# remembers one and saying "not set" was a header disagreeing with the very
+# store ``configure`` fills its spec from - and it left Identify refusing a
+# window it could see perfectly well.
+
+
+def test_a_remembered_region_fills_the_header_at_start(calib: CalibHarness) -> None:
+    view = calib.view
+    remembered = ScreenRegion(left=7, top=9, width=300, height=200)
+    calib.monitor.saved_regions[view.config.general.service] = remembered
+
+    view.start()
+
+    assert view.region == remembered
+    assert calib.flush().last("calib")["region"] == remembered.describe()
+
+
+async def test_a_remembered_region_is_a_region_identify_may_search(
+    calib: CalibHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal is about "nothing is drawn", not about "nobody dragged in
+    THIS run" - so a box off the store is one Identify works from."""
+    view = calib.view
+    remembered = ScreenRegion(left=0, top=0, width=4, height=4)
+    calib.monitor.saved_regions[view.config.general.service] = remembered
+    view.start()
+    calib.monitor.frames = [bgrx([(0, 0, 0)] * 16, 4, 4)]
+    searched: list[ScreenRegion] = []
+    monkeypatch.setattr(
+        f"{VIEW}.identify_elements",
+        lambda region, *a, **k: (searched.append(region), [IdentifiedElement("copy", region)])[1],
+    )
+    monkeypatch.setattr(f"{VIEW}.draw_identify_overlay", lambda elements: None)
+
+    view._picker_open = True
+    await view._identify_window()
+
+    assert searched == [remembered]
+    toast = calib.flush().last("toast")
+    assert toast["severity"] == "information"
+    assert "Set chat region" not in toast["message"]
+
+
+def test_a_drawn_region_beats_the_remembered_one(calib: CalibHarness) -> None:
+    """The seed only ever fills a hole: re-reading the store on a slot switch or
+    a config edit must never undo a drag."""
+    view = calib.view
+    drawn = ScreenRegion(left=1, top=1, width=50, height=50)
+    calib.monitor.saved_regions[view.config.general.service] = ScreenRegion(0, 0, 999, 999)
+    view.set_region(AgentSlot.MASTER, drawn)
+
+    view.start()
+    view.select_slot(SUBAGENT)
+    view.select_slot(MASTER)
+
+    assert view.region == drawn
+    assert calib.flush().last("calib")["region"] == drawn.describe()
+
+
+def test_switching_windows_picks_up_what_that_window_forgot(calib: CalibHarness) -> None:
+    """A slot arrives with nothing drawn; the store is asked under that window's
+    own service key."""
+    view = calib.view
+    view.start()
+    view.select_slot(SUBAGENT)
+    assert view.region is None
+    remembered = ScreenRegion(left=3, top=4, width=120, height=90)
+    calib.monitor.saved_regions[view._service_key()] = remembered
+
+    view.select_slot(MASTER)
+    view.select_slot(SUBAGENT)
+
+    assert view.region == remembered
+    assert calib.flush().last("calib")["region"] == remembered.describe()
+
+
+async def test_the_seeded_region_is_what_the_monitor_is_pointed_at(
+    calib: CalibHarness,
+) -> None:
+    """The point of the seed: the spec carries the rectangle the header names."""
+    view = calib.view
+    remembered = ScreenRegion(left=11, top=12, width=13, height=14)
+    calib.monitor.saved_regions[view.config.general.service] = remembered
+    view.start()
+
+    await view._configure()
+
+    spec = calib.monitor.spec
+    assert spec is not None and spec.region == remembered
+
+
+def test_a_monitor_that_remembers_nothing_still_says_not_set(calib: CalibHarness) -> None:
+    """Every monitor the Chat UI opens this window over: those regions are the
+    session's, so the store answers None and the header is honest."""
+    calib.view.start()
+    assert calib.view.region is None
+    assert calib.flush().last("calib")["region"] == "not set"

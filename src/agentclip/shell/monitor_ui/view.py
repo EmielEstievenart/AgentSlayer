@@ -168,9 +168,14 @@ class CalibrationMonitor(Protocol):
 
     Named at the call site rather than taken as ``LocalUIMonitor`` for the
     reason ``AutomationController.MonitorLike`` is: half of what is here is the
-    **local-only tier** (``capture``, ``on_frame``) that a ``RemoteUIMonitor``
-    will never answer, and stating the subset is what makes "this window is
-    always local" a type error rather than a comment.
+    **local-only tier** (``capture``, ``on_frame``, ``saved_region``) that a
+    ``RemoteUIMonitor`` will never answer, and stating the subset is what makes
+    "this window is always local" a type error rather than a comment.
+
+    ``saved_region`` is the region store's READ (``driver/monitor/regions.py``):
+    where this machine last saw a service's chat window. It answers ``None`` for
+    a monitor that remembers nothing - which is every monitor the Chat UI opens
+    this window over, because those regions are the session's.
     """
 
     async def configure(self, spec: MonitorSpec) -> int: ...
@@ -178,6 +183,7 @@ class CalibrationMonitor(Protocol):
     async def resume(self) -> None: ...
     async def close(self) -> None: ...
     def capture(self, region: ScreenRegion) -> RegionImage: ...
+    def saved_region(self, service: str) -> ScreenRegion | None: ...
     def on_frame(
         self,
         hook: Callable[[RegionImage, Mapping[TemplateKind, Sighting | None]], None],
@@ -312,6 +318,7 @@ class CalibrationView:
         """
         if self._drop_frames is None:
             self._drop_frames = self._monitor.on_frame(self._on_frame)
+        self._seed_region()
         self.open_service_editor()
         self._push_all()
         self._retarget()
@@ -380,6 +387,7 @@ class CalibrationView:
         if slot is None or slot is self._slot:
             return
         self._slot = slot
+        self._seed_region()
         self._clear_elements()
         self._push_calibration()
         self._retarget()
@@ -794,6 +802,9 @@ class CalibrationView:
         # The editor can delete a service's captured appearances (and a service
         # itself), so the per-run cache is no longer trustworthy.
         self._profiles.clear()
+        # An edit can move a window onto another service, and that service has a
+        # remembered rectangle of its own.
+        self._seed_region()
         self._push_calibration()
         self._retarget()
 
@@ -992,6 +1003,31 @@ class CalibrationView:
         )
 
     # == small helpers =========================================================
+
+    def _seed_region(self) -> bool:
+        """Adopt what this machine remembers about the selected window, if the
+        user has drawn nothing for it yet. True when a rectangle was taken up.
+
+        Without this the window opens saying "not set" over a monitor that is
+        about to poll the very rectangle it claims not to have - ``configure``
+        fills a region-less spec from the store on its own
+        (``local.py:_remember_region``) - and ``Identify`` refuses a window it
+        can see perfectly well. The header and the store have to agree.
+
+        A DRAWN rectangle always wins: this only ever fills a hole, so re-reading
+        it on a slot switch or a config edit can never undo a drag.
+
+        Deliberately silent towards ``on_calibration``: this came OUT of the
+        monitor's own store, so telling the monitor about it would be echoing it
+        its own answer - the same reason :meth:`set_region` does not echo.
+        """
+        if self._regions[self._slot] is not None:
+            return False
+        remembered = self._monitor.saved_region(self._service_key())
+        if remembered is None:
+            return False
+        self._regions[self._slot] = remembered
+        return True
 
     def _service_key(self) -> str:
         """Which service the SELECTED window is pointed at.

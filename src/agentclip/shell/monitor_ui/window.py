@@ -11,8 +11,8 @@ process's MAIN thread and returns only when the LAST window closes; calling it
 twice in one process is not a thing pywebview supports. So there are two entry
 points and they are not symmetric:
 
-* :func:`run_calibration` is the STANDALONE one (``agentclip --calibrate``). It
-  owns everything - the asyncio loop thread, the window, and the pump.
+* :func:`run_monitor_ui` is the STANDALONE one (``agentclip-monitor``). It owns
+  everything - the asyncio loop thread, the window, and the pump.
 * :func:`open_calibration_window` is the door a shell that is ALREADY pumping
   uses (the chat GUI's titlebar button, phase 4B). It creates the window and
   wires it, and returns; the running pump picks the new window up. It
@@ -637,8 +637,8 @@ def open_calibration_window(
     The door for a shell that is already pumping (phase 4B's titlebar button):
     pywebview shows a window created after ``start()`` as soon as the pump gets
     round to it, and ``webview.start()`` may only ever be called once per
-    process. Standalone, :func:`run_calibration` calls this and then takes the
-    main thread.
+    process. Standalone, :func:`run_monitor_ui` reaches this through
+    :func:`_run_window` and then takes the main thread.
     """
     with asset_dir() as assets:
         window = webview.create_window(
@@ -711,45 +711,6 @@ def run_monitor_ui(
     )
 
 
-def run_calibration(
-    config: Config,
-    *,
-    profile_root: Path | None = None,
-    global_config_path: Path | None = None,
-    monitor: CalibrationMonitor | None = None,
-    provider: ClipboardProvider | None = None,
-    on_config_change: Callable[[Config], None] | None = None,
-    on_calibration: Callable[[AgentSlot, ScreenRegion | None], None] | None = None,
-) -> int:
-    """``agentclip --calibrate``: open the calibration window and run it.
-
-    The same window with **no Serve panel**: this door is opened from the app
-    binary, over a monitor the app is already driving, and a second listener
-    onto the same mouse is not a feature. ``run_monitor_ui`` is the standalone
-    one and is the one ``agentclip-monitor`` opens.
-
-    Standalone by construction otherwise - there is no engine, no session, no
-    transcript and no clipboard watcher anywhere below this call. What it needs
-    is a ``Config`` (which services exist, and how each is recognised) and a
-    place to read and write captured appearances; ``monitor`` is injectable so a
-    suite can drive the whole window over ``FakeUIMonitor``, and defaults to a
-    real ``LocalUIMonitor`` because a calibration window nobody configured is
-    still a window watching this machine's screen.
-    """
-    return _run_window(
-        config,
-        monitor=(
-            monitor
-            if monitor is not None
-            else build_monitor(config, profile_root=profile_root, provider=provider)
-        ),
-        profile_root=profile_root,
-        global_config_path=global_config_path,
-        on_config_change=on_config_change,
-        on_calibration=on_calibration,
-    )
-
-
 def _run_window(
     config: Config,
     *,
@@ -757,10 +718,12 @@ def _run_window(
     profile_root: Path | None = None,
     global_config_path: Path | None = None,
     serve: ServePanel | None = None,
-    on_config_change: Callable[[Config], None] | None = None,
-    on_calibration: Callable[[AgentSlot, ScreenRegion | None], None] | None = None,
 ) -> int:
-    """One window, one loop thread, one pump - what both entry points are.
+    """One window, one loop thread, one pump - what the standalone door is.
+
+    The other door is :func:`open_calibration_window`, which the Chat UI calls
+    from inside a pump it already owns; nothing below this function is shared
+    with it except the window creation it delegates to.
 
     Order is ``run_gui``'s and is the design's: the window is created with the
     ``js_api`` object first (pywebview injects the API at load), the bridge is
@@ -780,8 +743,6 @@ def _run_window(
         monitor=monitor,
         profile_root=profile_root,
         global_config_path=global_config_path,
-        on_config_change=on_config_change,
-        on_calibration=on_calibration,
         serve=serve,
     )
     try:
@@ -824,6 +785,5 @@ __all__: Sequence[str] = [
     "build_monitor",
     "entry_url",
     "open_calibration_window",
-    "run_calibration",
     "run_monitor_ui",
 ]

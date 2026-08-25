@@ -71,22 +71,26 @@ The target needs `agentclip-engine` on it — `uv tool install agentclip` over t
 To use `agentclip` from any directory without the checkout, freeze it into self-contained exes:
 
 ```powershell
-.\scripts\build-exe.ps1                 # both exes
+.\scripts\build-exe.ps1                 # all three exes
+.\scripts\build-exe.ps1 -EngineOnly     # just the engine
 .\scripts\build-exe.ps1 -MonitorOnly    # just the monitor
 ```
 
-This builds **two** artifacts (PyInstaller onefile, no Python needed to run them), smoke-tests each, and copies them to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`:
+This builds **three** artifacts (PyInstaller onefile, no Python needed to run them), smoke-tests each, and copies them to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`:
 
 - `dist\agentclip.exe` (~78 MB) — the full app.
+- `dist\agentclip-engine.exe` — the *engine* half alone, the binary an SSH target runs (`docs/design/remote-executor.md` §2.6). It carries the MCP SDK and nothing shell- or driver-shaped: no pywebview, no OpenCV, no region picker. Copy it onto a Windows target's `PATH` and remote sessions work there without a Python install.
 - `dist\agentclip-monitor.exe` — the *monitor* half alone, the standing process that runs on the machine whose **screen** shows the chat: a VM on a host-only network, or this PC in split mode (`docs/design/ui-monitor.md` §2.5, §6.5). It serves that machine's pixels, mouse, keyboard and clipboard to a brain over a TCP wire and keeps polling whether or not one is attached. It carries the OpenCV backend and the region picker and nothing shell- or engine-shaped: no pywebview, no textual, no MCP.
 
-Re-run to update after changing the source. Useful flags: `-Clean` (fresh build), `-MonitorOnly` (skip the app, and its `gui` extra), `-NoInstall` (build only), `-InstallDir <path>`. The engine binary is not built here — that one runs on an SSH target, so `scripts/build-exe.sh` owns it.
+Re-run to update after changing the source. Useful flags: `-Clean` (fresh build), `-EngineOnly` (skip the app, and its `cv`/`gui` extras), `-MonitorOnly` (skip the app, and its `gui`/`mcp` extras), `-NoInstall` (build only), `-InstallDir <path>`. Naming both "only" switches builds those two halves and skips the full app.
 
-The exe carries **the shell and every optional extra the desktop needs**: the GUI (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the GUI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three against the exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
+The exe carries **the shell and every optional extra the desktop needs**: the GUI (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the GUI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three of those against the app exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
 
 The monitor exe is proved the same way, minus the shell half: `--version` walks its whole import tree and `--list-matchers` imports the OpenCV backend for real — which matters more there than in the app, because the monitor machine is where every template search actually runs.
 
-The builds are driven by `packaging/agentclip.spec` and `packaging/agentclip-monitor.spec`; a onefile exe unpacks to `%TEMP%` on each launch, costing a second or two of startup.
+The engine exe is proved by `--version` alone, which walks its whole module-level import tree — config, the session factory, the server loop, the executor's tool registry — and is checked for the exact `agentclip-engine <version>` answer, because on a target that stdout stream *is* the wire protocol.
+
+The builds are driven by `packaging/agentclip.spec`, `packaging/agentclip-engine.spec` and `packaging/agentclip-monitor.spec`; a onefile exe unpacks to `%TEMP%` on each launch, costing a second or two of startup.
 
 > If `agentclip` says the gui extra is not installed, you are running a *different* `agentclip` — most likely a stale `uv tool install`. Run `where.exe agentclip`; the build script prints the same warning when it spots one, and `uv tool uninstall agentclip` clears it.
 
@@ -98,7 +102,7 @@ scripts/build-exe.sh --engine-only
 scripts/build-exe.sh --monitor-only
 ```
 
-Same idea, **three** artifacts, because a POSIX box is usually a machine being *driven onto* rather than the one driving:
+The same three artifacts as the Windows script above, which matters because a POSIX box is usually a machine being *driven onto* rather than the one driving:
 
 - `dist/agentclip` — the full app, exactly as above.
 - `dist/agentclip-engine` (~21 MB) — the engine half alone, the binary an SSH target runs (`docs/design/remote-executor.md` §2.6). It carries the MCP SDK and nothing shell- or driver-shaped: no textual, no pywebview, no OpenCV. Copy it onto a target's `PATH` and remote sessions work there without a Python install.

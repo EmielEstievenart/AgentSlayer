@@ -29,9 +29,12 @@
     --engine-only.
 
 .PARAMETER MonitorOnly
-    Build only agentclip-monitor.exe; skip the full app (and its gui/mcp extras,
-    which a machine that only serves its screen need not install). The mirror of
-    build-exe.sh's --monitor-only.
+    Build only agentclip-monitor.exe; skip the full app (and its mcp extra,
+    which a machine that only serves its screen never runs a server for). It
+    does NOT skip gui any more: since docs/design/ui-monitor.md 9.1 the monitor
+    binary opens the Monitor UI - the service editor, the region picker and the
+    Serve panel - and only its --headless door runs without a toolkit. The
+    mirror of build-exe.sh's --monitor-only.
 
     Given together, -EngineOnly and -MonitorOnly build those two halves and
     still skip the full app: they select halves, they are not exclusive modes.
@@ -126,9 +129,9 @@ try {
     # asked for - a second sync with a different extra set would silently
     # uninstall what the first one put there. Which extras depends on WHICH EXES
     # this run builds, and that is the whole point of the two "Only" switches:
-    # pywebview is only reached by the app's GUI shell (both other specs exclude
-    # it), and the engine exe imports neither it nor OpenCV
-    # (packaging/agentclip-engine.spec excludes those too).
+    # the engine exe imports neither pywebview nor OpenCV
+    # (packaging/agentclip-engine.spec excludes both), while the app and the
+    # monitor each open a pywebview window and each bundle the matcher backend.
     #
     # Not --no-default-groups: that would uninstall pytest/ruff/mypy and break
     # the dev loop. Dev deps are kept out of the binaries by the specs' excludes.
@@ -136,7 +139,9 @@ try {
     # None of the three is optional HERE even though all three are extras
     # everywhere else. `cv` covers the app AND the monitor: both bundle the
     # OpenCV matcher backend (architecture.md 6; the monitor exe is where every
-    # template search actually RUNS). `mcp` covers the app AND the engine: the
+    # template search actually RUNS). `gui` covers them both too, since
+    # ui-monitor.md 9.1: the monitor binary IS the Monitor UI, and only
+    # --headless runs without a toolkit. `mcp` covers the app AND the engine: the
     # engine exe exists to run MCP servers on the target
     # (docs/design/remote-executor.md 2.7). And PyInstaller can only collect a
     # package that is present in the environment it is pointed at. Worse,
@@ -146,7 +151,7 @@ try {
     # without a word.
     $extras = @()
     if ($BuildApp -or $BuildMonitor) { $extras += @('--extra', 'cv') }
-    if ($BuildApp)                   { $extras += @('--extra', 'gui') }
+    if ($BuildApp -or $BuildMonitor) { $extras += @('--extra', 'gui') }
     if ($BuildApp -or $BuildEngine)  { $extras += @('--extra', 'mcp') }
     Write-Step "Syncing dependencies (uv sync --group build $($extras -join ' '))"
     uv sync --group build @extras
@@ -166,11 +171,11 @@ try {
             throw "The cv extra is not importable, so the exe would be built without the OpenCV matcher backend. Fix the environment and re-run."
         }
     }
-    if ($BuildApp) {
+    if ($BuildApp -or $BuildMonitor) {
         Write-Step 'Verifying the gui extra is importable'
         uv run --group build python -c "from importlib.metadata import version; import webview; print('pywebview ' + version('pywebview'))"
         if ($LASTEXITCODE -ne 0) {
-            throw "The gui extra is not importable, so the exe would be built without the GUI shell. Fix the environment and re-run."
+            throw "The gui extra is not importable, so the exe would be built without its pywebview window (the Chat UI, or the Monitor UI). Fix the environment and re-run."
         }
     }
     # The engine's counterpart, and the same silent shape one layer down: every
@@ -314,10 +319,22 @@ try {
         }
 
         # --version is one of the two invocations that is neither a run nor a usage
-        # error, and it is a real check: argparse runs the version action before the
-        # required --port check, so this walks the entire module-level import tree -
-        # config, the clipboard provider, LocalUIMonitor, the wire, the server loop -
-        # without listening on anything.
+        # error, and it is a real check: the version action answers from inside
+        # parsing, before either door is chosen, so this walks the entire
+        # module-level import tree - config, the clipboard provider,
+        # LocalUIMonitor, the wire, the server loop, and since 9.1 the Monitor UI
+        # dispatcher above them - without opening a window or listening on
+        # anything. It needs no --port: the port is a Serve panel field now and
+        # is required only under --headless.
+        #
+        # There is deliberately no --gui-smoke here, unlike agentclip.exe. That
+        # check lives in cli.py (`_gui_smoke`), which is off this binary's
+        # layering allowance and is not in it to be called - so what a frozen
+        # Monitor UI's pywebview collection is proven by is the app binary's own
+        # --gui-smoke, which imports the same `webview`, the same backend and the
+        # same runtime out of the same environment. Giving the monitor one of its
+        # own means moving that function into a package both binaries may import;
+        # worth doing, and not in this phase.
         Write-Step 'Smoke-testing agentclip-monitor.exe'
         $monitorVersion = & $DistMonitorExe --version 2>&1 | Out-String
         if ($LASTEXITCODE -ne 0 -or -not $monitorVersion.Trim().StartsWith('agentclip-monitor ')) {

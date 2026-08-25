@@ -2,10 +2,11 @@
 
 The half of phase 4A that is about pywebview rather than about pixels
 (docs/design/ui-monitor.md §6.4). Nothing here opens a window: what is checked
-is the page this window would load, the marshalling shim the page reaches, and
-the ``--calibrate`` dispatch - the same three things ``tests/shell/chat/test_shell.py``
-checks for the chat window, because this is the repo's SECOND ``create_window``
-and none of it had a precedent.
+is the page this window would load and the marshalling shim the page reaches -
+two of the three things ``tests/shell/chat/test_shell.py`` checks for the chat
+window, because this is the repo's SECOND ``create_window`` and none of it had a
+precedent. The third, the standalone dispatch, moved to ``test_main.py`` when
+``agentclip-monitor`` became this window's entry point (9.1).
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from agentclip import __version__, cli
+from agentclip import __version__
 from agentclip.config import load_config
 from agentclip.shell.monitor_ui.view import CalibrationView
 from agentclip.shell.monitor_ui.window import (
@@ -84,6 +85,46 @@ def test_the_page_draws_the_editor_the_column_and_the_two_overlays() -> None:
     assert 'api("identify")' in js
     assert 'api("elements", elementsOpen)' in js
     assert 'api("svc_close")' in js
+
+
+def test_the_page_draws_the_serve_panel_and_can_reach_all_four_of_its_verbs() -> None:
+    """The Serve panel's markup and its four doors (ui-monitor.md 9.1). Every id
+    the renderer writes into has to exist, and every verb the panel needs has to
+    be raised from somewhere - a button with no ``api(...)`` behind it is a click
+    that silently does nothing."""
+    html = asset(ENTRY_PAGE)
+    js = asset("app.js")
+    for element in (
+        "serve",
+        "serve-address",
+        "serve-port",
+        "serve-toggle",
+        "serve-status",
+        "serve-warning",
+        "serve-error",
+        "serve-token",
+        "serve-copy",
+        "serve-regenerate",
+        "serve-no-token",
+    ):
+        assert f'id="{element}"' in html, element
+    assert 'api("serve_start"' in js
+    assert 'api("serve_stop")' in js
+    assert 'api("token_regenerate")' in js
+    # The one verb with an ANSWER: the token comes back through pywebview's
+    # return path so the page can write it to the clipboard inside the click
+    # that asked for it.
+    assert 'apiAsk("token_copy"' in js
+    assert 'case "serve":' in js
+
+
+def test_the_serve_panel_is_hidden_until_a_panel_says_otherwise() -> None:
+    """The window the Chat UI opens beside itself in local mode has no Serve
+    panel at all - there is nothing to serve when the brain is in the same
+    process - and the page learns that by never being sent a ``serve``
+    event."""
+    assert '<section class="serve" id="serve" hidden>' in asset(ENTRY_PAGE)
+    assert "el.serve.hidden = false;" in asset("app.js")
 
 
 def test_the_stylesheet_names_no_colour_outside_its_palette() -> None:
@@ -190,6 +231,39 @@ def test_the_js_api_marshals_every_intent_the_page_can_raise() -> None:
     assert ("set_elements_visible", (True,)) in calls.seen
 
 
+def test_the_js_api_marshals_the_serve_panel_too() -> None:
+    """The four verbs 9.1 added, and the coercions they do at the boundary: a
+    page hands back whatever an <input> held, and a port is an int."""
+    calls = Calls()
+    api = CalibrationJsApi(calls)  # type: ignore[arg-type]
+    api.serve_start("192.168.1.40", "7788", 1)  # type: ignore[arg-type]
+    api.serve_stop()
+    api.token_regenerate()
+    assert calls.seen == [
+        ("serve_start", ("192.168.1.40", 7788, True)),
+        ("serve_stop", ()),
+        ("token_regenerate", ()),
+    ]
+
+
+def test_the_token_verb_answers_and_never_raises_at_the_page() -> None:
+    """``token_copy`` is the one js_api method with a return value, so it cannot
+    use the swallow-and-drop path the others do - and it must still swallow,
+    because pywebview would otherwise leave the page holding a rejected promise
+    and no explanation."""
+
+    class Panelless:
+        def token_copy(self) -> str:
+            return "cafebabe"
+
+    class Boom:
+        def token_copy(self) -> str:
+            raise RuntimeError("nope")
+
+    assert CalibrationJsApi(Panelless()).token_copy() == "cafebabe"  # type: ignore[arg-type]
+    assert CalibrationJsApi(Boom()).token_copy() == ""  # type: ignore[arg-type]
+
+
 def test_a_raising_intent_is_swallowed_rather_than_dropped_by_pywebview() -> None:
     """pywebview logs and drops what a js_api method raises, so a failure here
     would be a click that silently did nothing AND a promise the page is still
@@ -265,58 +339,13 @@ class _NullMonitor:
         return lambda: None
 
 
-# == --calibrate =============================================================
-
-
-def test_the_flag_is_parsed_and_off_by_default() -> None:
-    assert cli.build_arg_parser().parse_args([]).calibrate is False
-    assert cli.build_arg_parser().parse_args(["--calibrate"]).calibrate is True
-
-
-def test_calibrate_opens_the_window_and_builds_no_engine(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The dispatch sits ABOVE the launch: a calibration window needs a Config
-    and a clipboard backend, and nothing that is about running a task
-    (ui-monitor.md §6.4). Every one of those is booby-trapped here."""
-    seen: dict[str, Any] = {}
-
-    def calibrate(config: Any, **rest: Any) -> int:
-        seen["config"] = config
-        seen.update(rest)
-        return 0
-
-    monkeypatch.setattr(
-        "agentclip.shell.monitor_ui.window.run_calibration", calibrate
-    )
-    def trap(name: str) -> Any:
-        return lambda *a, **k: pytest.fail(f"--calibrate built {name}")
-
-    for name in ("local_launch", "remote_launch", "make_engine_factory", "prune_sessions"):
-        monkeypatch.setattr(cli, name, trap(name), raising=True)
-    monkeypatch.setattr(
-        "agentclip.shell.chat.shell.run_gui", lambda *a, **k: pytest.fail("opened the chat GUI")
-    )
-
-    assert cli.main(["--calibrate", "--project", str(tmp_path)]) == 0
-    assert seen["config"].services  # a real Config, layered for this project
-    assert seen["provider"] is not None
-
-
-def test_calibrate_refuses_a_project_that_is_not_there(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        "agentclip.shell.monitor_ui.window.run_calibration",
-        lambda *a, **k: pytest.fail("opened a window for a project that does not exist"),
-    )
-    assert cli.main(["--calibrate", "--project", str(tmp_path / "nope")]) == 2
-
-
-def test_calibrate_is_in_the_help_text() -> None:
-    help_text = cli.build_arg_parser().format_help()
-    assert "--calibrate" in help_text
-    assert "no session" in help_text
+# == the standalone door =====================================================
+# ``agentclip --calibrate`` used to live here: a second process spelling of this
+# window, opened from the app binary. ui-monitor.md 9.1 removed it - the
+# standalone door is ``agentclip-monitor`` and there is exactly one of it - so
+# what those tests checked is checked one file over, in ``test_main.py``. What
+# stays in the app is ``open_calibration_window``, the in-app door the Chat UI's
+# F2 uses, which is exercised by ``tests/shell/chat``.
 
 
 # == the import graph ========================================================

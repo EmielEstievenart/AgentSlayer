@@ -1,10 +1,13 @@
-"""``agentclip-monitor`` - the standing monitor, as a process.
+"""``agentclip-monitor --headless`` - the standing monitor, with no window.
 
-Two doors, one function. On the machine whose screen shows the chat this is the
-**console script** ``agentclip-monitor`` (or the frozen binary from
-``packaging/agentclip-monitor.spec``); in a checkout it is ``python -m
+Two doors, one function. On a machine with no desktop to open a window on this
+is ``agentclip-monitor --headless`` (the console script itself is
+``shell/monitor_ui/__main__.py`` since ui-monitor.md 9.1, and delegates here
+verbatim for that flag); in a checkout it is ``python -m
 agentclip.driver.monitor``. The parser names the executable, because ``--help``
-on a VM is read by somebody who typed the former.
+on a VM is read by somebody who typed the former - and it is the SAME parser
+either way: :func:`build_arg_parser` is imported by the shell entry point, so
+the argument grammar has one home and it is the Driver's.
 
 Argument parsing and assembly, and nothing else: the loop is
 :func:`agentclip.driver.monitor.server.serve` and the machine itself is a
@@ -43,7 +46,7 @@ import sys
 from pathlib import Path
 
 from agentclip import __version__
-from agentclip.config import default_profile_dir, load_config
+from agentclip.config import Config, default_profile_dir, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.monitor.auth import default_monitor_dir, load_or_create_token
 from agentclip.driver.monitor.local import LocalUIMonitor
@@ -87,12 +90,14 @@ def _list_matchers() -> int:
 class _ListMatchersAction(argparse.Action):
     """``--list-matchers`` as an ACTION, for ``--version``'s reason.
 
-    ``--port`` is required, and argparse enforces required arguments only after
-    the whole command line has been consumed - so a plain ``store_true`` flag
-    would answer a build's question with "the following arguments are required:
-    --port". The version action sidesteps that by printing and exiting from
-    inside parsing; this does the same, so both smoke tests are single-flag
-    invocations that never open a socket.
+    ``--port`` was required when this was written, and argparse enforces
+    required arguments only after the whole command line has been consumed - so
+    a plain ``store_true`` flag would have answered a build's question with "the
+    following arguments are required: --port". The port is optional now (the
+    Serve panel asks for it instead), but the action stays: printing and exiting
+    from inside parsing is what keeps this smoke test a single-flag invocation
+    that never reaches an assembly, a config read or a socket, on either of the
+    two doors that share this parser.
     """
 
     def __init__(self, option_strings: list[str], dest: str, help: str | None = None) -> None:
@@ -125,11 +130,33 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action=_ListMatchersAction,
         help="print which appearance-matcher backends this build can run, and exit",
     )
+    # OPTIONAL since the Monitor UI landed (ui-monitor.md 9.1), and required
+    # only by the door that has nowhere else to ask: with a window the port is a
+    # field in the Serve panel, and naming it here is the "come up already
+    # listening" shortcut rather than the only spelling. ``--headless`` has no
+    # panel to fall back on, so :func:`main` demands it there.
     parser.add_argument(
         "--port",
-        required=True,
+        default=None,
         type=int,
-        help="TCP port to listen on (0 picks a free one and prints it)",
+        help=(
+            "TCP port to listen on (0 picks a free one and prints it)."
+            " Required with --headless; with a window it pre-fills the Serve"
+            " panel and starts it"
+        ),
+    )
+    # The one flag this parser owns for a window it may not import. The GRAMMAR
+    # is the Driver's - one parser, so ``agentclip-monitor --help`` says the
+    # same thing whichever half answers it - while the dispatch on this flag is
+    # ``shell/monitor_ui/__main__.py``'s, which is the only module allowed to
+    # know what a window is.
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help=(
+            "serve with no Monitor UI at all - the windowless door for a VM"
+            " with no desktop. Requires --port"
+        ),
     )
     parser.add_argument(
         "--bind",
@@ -207,34 +234,59 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_monitor(args: argparse.Namespace) -> LocalUIMonitor:
+def load_project_config(args: argparse.Namespace) -> Config:
+    """Which services exist on this machine, layered for ``--project``.
+
+    Split out of :func:`build_monitor` because the Monitor UI needs the same
+    answer for a second reason: the window EDITS this configuration (the service
+    editor is a monitor-side surface, ui-monitor.md 9.1), so both doors have to
+    resolve it identically - same project root, same override, same global path,
+    same warnings on stderr - or a service key would mean one thing to the poller
+    and another to the panel above it.
+    """
+    project_root = Path(args.project).expanduser().resolve()
+    config = load_config(
+        project_root,
+        service_override=args.service,
+        global_config_path=global_config_path(args),
+    )
+    for warning in config.warnings:
+        print(f"agentclip-monitor: {warning}", file=sys.stderr)
+    return config
+
+
+def global_config_path(args: argparse.Namespace) -> Path | None:
+    """Where ``config.toml`` is read from, or None for the platform location."""
+    if args.global_config is None:
+        return None
+    return Path(args.global_config).expanduser().resolve()
+
+
+def profile_root(args: argparse.Namespace) -> Path:
+    """Where captured appearances live on THIS machine."""
+    if args.profile_root is None:
+        return default_profile_dir()
+    return Path(args.profile_root).expanduser().resolve()
+
+
+def build_monitor(args: argparse.Namespace, config: Config | None = None) -> LocalUIMonitor:
     """The machine this process serves.
 
     ``profile_for`` is a plain disk read rather than a cache, for the
     calibration window's reason: the appearances are edited on THIS machine, so
     a cache here would be a way to poll against templates the user just
     replaced.
+
+    ``config`` is accepted so the Monitor UI can build the monitor over the very
+    ``Config`` object its editor is about to hand around, rather than re-reading
+    the same files and getting two objects that drift the moment one is saved.
     """
-    project_root = Path(args.project).expanduser().resolve()
-    global_config_path = (
-        None if args.global_config is None else Path(args.global_config).expanduser().resolve()
-    )
-    config = load_config(
-        project_root,
-        service_override=args.service,
-        global_config_path=global_config_path,
-    )
-    for warning in config.warnings:
-        print(f"agentclip-monitor: {warning}", file=sys.stderr)
-    root = (
-        default_profile_dir()
-        if args.profile_root is None
-        else Path(args.profile_root).expanduser().resolve()
-    )
+    resolved = load_project_config(args) if config is None else config
+    root = profile_root(args)
     return LocalUIMonitor(
         profile_for=lambda key: load_profile(root, key),
-        clipboard=select_provider(config.clipboard.provider),
-        clip_poll_interval_ms=config.clipboard.poll_interval_ms,
+        clipboard=select_provider(resolved.clipboard.provider),
+        clip_poll_interval_ms=resolved.clipboard.poll_interval_ms,
         # The standing monitor is the deployment §8 named: it outlives every
         # brain, so the box an operator drew over here has to survive a reboot
         # rather than being redrawn after each one.
@@ -324,7 +376,13 @@ async def _run(args: argparse.Namespace, monitor: LocalUIMonitor) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_arg_parser().parse_args(argv)
+    parser = build_arg_parser()
+    args = parser.parse_args(argv)
+    if args.port is None:
+        # The windowless door has nowhere to ask. ``parser.error`` rather than a
+        # bare return, so the refusal carries the usage line the person typing
+        # this on a VM console needs to read next.
+        parser.error("--port is required without a Monitor UI (see --headless)")
     monitor = build_monitor(args)
     try:
         return asyncio.run(_run(args, monitor))

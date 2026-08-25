@@ -46,8 +46,9 @@ Options:
   --engine-only       build only agentclip-engine; skip the full app (and its
                       cv/gui extras, which a headless target need not install)
   --monitor-only      build only agentclip-monitor; skip the full app (and its
-                      gui extra, which a machine that only serves its screen
-                      need not install)
+                      mcp extra, which a machine that only serves its screen
+                      never runs a server for). It still syncs gui: the monitor
+                      binary opens the Monitor UI since ui-monitor.md 9.1
   --no-install        build and smoke-test only; leave the binaries in dist/
   --install-dir DIR   where to copy them
                       (default: $AGENTCLIP_INSTALL_DIR, else ~/.local/bin)
@@ -154,10 +155,10 @@ fi
 #
 # `cv` covers the app AND the monitor - the monitor binary is where every
 # template search actually RUNS (ui-monitor.md 2.5), so if anything it needs the
-# backend more than the app does. `gui` is the app's alone: the calibration
-# window is a shell package and ships in the app binary, which is what
-# `agentclip --calibrate` opens on the monitor machine
-# (packaging/agentclip-monitor.spec excludes webview).
+# backend more than the app does. `gui` covers them both too, since 9.1: the
+# Monitor UI is a shell package and it ships in the MONITOR binary now, because
+# it runs where the pixels are. Only that binary's --headless door opens no
+# window, and it is one delegation inside the same entry point.
 #
 # Neither of those, nor `mcp`, is optional here even though all three are extras
 # everywhere else: the engine binary exists to run MCP servers on the target
@@ -174,7 +175,7 @@ extras=()
 if [ "$build_app" -eq 1 ] || [ "$build_monitor" -eq 1 ]; then
     extras+=(--extra cv)
 fi
-if [ "$build_app" -eq 1 ]; then
+if [ "$build_app" -eq 1 ] || [ "$build_monitor" -eq 1 ]; then
     extras+=(--extra gui)
 fi
 if [ "$build_app" -eq 1 ] || [ "$build_engine" -eq 1 ]; then
@@ -194,11 +195,11 @@ if [ "$build_app" -eq 1 ] || [ "$build_monitor" -eq 1 ]; then
         die "The cv extra is not importable, so the binaries would be built without the OpenCV matcher backend and every service would silently fall back to the anchor search. Fix the environment and re-run."
 fi
 
-if [ "$build_app" -eq 1 ]; then
+if [ "$build_app" -eq 1 ] || [ "$build_monitor" -eq 1 ]; then
     step 'Verifying the gui extra is importable'
     uv run --group build python -c \
         "from importlib.metadata import version; import webview; print('pywebview ' + version('pywebview'))" ||
-        die "The gui extra is not importable, so agentclip would be built without the GUI shell - its DEFAULT shell - and every launch would tell the user to install an extra they cannot install into a binary. Fix the environment and re-run."
+        die "The gui extra is not importable, so a binary would be built without its pywebview window - agentclip's DEFAULT shell, or agentclip-monitor's Monitor UI - and every launch would tell the user to install an extra they cannot install into a binary. Fix the environment and re-run."
 fi
 
 if [ "$build_app" -eq 1 ] || [ "$build_engine" -eq 1 ]; then
@@ -336,11 +337,22 @@ if [ "$build_monitor" -eq 1 ]; then
     monitor_bin="$(dist_path agentclip-monitor)"
     [ -f "$monitor_bin" ] || die "PyInstaller reported success but $monitor_bin is missing."
 
-    # The engine's argument, with the same argparse detail behind it: --port is
-    # required, and the version action runs before the required-check, so this is
-    # an invocation that walks the whole module-level import tree - config, the
-    # clipboard provider, LocalUIMonitor, the wire, the server loop - without
-    # listening on anything.
+    # The engine's argument, with the same argparse detail behind it: the version
+    # action answers from inside parsing, before either door is chosen, so this
+    # is an invocation that walks the whole module-level import tree - config,
+    # the clipboard provider, LocalUIMonitor, the wire, the server loop, and
+    # since 9.1 the Monitor UI dispatcher above them - without opening a window
+    # or listening on anything. It needs no --port any more: the port is a Serve
+    # panel field, and is required only under --headless.
+    #
+    # There is deliberately no --gui-smoke here, unlike agentclip. That check
+    # lives in cli.py (`_gui_smoke`), which is off this binary's layering
+    # allowance and is not in it to be called - so what proves a frozen Monitor
+    # UI's pywebview collection is the app binary's own --gui-smoke, which
+    # imports the same `webview`, the same backend and the same runtime out of
+    # the same environment. Giving the monitor one of its own means moving that
+    # function somewhere both binaries may import from; worth doing, and not in
+    # this phase.
     step 'Smoke-testing agentclip-monitor'
     monitor_version="$("$monitor_bin" --version 2>&1)" ||
         { printf '%s\n' "$monitor_version"; die "agentclip-monitor --version failed. Not installing a broken binary."; }

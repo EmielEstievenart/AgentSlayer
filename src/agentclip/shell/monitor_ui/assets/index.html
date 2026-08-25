@@ -45,6 +45,42 @@
         </div>
       </header>
 
+      <!-- SERVE: who may drive this machine (ui-monitor.md §9.1). Its own band
+           between the header and the working area, because it is the one block
+           here that is not about pixels: an address, a port, and the secret a
+           Chat UI on the other machine has to carry. Hidden until a `serve`
+           event arrives, which is how the window the Chat UI opens beside
+           itself in local mode has no Serve panel at all - there is nothing to
+           serve when the brain is already in the same process.
+
+           Static text below is the field labels and the one checkbox sentence;
+           the status line, the unauthenticated-port warning and every error are
+           Python's words (shell/monitor_ui/serve.py), pushed on the event. -->
+      <section class="serve" id="serve" hidden>
+        <div class="serve-row">
+          <span class="serve-title">SERVE</span>
+          <select id="serve-address"></select>
+          <input id="serve-port" type="text" inputmode="numeric" placeholder="port" />
+          <button id="serve-toggle" type="button">Start</button>
+          <span class="side-status" id="serve-status"></span>
+        </div>
+        <div class="svc-warn" id="serve-warning"></div>
+        <div class="svc-error" id="serve-error"></div>
+        <div class="serve-row">
+          <span class="serve-title">TOKEN</span>
+          <span class="serve-token" id="serve-token"></span>
+          <button id="serve-copy" type="button">Copy</button>
+          <button id="serve-regenerate" type="button">Regenerate</button>
+          <label class="svc-check" id="serve-no-token-row"
+            ><input type="checkbox" id="serve-no-token" /><span
+              >no token (loopback only)</span
+            ></label
+          >
+          <span class="spacer"></span>
+          <span class="side-status" id="serve-token-path"></span>
+        </div>
+      </section>
+
       <div class="calib-main" id="calib-main">
         <div class="calib-editor">
           <div class="svc-body">

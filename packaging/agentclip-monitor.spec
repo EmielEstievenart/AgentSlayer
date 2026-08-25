@@ -7,8 +7,10 @@ part of a plain, everything run - or by hand from the repo root::
 
     uv run --group build pyinstaller --noconfirm packaging/agentclip-monitor.spec
 
-The build environment must have the ``cv`` extra installed, for the reason the
-next paragraph gives; the scripts sync it and refuse to build without it.
+The build environment must have the ``cv`` AND ``gui`` extras installed - the
+matcher backend for the reason the next paragraph gives, pywebview because this
+binary opens the Monitor UI since ui-monitor.md 9.1. The scripts sync both and
+refuse to build without either.
 
 This is the binary that runs on the machine whose SCREEN shows the chat
 (docs/design/ui-monitor.md 2.5, 6.5): a VM on a host-only network, or this PC in
@@ -32,6 +34,14 @@ What it MUST carry, and why each name is here rather than found:
 * **copykitten/pyperclip** - the clipboard backends, same lazy shape. The
   clipboard is a monitor resource (2.11): the watcher polls it here and the
   brain only ever sees the text.
+* **pywebview and its platform backend** - the Monitor UI (ui-monitor.md 9.1).
+  This binary IS the window now: ``agentclip-monitor`` opens the service editor,
+  the ELEMENTS column, the region picker and the Serve panel, and only
+  ``--headless`` skips it. Named per-platform for the main spec's reason -
+  webview/guilib.py picks a backend off ``platform.system()`` and imports it BY
+  NAME at import time, so nothing static reaches it - and the block below is
+  ``packaging/agentclip.spec``'s, deliberately identical, because the two
+  binaries open the same kind of window on the same kinds of machine.
 * **tkinter** - the ``--pick-region`` overlay (driver/screen/overlay.py) imports
   it inside a function. Kept, where the engine spec drops it, because the region
   a user drags is drawn on THIS machine. No ``datas`` are needed for it:
@@ -57,15 +67,22 @@ shell, the engine or the executor - and the ``excludes`` list is that rule said
 to PyInstaller, so the day a stray import appears it is a fat binary and a spec
 conflict rather than a VM that needs a browser engine to start polling.
 
-**No window UI here, deliberately.** The Monitor UI (6.4) does run where the
-pixels are, but it is a SHELL package (``agentclip.shell.monitor_ui``, with
-its own pywebview window and its own asset bundle) and this binary may not
-import a shell at all. It ships in the app binary instead, which is what
-``agentclip --calibrate`` opens on the monitor machine - so ``webview`` and its
-runtime stay excluded here rather than half-collected, and ``agentclip-monitor``
-has no ``--calibrate`` of its own (driver/monitor/__main__.py). That is also why
-this spec wants only the ``cv`` extra where the main one wants ``cv`` and
-``gui``.
+**The window ships here now** (ui-monitor.md 9.1), which is the one thing this
+spec used to say the opposite of. The Monitor UI runs where the pixels are, and
+that is this binary's machine - so ``agentclip-monitor`` carries
+``agentclip.shell.monitor_ui`` (its own pywebview window, its own bridge, its own
+asset bundle) and the ``gui`` extra along with ``cv``. The entry script is that
+package's ``__main__.py``: a dispatcher that opens the window, or delegates to
+``driver/monitor/__main__.py`` verbatim under ``--headless``.
+
+What is still excluded is everything else a shell could drag in: this binary has
+no session, no engine, no transcript and no Chat UI. ``agentclip.shell.chat`` and
+``agentclip.shell.app`` are unreachable from ``shell.monitor_ui`` by the layering
+test's rule, and the excludes below are that rule said to PyInstaller.
+
+**``--headless`` still imports no toolkit**, which is what keeps it honest on a
+server with no desktop: the shell entry point reaches ``webview`` only inside the
+function that creates a window, and the delegation happens before that.
 """
 
 import os
@@ -76,6 +93,48 @@ import sys
 # anchor everything to the repo root instead.
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 SRC = os.path.join(ROOT, "src")
+
+# The MONITOR UI's page. ``shell/monitor_ui/window.py`` resolves it through
+# ``files("agentclip.shell.monitor_ui") / "assets"`` and never ``__file__``, and
+# PyInstaller's FrozenImporter answers that by looking under sys._MEIPASS at
+# exactly this layout - so the destination has to be the PACKAGE's relative path
+# or a frozen build opens a window on nothing. Globbed rather than listed, for
+# ``packaging/agentclip.spec``'s reason: webview/assets.py's ASSET_NAMES is the
+# contract for what must be there, and a second copy of that list here would be a
+# fourth asset away from silently shipping three.
+#
+# ``shell/webview`` needs none of its own: it is the plumbing both windows are
+# made of (the bridge, the service editor's model, the asset RESOLUTION), and
+# every file it resolves belongs to the package that owns the window.
+MONITOR_UI_ASSETS = os.path.join(SRC, "agentclip", "shell", "monitor_ui", "assets")
+page_datas = [
+    (os.path.join(MONITOR_UI_ASSETS, name), "agentclip/shell/monitor_ui/assets")
+    for name in sorted(os.listdir(MONITOR_UI_ASSETS))
+    if os.path.isfile(os.path.join(MONITOR_UI_ASSETS, name))
+]
+
+# pywebview's backend, named per PLATFORM. Lifted from ``packaging/agentclip.spec``
+# unchanged and for its reasons: webview/guilib.py's ``initialize()`` picks the
+# backend off ``platform.system()`` and imports it by name, so the module the
+# frozen binary needs is decided by the OS the build ran on - and where guilib
+# tries two backends in order, BOTH are named, because the pick belongs to the
+# machine the exe lands on rather than to the one it was frozen on.
+if sys.platform == "win32":
+    webview_platforms = [
+        "webview.platforms.winforms",
+        "webview.platforms.edgechromium",
+        "webview.platforms.mshtml",
+    ]
+    # pythonnet's tree, which is what winforms runs on. `clr` is named
+    # separately because it is a two-line shim module rather than a package and
+    # it is what pulls pythonnet in.
+    webview_runtime = ["clr", "pythonnet", "clr_loader"]
+elif sys.platform == "darwin":
+    webview_platforms = ["webview.platforms.cocoa"]
+    webview_runtime = []
+else:
+    webview_platforms = ["webview.platforms.gtk", "webview.platforms.qt"]
+    webview_runtime = []
 
 hiddenimports = [
     # The OpenCV matcher backend. Collection itself needs no help (PyInstaller
@@ -96,6 +155,18 @@ hiddenimports = [
     # everything above, and the same consequence if it were missed: a monitor
     # that runs but cannot tell the operator which address to type.
     "psutil",
+    # The Monitor UI's toolkit. `webview` itself is unconditional (the package
+    # is the same everywhere and shell/monitor_ui/window.py reaches it inside
+    # the function that creates the window); the backend and its runtime come
+    # from the per-platform block above. Collection below that needs no help:
+    # pywebview and pythonnet each ship a PyInstaller hook through the
+    # `pyinstaller40` entry point, and pyinstaller-hooks-contrib adds hook-clr
+    # and hook-clr_loader - so the WebView2 interop DLLs, webview/js/,
+    # Python.Runtime.dll and clr_loader's ffi DLLs all ride along once the
+    # modules are REACHABLE, which is the only half a lazy import makes fragile.
+    "webview",
+    *webview_platforms,
+    *webview_runtime,
 ]
 
 # The X11 backend (driver/screen/x11.py) - capture, XTest input and EWMH focus
@@ -118,12 +189,10 @@ excludes = [
     # the shell and dropped both dependencies, which is a stronger version of the
     # same guarantee.
     "pygments",
-    # The window UI's stack. See the module docstring: the Monitor UI is
-    # a later phase's addition to this binary, not a silent one.
-    "webview",
-    "pythonnet",
-    "clr",
-    "clr_loader",
+    # `webview`, `pythonnet`, `clr` and `clr_loader` were HERE until 9.1, with a
+    # note saying the Monitor UI would be a later phase's addition rather than a
+    # silent one. This is that phase: they are hiddenimports above now, and the
+    # excludes below are what still is not in this binary.
     # ENGINE / EXECUTOR: the whole other half of the app. The monitor runs no
     # session, spawns no tool and speaks to no model, so none of this is
     # reachable - the layering test says so, and excluding it makes that
@@ -150,17 +219,20 @@ excludes = [
 
 a = Analysis(
     # The console script's module, reached as a file. `[project.scripts]` names
-    # `agentclip.driver.monitor.__main__:main` and this is that module - its
+    # `agentclip.shell.monitor_ui.__main__:main` and this is that module - its
     # `if __name__ == "__main__"` guard fires because PyInstaller runs an entry
     # script exactly as `__main__`, so the frozen binary and `python -m
-    # agentclip.driver.monitor` are the same door.
-    [os.path.join(SRC, "agentclip", "driver", "monitor", "__main__.py")],
+    # agentclip.shell.monitor_ui` are the same door. It is the SHELL's entry
+    # since 9.1 rather than the Driver's: the binary opens a window, and
+    # `--headless` is one delegation away inside it.
+    [os.path.join(SRC, "agentclip", "shell", "monitor_ui", "__main__.py")],
     pathex=[SRC],
     binaries=[],
-    # No datas of our own. The package is freeze-friendly by design
-    # (architecture.md 7), and the one exception in the tree - the GUI shells'
-    # page assets - is on the other side of the layering line and excluded above.
-    datas=[],
+    # The Monitor UI's page, and nothing else: the rest of the tree is
+    # freeze-friendly by design (architecture.md 7), and a browser engine
+    # loading a page over a file:// URL is the one deliberate exception - which
+    # is now on THIS side of the layering line.
+    datas=page_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -196,9 +268,12 @@ exe = EXE(
     # UPX trips AV heuristics and has a history of corrupting Windows DLLs.
     upx=False,
     runtime_tmpdir=None,
-    # Not a TUI - there is no UI at all. It is that the operator starts this in
-    # a terminal, reads the "listening on ..." line and ends it with Ctrl+C, and
-    # a windowed build detaches exactly those.
+    # Kept console even though this binary now opens a window, because
+    # `--headless` is the door a VM with no desktop uses: the operator starts it
+    # in a terminal, reads the "listening on ..." line and the token off stderr,
+    # and ends it with Ctrl+C - and a windowed build detaches exactly those. The
+    # cost is a console behind the Monitor UI on Windows, which is a window an
+    # operator standing at a VM can live with; losing the headless door is not.
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,

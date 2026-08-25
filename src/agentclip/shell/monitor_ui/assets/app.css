@@ -214,6 +214,77 @@ button:not(:disabled) {
   overflow-wrap: anywhere;
 }
 
+/* -- the Serve panel -------------------------------------------------------
+   Its own band under the header (ui-monitor.md 9.1), and the only block on
+   this page that is not about pixels: it says who may drive this machine. Two
+   rows that wrap rather than a grid - the controls are of wildly different
+   widths (a dropdown of NIC addresses, five digits of port, a 32-character
+   token) and a column layout would size every one of them for the longest.
+
+   The token is monospace and selectable, because the fallback for a Copy
+   button that a locked-down webview refuses is a human dragging over it. */
+
+.serve {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.serve-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.serve-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  min-width: 52px;
+}
+
+.serve-row button {
+  padding: 4px 12px;
+  font-size: 12.5px;
+}
+
+.serve select,
+.serve input[type="text"] {
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 12.5px;
+}
+
+.serve select {
+  max-width: 260px;
+}
+
+.serve input[type="text"] {
+  width: 88px;
+}
+
+.serve select:disabled,
+.serve input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* The one string on this page somebody has to reproduce by hand if the copy
+   button cannot: monospace, and wide enough that it never wraps mid-token. */
+.serve-token {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  overflow-wrap: anywhere;
+}
+
 /* -- toasts --------------------------------------------------------------- */
 
 .toasts {

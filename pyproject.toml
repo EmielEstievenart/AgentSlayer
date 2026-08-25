@@ -73,7 +73,12 @@ agentclip-engine = "agentclip.engine.link.__main__:main"
 # mode - and serves that screen, mouse, keyboard and clipboard to a brain over
 # the JSON-lines monitor wire. A standing process: it keeps polling whether or
 # not a brain is attached, and accepts a redial (2.8).
-agentclip-monitor = "agentclip.driver.monitor.__main__:main"
+# It points at the SHELL rather than at the driver since 9.1: the binary opens
+# the Monitor UI (service editor, ELEMENTS, region picker, Serve panel), and
+# `--headless` delegates to driver/monitor/__main__.py verbatim for the VM with
+# no desktop. The argument grammar is still the Driver's, imported by that
+# dispatcher - one parser, two doors.
+agentclip-monitor = "agentclip.shell.monitor_ui.__main__:main"
 
 [dependency-groups]
 dev = [

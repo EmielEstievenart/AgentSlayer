@@ -420,14 +420,27 @@ class MonitorServer:
 
     @property
     def token(self) -> str | None:
-        """The secret a hello must carry, or None for the no-token mode.
+        """The secret the NEXT hello must carry, or None for the no-token mode.
 
-        Read-only: a token is chosen when the process starts and printed for
-        the operator to copy, so a setter would be a way to make the sentence
-        on their screen a lie. Replacing one is
-        :func:`agentclip.driver.monitor.auth.regenerate_token` plus a restart.
+        Settable, and only because there is now a surface that can keep the
+        sentence on the operator's screen true: the Monitor UI's Serve panel
+        shows the token and regenerates it in place (ui-monitor.md 9.1), so
+        the value here and the value the panel prints are written together.
+        A terminal-only monitor never assigns it - it prints what
+        :func:`~agentclip.driver.monitor.auth.load_or_create_token` gave it,
+        once, and that string stays true for the process's life.
+
+        Assigning it does NOT drop the attached brain, and that is the design's
+        word rather than an accident of the implementation: a connection that
+        already shook hands was already authorised, and :class:`_Session` holds
+        its own copy of the secret it was admitted under. What changes is what
+        the next ``hello`` has to carry.
         """
         return self._token
+
+    @token.setter
+    def token(self, token: str | None) -> None:
+        self._token = token
 
     @property
     def port(self) -> int:

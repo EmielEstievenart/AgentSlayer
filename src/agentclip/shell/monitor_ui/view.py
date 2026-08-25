@@ -61,6 +61,7 @@ from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.profile_store import load_profile
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
+from agentclip.shell.monitor_ui.serve import ServePanel
 from agentclip.shell.webview.bridge import Bridge
 from agentclip.shell.webview.service_editor import ServiceEditor, kind_of, png_data_uri
 
@@ -198,6 +199,7 @@ class CalibrationView:
         on_exit: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
         on_calibration: Callable[[AgentSlot, ScreenRegion | None], None] | None = None,
+        serve: ServePanel | None = None,
     ) -> None:
         self._bridge = bridge
         self._config = config
@@ -221,6 +223,23 @@ class CalibrationView:
         # this window at all, and phase 5 is where the monitor grows a home for
         # it on its own machine.
         self._on_calibration = on_calibration if on_calibration is not None else _no_calibration
+
+        # -- who may drive this machine ----------------------------------------
+        # The Serve panel (ui-monitor.md 9.1), or None where there is nothing to
+        # serve: the Chat UI opens this window over the monitor it is ALREADY
+        # driving in local mode, and a second listener onto the same mouse is
+        # not a feature. Standalone it is always there.
+        #
+        # Constructed by whoever built the monitor and bound HERE, because the
+        # two things it needs are this view's: the loop its server has to live
+        # on, and the page's event vocabulary.
+        self._serve = serve
+        if serve is not None:
+            serve.bind(
+                schedule=self._schedule,
+                push=lambda state: self._bridge.send("serve", **state),
+                notify=lambda message: self.notify(message),
+            )
 
         # -- what is being calibrated ------------------------------------------
         self._slot = AgentSlot.MASTER
@@ -278,6 +297,11 @@ class CalibrationView:
     def editor(self) -> ServiceEditor | None:
         return self._editor
 
+    @property
+    def serve(self) -> ServePanel | None:
+        """The Serve panel, or None for a window with nothing to serve."""
+        return self._serve
+
     # == lifecycle =============================================================
 
     def start(self) -> None:
@@ -291,6 +315,11 @@ class CalibrationView:
         self.open_service_editor()
         self._push_all()
         self._retarget()
+        # Last, and only when a command line asked for it: the first thing the
+        # page paints is then a panel that is already listening rather than one
+        # that starts a beat later under the reader's eyes.
+        if self._serve is not None:
+            self._serve.start_if_requested()
 
     def page_ready(self) -> None:
         """A reload: repaint every surface from the state we already hold."""
@@ -308,11 +337,40 @@ class CalibrationView:
         self._push_calibration()
 
     async def close(self) -> None:
-        """Stop listening and end the monitor's threads for good. Idempotent."""
+        """Stop listening and end the monitor's threads for good. Idempotent.
+
+        The Serve panel's listener goes FIRST and on this loop: it is bound to
+        the loop that is about to stop, and a socket left listening would hold
+        the port against the next launch of this very window.
+        """
+        if self._serve is not None:
+            await self._serve.close()
         drop, self._drop_frames = self._drop_frames, None
         if drop is not None:
             drop()
         await self._monitor.close()
+
+    # == the Serve panel =======================================================
+    # Four verbs, each one a forward: the panel owns the server, the token and
+    # every sentence about them (serve.py), and the view owns only the fact that
+    # a page can ask.
+
+    def serve_start(self, address: str, port: int, no_token: bool) -> None:
+        if self._serve is not None:
+            self._serve.start(address, port, no_token)
+
+    def serve_stop(self) -> None:
+        if self._serve is not None:
+            self._serve.stop()
+
+    def token_copy(self) -> str:
+        """The token, ANSWERED rather than pushed: the page writes it to the
+        clipboard, which is a thing only a real user gesture may do."""
+        return "" if self._serve is None else self._serve.token
+
+    def token_regenerate(self) -> None:
+        if self._serve is not None:
+            self._serve.regenerate()
 
     # == the window's chrome ===================================================
 
@@ -916,6 +974,8 @@ class CalibrationView:
         self._push_calibration()
         self._push_editor()
         self._push_elements()
+        if self._serve is not None:
+            self._serve.push()
 
     def _push_calibration(self) -> None:
         """The header block: which window, what is drawn for it, which service."""

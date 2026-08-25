@@ -50,6 +50,7 @@ from agentclip.driver.monitor.local import LocalUIMonitor
 from agentclip.driver.screen.profile_store import load_profile
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
+from agentclip.shell.monitor_ui.serve import ServePanel
 from agentclip.shell.monitor_ui.view import CalibrationMonitor, CalibrationView
 from agentclip.shell.webview.assets import package_asset_dir, page_url
 from agentclip.shell.webview.bridge import Bridge, EmitFn
@@ -115,6 +116,10 @@ class CalibrationCalls(Protocol):
 
     def page_ready(self) -> None: ...
     def start_page(self) -> None: ...
+    def serve_start(self, address: str, port: int, no_token: bool) -> None: ...
+    def serve_stop(self) -> None: ...
+    def token_copy(self) -> str: ...
+    def token_regenerate(self) -> None: ...
     def select_slot(self, name: str) -> None: ...
     def set_chat_region(self) -> None: ...
     def show_identify(self) -> None: ...
@@ -168,6 +173,35 @@ class CalibrationJsApi:
     def slot(self, name: str = "") -> None:
         """The MASTER / SUB-AGENT picker."""
         self._safely(lambda: self._calls.select_slot(name))
+
+    # -- the Serve panel ------------------------------------------------------
+
+    def serve_start(self, address: str = "", port: int = 0, no_token: bool = False) -> None:
+        """"Start": bind the monitor port. Answered by a ``serve`` event."""
+        self._safely(lambda: self._calls.serve_start(address, int(port), bool(no_token)))
+
+    def serve_stop(self) -> None:
+        """"Stop": drop the listener. The monitor keeps polling."""
+        self._safely(self._calls.serve_stop)
+
+    def token_copy(self) -> str:
+        """The one verb that ANSWERS rather than schedules.
+
+        The page writes the token to the clipboard, because a clipboard write is
+        a thing only a real user gesture may do - so the value has to come back
+        through pywebview's return path (a promise on the JS side) rather than
+        as a push. Read straight off the panel on pywebview's own thread: it is
+        a string attribute, and marshalling it onto the loop would mean parking
+        this call on a future for no gain.
+        """
+        try:
+            return self._calls.token_copy()
+        except Exception:  # noqa: BLE001 - see the class docstring
+            return ""
+
+    def token_regenerate(self) -> None:
+        """"Regenerate": a new secret for the next hello. Nobody is dropped."""
+        self._safely(self._calls.token_regenerate)
 
     def set_region(self) -> None:
         """"Set chat region...": the fullscreen draw-a-box child process."""
@@ -278,6 +312,7 @@ class CalibrationRunner:
         on_close: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
         on_calibration: Callable[[AgentSlot, ScreenRegion | None], None] | None = None,
+        serve: ServePanel | None = None,
     ) -> None:
         self._owns_loop = schedule is None
         self._loop = asyncio.new_event_loop() if self._owns_loop else None
@@ -302,6 +337,7 @@ class CalibrationRunner:
             on_exit=self.request_close,
             on_config_change=on_config_change,
             on_calibration=on_calibration,
+            serve=serve,
         )
         self.js_api = CalibrationJsApi(self)
 
@@ -458,6 +494,20 @@ class CalibrationRunner:
     def start_page(self) -> None:
         self.schedule_call(self.view.start)
 
+    def serve_start(self, address: str, port: int, no_token: bool) -> None:
+        self.schedule_call(self.view.serve_start, address, port, no_token)
+
+    def serve_stop(self) -> None:
+        self.schedule_call(self.view.serve_stop)
+
+    def token_copy(self) -> str:
+        """Straight through, on pywebview's thread: this one has an answer, and
+        a string attribute read owes the loop nothing."""
+        return self.view.token_copy()
+
+    def token_regenerate(self) -> None:
+        self.schedule_call(self.view.token_regenerate)
+
     def select_slot(self, name: str) -> None:
         self.schedule_call(self.view.select_slot, name)
 
@@ -549,6 +599,7 @@ def build_monitor(
     *,
     profile_root: Path | None = None,
     provider: ClipboardProvider | None = None,
+    regions_dir: Path | None = None,
 ) -> LocalUIMonitor:
     """The monitor a standalone calibration window runs over.
 
@@ -567,6 +618,10 @@ def build_monitor(
         profile_for=lambda key: load_profile(root, key),
         clipboard=provider,
         clip_poll_interval_ms=config.clipboard.poll_interval_ms,
+        # Where a box drawn in this window is remembered (regions.py). ``None``
+        # for the window the Chat UI opens beside itself: that monitor's regions
+        # are the session's, and the app already carries them.
+        regions_dir=regions_dir,
     )
 
 
@@ -601,6 +656,61 @@ def open_calibration_window(
         return window
 
 
+def run_monitor_ui(
+    config: Config,
+    *,
+    config_dir: Path,
+    profile_root: Path | None = None,
+    global_config_path: Path | None = None,
+    provider: ClipboardProvider | None = None,
+    serve_at: tuple[str, int] | None = None,
+    no_token: bool = False,
+    monitor: LocalUIMonitor | None = None,
+) -> int:
+    """``agentclip-monitor``: the Monitor UI, standing on the machine with the
+    pixels.
+
+    The window ``agentclip --calibrate`` used to open, plus the two things a
+    standalone Monitor has that an in-app calibration visit does not
+    (ui-monitor.md §9.1): it OWNS the clipboard (a real provider, because this
+    process is the one a Chat UI will ask to read it), and it has a **Serve
+    panel** - an address, a port, a token, and the decision about who may drive
+    this desktop.
+
+    ``config_dir`` is where this machine's own two facts live: the token
+    (``auth.py``) and the chat regions drawn here (``regions.py``). It is
+    required rather than defaulted, because a Monitor UI that minted a token
+    into a directory nobody named would be a secret the operator cannot find
+    again.
+
+    ``serve_at`` is the command line's answer, when it gave one: ``--port`` (and
+    ``--bind``) pre-fill the panel and arm its auto-start, so a launcher that
+    used to type the whole thing still comes up listening.
+    """
+    machine = (
+        monitor
+        if monitor is not None
+        else build_monitor(
+            config,
+            profile_root=profile_root,
+            provider=provider,
+            regions_dir=config_dir,
+        )
+    )
+    return _run_window(
+        config,
+        monitor=machine,
+        profile_root=profile_root,
+        global_config_path=global_config_path,
+        serve=ServePanel(
+            machine,
+            config_dir=config_dir,
+            serve_at=serve_at,
+            no_token=no_token,
+        ),
+    )
+
+
 def run_calibration(
     config: Config,
     *,
@@ -613,13 +723,44 @@ def run_calibration(
 ) -> int:
     """``agentclip --calibrate``: open the calibration window and run it.
 
-    Standalone by construction - there is no engine, no session, no transcript
-    and no clipboard watcher anywhere below this call. What it needs is a
-    ``Config`` (which services exist, and how each is recognised) and a place to
-    read and write captured appearances; ``monitor`` is injectable so a suite can
-    drive the whole window over ``FakeUIMonitor``, and defaults to a real
-    ``LocalUIMonitor`` because a calibration window nobody configured is still a
-    window watching this machine's screen.
+    The same window with **no Serve panel**: this door is opened from the app
+    binary, over a monitor the app is already driving, and a second listener
+    onto the same mouse is not a feature. ``run_monitor_ui`` is the standalone
+    one and is the one ``agentclip-monitor`` opens.
+
+    Standalone by construction otherwise - there is no engine, no session, no
+    transcript and no clipboard watcher anywhere below this call. What it needs
+    is a ``Config`` (which services exist, and how each is recognised) and a
+    place to read and write captured appearances; ``monitor`` is injectable so a
+    suite can drive the whole window over ``FakeUIMonitor``, and defaults to a
+    real ``LocalUIMonitor`` because a calibration window nobody configured is
+    still a window watching this machine's screen.
+    """
+    return _run_window(
+        config,
+        monitor=(
+            monitor
+            if monitor is not None
+            else build_monitor(config, profile_root=profile_root, provider=provider)
+        ),
+        profile_root=profile_root,
+        global_config_path=global_config_path,
+        on_config_change=on_config_change,
+        on_calibration=on_calibration,
+    )
+
+
+def _run_window(
+    config: Config,
+    *,
+    monitor: CalibrationMonitor,
+    profile_root: Path | None = None,
+    global_config_path: Path | None = None,
+    serve: ServePanel | None = None,
+    on_config_change: Callable[[Config], None] | None = None,
+    on_calibration: Callable[[AgentSlot, ScreenRegion | None], None] | None = None,
+) -> int:
+    """One window, one loop thread, one pump - what both entry points are.
 
     Order is ``run_gui``'s and is the design's: the window is created with the
     ``js_api`` object first (pywebview injects the API at load), the bridge is
@@ -636,15 +777,12 @@ def run_calibration(
 
     runner = CalibrationRunner(
         config=config,
-        monitor=(
-            monitor
-            if monitor is not None
-            else build_monitor(config, profile_root=profile_root, provider=provider)
-        ),
+        monitor=monitor,
         profile_root=profile_root,
         global_config_path=global_config_path,
         on_config_change=on_config_change,
         on_calibration=on_calibration,
+        serve=serve,
     )
     try:
         open_calibration_window(webview, runner)
@@ -653,10 +791,12 @@ def run_calibration(
         # RETURNING rather than off the window's ``closing`` event, for the chat
         # shell's reason: ``closing`` runs on the window's own thread and the
         # bridge's drainer parks inside ``evaluate_js`` waiting on that very
-        # thread.
+        # thread. It is also what closes the Serve panel's listener: the runner's
+        # stop sequence awaits ``view.close()`` on the loop the server lives on,
+        # which is the last moment there is one.
         webview.start()
     except Exception as exc:  # pywebview's WebViewException and friends
-        print(f"agentclip: the calibration window could not start: {exc}", file=sys.stderr)
+        print(f"agentclip: the monitor window could not start: {exc}", file=sys.stderr)
         return 2
     finally:
         runner.stop()
@@ -685,4 +825,5 @@ __all__: Sequence[str] = [
     "entry_url",
     "open_calibration_window",
     "run_calibration",
+    "run_monitor_ui",
 ]

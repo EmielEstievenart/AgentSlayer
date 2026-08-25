@@ -22,6 +22,27 @@ Status: **HISTORICAL, NOT BINDING** (2026-08-25). Agreed and implemented in full
 >   LIVE↔DEAD state machine. The link channel is opened on exactly this.
 > * **`SshHost.open_link_channel`** and `LinkChannel` — the one exec channel a
 >   session now has, described by remote-executor.md §2.12, not here.
+> * **`SshHost.open_tunnel`** and `Tunnel` — **AS BUILT (2026-08-25)**, and new
+>   rather than surviving: the connection carries a second kind of channel now.
+>   A UI monitor runs where the *pixels* are, and when those pixels are on the
+>   SSH target the Chat UI has to reach a TCP port over there. `open_tunnel(
+>   dest_host, dest_port)` opens a `direct-tcpip` channel on the live connection
+>   and binds an ephemeral `127.0.0.1` listener in front of it, so
+>   `RemoteUIMonitor.connect("127.0.0.1", tunnel.local_port)` works unchanged —
+>   no external `ssh -L`, no second SSH process, no port chosen by hand, and
+>   nothing left running when the tunnel is closed. The channel opens **eagerly**,
+>   at `open_tunnel` time, precisely so a destination that is not listening fails
+>   into the connect dialog that asked rather than into a monitor handshake much
+>   later. Exactly **one** local connection is served (the listener closes on the
+>   first `accept`, so a second dial is refused — one brain), and two daemon
+>   threads pump 64 KiB chunks each way until either side EOFs. The one place its
+>   error mapping departs from `open_link_channel`: a `ChannelException` means the
+>   *target* refused to reach the destination while the SSH link is healthy, so it
+>   raises `ConnectionRefusedError` naming `host:port` and does **not** mark the
+>   host dead — a mistyped port must not cost a re-dial and a fresh
+>   authentication. Every other paramiko/OS failure is `mark_dead` as usual.
+>   Covered by `tests/executor/hosts/test_ssh_tunnel.py` (fake channel, real
+>   loopback sockets; no `real_ssh` marker).
 > * The **connect sequence** (`executor/hosts/connect.py`), unchanged in shape:
 >   its six steps still resolve, dial, probe the OS, check the remote root,
 >   capture home + environment, and read the target's config. What they run on

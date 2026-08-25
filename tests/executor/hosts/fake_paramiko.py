@@ -9,7 +9,10 @@ socket, so the unit tests cost nothing and can run anywhere.
 from __future__ import annotations
 
 import errno
+import queue
 import stat as stat_module
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -271,6 +274,81 @@ class FakeCommandScript:
     stderr_chunks: list[bytes] = field(default_factory=list)
 
 
+class FakeTcpChannel:
+    """A ``direct-tcpip`` channel: a blocking byte pipe, not a scripted command.
+
+    The other fake channel answers a whole command at once and then EOFs, which
+    is exactly wrong for a tunnel - the pump thread would see EOF before a local
+    client ever connected. So this one BLOCKS in ``recv`` until a test stages
+    bytes with :meth:`feed`, calls :meth:`feed_eof`, or closes it, which is what
+    a real forwarded connection does while the far side is quiet.
+
+    Whatever the tunnel writes accumulates in ``sent``; :meth:`wait_for_sent`
+    is how a test waits for bytes that another thread is carrying.
+    """
+
+    def __init__(self, kind: str, dest: Any, origin: Any) -> None:
+        self.kind = kind
+        self.dest = dest
+        self.origin = origin
+        self.sent = bytearray()
+        self.closed = False
+        self._lock = threading.Lock()
+        self._incoming: queue.Queue[bytes | None] = queue.Queue()
+        self._left = b""
+
+    # -- what a test drives it with -----------------------------------------
+
+    def feed(self, data: bytes) -> None:
+        """Bytes arriving FROM the far side, as if the destination wrote them."""
+        self._incoming.put(data)
+
+    def feed_eof(self) -> None:
+        """The far side hung up."""
+        self._incoming.put(None)
+
+    def wait_for_sent(self, count: int, timeout: float = 5.0) -> bytes:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            with self._lock:
+                if len(self.sent) >= count:
+                    return bytes(self.sent)
+            time.sleep(0.005)
+        with self._lock:
+            return bytes(self.sent)
+
+    # -- paramiko.Channel surface -------------------------------------------
+
+    def recv(self, n: int) -> bytes:
+        if self._left:
+            data, self._left = self._left[:n], self._left[n:]
+            return data
+        if self.closed:
+            return b""
+        item = self._incoming.get()  # blocks, like the real thing
+        if item is None:
+            return b""
+        data, self._left = item[:n], item[n:]
+        return data
+
+    def sendall(self, data: bytes) -> None:
+        if self.closed:
+            raise OSError("socket is closed")
+        with self._lock:
+            self.sent.extend(data)
+
+    def send(self, data: bytes) -> int:
+        self.sendall(data)
+        return len(data)
+
+    def settimeout(self, timeout: float | None) -> None:
+        pass
+
+    def close(self) -> None:
+        self.closed = True
+        self._incoming.put(None)  # wake whoever is blocked in recv()
+
+
 class FakeTransport:
     def __init__(self, client: FakeSSHClient) -> None:
         self._client = client
@@ -295,6 +373,21 @@ class FakeTransport:
         self._client.channels.append(chan)
         return chan
 
+    def open_channel(
+        self,
+        kind: str,
+        dest_addr: Any = None,
+        src_addr: Any = None,
+        timeout: float | None = None,
+    ) -> FakeTcpChannel:
+        if self._client.broken:
+            raise paramiko.SSHException(BROKEN)
+        if FakeSSHClient.open_channel_error is not None:
+            raise FakeSSHClient.open_channel_error
+        chan = FakeTcpChannel(kind, dest_addr, src_addr)
+        self._client.tcp_channels.append(chan)
+        return chan
+
 
 class FakeSSHClient:
     """paramiko.SSHClient with the socket removed.
@@ -310,11 +403,15 @@ class FakeSSHClient:
     # Exceptions to raise from connect(), consumed one per call.
     connect_errors: list[BaseException | None] = []
     host_keys_seen: list[str] = []
+    # Raised by transport.open_channel() when set: how a tunnel's open failure
+    # is injected, either as a refusal or as a dead transport.
+    open_channel_error: BaseException | None = None
 
     def __init__(self) -> None:
         self.broken = False
         self.commands: list[str] = []
         self.channels: list[FakeChannel] = []
+        self.tcp_channels: list[FakeTcpChannel] = []
         self.policy: paramiko.MissingHostKeyPolicy | None = None
         self.sftp: FakeSftp | None = None
         self._transport: FakeTransport | None = None
@@ -328,6 +425,7 @@ class FakeSSHClient:
         cls.scripts = []
         cls.connect_errors = []
         cls.host_keys_seen = []
+        cls.open_channel_error = None
 
     # -- paramiko.SSHClient surface -----------------------------------------
 

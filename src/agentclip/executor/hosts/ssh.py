@@ -37,6 +37,12 @@ a tool.
 matters: one long-lived duplex stream carrying the Shell<->Engine wire protocol
 (docs/design/remote-executor.md §2.12). It is deliberately NOT wrapped and NOT
 ``setsid``'d - see the method's docstring for why each of those is a feature.
+
+**The tunnel** (:meth:`SshHost.open_tunnel`) is the second thing the connection
+carries: a local loopback port forwarded to one address on the target's side, so
+the Chat UI can reach a standing monitor over there without an external
+``ssh -L``. One channel, one local connection, two pump threads - see
+:class:`Tunnel`.
 """
 
 from __future__ import annotations
@@ -46,6 +52,7 @@ import codecs
 import errno
 import hashlib
 import shlex
+import socket
 import stat as stat_module
 import threading
 import time
@@ -76,6 +83,14 @@ _RECV_CHUNK = 65536
 # grow this buffer for the life of a session.
 _LINK_STDERR_TAIL = 8192
 _LINK_CLOSE_JOIN_S = 2.0
+
+# A forwarded port is reachable from THIS machine and nowhere else: binding
+# 0.0.0.0 would put somebody else's monitor on the office network.
+_LOOPBACK = "127.0.0.1"
+# How long a tunnel's accept() blocks before it looks at whether it was closed.
+# Nothing waits on this - it is only the granularity of a close() with no client.
+_TUNNEL_ACCEPT_POLL_S = 0.2
+_TUNNEL_JOIN_S = 2.0
 
 # Prompt callbacks the caller supplies. Both are answered by whoever drives the
 # connect - the terminal launch's getpass, or the GUI dialog's modals; a re-dial
@@ -272,6 +287,170 @@ class LinkChannel:
                 excess = len(self._tail) - _LINK_STDERR_TAIL
                 if excess > 0:
                     del self._tail[:excess]
+
+
+class Tunnel:
+    """One local TCP port, forwarded over the SSH connection to one destination.
+
+    What ``ssh -L`` is for, without an ``ssh -L``: the Chat UI can reach a
+    standing monitor on the target's own machine by dialling
+    ``127.0.0.1:local_port`` here, and every byte rides the SSH connection this
+    tunnel was opened on. :meth:`RemoteUIMonitor.connect
+    <agentclip.driver.monitor.remote.RemoteUIMonitor.connect>` takes a host and
+    a port and needs to know nothing else, which is the whole point - the
+    monitor client is unchanged, and the tunnel is a detail of how the address
+    it was handed happens to work.
+
+    **Exactly one local connection.** The listener stops existing the moment it
+    has a client, so a second dial is REFUSED at connect(2) rather than accepted
+    and quietly dropped - the same "one brain" rule the monitor enforces at its
+    own end, arriving as an error the caller can read instead of a socket that
+    never answers. And a tunnel is spent once that connection ends: EOF on
+    either side closes both, and closing either side closes the tunnel.
+
+    **Two daemon threads, no event loop.** Paramiko's channel is a blocking,
+    thread-safe object and so is the socket, so the pump is two ``recv``/
+    ``sendall`` loops rather than anything asyncio has to be told about. The
+    monitor client above runs its own loop over the local socket and never sees
+    these threads.
+    """
+
+    __slots__ = (
+        "dest",
+        "local_host",
+        "local_port",
+        "_chan",
+        "_listener",
+        "_sock",
+        "_lock",
+        "_closed",
+        "_threads",
+        "_prefix",
+    )
+
+    def __init__(self, chan: paramiko.Channel, listener: socket.socket, *, dest: str) -> None:
+        self._chan = chan
+        self._listener = listener
+        self.dest = dest  # "host:port" on the far side, for diagnostics
+        self.local_host = _LOOPBACK
+        self.local_port = int(listener.getsockname()[1])
+        self._sock: socket.socket | None = None
+        self._lock = threading.Lock()
+        self._closed = False
+        self._prefix = f"agentclip-tunnel-{self.local_port}"
+        accept = threading.Thread(
+            target=self._accept_one, name=f"{self._prefix}-accept", daemon=True
+        )
+        self._threads: list[threading.Thread] = [accept]
+        accept.start()
+
+    @property
+    def closed(self) -> bool:
+        with self._lock:
+            return self._closed
+
+    def close(self) -> None:
+        """Tear the tunnel down. Idempotent, and safe from a pump thread.
+
+        The teardown itself happens once; the JOIN happens on every call from
+        OUTSIDE, so a caller that closes explicitly is guaranteed the threads
+        are gone when this returns.
+
+        A close from one of the tunnel's own threads joins nothing at all, and
+        that is load-bearing rather than a nicety: the pumps close each other,
+        so a pump that joined its siblings would have the up-pump waiting on the
+        down-pump while the down-pump waits on the up-pump - a deadlock that a
+        join timeout turns into a two-second pause instead of a hang, which is
+        worse than either. An internal close is a teardown NOTIFICATION; only
+        the owner waits.
+        """
+        with self._lock:
+            first = not self._closed
+            self._closed = True
+            sock = self._sock
+            threads = list(self._threads)
+        if first:
+            with suppress(Exception):  # closing a dead channel must never raise
+                self._chan.close()
+            with suppress(OSError):
+                self._listener.close()
+            if sock is not None:
+                # shutdown first: it is what reliably wakes a recv() blocked on
+                # this socket in the other pump thread, on every platform.
+                with suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+                with suppress(OSError):
+                    sock.close()
+        if threading.current_thread() in threads:
+            return
+        for thread in threads:
+            thread.join(timeout=_TUNNEL_JOIN_S)
+
+    def __enter__(self) -> Tunnel:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.close()
+
+    # -- the pump ------------------------------------------------------------
+
+    def _accept_one(self) -> None:
+        """Wait for the one local client, then start pumping both ways."""
+        while True:
+            with self._lock:
+                if self._closed:
+                    return
+            try:
+                sock, _peer = self._listener.accept()
+            except TimeoutError:
+                continue  # the poll that lets close() be noticed
+            except OSError:
+                return  # the listener went away: closed, or never worked
+            break
+        with suppress(OSError):
+            self._listener.close()  # one brain: a second dial is refused
+        sock.settimeout(None)
+        with self._lock:
+            if self._closed:  # closed while we were accepting
+                with suppress(OSError):
+                    sock.close()
+                return
+            self._sock = sock
+            pumps = [
+                threading.Thread(
+                    target=self._pump,
+                    args=(sock.recv, self._chan.sendall),
+                    name=f"{self._prefix}-up",
+                    daemon=True,
+                ),
+                threading.Thread(
+                    target=self._pump,
+                    args=(self._chan.recv, sock.sendall),
+                    name=f"{self._prefix}-down",
+                    daemon=True,
+                ),
+            ]
+            self._threads.extend(pumps)
+        for pump in pumps:
+            pump.start()
+
+    def _pump(self, read: Callable[[int], bytes], write: Callable[[bytes], object]) -> None:
+        """Move bytes one way until either end stops. Never raises upward."""
+        try:
+            while True:
+                data = read(_RECV_CHUNK)
+                if not data:
+                    break  # EOF on one side ends both: this is one connection
+                write(data)
+        except (OSError, EOFError, paramiko.SSHException):
+            pass  # a broken half is a closed tunnel, not an incident to report
+        finally:
+            self.close()
 
 
 class SshHost:
@@ -636,6 +815,69 @@ class SshHost:
             self.mark_dead(exc)
             raise OSError(errno.EIO, f"connection lost to {self.target}: {exc}") from exc
         return LinkChannel(chan)
+
+    # -- port forwarding -----------------------------------------------------
+
+    def open_tunnel(self, dest_host: str, dest_port: int) -> Tunnel:
+        """Forward a local loopback port to ``dest_host:dest_port`` on the target.
+
+        The connection an external ``ssh -L`` would have provided, opened on the
+        link this object already holds: the Chat UI dials
+        ``127.0.0.1:tunnel.local_port`` and reaches a monitor running where the
+        target's pixels are, with no second SSH process, no port to pick by hand
+        and nothing to leave running afterwards.
+
+        **The channel is opened EAGERLY, here, not on the first local accept.**
+        Lazily would be tidier plumbing and worse for the only caller: a connect
+        dialog asks for a tunnel because a human just typed a host and a port,
+        and "that port is not listening over there" has to come back as this
+        call's failure, while the dialog is still on screen and the field is
+        still editable. Deferred to the first accept it would surface much later
+        as a monitor handshake that hung up, several layers from the typo.
+
+        Two failures, deliberately told apart - and this is the one place the
+        error mapping differs from :meth:`open_link_channel`:
+
+        * The SERVER refused to open the channel (``ChannelException``: nothing
+          listening on ``dest_port``, a policy that forbids forwarding). The SSH
+          connection is perfectly healthy, so it is NOT marked dead - a bad port
+          in a dialog must not cost a re-dial and a fresh authentication when
+          the user fixes the digit. Surfaces as ``ConnectionRefusedError``
+          naming ``host:port``.
+        * The TRANSPORT died. Same treatment as everywhere else on this class:
+          :meth:`mark_dead`, so the next operation re-dials, and an
+          :class:`OSError` naming the connection.
+        """
+        dest = f"{dest_host}:{dest_port}"
+        client = self._ensure()
+        try:
+            transport = client.get_transport()
+            if transport is None:
+                raise paramiko.SSHException("the transport is gone")
+            chan = transport.open_channel(
+                "direct-tcpip",
+                (dest_host, dest_port),
+                (_LOOPBACK, 0),
+                timeout=_CONNECT_TIMEOUT_S,
+            )
+        except paramiko.ChannelException as exc:
+            self.last_error = exc  # the link is fine; the far side said no
+            raise OSError(errno.ECONNREFUSED, f"{self.target} cannot reach {dest}: {exc}") from exc
+        except (paramiko.SSHException, OSError, EOFError) as exc:
+            self.mark_dead(exc)
+            raise OSError(errno.EIO, f"connection lost to {self.target}: {exc}") from exc
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            listener.bind((_LOOPBACK, 0))
+            listener.listen(1)
+            listener.settimeout(_TUNNEL_ACCEPT_POLL_S)
+        except OSError:
+            with suppress(Exception):
+                chan.close()
+            with suppress(OSError):
+                listener.close()
+            raise
+        return Tunnel(chan, listener, dest=dest)
 
     # -- what the connect sequence reads off the target -----------------------
     #

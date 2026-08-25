@@ -431,6 +431,20 @@ class JsCalls(Protocol):
     def connect_cancel(self) -> None: ...
     def connect_save(self, name: str) -> None: ...
     def reconnect_now(self) -> None: ...
+    # The Monitor tab of the same dialog (``ui-monitor.md`` §9.2): which
+    # MACHINE'S SCREEN this window drives, as against which machine its files
+    # are on. Same arrangement, one method per intent, and one extra verb the
+    # SSH tab has no equivalent for - ``monitor_disconnect``, because a monitor
+    # can be let go of without ending the session, and an executor cannot.
+    def monitor_open(self) -> None: ...
+    def monitor_select(self, key: str) -> None: ...
+    def monitor_fields(self, mode: str, host: str, port: str, token: str, via: str) -> None: ...
+    def monitor_start(self) -> None: ...
+    def monitor_edit(self) -> None: ...
+    def monitor_cancel(self) -> None: ...
+    def monitor_save(self, name: str) -> None: ...
+    def monitor_forget(self, name: str) -> None: ...
+    def monitor_disconnect(self) -> None: ...
 
 
 class JsApi:
@@ -616,6 +630,59 @@ class JsApi:
         """The link indicator's button: spend the lazy re-dial early. The same
         ``_ensure`` the next operation would have called, never a second path."""
         self._safely(self._calls.reconnect_now)
+
+    # -- the Monitor tab (ui-monitor.md §9.2) ---------------------------------
+    # The other machine in the split, and the other kind of event: a dial here
+    # swaps the SCREEN under a session that keeps running, where the tab beside
+    # it starts a new session on new files.
+
+    def monitor_open(self) -> None:
+        """The dialog's "Monitor" tab. Opening it closes the Executor tab -
+        one dialog, two questions, one of them on screen at a time."""
+        self._safely(self._calls.monitor_open)
+
+    def monitor_select(self, key: str = "") -> None:
+        """A saved ``[monitor.<name>]`` row. Prefills the form, dials nothing."""
+        self._safely(lambda: self._calls.monitor_select(key))
+
+    def monitor_fields(
+        self, mode: str = "", host: str = "", port: str = "", token: str = "", via: str = ""
+    ) -> None:
+        """A keystroke in the form, as the WHOLE candidate - ``connect_fields``'
+        contract, with the mode radio riding along so the model always knows
+        which of the two forms the values belong to."""
+        self._safely(lambda: self._calls.monitor_fields(mode, host, port, token, via))
+
+    def monitor_start(self) -> None:
+        """"Attach", and "Retry": one dial at the values in the form."""
+        self._safely(self._calls.monitor_start)
+
+    def monitor_edit(self) -> None:
+        """"Edit": back to the form with the attempted values in it."""
+        self._safely(self._calls.monitor_edit)
+
+    def monitor_cancel(self) -> None:
+        """"Close": drop the tab. The LINK is not dropped - that is
+        ``monitor_disconnect``, and confusing the two would be a dialog whose
+        close button took the screen away."""
+        self._safely(self._calls.monitor_cancel)
+
+    def monitor_save(self, name: str = "") -> None:
+        """"Save this monitor": one ``[monitor.<name>]`` table in the GLOBAL
+        config - token included, stated rather than hidden (§9.2)."""
+        self._safely(lambda: self._calls.monitor_save(name))
+
+    def monitor_forget(self, name: str = "") -> None:
+        """Drop one saved ``[monitor.<name>]`` table."""
+        self._safely(lambda: self._calls.monitor_forget(name))
+
+    def monitor_disconnect(self) -> None:
+        """Let the remote monitor go and watch this machine's screen again.
+
+        A link event like the dial, and the session is untouched by it: the
+        loop parks, the switchable handle takes a local monitor back and the
+        recipe re-derives from whatever is on this screen (§2.9)."""
+        self._safely(self._calls.monitor_disconnect)
 
     @staticmethod
     def _safely(call: Callable[[], None]) -> None:

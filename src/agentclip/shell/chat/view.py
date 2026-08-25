@@ -40,6 +40,7 @@ whole key chain landed in increment 6.)
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -48,15 +49,19 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from agentclip.config import (
+    MONITOR_LOOPBACK,
     VALID_GUI_THEMES,
     Config,
     GuiConfig,
+    MonitorTarget,
     RemoteTarget,
     ServicePreset,
     default_global_config_path,
     default_profile_dir,
+    drop_monitor_target,
     save_active_services,
     save_gui_theme,
+    save_monitor_target,
     save_remote_target,
 )
 from agentclip.driver.automation.controller import AutomationController, MonitorLike
@@ -115,10 +120,14 @@ from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.chat.docs import load_doc_pages
 from agentclip.shell.chat.remote import (
+    MONITOR_CONNECT_FIRST,
+    MONITOR_LOCAL_AGAIN,
     ConnectDialog,
+    MonitorDialog,
     RemoteConnect,
     RemoteRuntime,
     alias_rows,
+    monitor_rows,
     policy_lines,
     saved_rows,
 )
@@ -318,7 +327,7 @@ CALIBRATION_OPEN = "the calibration window is already open"
 # mode that browser is on another machine - so there is nothing here to draw a
 # box around and the door is closed rather than opened onto the wrong screen.
 CALIBRATION_REMOTE = (
-    "calibration runs on the monitor's machine: run agentclip --calibrate there"
+    "calibration runs on the monitor's machine: run agentclip-monitor there"
 )
 
 # == the monitor link (--monitor host:port, ui-monitor.md §6.5) ================
@@ -341,6 +350,13 @@ MONITOR_RESTARTED = "the monitor at {peer} restarted - re-deriving everything fr
 # the only slow thing in the flow.
 MONITOR_BACKOFF_START = 1.0
 MONITOR_BACKOFF_CAP = 10.0
+
+# The Monitor tab's own three (§9.2). A dial is one round trip, so unlike the
+# SSH tab there is no checklist to be busy on - there is a button that is
+# already pressed, and a second press says so.
+MONITOR_DIAL_BUSY = "a monitor dial is already running"
+MONITOR_ALREADY_LOCAL = "this window is already watching this machine's screen"
+MONITOR_DIAL_FAILED = "the monitor did not answer"
 
 REGION_UNSET = "not set - alt-tab to the chat yourself"
 # The CHAT WINDOW block's readiness line, per SELECTED window - ``tui/widgets/
@@ -511,12 +527,32 @@ class DialledMonitor(UIMonitor, Protocol):
 # How a host:port becomes a monitor. Injected exactly as ``open_calibration``
 # is, and for the same reason: the real one opens a TCP connection, and a suite
 # must be able to run the whole connect/disconnect/redial story without one.
-MonitorDial = Callable[[str, int], Awaitable[DialledMonitor]]
+MonitorDial = Callable[[str, int, str], Awaitable[DialledMonitor]]
 
 
-async def _dial_remote_monitor(host: str, port: int) -> DialledMonitor:
-    """The real dial: one TCP connection and the monitor handshake (§6.5)."""
-    return await RemoteUIMonitor.connect(host, port)
+async def _dial_remote_monitor(host: str, port: int, token: str) -> DialledMonitor:
+    """The real dial: one TCP connection and the monitor handshake (§6.5).
+
+    ``token`` is §9.1's shared secret and "" is a real value - the right one for
+    a monitor started with ``--no-token``. It becomes ``None`` on the wire,
+    because the hello's field is optional and an empty string is a token that is
+    simply wrong.
+    """
+    return await RemoteUIMonitor.connect(host, port, token=token or None)
+
+
+def _as_monitor_target(given: MonitorTarget | tuple[str, int] | None) -> MonitorTarget | None:
+    """Normalise what a launch handed over into the one value type.
+
+    ``cli.main`` sends a :class:`MonitorTarget` since §9.2 (it has a token and,
+    for ``--monitor @name``, an SSH hop to make); the bare ``(host, port)`` pair
+    is §6.5's shape and is still accepted, because it is what "the address and
+    nothing else" honestly looks like and half the suite says it that way.
+    """
+    if given is None or isinstance(given, MonitorTarget):
+        return given
+    host, port = given
+    return MonitorTarget(name=f"{host}:{port}", host=host, port=port)
 
 
 def _fence(body: str) -> str:
@@ -649,7 +685,7 @@ class GuiView:
         on_exit: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
         open_calibration: OpenCalibration | None = None,
-        monitor_target: tuple[str, int] | None = None,
+        monitor_target: MonitorTarget | tuple[str, int] | None = None,
         dial: MonitorDial | None = None,
     ) -> None:
         self._bridge = bridge
@@ -760,11 +796,19 @@ class GuiView:
         # object nor the automation core is ever rebuilt for a link event
         # (§2.9). A ``monitor=`` handed in alongside it is ignored - the whole
         # point of split mode is that the machine arrives later.
-        self._monitor_target = monitor_target
+        #
+        # Since §9.2 the flag is no longer the whole entry: the Monitor tab on
+        # the connect dialog dials one mid-session, so the handle is a
+        # ``SwitchableMonitor`` in EVERY mode - local mode's inner is simply the
+        # ``LocalUIMonitor`` this machine watches its own screen with. That is
+        # what makes both directions ordinary swaps: a dial replaces the local
+        # inner with a remote one, and a disconnect puts a local one back,
+        # without the controller (or this object) being rebuilt for either.
+        self._monitor_target = _as_monitor_target(monitor_target)
         self._dial: MonitorDial = dial if dial is not None else _dial_remote_monitor
-        self._switch: SwitchableMonitor | None = (
-            SwitchableMonitor() if monitor_target is not None else None
-        )
+        # The tunnel under a Via-SSH link, so a redial can reopen one and a
+        # disconnect can close it. None for a direct dial and for local mode.
+        self._tunnel: Any = None
         # The far PROCESS's id from the last handshake, so a redial can tell a
         # resumed monitor from a restarted one (``DialledMonitor.server_id``).
         self._monitor_server_id: str | None = None
@@ -775,18 +819,21 @@ class GuiView:
         # redial loop - a backoff that outlived its window would keep dialling
         # a machine nobody is watching any more.
         self._monitor_closing = False
-        self._monitor: ShellMonitor = (
-            self._switch
-            if self._switch is not None
-            else monitor
-            if monitor is not None
-            else LocalUIMonitor(
-                profile_for=self._profile,
-                clipboard=provider,
-                clip_poll_interval_ms=config.clipboard.poll_interval_ms,
-                clip_accepts=looks_like_protocol,
-            )
+        # This machine's own screen, and what a ``monitor_disconnect`` swaps
+        # back to. Built EAGERLY in local mode (it is the inner from the first
+        # frame) and lazily in split mode, where building one at launch would
+        # mean a poll thread over the operator's desktop for a window that is
+        # only ever going to watch a VM.
+        self._injected_monitor = monitor
+        self._local_monitor: ShellMonitor | None = (
+            self._build_local_monitor() if self._monitor_target is None else None
         )
+        self._switch = (
+            SwitchableMonitor(self._local_monitor)
+            if self._local_monitor is not None
+            else SwitchableMonitor()
+        )
+        self._monitor: ShellMonitor = self._switch
         self._automation = AutomationController(
             view=self,
             monitor=self._monitor,
@@ -827,6 +874,16 @@ class GuiView:
         # The dialog's model while it is up, and None the rest of the time - the
         # service editor's arrangement (``chat/remote.py`` holds every decision).
         self._dialog: ConnectDialog | None = None
+        # The Monitor tab's model while the dialog is up (§9.2). A sibling of
+        # ``_dialog`` rather than a field inside it: the two tabs answer two
+        # unrelated questions (where the FILES are, where the SCREEN is) and
+        # only the page's header knows they share a frame.
+        self._monitor_dialog: MonitorDialog | None = None
+        self._monitor_dialling = False
+        # Why the last dial (or the last drop) parked the loop. Kept so the
+        # dialog can show on its FORM what the toast said once and scrolled
+        # away - the field the user has to fix is right there.
+        self._monitor_failure = ""
         # The RemoteTarget that was actually dialled, for the save offer. Held
         # rather than re-parsed: what the user typed and what the config layer
         # resolved it to are not the same string.
@@ -854,6 +911,25 @@ class GuiView:
             # Same trick, same reason: `/skills` before a session must name the
             # folders of whichever machine the NEXT session is built on.
             skills=self._skill_rows,
+        )
+
+    def _build_local_monitor(self) -> ShellMonitor:
+        """This machine's own :class:`LocalUIMonitor` - or the injected fake.
+
+        One constructor for both the eager (local-mode) and the lazy
+        (disconnect-from-split) build, so a shell that came back from a remote
+        monitor is watching the same kind of object it would have had all along.
+        Nothing is started here: a ``LocalUIMonitor`` polls only once it has
+        been configured, which is what makes building one cheap enough to do at
+        the moment the link is dropped.
+        """
+        if self._injected_monitor is not None:
+            return self._injected_monitor
+        return LocalUIMonitor(
+            profile_for=self._profile,
+            clipboard=self._provider,
+            clip_poll_interval_ms=self._config.clipboard.poll_interval_ms,
+            clip_accepts=looks_like_protocol,
         )
 
     # == lifecycle =============================================================
@@ -982,6 +1058,11 @@ class GuiView:
         self._monitor_closing = True
         self._automation.stop_loop()
         await self._monitor.close()
+        # The SSH tunnel a Via-SSH link rode on, if there is one. After the
+        # monitor, because the pump under it is what the monitor's socket was
+        # talking to: closing the tunnel first would turn an orderly close into
+        # a dropped link (``executor/hosts/ssh.py:Tunnel``).
+        self._close_tunnel()
 
     # == what the page asks for (js_api, already on the loop) ==================
 
@@ -2089,6 +2170,8 @@ class GuiView:
             self.notify(CONNECT_BUSY, severity="warning")
             return
         saved = saved_rows(self._config)
+        self._monitor_dialog = None  # one tab at a time; the header switches
+        self._push_monitor()
         self._dialog = ConnectDialog(
             saved=saved,
             aliases=alias_rows(self._ssh_aliases(), saved),
@@ -2191,6 +2274,228 @@ class GuiView:
             return
         dialog.saved_as(clean)
         self._push_connect()
+
+    # == the Monitor tab (docs/design/ui-monitor.md 9.2) =======================
+    # The other half of the same dialog, and the one that does NOT end a
+    # session: a mid-session dial is a LINK event. The loop parks in
+    # DISCONNECTED, the SwitchableMonitor's inner is replaced and the recipe
+    # re-derives from the screen (2.9) - which is exactly what a redial has
+    # always done, so dialling a different monitor is indistinguishable from the
+    # old one having been restarted somewhere else. The transcript, the session
+    # and the engine are untouched: they are the Executor's half.
+
+    def monitor_open(self) -> None:
+        """Open the dialog on the Monitor tab (the header's second button)."""
+        if self._monitor_dialling:
+            self.notify(MONITOR_DIAL_BUSY, severity="warning")
+            return
+        self._dialog = None  # one tab at a time; the header switches between them
+        self._monitor_dialog = MonitorDialog(
+            saved=monitor_rows(self._config),
+            ssh_targets=saved_rows(self._config),
+            attached=self._monitor_peer(),
+        )
+        self._push_connect()
+        self._push_monitor()
+
+    def monitor_select(self, key: str) -> None:
+        """A saved row: fill the form (and its token). It does NOT dial.
+
+        The token comes from the CONFIG here rather than from the row, because a
+        row is a thing the page draws and a token is not something to put in a
+        list somebody screenshots (``remote.monitor_of_row``).
+        """
+        dialog = self._monitor_dialog
+        if dialog is None:
+            return
+        dialog.select(key)
+        saved = self._config.monitor.targets.get(key.removeprefix("monitor:"))
+        if saved is not None:
+            dialog.token = saved.token
+        self._push_monitor()
+
+    def monitor_fields(self, mode: str, host: str, port: str, token: str, via: str) -> None:
+        """A keystroke in the form. No repaint, for ``connect_fields``' reason."""
+        if self._monitor_dialog is None:
+            return
+        self._monitor_dialog.set_fields(mode, host, port, token, via)
+
+    def monitor_start(self) -> None:
+        """"Attach", and "Retry" - one press, because a retry IS a fresh dial."""
+        dialog = self._monitor_dialog
+        if dialog is None:
+            return
+        if self._monitor_dialling:
+            self.notify(MONITOR_DIAL_BUSY, severity="warning")
+            return
+        if not dialog.begin():
+            self._push_monitor()
+            return
+        self._monitor_dialling = True
+        self._push_monitor()
+        self._schedule(self._monitor_flow(dialog.target()))
+
+    def monitor_edit(self) -> None:
+        """"Edit": back to the form with what was attempted still in it."""
+        if self._monitor_dialog is None:
+            return
+        self._monitor_dialog.edit()
+        self._push_monitor()
+
+    def monitor_cancel(self) -> None:
+        """"Close": drop the tab. Never cancels a dial in flight - the round
+        trip is one call and the link it makes has nowhere else to go."""
+        if self._monitor_dialling:
+            self.notify(MONITOR_DIAL_BUSY, severity="warning")
+            return
+        self._monitor_dialog = None
+        self._push_monitor()
+
+    def monitor_save(self, name: str) -> None:
+        """"Save this monitor": one ``[monitor.<name>]`` table, global file only.
+
+        Unlike its SSH sibling this one DOES write a secret - the token, if the
+        form has one. Stated rather than hidden (``config.save_monitor_target``):
+        the alternative to the token in the file the user chose is the token in
+        a second file they did not.
+        """
+        dialog = self._monitor_dialog
+        if dialog is None:
+            return
+        clean = "".join(ch for ch in name.strip() if ch.isalnum() or ch in "-_.").strip("-")
+        if not clean:
+            return
+        try:
+            save_monitor_target(dialog.target(clean), self._global_config_path)
+        except OSError as exc:
+            self.notify(f"could not save the monitor: {exc}", severity="warning")
+            return
+        dialog.saved_as(clean)
+        dialog.saved = monitor_rows(self._reload_monitor_targets(clean, dialog.target(clean)))
+        self._push_monitor()
+
+    def monitor_forget(self, name: str) -> None:
+        """Drop a saved ``[monitor.<name>]`` table. The picker's other half."""
+        try:
+            drop_monitor_target(name, self._global_config_path)
+        except OSError as exc:
+            self.notify(f"could not forget the monitor: {exc}", severity="warning")
+            return
+        self._config = replace(
+            self._config,
+            monitor=replace(
+                self._config.monitor,
+                targets={
+                    key: value
+                    for key, value in self._config.monitor.targets.items()
+                    if key != name
+                },
+            ),
+        )
+        if self._monitor_dialog is not None:
+            self._monitor_dialog.saved = monitor_rows(self._config)
+            self._push_monitor()
+
+    def monitor_disconnect(self) -> None:
+        """Let go of the remote monitor and watch this machine's screen again.
+
+        The swap in the other direction, and it is the same swap: a fresh
+        ``LocalUIMonitor`` becomes the inner, the loop is retargeted onto it and
+        the calibration door - closed for as long as the pixels were elsewhere
+        (6.4) - opens again. The redial loop is stopped first, because a
+        deliberate detach that a backoff undid one second later would be a
+        button that does nothing.
+        """
+        if self._monitor_target is None:
+            self.notify(MONITOR_ALREADY_LOCAL, severity="warning")
+            return
+        self._schedule(self._detach_monitor())
+
+    async def _detach_monitor(self) -> None:
+        """``monitor_disconnect``'s work, on the loop: swap local, retarget."""
+        self._monitor_target = None
+        self._monitor_server_id = None
+        self._monitor_dialling = False
+        local = self._build_local_monitor()
+        self._local_monitor = local
+        previous = self._switch.swap(local)
+        self._close_tunnel()
+        try:
+            await self._retarget_monitor()
+        except Exception as exc:  # noqa: BLE001 - a local retarget that refused
+            self.notify(f"could not watch this screen: {exc}", severity="warning")
+        self._switch.watch_clipboard(self._automation.os_armed)
+        self._automation.set_loop_state(LoopState.IDLE, MONITOR_LOCAL_AGAIN)
+        self.notify(MONITOR_LOCAL_AGAIN)
+        if self._monitor_dialog is not None:
+            self._monitor_dialog.detached()
+            self._push_monitor()
+        self._push_sidebar()
+        # The link, not the handle: ``swap`` hands the old inner back precisely
+        # so the side that knows whether it is dead gets to close it.
+        self._schedule(previous.close())
+
+    async def _monitor_flow(self, target: MonitorTarget) -> None:
+        """One dial from the dialog, and what it does to the rest of the shell.
+
+        The dial itself is ``_attach_monitor``, unchanged and shared with the
+        launch flag and the redial loop - so a link made from a dialog and a
+        link made from ``--monitor`` are the same link, configured by the same
+        sequence, redialled by the same backoff. What this adds is the two
+        things only a dialog owes: the target becomes the one the redial loop
+        uses, and a failure lands on the form rather than in a toast that scrolls
+        away.
+        """
+        dialog = self._monitor_dialog
+        previous, previous_tunnel = self._monitor_target, self._tunnel
+        self._monitor_target = target
+        try:
+            ok = await self._attach_monitor()
+        finally:
+            self._monitor_dialling = False
+        if not ok:
+            # Back to whatever was being watched before the attempt: a failed
+            # dial must not leave a redial loop chasing a machine the user only
+            # typed at. The reason is already on the loop's DISCONNECTED note,
+            # and it goes on the form too.
+            self._monitor_target, self._tunnel = previous, previous_tunnel
+            if dialog is not None:
+                dialog.failed(self._monitor_failure or MONITOR_DIAL_FAILED)
+                self._push_monitor()
+            return
+        if dialog is not None:
+            dialog.succeeded(peer=target.describe(), can_save=not dialog.is_saved())
+            self._push_monitor()
+        self._push_sidebar()
+
+    def _monitor_peer(self) -> str:
+        """Which monitor is attached, "" when the screen is this machine's."""
+        target = self._monitor_target
+        return target.describe() if target is not None else ""
+
+    def _reload_monitor_targets(self, name: str, target: MonitorTarget) -> Config:
+        """Fold a just-saved target into the live config, without a re-read.
+
+        Re-reading the file would be re-reading the machine's whole
+        configuration to learn one thing this process just wrote - and in a
+        remote session the config that is live belongs to the TARGET, which has
+        no [monitor] tables at all (they are global-only by design).
+        """
+        self._config = replace(
+            self._config,
+            monitor=replace(
+                self._config.monitor,
+                targets={**self._config.monitor.targets, name: replace(target, name=name)},
+            ),
+        )
+        return self._config
+
+    def _push_monitor(self) -> None:
+        """The whole Monitor tab in one event; ``open: false`` is closed."""
+        if self._monitor_dialog is None:
+            self._bridge.send("monitor", open=False)
+            return
+        self._bridge.send("monitor", **self._monitor_dialog.event())
 
     def reconnect_now(self) -> None:
         """The link indicator's button (gui.md §4 ruling 5).
@@ -2575,7 +2880,9 @@ class GuiView:
         browser, and the suspend below is a bracket, not a counter.
         """
         if self._monitor_target is not None:
-            # Split mode: the pixels are on another machine (§2.6, §6.4). This
+            # A remote monitor is attached - by the launch flag or by the
+            # Monitor tab, which is the same state either way since §9.2. The
+            # pixels are on another machine (§2.6, §6.4), and this
             # window's calibration runs over a LocalUIMonitor of its own, which
             # would capture THIS screen - a picture of the operator's desktop
             # saved as the chat service's appearance. So the door is closed and
@@ -3116,6 +3423,72 @@ class GuiView:
         if not await self._attach_monitor():
             self._begin_redial()
 
+    async def _dial_address(self, target: MonitorTarget) -> tuple[str, int]:
+        """Where to actually open the socket - and, Via SSH, the tunnel first.
+
+        A direct target IS its address. A Via-SSH one is a monitor bound to the
+        target's own loopback, so the address is a local port this process owns
+        and every byte through it rides the SSH connection the Executor already
+        holds: ``open_tunnel`` opens one ``direct-tcpip`` channel and pumps it
+        to a loopback listener (``executor/hosts/ssh.py:Tunnel``). No second
+        login, no second host-key question, no external ``ssh -L`` (§9.2).
+
+        Blocking, so it goes to a worker thread: it opens the channel EAGERLY,
+        which is what makes "nothing is listening on that port over there" this
+        call's failure - shown on the form the user just typed into - rather
+        than a handshake that hangs up two layers later.
+
+        A tunnel from the previous attempt is closed first, always. A redial
+        opens a fresh one, because the old one is spent: a tunnel serves exactly
+        one local connection and the link that used it is the one that died.
+        """
+        if not target.is_via_ssh():
+            return target.host, target.dial_port()
+        host = self._host
+        if not self._ssh_target_is(target.via):
+            raise ConnectionError(MONITOR_CONNECT_FIRST.format(name=target.via))
+        self._close_tunnel()
+        tunnel = await asyncio.to_thread(
+            host.open_tunnel, target.host or MONITOR_LOOPBACK, target.dial_port()
+        )
+        self._tunnel = tunnel
+        return str(tunnel.local_host), int(tunnel.local_port)
+
+    def _ssh_target_is(self, name: str) -> bool:
+        """Is the Executor connected to the saved SSH target called ``name``?
+
+        The refusal this answers is deliberate (``MONITOR_CONNECT_FIRST``): a
+        Monitor tab that quietly ran the SSH connect sequence would be ending
+        the user's session - "one session, one host" makes a connect a session
+        boundary - from behind a button that says "attach a monitor". So the
+        tab asks for the connection it needs and names it, and the Executor tab
+        beside it is one click away.
+
+        Matched against the name the target was SAVED as and against what the
+        connection calls itself, because a saved ``[remote.pi]`` whose host is
+        ``raspberrypi.local`` is dialled under both.
+        """
+        host = self._host
+        if host is None or getattr(host, "open_tunnel", None) is None:
+            return False
+        dialled = self._dialled
+        if dialled is not None and dialled.name == name:
+            return True
+        return str(getattr(host, "target", "")) in (name, self._remote_target)
+
+    def _close_tunnel(self) -> None:
+        """Drop the SSH tunnel under the link, if there is one. Idempotent.
+
+        Never fatal: a tunnel whose channel already died closes itself, and a
+        second close of one is a no-op by its own contract - so a failure here
+        would be a failure to tidy up after something that is already gone.
+        """
+        tunnel, self._tunnel = self._tunnel, None
+        if tunnel is None:
+            return
+        with contextlib.suppress(Exception):
+            tunnel.close()
+
     async def _attach_monitor(self) -> bool:
         """One dial attempt and everything a successful one owes. Never raises.
 
@@ -3128,13 +3501,14 @@ class GuiView:
         story.
         """
         target, switch = self._monitor_target, self._switch
-        if target is None or switch is None:  # pragma: no cover - guarded by callers
+        if target is None:  # pragma: no cover - guarded by callers
             return False
-        host, port = target
-        peer = f"{host}:{port}"
+        peer = target.describe()
         try:
-            link = await self._dial(host, port)
+            host, port = await self._dial_address(target)
+            link = await self._dial(host, port, target.token)
         except Exception as exc:  # noqa: BLE001 - a dial fails in the transport's own ways
+            self._close_tunnel()
             self._park_disconnected(MONITOR_RETRY.format(peer=peer, reason=exc))
             return False
         was = self._monitor_server_id
@@ -3180,6 +3554,7 @@ class GuiView:
         one notification per backoff round on top of the one that already says
         the true thing.
         """
+        self._monitor_failure = reason
         fresh = self._automation.loop_state is not LoopState.DISCONNECTED
         self._automation.set_loop_state(LoopState.DISCONNECTED, reason)
         if fresh:

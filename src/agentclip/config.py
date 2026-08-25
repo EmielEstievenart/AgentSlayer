@@ -514,6 +514,69 @@ class RemoteConfig:
         )
 
 
+# What ``agentclip-monitor`` listens on when nobody said otherwise, and what a
+# "Via SSH" form fills its port box with: the tunnel's far end is that monitor's
+# own loopback port, which is this one unless the operator moved it.
+DEFAULT_MONITOR_PORT = 7777
+
+# The far end of a Via-SSH dial, as seen FROM the target. Not a guess about the
+# network: the whole point of the tunnel is that the monitor is bound to the
+# target's loopback and nothing off that box can reach it (ui-monitor.md §9.2).
+MONITOR_LOOPBACK = "127.0.0.1"
+
+
+@dataclass(frozen=True, slots=True)
+class MonitorTarget:
+    """One Monitor a Chat UI can attach to (a ``[monitor.<name>]`` table).
+
+    The Monitor is the half that watches the Browser: pixels, mouse, keyboard,
+    clipboard (docs/design/ui-monitor.md §9.0). A target says how to reach one.
+
+    ``via`` names a saved ``[remote.<name>]`` SSH target and is what makes this
+    a **Via SSH** target rather than a direct one: ``host``/``port`` are then
+    read on THAT machine - typically ``127.0.0.1:7777``, the monitor's own
+    loopback - and the Chat UI reaches them through a ``direct-tcpip`` channel
+    on the SSH connection it already holds, with no second login and no external
+    ``ssh -L``.
+
+    ``token`` is §5's shared secret and it is stated plainly here rather than
+    hidden: a config file is where a user who wants one saved would put it, and
+    pretending otherwise only produces a second, worse place. ``$AGENTCLIP_
+    MONITOR_TOKEN`` overrides it for anyone who will not keep a secret in a file.
+    """
+
+    name: str = ""
+    host: str = ""
+    port: int = 0  # 0 = DEFAULT_MONITOR_PORT
+    token: str = ""
+    via: str = ""  # a saved [remote.<name>] name; "" = dial the host directly
+
+    def is_via_ssh(self) -> bool:
+        return bool(self.via)
+
+    def dial_port(self) -> int:
+        """The port to ask for, with the default filled in."""
+        return self.port or DEFAULT_MONITOR_PORT
+
+    def describe(self) -> str:
+        """``host:port``, prefixed with the SSH hop when there is one - the one
+        line a picker row shows under the name."""
+        where = f"{self.host or MONITOR_LOOPBACK}:{self.dial_port()}"
+        return f"via {self.via} -> {where}" if self.via else where
+
+
+@dataclass(frozen=True, slots=True)
+class MonitorConfig:
+    """The saved ``[monitor.<name>]`` targets, and nothing else.
+
+    A struct of one field for :class:`RemoteConfig`'s shape, not out of
+    optimism: what a session's monitor actually IS arrives on the command line
+    (``--monitor``) or from the connect dialog, and neither is a config fact.
+    """
+
+    targets: dict[str, MonitorTarget] = field(default_factory=dict)
+
+
 # The `[limits]` value that means "you work it out": not a size, and never seen
 # by anything that consumes a limit, because :func:`resolve_limits` turns it into
 # a number before the session starts. Zero is the right spelling for it - it is
@@ -633,6 +696,11 @@ class Config:
     backup: BackupConfig = field(default_factory=BackupConfig)
     permission: PermissionConfig = field(default_factory=PermissionConfig)
     remote: RemoteConfig = field(default_factory=RemoteConfig)
+    # The saved [monitor.<name>] targets, from the GLOBAL file alone: which
+    # machine's screen this PC can drive is a fact about this PC, not about the
+    # project - and in a remote session the project's config is on the target,
+    # which has no opinion about the operator's VMs (ui-monitor.md §9.2).
+    monitor: MonitorConfig = field(default_factory=MonitorConfig)
     # The effective ruleset PER MODE (shipped defaults, the mode's overlay, then
     # the user's permissions.json). Never empty: an install without a
     # permissions.json runs on the shipped defaults, which are also exactly what
@@ -1114,6 +1182,36 @@ def _load_remote(
     return RemoteConfig(target=target, root=root, targets=targets)
 
 
+def _load_monitor(table: dict, warnings: list[str]) -> MonitorConfig:
+    """Read the ``[monitor.<name>]`` saved targets. The GLOBAL layer only.
+
+    Handed ``global_layer``'s table rather than the merged one, which is the
+    whole difference from :func:`_load_remote`: a project's ``.agentclip.toml``
+    naming a monitor would be a project claiming to know which machines the
+    operator has a screen on, and in a remote session that file is on the target
+    - a box with no view of this desk at all.
+    """
+    targets: dict[str, MonitorTarget] = {}
+    for key, entry in table.items():
+        ctx = f"monitor.{key}"
+        if not isinstance(entry, dict):
+            warnings.append(f"config: [{ctx}] must be a table; ignored")
+            continue
+        via = _take_str(entry, "via", "", ctx, warnings)
+        host = _take_str(entry, "host", "", ctx, warnings)
+        targets[key] = MonitorTarget(
+            name=key,
+            # A direct target named for its host need not repeat it, exactly as
+            # [remote.<name>] works; a via-SSH one defaults to the far side's
+            # loopback, because that is where a monitor behind a tunnel is.
+            host=host or (MONITOR_LOOPBACK if via else key),
+            port=_take_int(entry, "port", 0, 0, 65_535, ctx, warnings),
+            token=_take_str(entry, "token", "", ctx, warnings),
+            via=via,
+        )
+    return MonitorConfig(targets=targets)
+
+
 def load_config(
     project_root: Path,
     *,
@@ -1158,6 +1256,15 @@ def load_config(
     paths_t = merged.get("paths", {})
     permission_t = merged.get("permission", {})
     remote_t = merged.get("remote", {})
+    # The GLOBAL layer, deliberately - see _load_monitor. A project that named
+    # one is told it was ignored rather than left wondering why nothing appeared
+    # in the picker.
+    monitor_t = global_layer.get("monitor", {})
+    if project_layer.get("monitor"):
+        warnings.append(
+            "config: [monitor.*] is read from the global config only; "
+            "the project's tables are ignored"
+        )
 
     services = default_services()
     for key, table in merged.get("services", {}).items():
@@ -1402,6 +1509,7 @@ def load_config(
             remote_root or "",
             warnings,
         ),
+        monitor=_load_monitor(monitor_t if isinstance(monitor_t, dict) else {}, warnings),
         exclude=_take_str_list(paths_t, "exclude", DEFAULT_EXCLUDES, "paths", warnings),
         services=services,
         warnings=tuple(warnings),
@@ -1688,6 +1796,96 @@ def save_remote_target(target: RemoteTarget, path: Path | None = None) -> None:
     data = dict(data)
     data["remote"] = remote_table
 
+    location.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=location.parent, prefix=f".{location.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            tomli_w.dump(data, f)
+        os.replace(tmp_name, location)
+    except BaseException:
+        with suppress(OSError):
+            os.remove(tmp_name)
+        raise
+
+
+def save_monitor_target(target: MonitorTarget, path: Path | None = None) -> None:
+    """Persist one Monitor as a ``[monitor.<name>]`` table in the GLOBAL config.
+
+    What the connect dialog's Monitor tab offers after a successful attach
+    (docs/design/ui-monitor.md §9.2). The global file and never the project's,
+    for :func:`save_remote_target`'s reason and one more: in a remote session
+    the project's config is on the target, and a monitor target describes how
+    *this* PC reaches a screen.
+
+    Unlike its SSH sibling this one CAN write a secret, and does: the token is
+    stated plainly rather than hidden, because the alternative to a token in the
+    file the user chose is a token in a second file they did not. Anyone who
+    would rather not keep it there leaves it out and exports
+    ``AGENTCLIP_MONITOR_TOKEN`` instead - the reader prefers the environment.
+
+    Same atomic write and the same "only this table is touched" contract as
+    :func:`save_remote_target`; a key at its default is left out rather than
+    written blank, so a saved target reads like one a human wrote.
+    """
+    location = path if path is not None else default_global_config_path()
+    discard_warnings: list[str] = []
+    data = _read_toml(location, discard_warnings)
+
+    name = target.name or target.host
+    entry: dict[str, object] = {}
+    # A direct target named for its host need not repeat it; a via-SSH one omits
+    # a host that is just the far side's loopback, which is what _load_monitor
+    # fills back in.
+    default_host = MONITOR_LOOPBACK if target.via else name
+    if target.host and target.host != default_host:
+        entry["host"] = target.host
+    if target.port:
+        entry["port"] = target.port
+    if target.token:
+        entry["token"] = target.token
+    if target.via:
+        entry["via"] = target.via
+
+    monitor_table = dict(data.get("monitor", {}))
+    monitor_table[name] = entry
+
+    data = dict(data)
+    data["monitor"] = monitor_table
+    _write_toml(location, data)
+
+
+def drop_monitor_target(name: str, path: Path | None = None) -> None:
+    """Remove one ``[monitor.<name>]`` table. A name that is not there is a no-op.
+
+    The other half of the picker: a target saved from a dialog can be unsaved
+    from one, without the user going and finding the TOML file that a UI wrote
+    for them. Idempotent, and it never rewrites the file it did not change - a
+    save that touched nothing would still be a rewrite of everybody else's
+    formatting.
+    """
+    location = path if path is not None else default_global_config_path()
+    discard_warnings: list[str] = []
+    data = _read_toml(location, discard_warnings)
+    monitor_table = dict(data.get("monitor", {}))
+    if name not in monitor_table:
+        return
+    del monitor_table[name]
+    data = dict(data)
+    if monitor_table:
+        data["monitor"] = monitor_table
+    else:
+        data.pop("monitor", None)
+    _write_toml(location, data)
+
+
+def _write_toml(location: Path, data: dict) -> None:
+    """The atomic write every saver above ends with: temp file, then replace.
+
+    Factored out at the two monitor savers rather than retrofitted onto the
+    five older ones, which each end with their own copy of exactly this - a
+    sweep that touches five working functions to save four lines apiece is a
+    diff with more risk in it than duplication.
+    """
     location.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=location.parent, prefix=f".{location.name}.", suffix=".tmp")
     try:

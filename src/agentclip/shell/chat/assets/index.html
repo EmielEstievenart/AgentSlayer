@@ -200,6 +200,10 @@
             <button id="reconnect-now" type="button">Reconnect now</button>
           </div>
           <button id="connect-remote" type="button" hidden>Connect to remote...</button>
+          <!-- The Monitor tab's own door, and it is NOT gated on the app having
+               a way to go remote: which machine's screen this window drives is
+               a question every build can answer (ui-monitor.md 9.2). -->
+          <button id="attach-monitor" type="button">Attach a monitor...</button>
 
           <!-- Absent - heading included - when the app has no MCP manager,
                which is most installs. -->
@@ -287,6 +291,16 @@
          each of them is a flow parked on an answer. -->
     <div class="conn-scrim" id="conn-scrim" hidden>
       <div class="conn-modal">
+        <!-- Two tabs, two machines, two unrelated questions: the EXECUTOR tab
+             says where this session's files and commands are, the MONITOR tab
+             says whose screen it is watching (ui-monitor.md 9.0). They share a
+             frame and nothing else - one is open at a time, and switching is a
+             round trip so the model on the Python side owns which. -->
+        <div class="conn-tabs">
+          <button id="conn-tab-exec" class="conn-tab" type="button">Executor</button>
+          <button id="conn-tab-monitor" class="conn-tab" type="button">Monitor</button>
+        </div>
+        <div id="conn-exec">
         <div class="conn-head">
           Connect to a remote machine
           <span class="hint">one session, one host - connecting starts a new session</span>
@@ -349,6 +363,82 @@
           <button id="conn-connect" type="button">Connect</button>
           <button id="conn-edit" type="button" hidden>Edit</button>
           <button id="conn-close" type="button">Cancel</button>
+        </div>
+        </div>
+
+        <!-- THE MONITOR TAB (ui-monitor.md 9.2). Same vocabulary, one round
+             trip instead of a seven-row checklist: a mid-session dial is a LINK
+             event, so it either landed or it did not. -->
+        <div id="conn-monitor" hidden>
+          <div class="conn-head">
+            Attach a monitor
+            <span class="hint" id="mon-attached"></span>
+          </div>
+
+          <div class="conn-body">
+            <div class="conn-cols" id="mon-form">
+              <div class="conn-col conn-picker">
+                <div class="side-title">SAVED MONITORS</div>
+                <ol class="conn-list" id="mon-saved"></ol>
+              </div>
+
+              <div class="conn-col conn-fields">
+                <!-- Direct: the monitor's own address on a network this PC can
+                     reach. Via SSH: the monitor is on the target's loopback and
+                     the bytes ride the connection the Executor already holds -
+                     no second login, no external `ssh -L`. -->
+                <div class="side-title">How to reach it</div>
+                <div class="mon-modes">
+                  <label
+                    ><input type="radio" name="mon-mode" id="mon-mode-direct" value="direct" />
+                    Direct</label
+                  >
+                  <label
+                    ><input type="radio" name="mon-mode" id="mon-mode-ssh" value="ssh" /> Via
+                    SSH</label
+                  >
+                </div>
+
+                <div id="mon-via-row" hidden>
+                  <div class="side-title">Saved SSH target</div>
+                  <select id="mon-via"></select>
+                </div>
+
+                <div class="side-title" id="mon-host-title">Monitor host</div>
+                <input id="mon-host" type="text" placeholder="e.g. 192.168.1.40" />
+                <div class="side-title">Port</div>
+                <input id="mon-port" type="text" placeholder="7777" />
+                <!-- Optional, because a monitor started with --no-token has
+                     none. Length-checked when it is there: a token that is the
+                     wrong length is a paste that went wrong, and saying so here
+                     costs one refused handshake less. -->
+                <div class="side-title">Token</div>
+                <input id="mon-token" type="password" placeholder="from the Serve panel" />
+                <div class="conn-error" id="mon-error"></div>
+              </div>
+            </div>
+
+            <div class="conn-failure" id="mon-failure" hidden></div>
+
+            <div class="conn-save" id="mon-save" hidden>
+              <div class="side-title">Save this monitor for next time</div>
+              <input id="mon-save-name" type="text" placeholder="name" />
+              <button id="mon-save-btn" type="button">Save</button>
+              <div class="side-status">
+                written to the global config.toml - the token goes with it
+              </div>
+            </div>
+            <div class="side-status" id="mon-saved-note"></div>
+          </div>
+
+          <div class="conn-footer">
+            <span class="hint" id="mon-hint"></span>
+            <span class="spacer"></span>
+            <button id="mon-attach" type="button">Attach</button>
+            <button id="mon-edit" type="button" hidden>Edit</button>
+            <button id="mon-detach" type="button" hidden>Disconnect</button>
+            <button id="mon-close" type="button">Close</button>
+          </div>
         </div>
       </div>
     </div>

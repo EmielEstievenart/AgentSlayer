@@ -1670,12 +1670,70 @@ button:not(:disabled) {
   box-shadow: var(--shadow);
 }
 
+/* The two-tab header. One dialog, two machines: which FILES (Executor) and
+   which SCREEN (Monitor) - ui-monitor.md 9.0's vocabulary, spelled as the two
+   words the rest of the app uses for them. */
+.conn-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.conn-tab {
+  padding: 6px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: none;
+  color: var(--text-dim);
+  font-weight: 600;
+}
+
+.conn-tab.on {
+  border-bottom-color: var(--accent);
+  color: var(--text);
+}
+
 .conn-head {
   display: flex;
   gap: 10px;
   align-items: baseline;
   margin-bottom: 10px;
   font-weight: 600;
+}
+
+/* The Direct / Via-SSH radio pair. A row rather than a select, because there
+   are exactly two and which one is chosen changes which fields below mean
+   anything. */
+.mon-modes {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 4px;
+}
+
+/* The forget control on a saved-monitor row. Beside the row rather than inside
+   it, so a mis-aimed click picks the target instead of deleting it. */
+#mon-saved li {
+  display: flex;
+  gap: 4px;
+  align-items: stretch;
+}
+
+#mon-saved li > .conn-row {
+  flex: 1;
+  min-width: 0;
+}
+
+.conn-forget {
+  padding: 0 8px;
+  color: var(--text-dim);
+}
+
+.mon-modes label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
 }
 
 .conn-body {

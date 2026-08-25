@@ -30,16 +30,19 @@ from agentclip.config import (
     SCROLL_ACTIONS,
     TOLERANCE_MAX,
     TOLERANCE_MIN,
+    MonitorTarget,
     ServicePreset,
     default_global_config_path,
     default_permissions_config_path,
     default_profile_dir,
     default_services,
+    drop_monitor_target,
     load_config,
     normalize_finish_signals,
     project_permissions_path,
     resolve_limits,
     save_active_services,
+    save_monitor_target,
     save_services,
     save_theme,
 )
@@ -1822,3 +1825,168 @@ def test_save_services_writes_the_newest_fields_only_when_they_differ(
         assert "snap_back" not in written[key]
         assert "alert_sound" not in written[key]
         assert "alert_repeat_seconds" not in written[key]
+
+
+# -- [monitor.<name>]: the saved Monitors, global-file-only --------------------
+#
+# docs/design/ui-monitor.md 9.2. A monitor target says how THIS PC reaches a
+# machine whose screen it can drive - which is why, unlike almost everything
+# else in this file, it is read from the global layer alone: the project's
+# .agentclip.toml lives on the TARGET in a remote session, and that box has no
+# opinion about the operator's VMs.
+
+
+def test_no_monitor_table_is_no_saved_monitors(project: Path, global_path: Path) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.monitor.targets == {}
+    assert not cfg.warnings
+
+
+def test_saved_monitors_are_read_from_the_table(project: Path, global_path: Path) -> None:
+    global_path.write_text(
+        '[monitor.vm]\nhost = "10.0.0.5"\nport = 7777\ntoken = "%s"\n\n'
+        '[monitor.tunnelled]\nvia = "pi"\n' % ("a" * 32),
+        encoding="utf-8",
+    )
+    cfg = load_config(project, global_config_path=global_path)
+
+    assert cfg.monitor.targets["vm"] == MonitorTarget(
+        name="vm", host="10.0.0.5", port=7777, token="a" * 32
+    )
+    # A via-SSH target's host defaults to the FAR side's loopback, because that
+    # is where a monitor reached through a tunnel is; the port falls back to
+    # DEFAULT_MONITOR_PORT at the point of use rather than at load.
+    saved = cfg.monitor.targets["tunnelled"]
+    assert (saved.via, saved.host, saved.port) == ("pi", "127.0.0.1", 0)
+    assert saved.dial_port() == 7777
+    assert not cfg.warnings
+
+
+def test_a_monitor_named_for_its_host_need_not_repeat_it(
+    project: Path, global_path: Path
+) -> None:
+    """[remote.<name>]'s rule, and the same reason: a table named for the
+    machine it reaches should not have to say the name twice."""
+    global_path.write_text("[monitor.\"10.0.0.5\"]\nport = 7777\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.monitor.targets["10.0.0.5"].host == "10.0.0.5"
+
+
+def test_a_scalar_where_a_monitor_should_be_is_warned_about(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text('[monitor]\nvm = "10.0.0.5"\n', encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+
+    assert cfg.monitor.targets == {}
+    assert any("[monitor.vm] must be a table" in w for w in cfg.warnings)
+
+
+def test_a_projects_monitor_tables_are_ignored_and_said_to_be(
+    project: Path, global_path: Path
+) -> None:
+    """The one rule this table has that [remote.<name>] does not. Ignored
+    SILENTLY would be the footgun: a user who put it in the wrong file would
+    watch an empty picker and have nothing to go on."""
+    (project / ".agentclip.toml").write_text(
+        '[monitor.vm]\nhost = "10.0.0.5"\n', encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+
+    assert cfg.monitor.targets == {}
+    assert any("read from the global config only" in w for w in cfg.warnings)
+
+
+def test_describe_names_the_hop_in_front_of_the_address(
+    project: Path, global_path: Path
+) -> None:
+    """What a picker row's second line shows - and what the dialog parses back
+    when a row is clicked, which is why the shape is pinned here."""
+    assert MonitorTarget(host="10.0.0.5", port=7777).describe() == "10.0.0.5:7777"
+    assert (
+        MonitorTarget(host="127.0.0.1", via="pi").describe() == "via pi -> 127.0.0.1:7777"
+    )
+
+
+def test_save_monitor_target_then_load_round_trips(project: Path, global_path: Path) -> None:
+    save_monitor_target(
+        MonitorTarget(name="vm", host="10.0.0.5", port=7777, token="a" * 32), global_path
+    )
+    cfg = load_config(project, global_config_path=global_path)
+
+    assert cfg.monitor.targets["vm"] == MonitorTarget(
+        name="vm", host="10.0.0.5", port=7777, token="a" * 32
+    )
+    assert not cfg.warnings
+
+
+def test_save_monitor_target_writes_the_token_and_leaves_defaults_out(
+    project: Path, global_path: Path
+) -> None:
+    """Unlike save_remote_target this one CAN write a secret, and does: the
+    alternative to the token in the file the user chose is the token in a second
+    file they did not (9.2). Everything at its default is still left out, so a
+    saved target reads like one a human wrote."""
+    save_monitor_target(MonitorTarget(name="box", via="pi"), global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+
+    assert raw["monitor"]["box"] == {"via": "pi"}
+
+
+def test_save_monitor_target_preserves_every_other_table(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        '[general]\nservice = "claude"\n\n[remote.pi]\nhost = "raspberrypi.local"\n',
+        encoding="utf-8",
+    )
+    save_monitor_target(MonitorTarget(name="vm", host="10.0.0.5"), global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+
+    assert raw["general"] == {"service": "claude"}
+    assert raw["remote"]["pi"] == {"host": "raspberrypi.local"}
+    assert raw["monitor"]["vm"] == {"host": "10.0.0.5"}
+
+
+def test_drop_monitor_target_removes_one_and_leaves_the_rest(
+    project: Path, global_path: Path
+) -> None:
+    save_monitor_target(MonitorTarget(name="vm", host="10.0.0.5"), global_path)
+    save_monitor_target(MonitorTarget(name="box", via="pi"), global_path)
+
+    drop_monitor_target("vm", global_path)
+    cfg = load_config(project, global_config_path=global_path)
+
+    assert list(cfg.monitor.targets) == ["box"]
+
+
+def test_dropping_the_last_monitor_takes_the_table_with_it(
+    project: Path, global_path: Path
+) -> None:
+    """An empty [monitor] table left behind would be a table a user has to
+    wonder about."""
+    save_monitor_target(MonitorTarget(name="vm", host="10.0.0.5"), global_path)
+    drop_monitor_target("vm", global_path)
+
+    assert "monitor" not in tomllib.loads(global_path.read_text(encoding="utf-8"))
+
+
+def test_dropping_a_monitor_that_is_not_there_changes_nothing(
+    project: Path, global_path: Path
+) -> None:
+    """Idempotent, and it does not rewrite a file it did not change - a save
+    that touched nothing would still reflow everybody else's formatting."""
+    global_path.write_text('[general]\nservice = "claude"\n', encoding="utf-8")
+    before = global_path.read_text(encoding="utf-8")
+
+    drop_monitor_target("vm", global_path)
+
+    assert global_path.read_text(encoding="utf-8") == before
+
+
+def test_saving_a_monitor_is_atomic_no_leftover_tmp_files(
+    project: Path, global_path: Path
+) -> None:
+    save_monitor_target(MonitorTarget(name="vm", host="10.0.0.5"), global_path)
+    assert list(global_path.parent.glob("*.tmp")) == []
+    assert global_path.exists()

@@ -22,7 +22,7 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Protocol
 
-from agentclip.config import Config
+from agentclip.config import Config, MonitorTarget
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.shell.app.link import Link, SkillReport
@@ -184,7 +184,7 @@ def run_gui(
     on_config_change: Callable[[Config], None] | None = None,
     host: Any = None,
     remote: RemoteConnect | None = None,
-    monitor_target: tuple[str, int] | None = None,
+    monitor_target: MonitorTarget | tuple[str, int] | None = None,
 ) -> int:
     """Open the window, run the GUI loop, return an exit code when it closes.
 

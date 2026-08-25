@@ -145,6 +145,15 @@
     failed: "Retry re-runs the whole sequence; Edit puts the values back in the form",
     done: "this session's tools, files and skills are on the remote machine now"
   };
+  // The Monitor tab of the same dialog. Mirrored for the same reason
+  // connectOpen is: the form's text boxes may only be rewritten on a RELOAD.
+  var monitorOpen = false;
+  var MON_HINTS = {
+    form: "attaching swaps the screen, not the session - the transcript survives it",
+    running: "dialling the monitor...",
+    failed: "Retry dials again at these values; Edit puts them back in the form",
+    done: "this window is driving that machine's browser now"
+  };
 
   // The harness decision log, page-side. The deque below is the source of
   // truth; this is a view of it that happens to keep its own copy, because the
@@ -1763,12 +1772,18 @@
   function paintConnect(event) {
     if (!event.open) {
       connectOpen = false;
-      el.connScrim.hidden = true;
+      el.connExec.hidden = true;
+      // The scrim belongs to the DIALOG, not to either tab: closing one tab
+      // while the other is open must leave the frame on screen.
+      if (!monitorOpen) el.connScrim.hidden = true;
       return;
     }
     var opening = !connectOpen;
     connectOpen = true;
     el.connScrim.hidden = false;
+    el.connExec.hidden = false;
+    el.connTabExec.classList.add("on");
+    el.connTabMonitor.classList.remove("on");
 
     var form = event.phase === "form";
     el.connForm.hidden = !form;
@@ -1839,6 +1854,132 @@
     if (opening) {
       window.setTimeout(function () {
         el.connTarget.focus();
+      }, 0);
+    }
+  }
+
+  /* == the Monitor tab (ui-monitor.md 9.2) =================================
+     The same arrangement as the dialog beside it and the same division of
+     labour: every decision - which targets exist, whether Attach may be
+     pressed, what a failure says, whether a save is offered - is Python's
+     (chat/remote.py:MonitorDialog). This side draws it and sends whole forms. */
+
+  function monFields() {
+    api(
+      "monitor_fields",
+      el.monModeSsh.checked ? "ssh" : "direct",
+      el.monHost.value,
+      el.monPort.value,
+      el.monToken.value,
+      el.monVia.value
+    );
+  }
+
+  function monList(host, rows) {
+    host.innerHTML = "";
+    (rows || []).forEach(function (row) {
+      var item = document.createElement("li");
+      var pick = document.createElement("button");
+      pick.type = "button";
+      pick.className = "conn-row";
+      var name = document.createElement("div");
+      name.textContent = row.name;
+      var detail = document.createElement("div");
+      detail.className = "conn-row-detail";
+      detail.textContent = row.detail;
+      pick.appendChild(name);
+      pick.appendChild(detail);
+      pick.addEventListener("click", function () {
+        api("monitor_select", row.key);
+      });
+      // Saved from this dialog, so unsavable from it too: the alternative is a
+      // TOML file the user has to go and find because a UI wrote it.
+      var forget = document.createElement("button");
+      forget.type = "button";
+      forget.className = "conn-forget";
+      forget.title = "forget this monitor";
+      forget.textContent = "\u00d7";
+      forget.addEventListener("click", function () {
+        api("monitor_forget", row.name);
+      });
+      item.appendChild(pick);
+      item.appendChild(forget);
+      host.appendChild(item);
+    });
+  }
+
+  function monVias(rows, selected) {
+    el.monVia.innerHTML = "";
+    (rows || []).forEach(function (row) {
+      var option = document.createElement("option");
+      option.value = row.name;
+      option.textContent = row.detail ? row.name + "  (" + row.detail + ")" : row.name;
+      el.monVia.appendChild(option);
+    });
+    if (selected) el.monVia.value = selected;
+  }
+
+  function paintMonitor(event) {
+    if (!event.open) {
+      monitorOpen = false;
+      el.connMonitor.hidden = true;
+      if (!connectOpen) el.connScrim.hidden = true;
+      return;
+    }
+    var opening = !monitorOpen;
+    monitorOpen = true;
+    el.connScrim.hidden = false;
+    el.connMonitor.hidden = false;
+    el.connExec.hidden = true;
+    el.connTabExec.classList.remove("on");
+    el.connTabMonitor.classList.add("on");
+
+    var ssh = event.mode === "ssh";
+    el.monModeSsh.checked = ssh;
+    el.monModeDirect.checked = !ssh;
+    el.monViaRow.hidden = !ssh;
+    // Via SSH the host box means "as seen from THAT machine", which is a
+    // different question with the same answer shape - so the label changes and
+    // the placeholder stops suggesting a LAN address.
+    el.monHostTitle.textContent = ssh ? "Monitor host, as seen from that machine" : "Monitor host";
+    el.monHost.placeholder = ssh ? "127.0.0.1" : "e.g. 192.168.1.40";
+
+    var form = event.phase === "form";
+    el.monForm.hidden = !form;
+    if (opening || form) {
+      if (document.activeElement !== el.monHost) el.monHost.value = event.host || "";
+      if (document.activeElement !== el.monPort) el.monPort.value = event.port || "";
+      if (document.activeElement !== el.monToken) el.monToken.value = event.token || "";
+    }
+    monList(el.monSaved, event.saved);
+    monVias(event.ssh, event.via);
+    el.monError.textContent = event.error || "";
+    el.monFailure.textContent = event.failure || "";
+    el.monFailure.hidden = !event.failure;
+    el.monAttachedLine.textContent = event.attached
+      ? "attached: " + event.attached
+      : "watching this machine's screen";
+
+    el.monSave.hidden = !event.can_save;
+    if (event.can_save && document.activeElement !== el.monSaveName) {
+      el.monSaveName.value = event.save_name || "";
+    }
+    el.monSavedNote.textContent = event.saved_note || "";
+
+    el.monAttach.hidden = event.phase === "done";
+    el.monAttach.disabled = Boolean(event.busy);
+    el.monAttach.textContent = event.phase === "failed" ? "Retry" : "Attach";
+    el.monEdit.hidden = event.phase !== "failed";
+    // Disconnect is about the LINK and Close is about the dialog: a monitor
+    // that is attached can be let go of without ending the session, and the two
+    // buttons must never be read as the same thing.
+    el.monDetach.hidden = !event.attached;
+    el.monDetach.disabled = Boolean(event.busy);
+    el.monClose.disabled = Boolean(event.busy);
+    el.monHint.textContent = MON_HINTS[event.phase] || "";
+    if (opening) {
+      window.setTimeout(function () {
+        el.monHost.focus();
       }, 0);
     }
   }
@@ -2067,6 +2208,9 @@
         // for one thing, one implementation of it.
         if (event.what === "log") toggleLog();
         return;
+      case "monitor":
+        paintMonitor(event);
+        break;
       case "connect":
         paintConnect(event);
         break;
@@ -2691,6 +2835,7 @@
       sideRemoteLines: id("side-remote-lines"),
       reconnectNow: id("reconnect-now"),
       connectRemote: id("connect-remote"),
+      attachMonitor: id("attach-monitor"),
       connScrim: id("conn-scrim"),
       connForm: id("conn-form"),
       connSaved: id("conn-saved"),
@@ -2705,6 +2850,32 @@
       connSave: id("conn-save"),
       connSaveName: id("conn-save-name"),
       connSaveBtn: id("conn-save-btn"),
+      connTabExec: id("conn-tab-exec"),
+      connTabMonitor: id("conn-tab-monitor"),
+      connExec: id("conn-exec"),
+      connMonitor: id("conn-monitor"),
+      monAttachedLine: id("mon-attached"),
+      monForm: id("mon-form"),
+      monSaved: id("mon-saved"),
+      monModeDirect: id("mon-mode-direct"),
+      monModeSsh: id("mon-mode-ssh"),
+      monViaRow: id("mon-via-row"),
+      monVia: id("mon-via"),
+      monHostTitle: id("mon-host-title"),
+      monHost: id("mon-host"),
+      monPort: id("mon-port"),
+      monToken: id("mon-token"),
+      monError: id("mon-error"),
+      monFailure: id("mon-failure"),
+      monSave: id("mon-save"),
+      monSaveName: id("mon-save-name"),
+      monSaveBtn: id("mon-save-btn"),
+      monSavedNote: id("mon-saved-note"),
+      monHint: id("mon-hint"),
+      monAttach: id("mon-attach"),
+      monEdit: id("mon-edit"),
+      monDetach: id("mon-detach"),
+      monClose: id("mon-close"),
       connSavedNote: id("conn-saved-note"),
       connHint: id("conn-hint"),
       connConnect: id("conn-connect"),
@@ -2902,6 +3073,51 @@
     });
     el.connSaveBtn.addEventListener("click", function () {
       api("connect_save", el.connSaveName.value);
+    });
+
+    // -- the Monitor tab's own wiring ---------------------------------------
+    // Which TAB is showing is a round trip like everything else here: the two
+    // models live on the Python side and only one of them may be open, so the
+    // page asks rather than deciding.
+    el.connTabExec.addEventListener("click", function () {
+      api("connect_open");
+    });
+    el.connTabMonitor.addEventListener("click", function () {
+      api("monitor_open");
+    });
+    el.attachMonitor.addEventListener("click", function () {
+      api("monitor_open");
+    });
+    [el.monHost, el.monPort, el.monToken].forEach(function (input) {
+      input.addEventListener("input", monFields);
+    });
+    [el.monModeDirect, el.monModeSsh].forEach(function (radio) {
+      radio.addEventListener("change", function () {
+        monFields();
+        // The mode decides which fields mean anything, so this ONE control
+        // repaints rather than waiting for the next event - the alternative is
+        // a Via-SSH form still showing a "Monitor host" label.
+        el.monViaRow.hidden = !el.monModeSsh.checked;
+      });
+    });
+    el.monVia.addEventListener("change", monFields);
+    el.monAttach.addEventListener("click", function () {
+      // The values go with the press, for connect_start's reason: an input
+      // event and a click reach Python on two different threads.
+      monFields();
+      api("monitor_start");
+    });
+    el.monEdit.addEventListener("click", function () {
+      api("monitor_edit");
+    });
+    el.monDetach.addEventListener("click", function () {
+      api("monitor_disconnect");
+    });
+    el.monClose.addEventListener("click", function () {
+      api("monitor_cancel");
+    });
+    el.monSaveBtn.addEventListener("click", function () {
+      api("monitor_save", el.monSaveName.value);
     });
 
     // The log pane never scrolls its own way: reading the scroll position is

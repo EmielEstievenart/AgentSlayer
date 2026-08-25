@@ -53,7 +53,7 @@ exception: a printable character never fires a shortcut mid-sentence.)
 | Key | Does |
 |---|---|
 | `F1` / `?` | This help sheet (`Esc` or `F1` closes it) |
-| `F2` | Open the **calibration window**: what each service *looks* like, its sizes and finish signals, where its chat window is, and what the tool is recognising right now. The titlebar's **calibrate** button and the sidebar's **Edit services...** / **Set chat region...** are the same door |
+| `F2` | Open the **Monitor UI** over this machine's own screen (closed while a remote monitor is attached): what each service *looks* like, its sizes and finish signals, where its chat window is, and what the tool is recognising right now. The titlebar's **calibrate** button and the sidebar's **Edit services...** / **Set chat region...** are the same door |
 | `F3` | Hide/show the sidebar |
 | `F4` | Appearance (theme) |
 | `F5` | ARM / DISARM the tool (same as `/armed`). Disarmed it still watches and shows everything, but never clicks, pastes or reads your clipboard |
@@ -89,10 +89,17 @@ clipboard watcher to run — leaves the strip instead of fading.
 
 | Flag | Does |
 |---|---|
-| `--calibrate` | Open the **calibration window alone** — no session, no engine, nothing running. This is what you launch on the machine the browser is on |
 | `--ssh <target>` | Run this session's tools, files and skills on another machine (`user@host`, an ssh-config alias, or a pasted `ssh …` command) |
 | `--monitor <host:port>` | Drive the **screen** of another machine — the one running `agentclip-monitor` |
+| `--monitor @<name>` | The same, from a saved `[monitor.<name>]` target in your global `config.toml` (see `docs/configuration.md`) |
+| `--monitor-token <token>` | The monitor's token. Prefer a saved target or `AGENTCLIP_MONITOR_TOKEN` — `argv` is world-readable |
+| `--calibrate` | **Removed.** The window it opened is `agentclip-monitor`'s own now; the flag prints one line saying so and exits |
 | `--tui` | **Removed.** The Textual terminal shell is gone; the flag prints one line saying so and exits. Kept for one release so a script that still carries it is told what happened |
+
+The monitor's token comes from three places, and the first one that has it
+wins: `--monitor-token`, then `$AGENTCLIP_MONITOR_TOKEN`, then the `token` key
+of the saved `[monitor.<name>]` target. The flag is listed last on purpose —
+anything on a command line is visible to every process on the machine.
 
 `--ssh` and `--monitor` are separate questions and can be used apart or
 together: `--ssh` moves where your *files and commands* live, `--monitor` moves
@@ -102,7 +109,7 @@ which *screen* the browser automation watches, clicks and pastes into.
 
 Two commands run over there, and neither needs a session or an engine:
 
-- `agentclip --calibrate` — capture what the service looks like, draw the chat region, watch what is being recognised. Run this first; a monitor with nothing captured has nothing to find.
+- `agentclip-monitor` — the Monitor UI: capture what the service looks like, draw the chat region, watch what is being recognised, and start the port. Run this first; a monitor with nothing captured has nothing to find.
 - `agentclip-monitor --port 7777` — the standing monitor. It keeps running across disconnects, serves one brain at a time, and hosts nothing else.
 - `agentclip-monitor --port 7777 --bind 0.0.0.0` — listen on something other than loopback. Only with the warning below.
 
@@ -116,8 +123,29 @@ own machine:
 ssh -N -L 7777:127.0.0.1:7777 you@the-vm     # then: agentclip --monitor 127.0.0.1:7777
 ```
 
+### Attaching a monitor from the window
+
+You do not have to know any of those flags, and you do not have to restart to
+change your mind. The **Connect** dialog has two tabs:
+
+- **Executor** — which machine this session's *files and commands* live on. Connecting there starts a new session, because one session is one host.
+- **Monitor** — which machine's *screen* this window drives. Attaching there does **not** touch the session: the transcript, the engine and your files stay exactly where they are while the browser automation moves to the other machine.
+
+The Monitor tab offers two ways to reach one:
+
+- **Direct** — host, port and token. The monitor's own address, on a network this PC can reach.
+- **Via SSH** — pick one of your saved SSH targets, then give the port *as seen from that machine* (usually `127.0.0.1:7777`, which is where a monitor bound to loopback is). AgentClip forwards it over the SSH connection it already holds: no second login, no password asked twice, no `ssh -L` to leave running. The Executor has to be connected to that target first — the Monitor tab rides the same connection, and it says so rather than quietly starting a second one.
+
+A token is still required over the tunnel: SSH proves who reached the port, not
+which of the several things on that machine did. **Disconnect** hands the
+window back to this machine's screen.
+
+A monitor you attached can be saved as a `[monitor.<name>]` target for next
+time — the token goes with it, into your global `config.toml`.
+
 While a monitor link is up the Chat UI's own calibration door (`F2`) is
-closed: the pixels are on the other machine, so calibration runs there.
+closed: the pixels are on the other machine, so calibration runs there
+(`agentclip-monitor`). Disconnecting opens it again.
 
 **Inside the chat box:**
 

@@ -1299,7 +1299,42 @@ serves with pywebview uninstalled; a region drawn in the window survives a
 monitor restart and a `configure` that omits one; suite green; all three exes
 rebuilt.
 
-### 9.2 Connect a Monitor from the Chat UI
+### 9.2 Connect a Monitor from the Chat UI — **AS BUILT** (2026-08-25)
+
+> **Built, and binding.** Four deviations from the plan above, each because the
+> code that landed for §9.1 settled the question differently:
+>
+> - **The tunnel is a `Tunnel`, not a reader/writer pair.** The plan proposed
+>   giving `RemoteUIMonitor` a reader/writer seam with `connect_tcp` as the
+>   convenience. `SshHost.open_tunnel(dest_host, dest_port)` shipped instead: it
+>   opens the `direct-tcpip` channel eagerly and pumps it to a loopback listener
+>   this process owns, so the dial is the unchanged
+>   `RemoteUIMonitor.connect(tunnel.local_host, tunnel.local_port, token=…)`.
+>   The monitor client gained nothing at all, which is better than the seam the
+>   plan asked for. Eager matters: "nothing is listening over there" comes back
+>   as the tunnel's failure, on the form, rather than as a handshake that hangs
+>   up two layers later.
+> - **`[monitor.<name>]` has `via`, not `mode` + `ssh`.** One optional key
+>   instead of two coupled ones: a target with `via` is a Via-SSH target, and a
+>   `mode` that could disagree with the presence of an `ssh` name is a state the
+>   file can no longer be in. `host` defaults to `127.0.0.1` when `via` is set.
+> - **An unconnected SSH target is refused with a hint, not connected.** If the
+>   Via-SSH target is not the machine the Executor is on, the tab says
+>   `connect the Executor to <name> first - the Monitor tab rides that same
+>   connection`. Running the SSH sequence from here would end the user's session
+>   (one session, one host) from behind a button that says "attach a monitor" —
+>   which is the hidden multi-step action ssh-connect.md §3.2 refuses to be.
+> - **The `SwitchableMonitor` is now the handle in EVERY mode**, local included,
+>   with the `LocalUIMonitor` as its first inner. That is what makes a
+>   mid-session dial a swap rather than a rebuild — and what makes the way back
+>   (`monitor_disconnect`) the same swap in the other direction.
+>
+> **Also landed here:** `--monitor @name`, `--monitor-token`,
+> `AGENTCLIP_MONITOR_TOKEN` (flag, then env, then the saved table), and
+> `--calibrate`'s removal — a one-line stub naming `agentclip-monitor`, kept for
+> one release exactly as `--tui` is. `open_calibration` is refused whenever a
+> remote monitor is attached, from the flag or from the tab, and opens again on
+> disconnect.
 
 **Goal.** Stop making split mode a launch-time flag. §6.5 refused an in-app
 connect field on the grounds that "a second one would have to answer what a

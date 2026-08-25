@@ -80,9 +80,13 @@ class Dialler:
     def __init__(self, *outcomes: ScriptedLink | Exception) -> None:
         self.outcomes = list(outcomes)
         self.dialled: list[tuple[str, int]] = []
+        # Every token the view offered, in order. "" is a real value and the
+        # right one for a monitor started with --no-token (ui-monitor.md §9.1).
+        self.tokens: list[str] = []
 
-    async def __call__(self, host: str, port: int) -> Any:
+    async def __call__(self, host: str, port: int, token: str = "") -> Any:
         self.dialled.append((host, port))
+        self.tokens.append(token)
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
         if isinstance(outcome, Exception):
             raise outcome

@@ -18,7 +18,7 @@ AgentClip reads two kinds of files: **TOML app config** (settings) and **JSON pe
 > what the tool is recognising right now. It is a **window of its own**, not a
 > panel — open it from the Chat UI with `F2`, the titlebar's **calibrate**
 > button, or the sidebar's **Edit services...** / **Set chat region...**, and
-> run it alone with `agentclip --calibrate` on the machine the browser is on.
+> run it alone as `agentclip-monitor` on the machine the browser is on.
 > One at a time: a second press says it is already open. While it is up the chat
 > Chat UI stops polling the screen, because its capture overlays land on the very
 > browser the detectors watch. See `docs/design/ui-monitor.md` §2.6 and §6.4.
@@ -29,20 +29,20 @@ TOML merge order: **built-in defaults → global config.toml → project .agentc
 
 **Split mode** (`--monitor host:port`): the *screen* moves instead of the files. The Chat UI runs here; the browser, the mouse, the clipboard and the appearance profiles all live on the machine running `agentclip-monitor` there. Two commands run over there, and neither needs a session or an engine:
 
-- `agentclip --calibrate` — capture the appearances and draw the chat region on that machine. The profiles stay there; they never cross the link.
+- `agentclip-monitor` — the Monitor UI: capture the appearances and draw the chat region on that machine. The profiles stay there; they never cross the link.
 - `agentclip-monitor --port 7777` — the standing monitor, on loopback. It keeps running across disconnects and serves one brain at a time.
 - `agentclip-monitor --port 7777 --bind 0.0.0.0` — listen on something other than loopback, which is the explicit opt-in described below.
-- `agentclip --monitor 127.0.0.1:7777` — here, once a forward is up.
+- `agentclip --monitor 127.0.0.1:7777` — here, once a forward is up; or `--monitor @name` for a saved `[monitor.<name>]` target, or the Connect dialog's **Monitor** tab, which needs no flag and no restart and can open the forward itself (**Via SSH**).
 
 **The monitor port is unauthenticated** (`docs/design/ui-monitor.md` §5). It is a channel to that machine's mouse, keyboard and clipboard, so the default bind is `127.0.0.1` and `--bind` is the opt-in; the intended deployment is a VM on a private host-only network, or an SSH forward: `ssh -N -L 7777:127.0.0.1:7777 you@the-vm`.
 
-If the link drops, the Chat UI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. While split mode is on, the Chat UI's `F2` is closed: calibration runs on the monitor's machine.
+If the link drops, the Chat UI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. While a monitor is attached, the Chat UI's `F2` is closed: calibration runs on the monitor's machine. Disconnecting from the Monitor tab opens it again.
 
-In-app changes (the calibration window, theme pickers, saved remote targets) are persisted to the **global** config.toml.
+In-app changes (the calibration window, theme pickers, saved remote targets, saved monitors) are persisted to the **global** config.toml.
 
 ## Running the monitor on Linux
 
-The monitor half — `agentclip-monitor`, and `agentclip --calibrate` beside it — runs on **X11**. It captures with `XGetImage`, clicks and types through the XTest extension, and switches windows through EWMH's `_NET_ACTIVE_WINDOW`; on Windows the same operations are GDI and `SendInput`, and the backend is picked by platform with nothing to configure.
+The monitor half — `agentclip-monitor`, window and all — runs on **X11**. It captures with `XGetImage`, clicks and types through the XTest extension, and switches windows through EWMH's `_NET_ACTIVE_WINDOW`; on Windows the same operations are GDI and `SendInput`, and the backend is picked by platform with nothing to configure.
 
 **Native Wayland is not supported.** A Wayland session gives no client a way to screenshot another client's surface or synthesise input into it, so there is nothing for the monitor to build on. A browser running under **XWayland** *is* a normal X client and works — start it with `GDK_BACKEND=x11` (Firefox: `MOZ_ENABLE_WAYLAND=0`), or log into an "X11"/"Xorg" session at the display manager. `echo $XDG_SESSION_TYPE` says which you are in.
 
@@ -132,6 +132,42 @@ root = "/home/emiel/code/thing"
 
 Use with `agentclip --ssh pi`. `--ssh` also accepts a raw `user@host` or a pasted `ssh …` command.
 
+### [monitor.\<name\>] — saved Monitors
+
+Which machine's *screen* this PC can drive — the other half of the split
+(`docs/design/ui-monitor.md` §9.2). **Global config.toml only:** a monitor
+target is a fact about how this PC reaches a machine, not about the project,
+and in a remote session the project's `.agentclip.toml` is on the target, which
+has no view of your desk. A `[monitor.*]` table in a project file is ignored,
+and says so as a warning.
+
+```toml
+[monitor.vm]
+host = "10.0.0.5"            # default: the table name itself
+port = 7777                  # default: 7777
+token = "3f9a…"              # default: "" (a monitor started --no-token has none)
+
+[monitor.behind-pi]
+via = "pi"                   # a saved [remote.<name>] SSH target
+host = "127.0.0.1"           # default when `via` is set: as seen from THAT machine
+port = 7777
+token = "8c21…"
+```
+
+A target with `via` is reached over the SSH connection the Executor already
+holds — one forwarded channel, no second login and no `ssh -L`. `host` and
+`port` are then read *on that machine*, which is why they default to its own
+loopback: that is where a monitor bound to `127.0.0.1` over there is.
+
+Use with `agentclip --monitor @vm`, or pick it from the **Monitor** tab of the
+Connect dialog — which is also what writes these tables, including the token.
+
+**Where the token comes from**, first one wins: `--monitor-token`, then
+`$AGENTCLIP_MONITOR_TOKEN`, then this table's `token` key. The flag is last on
+purpose — `argv` is readable by every process on the machine — and the
+environment variable exists for anyone who would rather not keep a secret in a
+config file at all.
+
 ### [services.\<key\>] — service presets
 
 A preset describes one chat service: its paste budget and how AgentClip drives it. Built-ins (key · paste budget · context estimate):
@@ -145,7 +181,7 @@ A preset describes one chat service: its paste budget and how AgentClip drives i
 | `copilot-free` | 6k | 128k | | `unknown` | 6k | 100k |
 | `claude` | 24k | 700k | | `paranoid` | 4k | 50k |
 
-Built-ins can be edited but not deleted. Fields (all editable in the calibration window — `F2`, the titlebar's **calibrate** button, or `agentclip --calibrate`):
+Built-ins can be edited but not deleted. Fields (all editable in the calibration window — `F2`, the titlebar's **calibrate** button, or `agentclip-monitor` on the machine the browser is on):
 
 | Key | Default | Meaning |
 |---|---|---|

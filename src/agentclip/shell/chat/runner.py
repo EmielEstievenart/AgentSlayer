@@ -52,7 +52,7 @@ from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
-from agentclip.config import Config
+from agentclip.config import Config, MonitorTarget
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.shell.app.link import Link, SkillReport
@@ -85,7 +85,7 @@ class GuiRunner:
         remote: RemoteConnect | None = None,
         on_close: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
-        monitor_target: tuple[str, int] | None = None,
+        monitor_target: MonitorTarget | tuple[str, int] | None = None,
     ) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread: threading.Thread | None = None
@@ -409,6 +409,38 @@ class GuiRunner:
 
     def reconnect_now(self) -> None:
         self.schedule_call(self.view.reconnect_now)
+
+    # The Monitor tab of the same dialog (ui-monitor.md §9.2). Same shape and
+    # same reason: the tab is a MODEL on the loop (``chat/remote.py``), and a
+    # dial is a link event rather than a new session, so nothing here differs
+    # from its SSH sibling except which question the form asks.
+
+    def monitor_open(self) -> None:
+        self.schedule_call(self.view.monitor_open)
+
+    def monitor_select(self, key: str) -> None:
+        self.schedule_call(self.view.monitor_select, key)
+
+    def monitor_fields(self, mode: str, host: str, port: str, token: str, via: str) -> None:
+        self.schedule_call(self.view.monitor_fields, mode, host, port, token, via)
+
+    def monitor_start(self) -> None:
+        self.schedule_call(self.view.monitor_start)
+
+    def monitor_edit(self) -> None:
+        self.schedule_call(self.view.monitor_edit)
+
+    def monitor_cancel(self) -> None:
+        self.schedule_call(self.view.monitor_cancel)
+
+    def monitor_save(self, name: str) -> None:
+        self.schedule_call(self.view.monitor_save, name)
+
+    def monitor_forget(self, name: str) -> None:
+        self.schedule_call(self.view.monitor_forget, name)
+
+    def monitor_disconnect(self) -> None:
+        self.schedule_call(self.view.monitor_disconnect)
 
 
 def _no_close() -> None:

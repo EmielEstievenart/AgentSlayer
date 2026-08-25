@@ -4,16 +4,22 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import os
 import platform
 import sys
 import time
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from agentclip import __version__
-from agentclip.config import Config, default_remote_state_dir, load_config
+from agentclip.config import (
+    Config,
+    MonitorTarget,
+    default_remote_state_dir,
+    load_config,
+)
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.screen.matchers import MATCHERS, select_matcher
 from agentclip.engine.link.factory import EngineBuilder, EngineRequest, make_engine_builder
@@ -355,6 +361,27 @@ MONITOR_BAD_TARGET = "--monitor wants HOST:PORT with a numeric port, not {given!
 # to guess at (docs/design/ui-monitor.md §6.6, §8 "Textual removal timing").
 TUI_REMOVED = "the Textual TUI was removed in this release; plain agentclip opens the Chat UI"
 
+# ``--calibrate``'s epitaph, and ``--tui``'s arrangement for the same reason:
+# the flag survives one release as a stub that names its replacement rather than
+# an argparse "unrecognized arguments" a script would have to guess at. The
+# window it opened is now a binary of its own - the Monitor UI is the Monitor's
+# front end and it runs where the pixels are (ui-monitor.md §9.0, §9.1).
+CALIBRATE_REMOVED = (
+    "--calibrate was removed in this release; run agentclip-monitor instead"
+)
+
+# ``--monitor @name`` naming a table this PC does not have. Named for the same
+# reason MONITOR_BAD_TARGET is: a refusal a suite pins is a refusal that stays
+# readable.
+MONITOR_NO_SAVED = "--monitor @{name} names no [monitor.{name}] target in the global config"
+
+# Where a monitor token comes from, in order. The environment beats the saved
+# table because that is the whole point of having it - somebody who will not
+# keep a secret in a config file exports one instead - and the flag comes last
+# and is documented last, because argv is world-readable on the machines this
+# runs on.
+MONITOR_TOKEN_ENV = "AGENTCLIP_MONITOR_TOKEN"
+
 
 def parse_monitor_target(text: str) -> tuple[str, int] | None:
     """``host:port`` → ``(host, port)``, or None when it is not one.
@@ -379,6 +406,36 @@ def parse_monitor_target(text: str) -> tuple[str, int] | None:
     if not 1 <= number <= 65535:
         return None
     return host, number
+
+
+def resolve_monitor_target(
+    given: str, token_flag: str | None, config: Config, environ: Mapping[str, str] | None = None
+) -> MonitorTarget | str:
+    """``--monitor``'s value into the target to dial, or one sentence refusing it.
+
+    Two spellings, and the ``@`` is what tells them apart because a host name
+    cannot start with one: ``@name`` is a saved ``[monitor.<name>]`` table
+    (ui-monitor.md §9.2) and everything else is the ``HOST:PORT`` §6.5 shipped,
+    right-partitioned so an IPv6 literal survives.
+
+    The token rides none of it. It comes from the saved table, from
+    ``AGENTCLIP_MONITOR_TOKEN`` or from ``--monitor-token``, and the flag is
+    LAST in the documentation and FIRST in precedence for the ordinary reason a
+    flag beats a file: it is the thing the person typed just now.
+    """
+    env = environ if environ is not None else os.environ
+    token = token_flag if token_flag is not None else env.get(MONITOR_TOKEN_ENV, "")
+    if given.startswith("@"):
+        name = given[1:]
+        saved = config.monitor.targets.get(name)
+        if saved is None:
+            return MONITOR_NO_SAVED.format(name=name)
+        return replace(saved, token=token or saved.token)
+    pair = parse_monitor_target(given)
+    if pair is None:
+        return MONITOR_BAD_TARGET.format(given=given)
+    host, port = pair
+    return MonitorTarget(name=given, host=host, port=port, token=token)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -442,26 +499,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="deprecated no-op; the Chat UI is the only shell",
     )
-    # The calibration window on its own (docs/design/ui-monitor.md 6.4): the
-    # service editor, the ELEMENTS column, the chat-region picker and
-    # /identify, over this machine's own screen. No engine, no session, no
-    # transcript - which is the whole point, because in split mode this is what
-    # runs on the VM the browser is on while the chat GUI stays on the
-    # operator's desk.
+    # Kept for one release as a STUB, exactly as --tui is: the window it opened
+    # is a binary of its own now (`agentclip-monitor`, ui-monitor.md §9.1), and
+    # a script that still carries this flag deserves to be told which command
+    # replaced it rather than an argparse error about an unrecognized argument.
     parser.add_argument(
         "--calibrate",
         action="store_true",
-        help="open the calibration window alone (no session, no engine) and exit when it closes",
+        help="removed: run agentclip-monitor instead",
     )
-    # Split mode (docs/design/ui-monitor.md §6.5): the screen this window drives
-    # is on ANOTHER machine, reached over the monitor wire. There is
-    # deliberately no in-app connect field for this in phase 5: the flag is the
-    # whole entry.
+    # Split mode (docs/design/ui-monitor.md §6.5, §9.2): the screen this window
+    # drives is on ANOTHER machine, reached over the monitor wire. No longer the
+    # WHOLE entry - the Chat UI's connect dialog grew a Monitor tab in §9.2 -
+    # but still the scriptable one, and it gained `@name` for a saved
+    # [monitor.<name>] target.
     parser.add_argument(
         "--monitor",
         default=None,
-        metavar="HOST:PORT",
+        metavar="HOST:PORT|@NAME",
         help="drive the screen of a machine running agentclip-monitor (Chat UI only)",
+    )
+    # The monitor port's shared secret (ui-monitor.md §9.1). Documented last of
+    # the three sources on purpose: argv is world-readable on the machines this
+    # runs on, so the saved target and $AGENTCLIP_MONITOR_TOKEN are the ways to
+    # spell it that do not put it in `ps`.
+    parser.add_argument(
+        "--monitor-token",
+        default=None,
+        metavar="TOKEN",
+        help=(
+            "the monitor's token; prefer a saved [monitor.<name>] target or "
+            "$AGENTCLIP_MONITOR_TOKEN, since argv is world-readable"
+        ),
     )
     parser.add_argument(
         "--list-matchers",
@@ -561,39 +630,6 @@ def _gui_smoke() -> int:
         renderer = "missing" if webview2_missing() else "edgechromium"
     print(f"gui-smoke: ok renderer={renderer}")
     return 0
-
-
-def _calibrate(args: argparse.Namespace) -> int:
-    """``--calibrate``: the calibration window, alone (ui-monitor.md §6.4).
-
-    Deliberately NOT a ``Launch``. A launch is the answer to "where does the
-    session run", and this window runs no session: what it needs is a ``Config``
-    (which services exist and how each is recognised) and a clipboard backend
-    for the monitor it opens - and even that is only because ``LocalUIMonitor``
-    takes one, since nothing here ever starts the watcher. Everything else
-    ``main`` builds below this point - the engine factory, the session tree and
-    its pruning, the MCP runtime, an SSH dial - is about running a task, and
-    building any of it here would be paying for a machine this window never
-    touches.
-
-    The project root is still resolved and still used, for one reason: config is
-    layered per project (``load_config``), so which project you are in decides
-    which service presets you are editing.
-
-    The import is inside the function for ``run_gui``'s reason: pywebview is the
-    optional ``gui`` extra and importing ``cli`` must not pay for it.
-    """
-    from agentclip.shell.monitor_ui.window import run_calibration
-
-    try:
-        project_root = Path(args.project).resolve(strict=True)
-    except OSError as exc:
-        print(f"agentclip: cannot resolve --project {args.project!r}: {exc}", file=sys.stderr)
-        return 2
-    config = load_config(project_root, service_override=args.service)
-    for warning in config.warnings:
-        print(f"agentclip: {warning}", file=sys.stderr)
-    return run_calibration(config, provider=select_provider(config.clipboard.provider))
 
 
 @dataclass(frozen=True, slots=True)
@@ -799,30 +835,12 @@ def main(argv: list[str] | None = None) -> int:
         return _list_matchers()
     if args.gui_smoke:
         return _gui_smoke()
-    # ABOVE the launch, deliberately, and not below the shell fork: the
-    # calibration window needs a Config and a clipboard backend and nothing
-    # else. No engine factory is built, no session tree is created or pruned,
-    # no MCP runtime is spawned and no connection is dialled - every one of
-    # those is about running a TASK, and this window runs none
-    # (docs/design/ui-monitor.md 6.4). ``--ssh`` with it is meaningless for the
-    # same reason: calibration is about THIS machine's screen.
+    # Beside ``--tui`` and for its reason: the window this opened is a binary of
+    # its own now (``agentclip-monitor``, ui-monitor.md §9.1). One line, exit 2,
+    # nothing started.
     if args.calibrate:
-        return _calibrate(args)
-
-    # WHICH MACHINE'S SCREEN, and it is a separate question from where the
-    # session runs (``--ssh``, below): the monitor link moves the pixels, the
-    # mouse and the clipboard onto another box, while the engine and the
-    # project stay wherever the launch put them (docs/design/ui-monitor.md §1's
-    # table - three halves, three flags).
-    monitor_target: tuple[str, int] | None = None
-    if args.monitor is not None:
-        monitor_target = parse_monitor_target(args.monitor)
-        if monitor_target is None:
-            print(
-                f"agentclip: {MONITOR_BAD_TARGET.format(given=args.monitor)}",
-                file=sys.stderr,
-            )
-            return 2
+        print(f"agentclip: {CALIBRATE_REMOVED}", file=sys.stderr)
+        return 2
 
     # WHERE the session runs, and it is settled AFTER the window opens rather
     # than before it: an ``--ssh`` launch does not block on a terminal dial. The
@@ -837,6 +855,23 @@ def main(argv: list[str] | None = None) -> int:
     if isinstance(launch, int):
         return launch
     config = launch.config
+
+    # WHICH MACHINE'S SCREEN, and it is a separate question from where the
+    # session runs (``--ssh``, above): the monitor link moves the pixels, the
+    # mouse and the clipboard onto another box, while the engine and the project
+    # stay wherever the launch put them (docs/design/ui-monitor.md §1's table -
+    # three halves, three flags). Resolved HERE rather than before the launch,
+    # because ``@name`` reads a saved ``[monitor.<name>]`` table and there is no
+    # config to read it out of until the launch has loaded one - and refused
+    # here too, so nothing below this line can be handed a target it would have
+    # to re-parse or re-validate.
+    monitor_target: MonitorTarget | None = None
+    if args.monitor is not None:
+        resolved = resolve_monitor_target(args.monitor, args.monitor_token, config)
+        if isinstance(resolved, str):
+            print(f"agentclip: {resolved}", file=sys.stderr)
+            return 2
+        monitor_target = resolved
 
     if args.list_services:
         for key in sorted(config.services):
@@ -996,9 +1031,10 @@ def main(argv: list[str] | None = None) -> int:
                 service_override=args.service,
                 pending=pending_connect,
             ),
-            # Split mode, and deliberately handed over as the parsed pair
-            # rather than the raw string: ``main`` is where a bad target is
-            # refused, so nothing below this line can be given one.
+            # Split mode, and deliberately handed over as the resolved
+            # ``MonitorTarget`` rather than the raw string: ``main`` is where a
+            # bad target - and an ``@name`` that names nothing - is refused, so
+            # nothing below this line can be given one.
             monitor_target=monitor_target,
         )
     finally:

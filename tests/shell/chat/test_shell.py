@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from agentclip import __version__, cli
-from agentclip.config import load_config
+from agentclip.config import MonitorTarget, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.hosts.local import LocalHost
@@ -490,10 +490,18 @@ def test_a_target_that_is_not_host_port_is_refused_rather_than_guessed_at(given:
     assert cli.parse_monitor_target(given) is None
 
 
-def test_a_bad_monitor_target_is_fatal_before_anything_is_launched(
+def test_a_bad_monitor_target_is_fatal_before_anything_is_started(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(cli, "local_launch", lambda args: pytest.fail("resolved a launch"))
+    """Refused in ``main``, so nothing below it can be handed a target it would
+    have to re-parse. Since §9.2 the refusal happens just AFTER the launch is
+    resolved rather than just before it - ``--monitor @name`` reads a saved
+    table, and there is no config to read one out of until then - so the thing
+    pinned here is that no WINDOW opens, not that no Config was built."""
+    monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
+    monkeypatch.setattr(
+        "agentclip.shell.chat.shell.run_gui", lambda *a, **k: pytest.fail("opened a window")
+    )
 
     assert cli.main(["--monitor", "box:ssh", "--project", str(tmp_path)]) == 2
     err = capsys.readouterr().err
@@ -501,11 +509,14 @@ def test_a_bad_monitor_target_is_fatal_before_anything_is_launched(
     assert "box:ssh" in err  # ...and it says what it was given
 
 
-def test_the_monitor_target_reaches_the_gui_as_a_parsed_pair(
+def test_the_monitor_target_reaches_the_gui_resolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Threaded like ``pending_connect``: resolved in ``main``, handed to
-    ``run_gui`` as the pair, and absent (None) on a launch that did not ask."""
+    ``run_gui`` as the value type, and absent (None) on a launch that did not
+    ask. A ``MonitorTarget`` rather than the old pair since §9.2, because the
+    address is no longer all of it - a token rides along, and ``@name`` can put
+    an SSH hop in front of the whole thing."""
     kwargs: dict[str, object] = {}
     monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
     monkeypatch.setattr(
@@ -513,8 +524,142 @@ def test_the_monitor_target_reaches_the_gui_as_a_parsed_pair(
     )
 
     assert cli.main(["--monitor", "box:7777", "--project", str(tmp_path)]) == 0
-    assert kwargs["monitor_target"] == ("box", 7777)
+    assert kwargs["monitor_target"] == MonitorTarget(
+        name="box:7777", host="box", port=7777
+    )
 
     kwargs.clear()
     assert cli.main(["--project", str(tmp_path)]) == 0
     assert kwargs["monitor_target"] is None
+
+
+# == --monitor @name, the token's three sources, and --calibrate's epitaph =====
+# ui-monitor.md 9.2. The flag is no longer the whole entry - the Chat UI's
+# connect dialog grew a Monitor tab - but it stays the SCRIPTABLE one, and it
+# gained a saved-target spelling and a token that never rides in the target
+# string.
+
+
+def _saved_monitor(root: Path, body: str) -> Path:
+    """A global config.toml with [monitor.*] tables in it, and the launch wired
+    to read it - the fixture two of the tests below share."""
+    path = root / "config.toml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _launch_with(root: Path, global_path: Path) -> cli.Launch:
+    return cli.Launch(
+        project_root=root,
+        config=load_config(root, global_config_path=global_path),
+        host=LocalHost(),
+        os_name="TestOS",
+        data_root=root,
+        home=root,
+    )
+
+
+def test_a_saved_monitor_is_dialled_by_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``@name`` reads a ``[monitor.<name>]`` table - the token with it, so the
+    common case puts no secret on a command line at all."""
+    global_path = _saved_monitor(
+        tmp_path,
+        '[monitor.vm]\nhost = "10.0.0.5"\nport = 7777\ntoken = "%s"\n' % ("a" * 32),
+    )
+    kwargs: dict[str, object] = {}
+    monkeypatch.setattr(cli, "local_launch", lambda args: _launch_with(tmp_path, global_path))
+    monkeypatch.setattr(
+        "agentclip.shell.chat.shell.run_gui", lambda given, **rest: kwargs.update(rest) or 0
+    )
+
+    assert cli.main(["--monitor", "@vm", "--project", str(tmp_path)]) == 0
+    assert kwargs["monitor_target"] == MonitorTarget(
+        name="vm", host="10.0.0.5", port=7777, token="a" * 32
+    )
+
+
+def test_a_saved_monitor_can_ride_a_saved_ssh_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``via`` is what makes a target a Via-SSH one, and its host defaults to the
+    far side's loopback - which is where a monitor behind a tunnel is."""
+    global_path = _saved_monitor(tmp_path, '[monitor.box]\nvia = "pi"\n')
+    kwargs: dict[str, object] = {}
+    monkeypatch.setattr(cli, "local_launch", lambda args: _launch_with(tmp_path, global_path))
+    monkeypatch.setattr(
+        "agentclip.shell.chat.shell.run_gui", lambda given, **rest: kwargs.update(rest) or 0
+    )
+
+    assert cli.main(["--monitor", "@box", "--project", str(tmp_path)]) == 0
+    target = kwargs["monitor_target"]
+    assert isinstance(target, MonitorTarget)
+    assert (target.via, target.host, target.dial_port()) == ("pi", "127.0.0.1", 7777)
+
+
+def test_a_name_that_names_nothing_is_fatal_and_says_which_table_it_looked_for(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
+    monkeypatch.setattr(
+        "agentclip.shell.chat.shell.run_gui", lambda *a, **k: pytest.fail("opened a window")
+    )
+
+    assert cli.main(["--monitor", "@vm", "--project", str(tmp_path)]) == 2
+    assert "[monitor.vm]" in capsys.readouterr().err
+
+
+def test_the_token_comes_from_the_environment_and_the_flag_beats_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Three sources, in this order: the flag, then $AGENTCLIP_MONITOR_TOKEN,
+    then the saved table. The flag is documented LAST because argv is
+    world-readable on the machines this runs on - which is a reason to prefer
+    the other two, not a reason for it to lose when somebody types it."""
+    kwargs: dict[str, object] = {}
+    monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
+    monkeypatch.setattr(
+        "agentclip.shell.chat.shell.run_gui", lambda given, **rest: kwargs.update(rest) or 0
+    )
+    monkeypatch.setenv("AGENTCLIP_MONITOR_TOKEN", "e" * 32)
+
+    assert cli.main(["--monitor", "box:7777", "--project", str(tmp_path)]) == 0
+    assert kwargs["monitor_target"].token == "e" * 32  # type: ignore[union-attr]
+
+    kwargs.clear()
+    assert (
+        cli.main(
+            ["--monitor", "box:7777", "--monitor-token", "f" * 32, "--project", str(tmp_path)]
+        )
+        == 0
+    )
+    assert kwargs["monitor_target"].token == "f" * 32  # type: ignore[union-attr]
+
+
+def test_a_saved_targets_token_is_used_when_nothing_overrides_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    global_path = _saved_monitor(
+        tmp_path, '[monitor.vm]\nhost = "10.0.0.5"\ntoken = "%s"\n' % ("a" * 32)
+    )
+    config = load_config(tmp_path, global_config_path=global_path)
+    monkeypatch.delenv("AGENTCLIP_MONITOR_TOKEN", raising=False)
+
+    resolved = cli.resolve_monitor_target("@vm", None, config, {})
+    assert isinstance(resolved, MonitorTarget)
+    assert resolved.token == "a" * 32
+
+
+def test_calibrate_is_refused_with_the_command_that_replaced_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--tui``'s arrangement, for ``--tui``'s reason (ui-monitor.md 9.0): the
+    flag survives one release as a stub that names its replacement, because an
+    argparse "unrecognized arguments" tells a script that carried it nothing."""
+    monkeypatch.setattr(cli, "local_launch", lambda args: pytest.fail("resolved a launch"))
+
+    assert cli.main(["--calibrate", "--project", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert cli.CALIBRATE_REMOVED in err
+    assert "agentclip-monitor" in err

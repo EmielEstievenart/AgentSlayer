@@ -18,7 +18,7 @@ where it says **Monitor UI**; "GUI" is not a term any more.
 |---|---|---|---|
 | **Chat UI** | what the user looks at and types into | `shell/chat/` | `agentclip` |
 | **Monitor** | the process that watches the Browser, clicks it and owns the clipboard | `driver/monitor/` | `agentclip-monitor` |
-| **Monitor UI** | the Monitor's own window: service editor, ELEMENTS, region picker, `/identify` | `shell/monitor_ui/` | `agentclip-monitor` (and `agentclip --calibrate`) |
+| **Monitor UI** | the Monitor's own window: Serve panel, service editor, ELEMENTS, region picker, `/identify` | `shell/monitor_ui/` | `agentclip-monitor` (the Chat UI opens the same window in-process in local mode; `agentclip --calibrate` is a stub naming the binary) |
 | **Browser** | the desktop chat app AgentClip operates — the thing being watched | not ours | — |
 | **Executor** | permission-gated execution on behalf of the agent, through the Host seam | `executor/` | `agentclip-engine` (with the engine) |
 
@@ -71,7 +71,7 @@ Four seams carry the split, and they are deliberately not one object (docs/desig
 
 | seam | direction | thread contract |
 |---|---|---|
-| `driver/automation/view.py:AutomationView` | controller → shell | paint-only, callable from the poller/watcher threads, must be non-blocking and thread-safe (the TUI posts a message; a GUI enqueues to its JS bridge) |
+| `driver/automation/view.py:AutomationView` | controller → shell | paint-only, callable from the poller/watcher threads, must be non-blocking and thread-safe (the Chat UI enqueues to its JS bridge). Only the **Chat UI** implements it: the Monitor UI has no automation loop to paint for |
 | `driver/automation/host.py:AutomationHost` | controller → shell | the handful of answers only a shell has (live preset/profile, `find_all`, the verified copy click, prose ingest, detector rebuild, the OSC-52 park-off-clipboard). Event-loop thread only — which is exactly why it is not folded into `AutomationView` |
 | `driver/monitor/protocol.py:UIMonitor` | controller → the machine that can see the chat | the whole machine behind one object: `configure`/`suspend`/`resume`, the `Tick` stream (`latest`, `observe`, `subscribe`), the clipboard (`watch_clipboard`, `on_clip`, read/write) and every OS action, each a coroutine. In-process today (`driver/monitor/local.py:LocalUIMonitor`, which owns the poll thread); a TCP client tomorrow (docs/design/ui-monitor.md §3, §6.5). Awaited from the event-loop thread; the `subscribe`/`on_clip` hooks fire on the monitor's own thread and must not block |
 | `driver/monitor/ops.py:ScreenOps` | monitor → OS | `agentclip.driver.screen` behind one substitutable object, so the OS primitives stay off the paint port and a shell's test suite can patch them at its own module scope. It is a tier *inside* the monitor now (reached as `monitor.ops`), not a seam a shell wires up — it moved out of `driver/automation` in ui-monitor.md phase 1 |
@@ -230,47 +230,37 @@ src/agentclip/
     │   └── types.py       # SessionSpec, SessionRef, SessionStats (EngineRequest is engine-side:
     │                      #   engine/link/factory.py, so a remote engine can decode one)
     ├── chat/              # the CHAT UI: a native pywebview window over hand-written
-    │                      #   HTML/CSS/JS in assets/, Python in the same process (gui.md §2)
+    │   │                  #   HTML/CSS/JS in assets/, Python in the same process (gui.md §2)
+    │   ├── shell.py       # run_gui: the process entry — builds the window, owns the one
+    │   │                  #   webview.start() pump, and hands it to every other window
+    │   ├── runner.py      # GuiRunner: the asyncio loop thread both windows' coroutines run on
+    │   ├── view.py        # GuiView: the ChatView + AutomationView + AutomationHost adapter
+    │   ├── remote.py      # the CONNECT DIALOG's models, window-free: the Executor tab's SSH
+    │   │                  #   sequence and the Monitor tab (Direct | Via SSH), which targets
+    │   │                  #   are offered, when Connect is armed, where a failure lands
+    │   ├── docs.py        # the docs button: commands.md / configuration.md rendered in-app
+    │   └── assets/        # index.html, app.css, app.js — real FILES (a file:// URL loads them)
     ├── monitor_ui/        # the MONITOR UI: the window that runs where the pixels are —
-    │                      #   service editor, ELEMENTS, region picker, /identify, over a
-    │                      #   LOCAL UIMonitor and nothing else (ui-monitor.md §2.6, §6.4).
-    │                      #   Never imports chat/ or app/: no session, no engine, no transcript
-    ├── webview/           # what BOTH windows are made of, and neither owns: bridge.py (one
-    │                      #   FIFO, one drainer, the js_api shim), service_editor.py (the
-    │                      #   editor's MODEL) and assets.py (asset dir + file:// entry URL)
-    └── tui/
-        ├── app.py         # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
-        ├── messages.py    # ClipboardCaptured, CallStarted/CallFinished/CallOutput (the engine worker
-        │                  # thread's bridge to the run panel), McpStatusChanged, and the PAINT family:
-        │                  # one message per AutomationView method (the Driver's threads asking
-        │                  # for a repaint), plus AutoCopyRequested. No probe messages: the poller
-        │                  # feeds AutomationController.consume_* in its own call stack
-        ├── graphics.py    # can this terminal draw sixels? probed ONCE from cli.main, before Textual (tui.md §1.7)
-        ├── pixels.py      # the half-block renderer: pure functions over RegionImage, the no-sixel
-        │                  # fallback; re-exports driver.screen.capture.crop, which used to live here
-        ├── screens/
-        │   ├── main.py    # the ChatView + AutomationView + AutomationHost adapter: tabs,
-        │   │              #   transcripts, sidebar routing, and the scheduling the Driver
-        │   │              #   hands back (run_worker); the automation itself is below it
-        │   ├── service_editor.py # F2: the whole per-service PROFILE editor (tui.md §1.4)
-        │   ├── settings.py # F4: appearance/theme picker
-        │   ├── help.py    # F1 cheatsheet; its command section renders from shell/app/commands.py
-        │   ├── summary.py # end-of-session stats + what next (tui.md §1.5)
-        │   ├── confirm.py # ConfirmScreen(ModalScreen[bool]): quit mid-turn, undo, forget captures
-        │   └── text_entry.py # TextEntryScreen(ModalScreen[str | None]): one-line prompts
-        └── widgets/
-            ├── transcript.py  # VerticalScroll of per-message widgets, .anchor() pinning
-            ├── window_tabs.py # the two-row tab bar whose tabs ARE browser windows (tui.md §1.6)
-            ├── composer.py    # the docked chat box: Enter sends, and it drives the popup below
-            ├── command_popup.py # the slash-command list above the composer (tui.md §3.3a)
-            ├── action_panel.py  # the approval gate: title, diff/command body, buttons, reject input
-            ├── run_panel.py    # the RUN PANEL: one row per call while a turn executes + the running
-            │                    # command's live output, ctrl+o (tui.md §8a)
-            ├── running_bar.py   # the "Working... ctrl+x cancels" spinner line, the run panel's header
-            ├── sidebar.py     # the settings column: service, chat window, DETECTION (tui.md §1.3)
-            ├── elements.py    # the ELEMENTS column: the crops the detectors matched (tui.md §1.7)
-            ├── log_pane.py    # the full-width live harness decision log, /log + F8 (tui.md §3.3b)
-            └── statusbar.py   # docked Horizontal: watcher state, budget, service, phase
+    │   │                  #   service editor, ELEMENTS, region picker, /identify and the
+    │   │                  #   SERVE panel, over a LOCAL UIMonitor and nothing else
+    │   │                  #   (ui-monitor.md §2.6, §6.4, §9.1). Never imports chat/ or app/:
+    │   │                  #   no session, no engine, no transcript. Of driver/automation it
+    │   │                  #   may import finish.py alone, for the ELEMENTS labels
+    │   ├── __main__.py    # agentclip-monitor's entry: the Driver's OWN build_arg_parser, then
+    │   │                  #   either open the window or delegate --headless to
+    │   │                  #   driver/monitor/__main__.py verbatim (which imports no toolkit)
+    │   ├── window.py      # CalibrationRunner/Bridge/JsApi + run_monitor_ui (owns the pump,
+    │   │                  #   standalone) and open_calibration_window (borrows the Chat UI's)
+    │   ├── view.py        # CalibrationView: the service editor, the ELEMENTS column, the
+    │   │                  #   region picker and /identify, over a CalibrationMonitor
+    │   ├── serve.py       # the SERVE panel's model: interfaces, port, start/stop, the token
+    │   │                  #   row, the status sentences — window-free, like chat/remote.py
+    │   └── assets/        # index.html, app.css, app.js — files, for the same reason
+    └── webview/           # what BOTH windows are made of, and neither owns
+        ├── bridge.py      # one FIFO, one drainer thread, the js_api shim: the only thread
+        │                  #   allowed to call a given window's evaluate_js (one per window)
+        ├── service_editor.py # ServiceEditor: the editor's MODEL, callback-injected, no window
+        └── assets.py      # asset dir resolution + the file:// entry URL (frozen and from source)
 ```
 
 ### Key signatures

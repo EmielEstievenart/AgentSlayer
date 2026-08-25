@@ -2,17 +2,22 @@
 
 > **Status: BUILT, in the MONITOR UI.** The editor described here is
 > drawn by `src/agentclip/shell/monitor_ui/` (its model is
-> `src/agentclip/shell/webview/service_editor.py`, shared and unchanged) — a
-> pywebview window of its own, beside the ELEMENTS column and the chat-region
-> picker, over a `LocalUIMonitor` of its own (`docs/design/ui-monitor.md` §2.6,
-> §6.4, phase 4). `F2` and the sidebar's **Edit services...** now open that
-> WINDOW rather than a modal inside the Chat UI, and `agentclip --calibrate`
-> opens it standalone with no session and no engine behind it. §5.10's "who
-> applies it" is now split across the two: the editor's saved presets reach the
-> Chat UI through the window's `on_config_change`, and the Chat UI suspends
-> its own detectors for the whole visit rather than per capture. Everything
-> else below is unchanged and still binding. ("GUI" further down is the older
-> name for the Chat UI; the prose below is not rewritten.)
+> `src/agentclip/shell/webview/service_editor.py` — one package down, shared
+> with the Chat UI and unchanged) — a pywebview window of its own, beside the
+> ELEMENTS column and the chat-region picker, over a `LocalUIMonitor` of its
+> own (`docs/design/ui-monitor.md` §2.6, §6.4, §9.1). The window that hosts it
+> is specified by `monitor-ui.md`, beside this file; the editor is not a modal
+> in it — the editor **is** that window, and closing the editor closes the
+> window. `F2` and the sidebar's **Edit services...** now open that WINDOW
+> rather than a modal inside the Chat UI, and **`agentclip-monitor`** opens it
+> standalone with no session and no engine behind it (`agentclip --calibrate`,
+> which used to, is now a stub that names that binary). §5.10's "who applies
+> it" is now split across the two: the editor's saved presets reach the Chat UI
+> through the window's `on_config_change`, and the Chat UI suspends its own
+> detectors for the whole visit while the window brackets each capture on its
+> own monitor (`monitor-ui.md` §6.2). Everything else below is unchanged and
+> still binding. ("GUI" further down is the older name for the Chat UI; the
+> prose below is not rewritten.)
 
 
 Audience: engineers building a second frontend (pywebview/HTML/JS) to reach

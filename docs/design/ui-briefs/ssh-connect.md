@@ -11,6 +11,16 @@ below); this brief does not revisit any decision recorded there — it proposes
 UI for the semantics that document already settled, and flags where the GUI
 forces a new decision remote-ssh.md left open (§6).
 
+> **Amendment (2026-08-25): this dialog has two tabs now.** Everything below
+> describes the **Executor** tab — which machine this session's files and
+> commands live on. A second tab, **Monitor**, was built beside it
+> (`docs/design/ui-monitor.md` §9.2): which machine's *screen* this window
+> drives. The two are separate questions and the dialog keeps them separate —
+> connecting the Executor starts a new session, attaching a Monitor does not
+> touch one. §3a below specifies the Monitor tab, and it is **BUILT**, unlike
+> §3. The word "GUI" throughout this file is the older name for the **Chat
+> UI**; the prose is not rewritten.
+
 > **Amendment (2026-08-19): the engine does not stay on this PC.** When this
 > brief was written, "connect" meant *this* process reaching the target one
 > primitive at a time. Since `docs/design/remote-executor.md` §2.12's flip, a
@@ -378,6 +388,160 @@ happy-path notice, only for wiring it to the dialog:
   reason for having the line at all is unchanged — which machine a server really
   runs on is exactly what a user should not have to find the MCP panel to learn.
 
+## 3a. The Monitor tab — **BUILT** (2026-08-25)
+
+> **Built, and binding.** `docs/design/ui-monitor.md` §9.2 decided it and §9.1
+> built the window on the far end (`monitor-ui.md`). Unlike §3 above, this
+> section describes code.
+
+### 3a.1 Why it is a tab on this dialog and not its own thing
+
+Both tabs answer "which machine?", and a user who has just connected an Executor
+is exactly the user who then wants that machine's screen. Putting them on one
+dialog is also what makes the difference visible, because the difference matters:
+
+- **Executor** — this session's *files and commands*. Connecting **starts a new
+  session**: one session is one host (`remote-executor.md` §2.8).
+- **Monitor** — this window's *screen*. Attaching **does not touch the session**:
+  the transcript, the engine and the files stay exactly where they are while the
+  browser automation moves to the other machine. A mid-session dial is a **link
+  event, not a new session** — it parks the loop in `DISCONNECTED`, swaps the
+  `SwitchableMonitor`'s inner monitor and re-derives everything from the screen.
+
+The tabs are `Executor` and `Monitor`; Python owns which one is on screen, so
+opening one closes the other's model.
+
+### 3a.2 Entry points
+
+Two, and both land on the same tab:
+
+- the **Monitor** tab button on the connect dialog;
+- the sidebar's **`Attach a monitor...`** door, in the PROJECT area beside
+  **`Connect to remote...`**.
+
+The sidebar door is deliberately **never gated** — unlike its Executor
+neighbour, which hides when the app has no way to go remote. A monitor is
+reachable from any session, local ones included: the screen question is
+independent of the files question.
+
+### 3a.3 Anatomy
+
+Header `Attach a monitor`, with a hint that reads `attached: <peer>` or
+`watching this machine's screen`.
+
+Left column: `SAVED MONITORS` — one row per `[monitor.<name>]` table, name over
+detail (`10.0.0.5:7777`, or `via pi -> 127.0.0.1:7777`). Beside each row, not
+inside it, a `×` button (`forget this monitor`) — beside, so a mis-aimed click
+picks the target instead of deleting it.
+
+Right: `How to reach it`, two radio modes, then the form.
+
+- **Direct** — `Monitor host` (`e.g. 192.168.1.40`), `Port` (`7777`), `Token`
+  (a password field, `from the Serve panel`).
+- **Via SSH** — a `Saved SSH target` dropdown appears above the same three
+  fields, and the host label becomes `Monitor host, as seen from that machine`
+  with placeholder `127.0.0.1`, because that is where a monitor bound to
+  loopback over there is.
+
+Footer: a phase hint, then `Attach` (which reads `Retry` after a failure),
+`Edit`, `Disconnect` and `Close`. `Disconnect` shows only while something is
+attached, and it is deliberately distinct from `Close`: **Disconnect is about
+the link, Close is about the dialog.**
+
+### 3a.4 When Attach is armed
+
+Never disabled by validation — only while a dial is in flight. Validation
+happens on press, and a refusal repaints the form and dials nothing:
+
+- Via SSH with no target picked → `pick the saved SSH target the monitor sits behind`
+- Direct with no host → `name the machine the monitor is running on`
+- a port outside 1–65535 → `the monitor's port is a number from 1 to 65535` (an **empty** port box is not an error — it means 7777)
+- a token that is present but not 32 characters → `a monitor token is 32 characters; this one is 3`
+
+An **absent** token is legal: a monitor started `--no-token` has none. The
+length check exists because a truncated paste is the failure this form sees
+most, and catching it here costs nothing while catching it on the wire costs a
+dial.
+
+### 3a.5 Via SSH rides the connection that already exists
+
+The Chat UI opens a **`direct-tcpip`** channel on the paramiko connection the
+Executor tab already built (`SshHost.open_tunnel`) and pumps it to a loopback
+listener this process owns, so the dial itself is the unchanged
+`RemoteUIMonitor.connect(local_host, local_port, token=…)`. **No external
+`ssh -L`, no second login, no second password prompt, no second host-key
+question.** The channel is opened *eagerly*, so "nothing is listening over
+there" comes back on the form rather than as a handshake that hangs up two
+layers later.
+
+**An unconnected SSH target is refused with a hint, not connected:**
+
+> connect the Executor to `<name>` first - the Monitor tab rides that same
+> connection
+
+This is §3.2's rule, applied. Running the connect sequence from here would end
+the user's session — one session, one host — from behind a button that says
+"attach a monitor", which is exactly the hidden multi-step action this brief
+refuses to be.
+
+A token is still required over the tunnel. SSH proves who reached the port; it
+does not prove which of the several things on that VM did.
+
+### 3a.6 Where failures land
+
+Form errors (§3a.4) go on the form's own error line. Dial failures go to a
+failure line, wrapped as `cannot reach the monitor at {peer}: {reason}`, and are
+also toasted once. The reasons worth knowing:
+
+| Failure | What the user sees |
+|---|---|
+| nothing listening | the transport's own refusal — over SSH, the tunnel's, not a hang |
+| bad or missing token | the monitor's `kind="unauthorized"` sentence, verbatim |
+| a second brain attached | `this monitor already has a brain attached from {peer} - one brain at a time` |
+| wire-version mismatch | names both installs and both versions |
+
+A wrong token shows on the form. It does **not** start a redial loop:
+redialling a wrong token forever is how you lock yourself out of noticing.
+
+`Retry` dials again at the same values; `Edit` puts them back in the form;
+`Close` drops the dialog and never cancels a dial in flight.
+
+### 3a.7 Disconnect
+
+`Disconnect` swaps a fresh local monitor back in, closes the SSH tunnel,
+retargets, re-arms the clipboard watcher, parks the loop at IDLE with `watching
+this machine's screen again`, and reopens the calibration door. That door is
+closed for as long as a remote monitor is attached — `calibration runs on the
+monitor's machine: run agentclip-monitor there` — because the pixels are over
+there and so is the window that edits them (`monitor-ui.md`).
+
+### 3a.8 Saving a monitor
+
+On a successful attach the tab offers **`Save this monitor for next time`**: a
+name field, a `Save` button, and the standing note `written to the global
+config.toml - the token goes with it`. The offer appears only when this PC does
+not already have that monitor — decided **by address, not by name**, so the same
+box cannot be saved twice under two names. The proposed name is the SSH hop if
+there is one, else the host, flattened.
+
+`[monitor.<name>]` tables live in the **global** `config.toml` only, for
+`[remote.<name>]`'s reason and §6.1's: a monitor target is a fact about how
+*this PC* finds a machine, not a property of the project — and in a remote
+session the project's config file is on the target, which has no view of your
+desk. Fields: `host`, `port`, `token`, and `via` (the saved SSH target's name;
+`host` then defaults to `127.0.0.1`).
+
+**One optional key, not two coupled ones.** The plan proposed `mode` + `ssh`;
+what shipped is `via` alone, so a `mode` that disagrees with the presence of an
+`ssh` name is a state the file can no longer be in.
+
+The token is written into the file, **stated plainly rather than hidden**, and
+`AGENTCLIP_MONITOR_TOKEN` exists for anyone who would rather not keep a secret
+in one. Precedence, first one wins: `--monitor-token`, then the environment
+variable, then the saved table. The flag is documented last on purpose — `argv`
+is readable by every process on the machine.
+
+
 ## 4. Mid-session semantics
 
 - **Reconnect-transparently (remote-ssh.md decision 5).** A dropped link
@@ -467,7 +631,20 @@ remote-ssh.md settles the backend semantics; it does not (and mostly should
 not) settle GUI presentation. Where the GUI genuinely forces a decision the
 binding doc doesn't make, listed here with a proposed default:
 
-1. **Should a successful manual connection offer "save as `[remote.<name>]`"?**
+1. ~~**Should a successful manual connection offer "save as
+   `[remote.<name>]`"?**~~ **ANSWERED — yes** (2026-08-25). The proposed default
+   below is precedent now rather than proposal: §3a.8 shipped it for
+   `[monitor.<name>]`, exactly as described — an offer on the success screen, a
+   name field, written to the **global** `config.toml` only, the secret stated
+   in the file rather than hidden, and an environment variable for anyone who
+   will not keep one there. Two details the proposal did not have, both worth
+   carrying over to `[remote.<name>]` when it is built: the offer appears only
+   when this PC does not already have that target, decided **by address rather
+   than by name** (so one box cannot be saved twice under two names), and a
+   saved row carries a `×` **forget** control placed *beside* the row rather
+   than inside it, so a mis-aimed click picks the target instead of deleting it.
+   The original text, for the record:
+
    remote-ssh.md's config section only describes reading saved targets, never
    writing them from a session. *Proposed default:* yes — a checkbox/prompt
    in the connect-success screen ("Save this target as..."), writing to the

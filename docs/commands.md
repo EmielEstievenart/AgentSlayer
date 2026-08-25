@@ -9,7 +9,7 @@ Slash commands are typed in the chat box: Enter sends, and a newline is `shift+e
 | `/help` | List all commands (aliases: `/commands`, `/?`) |
 | `/new` | Start over: click "new chat" in the browser, clear the transcript, fresh session. Works mid-turn — the running turn is aborted first |
 | `/abort` | End a **sub-agent delegation** in flight (contrast `ctrl+x`, which only cancels the tool calls running right now) |
-| `/identify` | Open the calibration window, where the boxes are drawn over the real screen — calibration aid, touches nothing |
+| `/identify` | Open the **Monitor UI**, where the boxes are drawn over the real screen — calibration aid, touches nothing |
 | `/log` | Toggle the harness decision-log pane |
 | `/mcp` | List MCP servers: state, tools, errors — including entries whose config was refused (`invalid`, with the reason) |
 | `/skills` | List loaded skills grouped by the folder they came from — name, description, and a `[hidden from the model]` mark on the ones only you can reach |
@@ -75,7 +75,7 @@ keys `y` / `n` / `a` above live here too.
 | `c` | Re-copy the last outbound payload; press `c` **twice quickly** and it is pasted into the chat as well |
 | `i` | Force-ingest the clipboard now — "the reply is on the clipboard right now" |
 | `w` | Pause/resume the clipboard watcher |
-| `r` | Re-send this service's extra instructions with the next payload (set them in the calibration window, `F2`) |
+| `r` | Re-send this service's extra instructions with the next payload (set them in the **Monitor UI**, `F2`) |
 | `e` | End the session / show the summary |
 | `l` | Export the whole chat log to a file (raw blocks and payloads, for debugging) |
 | `x` | Expand/collapse the last collapsed output |
@@ -107,21 +107,46 @@ which *screen* the browser automation watches, clicks and pastes into.
 
 ### On the machine the browser is on
 
-Two commands run over there, and neither needs a session or an engine:
+`agentclip-monitor` runs over there. It needs no session and no engine, and it comes in two shapes:
 
-- `agentclip-monitor` — the Monitor UI: capture what the service looks like, draw the chat region, watch what is being recognised, and start the port. Run this first; a monitor with nothing captured has nothing to find.
-- `agentclip-monitor --port 7777` — the standing monitor. It keeps running across disconnects, serves one brain at a time, and hosts nothing else.
-- `agentclip-monitor --port 7777 --bind 0.0.0.0` — listen on something other than loopback. Only with the warning below.
+- `agentclip-monitor` — the **Monitor UI**: a window. Capture what the service looks like, draw the chat region, watch the ELEMENTS column recognise things, and start the port from the SERVE band. Run this first; a monitor with nothing captured has nothing to find.
+- `agentclip-monitor --headless --port 7777` — no window, for a machine with no desktop to draw one on. It imports no window toolkit at all.
+- `agentclip-monitor --port 7777` — the window, with the port pre-filled and already started.
 
-**The monitor port is unauthenticated.** Anything that can reach it can move
-that machine's mouse, type on its keyboard and read its clipboard. So the
-default bind is `127.0.0.1` and `--bind` is the explicit opt-in; the intended
-deployment is a VM on a private host-only network, or an SSH forward from your
-own machine:
+Its flags, beside `agentclip`'s above:
+
+| Flag | Does |
+|---|---|
+| `--headless` | No window. `--port` becomes required, and every setting has to come from flags or the config file |
+| `--port N` | With a window: pre-fills the SERVE band and starts it. With `--headless`: required. `0` picks a free port and prints it |
+| `--bind ADDRESS` | Listen on something other than `127.0.0.1`. The explicit opt-in — see the warning below |
+| `--no-token` | Serve with no authentication at all. **Loopback only**: off loopback it is refused, exit 2 |
+| `--token TEXT` / `--token-file PATH` | The token to require. `--headless` flags — the window serves with the token in its config dir, which the SERVE band shows, and says so if you pass these |
+| `--config-dir PATH` | Where this monitor keeps its token and its remembered chat regions (default: the platform config dir's `monitor/` folder) |
+| `--project`, `--service`, `--global-config`, `--profile-root` | The same config layering `agentclip` has |
+
+**The port requires a token by default — on loopback too.** The window shows it
+in the SERVE band with a **Copy** button (and a **Regenerate** button, which does
+not drop a Chat UI that is already attached — it changes what the *next* one must
+carry). A wrong or missing token is refused before the handshake completes, and
+the Chat UI shows that on the token field rather than retrying forever.
+
+`--bind` and the token answer different questions: **`--bind` says who can reach
+the port, the token says who may use it.** Off loopback the port is reachable by
+anything on that network and it is a channel to that machine's mouse, keyboard
+and clipboard — so the default bind is `127.0.0.1`, `--bind` is the explicit
+opt-in, and `--no-token` together with a non-loopback `--bind` is refused
+outright. The intended deployment is a VM on a private host-only network, or a
+forward — and the Connect dialog's **Monitor** tab can open that forward itself
+over the SSH connection it already holds, which is easier than:
 
 ```
 ssh -N -L 7777:127.0.0.1:7777 you@the-vm     # then: agentclip --monitor 127.0.0.1:7777
 ```
+
+**Keys in the Monitor UI:** `Esc` closes the modal if one is up, otherwise closes
+the window. That is the whole list — everything else on that window is a control
+you click, and it is specified by `docs/design/ui-briefs/monitor-ui.md`.
 
 ### Attaching a monitor from the window
 
@@ -143,9 +168,9 @@ window back to this machine's screen.
 A monitor you attached can be saved as a `[monitor.<name>]` target for next
 time — the token goes with it, into your global `config.toml`.
 
-While a monitor link is up the Chat UI's own calibration door (`F2`) is
-closed: the pixels are on the other machine, so calibration runs there
-(`agentclip-monitor`). Disconnecting opens it again.
+While a monitor link is up the Chat UI's own `F2` door is closed: the pixels are
+on the other machine, so the Monitor UI runs there (`agentclip-monitor`).
+Disconnecting opens it again.
 
 **Inside the chat box:**
 

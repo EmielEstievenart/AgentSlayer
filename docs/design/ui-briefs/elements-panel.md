@@ -3,16 +3,21 @@
 > **Status: BUILT, in the MONITOR UI.** Both surfaces described here
 > live in `src/agentclip/shell/monitor_ui/` — a pywebview window of its
 > own, over a `LocalUIMonitor` of its own, never over the Chat UI's controller
-> (`docs/design/ui-monitor.md` §2.6, §6.4, phase 4). Two entry points, one
-> implementation: `agentclip --calibrate` runs it standalone on the machine the
-> Browser is on, and the Chat UI opens it beside itself with `F2`, the
+> (`docs/design/ui-monitor.md` §2.6, §6.4, §9.1). The window that hosts them is
+> specified by `monitor-ui.md`, beside this file. Two entry points, one
+> implementation: **`agentclip-monitor`** runs it standalone on the machine the
+> Browser is on (and `agentclip --calibrate`, which used to, is now a stub that
+> names that binary), and the Chat UI opens it beside itself with `F2`, the
 > titlebar's **calibrate** button or either sidebar door. It is **not** in the
 > Chat UI's own window any more — there is no F7 column and no `elements`
 > event on that window's bridge, and `/identify` opens the Monitor UI
-> rather than drawing from the chat one. The behaviour below is otherwise
-> unchanged and still binding; §7's "do not carry over" list applies to the
-> Monitor UI's page exactly as written. ("GUI" further down is the older name
-> for the Chat UI; the prose below is not rewritten.)
+> rather than drawing from the chat one. One thing the older text below cannot
+> know: the crops keep updating while you are in that window, because the
+> suspend bracket there is per capture, not per visit (`monitor-ui.md` §6.2) —
+> this column is the surface you calibrate against. The behaviour below is
+> otherwise unchanged and still binding; §7's "do not carry over" list applies
+> to the Monitor UI's page exactly as written. ("GUI" further down is the older
+> name for the Chat UI; the prose below is not rewritten.)
 
 
 Audience: engineers building a second frontend (pywebview/HTML/JS) that must reach

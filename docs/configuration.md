@@ -10,39 +10,54 @@ AgentClip reads two kinds of files: **TOML app config** (settings) and **JSON pe
 | Project config | TOML | `<project>/.agentclip.toml` | Same tables; project overrides |
 | Global permissions | JSON | `permissions.json`, same folder as the global config | Permission rules + MCP servers |
 | Project permissions | JSON | `<project>/.agentclip/permissions.json` | Same schema; project outranks global |
-| Appearance profiles | PNG + JSON | `profiles/<service-key>/`, same folder as the global config | Captured screen templates + click points — edited in the **calibration window**, not by hand |
+| Appearance profiles | PNG + JSON | `profiles/<service-key>/`, same folder as the global config | Captured screen templates + click points — edited in the **Monitor UI**, not by hand |
+| Monitor token | text | `monitor/monitor-token`, same folder as the global config | The 32-character secret a Chat UI must present to drive this machine's screen |
+| Remembered chat regions | JSON | `monitor/regions.json`, same folder as the global config | The box drawn around the browser, per service, so a restarted monitor keeps it |
 
-> **The calibration window** is where everything made of pixels is edited: the
+> **Five words, one meaning each.** The **Chat UI** (`agentclip`) is what you look
+> at and type into. The **Monitor** (`agentclip-monitor`) watches the **Browser**
+> — the chat web page, which is not ours — clicks it and owns the clipboard. The
+> **Monitor UI** is the Monitor's own window. The **Executor**
+> (`agentclip-engine`) runs files and commands on the agent's behalf. "GUI" is
+> not a term any more; older design docs still say it and mean the Chat UI.
+
+> **The Monitor UI** is where everything made of pixels is edited: the
 > per-service editor (sizes, finish signals, captured templates, click points),
-> the box you draw around a chat window, and the live ELEMENTS column showing
-> what the tool is recognising right now. It is a **window of its own**, not a
-> panel — open it from the Chat UI with `F2`, the titlebar's **calibrate**
-> button, or the sidebar's **Edit services...** / **Set chat region...**, and
-> run it alone as `agentclip-monitor` on the machine the browser is on.
-> One at a time: a second press says it is already open. While it is up the chat
-> Chat UI stops polling the screen, because its capture overlays land on the very
-> browser the detectors watch. See `docs/design/ui-monitor.md` §2.6 and §6.4.
+> the box you draw around a chat window, the live ELEMENTS column showing what
+> the tool is recognising right now, and — standalone only — the **SERVE** band
+> that decides who may drive this machine. It is a **window of its own**, not a
+> panel: open it from the Chat UI with `F2`, the titlebar's **calibrate** button,
+> or the sidebar's **Edit services...** / **Set chat region...**, and run it
+> alone as `agentclip-monitor` on the machine the browser is on. One at a time: a
+> second press says it is already open. While it is up the Chat UI stops polling
+> the screen, because its capture overlays land on the very browser the detectors
+> watch. See `docs/design/ui-monitor.md` §2.6, §6.4 and §9.1, and
+> `docs/design/ui-briefs/monitor-ui.md` for the window itself.
 
 TOML merge order: **built-in defaults → global config.toml → project .agentclip.toml → CLI flags.** Tables merge per key; scalars *and lists* replace (a project can tighten a list, never extend it by accident). A broken file never crashes startup — problems become warnings and the default wins.
 
 **Remote sessions** (`--ssh`): the project config and *both* permission files are read from the **target machine** — the machine running your code owns its policy. The global config.toml stays local (it describes this PC: clipboard, screen, themes).
 
-**Split mode** (`--monitor host:port`): the *screen* moves instead of the files. The Chat UI runs here; the browser, the mouse, the clipboard and the appearance profiles all live on the machine running `agentclip-monitor` there. Two commands run over there, and neither needs a session or an engine:
+**Split mode** (`--monitor host:port`): the *screen* moves instead of the files. The Chat UI runs here; the browser, the mouse, the clipboard, the appearance profiles, the token and the remembered chat regions all live on the machine running `agentclip-monitor` there. What runs over there needs no session and no engine:
 
-- `agentclip-monitor` — the Monitor UI: capture the appearances and draw the chat region on that machine. The profiles stay there; they never cross the link.
-- `agentclip-monitor --port 7777` — the standing monitor, on loopback. It keeps running across disconnects and serves one brain at a time.
-- `agentclip-monitor --port 7777 --bind 0.0.0.0` — listen on something other than loopback, which is the explicit opt-in described below.
+- `agentclip-monitor` — the Monitor UI, a window: capture the appearances, draw the chat region, and start the port from its SERVE band. The profiles stay there; they never cross the link.
+- `agentclip-monitor --headless --port 7777` — the same monitor with no window, for a machine with no desktop. It imports no window toolkit at all.
+- `agentclip-monitor --port 7777 --bind 0.0.0.0` — listen on something other than loopback, which is the explicit opt-in described below. From the window, choosing a non-loopback row in the SERVE dropdown is the same opt-in, spelled as a click.
 - `agentclip --monitor 127.0.0.1:7777` — here, once a forward is up; or `--monitor @name` for a saved `[monitor.<name>]` target, or the Connect dialog's **Monitor** tab, which needs no flag and no restart and can open the forward itself (**Via SSH**).
 
-**The monitor port is unauthenticated** (`docs/design/ui-monitor.md` §5). It is a channel to that machine's mouse, keyboard and clipboard, so the default bind is `127.0.0.1` and `--bind` is the opt-in; the intended deployment is a VM on a private host-only network, or an SSH forward: `ssh -N -L 7777:127.0.0.1:7777 you@the-vm`.
+**The monitor port requires a token, by default, on loopback too** (`docs/design/ui-monitor.md` §9.1). It is a channel to that machine's mouse, keyboard and clipboard, and "loopback" is not consent on a machine whose whole job is to run a browser. The token is 32 hex characters, kept in that machine's `monitor/monitor-token` (mode `0600`, minted on first run), and the SERVE band shows it with a **Copy** button. **Regenerate** does not drop a Chat UI that is already attached — it changes what the *next* one must carry.
 
-If the link drops, the Chat UI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. While a monitor is attached, the Chat UI's `F2` is closed: calibration runs on the monitor's machine. Disconnecting from the Monitor tab opens it again.
+`--bind` and the token answer different questions: `--bind` says who can *reach* the port, the token says who may *use* it. The only way out is `--no-token` (or the SERVE band's `no token (loopback only)` box), which is loopback-only and refused off it. The intended deployment is a VM on a private host-only network, or an SSH forward: `ssh -N -L 7777:127.0.0.1:7777 you@the-vm` — or, easier, the Monitor tab's **Via SSH** mode, which opens that forward over the connection the Executor already holds.
 
-In-app changes (the calibration window, theme pickers, saved remote targets, saved monitors) are persisted to the **global** config.toml.
+**The chat region is remembered on the monitor**, in `monitor/regions.json`, keyed by service. The rule is one line: a Chat UI that names a region wins and its box is written to the store; one that does not is served from it. So a restarted monitor keeps the box somebody drew over there, a standalone Monitor UI has somewhere to put one at all, and a Chat UI that knows better still overrides. Both files live in the monitor's own config dir — `%APPDATA%\agentclip\monitor\` / `~/.config/agentclip/monitor/`, or wherever `--config-dir` points.
+
+If the link drops, the Chat UI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. While a monitor is attached, the Chat UI's `F2` is closed: the Monitor UI runs on the monitor's machine. Disconnecting from the Monitor tab opens it again.
+
+In-app changes (the Monitor UI, theme pickers, saved remote targets, saved monitors) are persisted to the **global** config.toml — except the token and the regions, which belong to the machine that can see the screen and stay there.
 
 ## Running the monitor on Linux
 
-The monitor half — `agentclip-monitor`, window and all — runs on **X11**. It captures with `XGetImage`, clicks and types through the XTest extension, and switches windows through EWMH's `_NET_ACTIVE_WINDOW`; on Windows the same operations are GDI and `SendInput`, and the backend is picked by platform with nothing to configure.
+The monitor half — `agentclip-monitor`, Monitor UI and all — runs on **X11**. It captures with `XGetImage`, clicks and types through the XTest extension, and switches windows through EWMH's `_NET_ACTIVE_WINDOW`; on Windows the same operations are GDI and `SendInput`, and the backend is picked by platform with nothing to configure.
 
 **Native Wayland is not supported.** A Wayland session gives no client a way to screenshot another client's surface or synthesise input into it, so there is nothing for the monitor to build on. A browser running under **XWayland** *is* a normal X client and works — start it with `GDK_BACKEND=x11` (Firefox: `MOZ_ENABLE_WAYLAND=0`), or log into an "X11"/"Xorg" session at the display manager. `echo $XDG_SESSION_TYPE` says which you are in.
 
@@ -55,7 +70,9 @@ What the machine needs:
 - **copykitten** is the preferred clipboard backend and is *untested* on Linux; if it misbehaves, uninstall it and the pyperclip fallback takes over (set `[clipboard] provider = "pyperclip"` to force it).
 - **A window manager that speaks EWMH** — anything mainstream does. Without one, the snap-back after an auto-copy click simply reports that focus did not come, and the rest keeps working.
 
-`agentclip-monitor --port 7777` binds loopback on that machine, so reach it with an SSH forward rather than `--bind`: `ssh -N -L 7777:127.0.0.1:7777 you@the-vm`, then `agentclip --monitor 127.0.0.1:7777` here.
+`agentclip-monitor --port 7777` binds loopback on that machine, so reach it with a forward rather than `--bind`: the Connect dialog's **Monitor** tab in **Via SSH** mode opens one over the connection the Executor already holds, and `ssh -N -L 7777:127.0.0.1:7777 you@the-vm` (then `agentclip --monitor 127.0.0.1:7777` here) is the manual equivalent. Either way you also need the token off that machine — the SERVE band shows it, and `--headless` prints it once on stderr at startup.
+
+A server with no desktop at all cannot open the Monitor UI, and does not need to: `agentclip-monitor --headless --port 7777` imports no window toolkit. It also cannot capture appearances or draw a region, so calibrate once from a machine that *does* have a display against the same config dir, or copy `profiles/` and `monitor/regions.json` over.
 
 ## config.toml reference
 
@@ -181,7 +198,7 @@ A preset describes one chat service: its paste budget and how AgentClip drives i
 | `copilot-free` | 6k | 128k | | `unknown` | 6k | 100k |
 | `claude` | 24k | 700k | | `paranoid` | 4k | 50k |
 
-Built-ins can be edited but not deleted. Fields (all editable in the calibration window — `F2`, the titlebar's **calibrate** button, or `agentclip-monitor` on the machine the browser is on):
+Built-ins can be edited but not deleted. Fields (all editable in the **Monitor UI** — `F2`, the titlebar's **calibrate** button, or `agentclip-monitor` on the machine the browser is on):
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -205,7 +222,7 @@ Built-ins can be edited but not deleted. Fields (all editable in the calibration
 | `alert_repeat_seconds` | `0` | 0 = alert once; N = repeat every N seconds while still waiting |
 | `edit_by_lines` | `false` | Add `replace_lines` (edit by line range) to the catalog and teach `read_file` its `numbered` gutter. For a host that cannot echo code back verbatim — M365 Copilot rewrites lambdas, so a find/replace edit can never match there. Costs ~900 chars of bootstrap |
 
-**Debugging delivery.** When a paste lands somewhere odd, set `snap_back = false` (or untick "focus back after send" in the calibration window): AgentClip stops taking the foreground back after its own auto-sends and auto-copies, so the browser keeps focus and you can watch where the clicks actually go. The beep you hear when the loop stalls and needs you is `alert_sound` ("beep when it stalls", same block) — it is off by default, and `alert_repeat_seconds` is how often it nags.
+**Debugging delivery.** When a paste lands somewhere odd, set `snap_back = false` (or untick "focus back after send" in the Monitor UI): AgentClip stops taking the foreground back after its own auto-sends and auto-copies, so the browser keeps focus and you can watch where the clicks actually go. The beep you hear when the loop stalls and needs you is `alert_sound` ("beep when it stalls", same block) — it is off by default, and `alert_repeat_seconds` is how often it nags.
 
 ## permissions.json — the rules
 

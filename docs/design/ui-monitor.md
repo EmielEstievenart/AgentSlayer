@@ -1,13 +1,13 @@
-# UI Monitor — the VM / brain split (plan)
+# UI Monitor — the VM / brain split
 
-> **Status: PLAN, not yet binding.** Decisions below were settled in a design
+> **Status: BUILT, and binding — every section, §9 included** (last phase
+> landed 2026-08-25). This began as a plan: decisions settled in a design
 > session on 2026-08-24 and grounded in a code investigation the same day
 > (every `file:line` reference in this document was verified against commit
-> `e8d3ff5`). Phases graduate into **binding** one at a time, exactly as
-> `remote-executor.md` did: when a phase lands, its section gets an "as built"
-> note and its status flips. Until then everything here is intent.
->
-> **Exception: every section is now built, and binding.** Where each one landed:
+> `e8d3ff5`), with phases graduating into binding one at a time exactly as
+> `remote-executor.md` did. They all have. **Each phase section carries its own
+> "as built" note, and where a note and the plan text under it disagree, the
+> note is the record.** Where each phase landed:
 >
 > - **§2.12, §6.0** (2026-08-24) — the default shell is the GUI, the TUI is
 >   behind `--tui`, and every phase-0 row in §7 is applied.
@@ -32,17 +32,24 @@
 >   exits 2, and §8's "Textual removal timing" is closed) and its second on
 >   2026-08-25 (the `SshHost` per-call path is deleted; `SshHost` is a
 >   connection, not a `Host`).
+> - **§9** (2026-08-25) — wave 2, whole, in four phases the same day it was
+>   decided: **§9.0** the nomenclature and the package renames (`shell/chat`,
+>   `shell/monitor_ui`, and a third package `shell/webview` the rename forced
+>   into existence); **§9.1** the Monitor UI — `agentclip-monitor` opens a
+>   window, the Serve band, the token, the region store; **§9.2** the Chat UI's
+>   Monitor tab, `SshHost.open_tunnel` and `--monitor @name`; **§9.3** this
+>   header, the ledger below, `ui-briefs/monitor-ui.md` and the user guide.
+>   Each subsection has its own "as built" note.
 >
-> Every row in §7 is applied. Of §8's open points, two are **closed by §9.1**
-> (auth on the port; chat-region persistence) the moment that phase lands; Wayland
-> and the manual states in split mode stay open.
+> Every row in §7 is applied. Of §8's six points, **four are closed** — auth on
+> the port and chat-region persistence by §9.1 (built, not merely decided), tick
+> cadence at phase 5, Textual removal timing at phase 6. **Two stay open:
+> Wayland, and what the manual fallback states mean in split mode.**
 >
-> **§9 is PLAN.** Wave 2 — the monitor gets its own UI — was decided on
-> 2026-08-25 and nothing in it is built. It carries its own status header and
-> its four phases graduate the same way §6's did. Where §9 renames things
-> (§9.0), the new words apply to §9 and to the code it produces; §1–§8 keep the
-> vocabulary they shipped under, so every anchor and every citation still
-> resolves.
+> Where §9 renames things (§9.0), the new words apply to §9 and to the code it
+> produced; **§1–§8 keep the vocabulary they shipped under** on purpose, so
+> every anchor and every citation still resolves. The paragraph under §1's
+> table is the old-word → new-word key that translates them.
 >
 > **Where this document overrides others** — say it here so no two docs
 > disagree:
@@ -372,14 +379,18 @@ of phase 2. Each gets a test that fails if it regresses.
 
 ## 5. Security note for the monitor port
 
-The monitor port is an unauthenticated channel to a machine's mouse, keyboard
-and clipboard. v1 binds `127.0.0.1` by default and requires an explicit
-`--bind` to listen elsewhere; the intended deployment is a VM on a private
-host-only network or an SSH `-L` forward. Adding a shared-secret handshake was
-**OPEN** and is now **decided: §9.1** — `hello` carries a token, a wrong or
-missing one is refused with `kind="unauthorized"`, and the default is token
-required even on loopback. Everything in the paragraph above is what stands
-until that phase lands.
+**Superseded by §9.1, which is built.** The monitor port *was* an
+unauthenticated channel to a machine's mouse, keyboard and clipboard. What
+survives from this section: v1 binds `127.0.0.1` by default and requires an
+explicit `--bind` to listen elsewhere, and the intended deployment is a VM on a
+private host-only network or a forward. What changed on 2026-08-25: `hello`
+carries a token, a wrong or missing one is refused with `kind="unauthorized"`
+before `hello_ack`, and the default is **token required even on loopback**,
+waivable only by `--no-token` and only on loopback. `--bind` and the token are
+orthogonal — `--bind` answers who can *reach* the port, the token answers who
+may *use* it. §9.2 also turned the `-L` forward into a `direct-tcpip` channel on
+the connection the app already has, so the manual `ssh -L` is now the fallback
+rather than the recipe.
 
 ### 5.1 Which desktops the monitor can serve — **as built**
 
@@ -780,7 +791,7 @@ for the state label (`paint_loop_state`, tui `main.py:1726`, gui
 >
 > - **One `webview.start()` per process.** The native pump runs on the main
 >   thread and returns when the LAST window closes, so the two entry points are
->   not symmetric: `run_calibration` owns the pump (standalone), and
+>   not symmetric: `run_monitor_ui` owns the pump (standalone), and
 >   `open_calibration_window(webview, runner)` only creates the window and wires
 >   it, leaving the pump the chat shell is already running to pick it up.
 > - **A borrowed loop.** The chat GUI passes `GuiRunner.schedule` as the
@@ -1043,22 +1054,25 @@ per-call machinery is still in the code" now say it is gone.
 
 **Every row in this table is applied**, and every phase of §6 is as built.
 
-## 8. Open points (**OPEN**, except where §9 closed one)
+## 8. Open points — **two left** (Wayland; the manual states in split mode)
 
-Two of the points below are answered by §9 and struck through; they stay listed,
-with the answer, until the phase that implements them lands.
+Four of the six below are answered and struck through; they stay listed, with
+the answer and where it landed, because a reader arriving at this section
+deserves to find the resolution rather than a dangling question. **The only
+points still open are Wayland and what the manual fallback states mean in split
+mode.**
 
-- ~~**Auth on the monitor port**~~ (§5). **CLOSED by §9.1** (decided 2026-08-25;
-  not built until that phase lands). The answer is the shared secret the
+- ~~**Auth on the monitor port**~~ (§5). **CLOSED and BUILT by §9.1**
+  (2026-08-25). The answer is the shared secret the
   handshake always had room for: `hello` carries a `token`, a wrong or missing
   one is refused with an `error` frame of `kind="unauthorized"`, the token is
   generated and shown by the Monitor UI, and the default is **token required —
   on loopback too**, waivable only by an explicit `--no-token` / checkbox that
   is itself refused off loopback. §5's bind default keeps its own meaning
   beside it: `--bind` answers who can reach the port, the token answers who may
-  use it. Phase 5's shipped state — loopback-by-default plus a documented SSH
-  `-L` deployment — is what stands until §9.1 lands, and §9.2 turns the forward
-  itself into a `direct-tcpip` channel on the connection the app already has.
+  use it. §9.2 also turned the forward itself into a `direct-tcpip` channel on
+  the connection the app already has, so the manual `ssh -L` phase 5 documented
+  is now the fallback rather than the recipe.
 - **Which clipboard the manual fallback states mean in split mode.**
   `MANUAL_INSERT` / `MANUAL_COPY` assume the operator can reach the browser's
   clipboard. On a VM that is the VM's clipboard — the brain's GUI can show the
@@ -1068,8 +1082,8 @@ with the answer, until the phase that implements them lands.
   states have a recipe that parks and an alarm that nags, and neither knows
   which machine the human is sitting at.
 - ~~**Chat regions are not persisted on the monitor**~~ (§6.4's note, restated by
-  §6.5's). **CLOSED by §9.1** (decided 2026-08-25; not built until that phase
-  lands). It lives in **the monitor's own store** — the monitor's config dir,
+  §6.5's). **CLOSED and BUILT by §9.1** (2026-08-25), as `regions.json` in the
+  monitor's config dir. It lives in **the monitor's own store** — the monitor's config dir,
   keyed by service key — which is the half of the question that was undecided;
   the brain's config was the other candidate and it loses, because the machine
   that can see the box is the machine that should remember it. `MonitorSpec.region`
@@ -1098,12 +1112,14 @@ with the answer, until the phase that implements them lands.
 
 ## 9. Wave 2 — the monitor gets its own UI
 
-> **Status: PLAN, not yet binding.** Decided by the user on 2026-08-25, after
-> wave 1 (§6) shipped whole. Everything above this line describes code;
-> everything below it is intent, and graduates one phase at a time exactly as
-> §6's did — a phase lands, its subsection gets an "as built" note, its status
-> flips. Phases run in order 9.0 → 9.1 → 9.2 → 9.3; 9.3 may start early for the
-> rows whose surface is already decided.
+> **Status: BUILT, and binding** (2026-08-25). Decided by the user that morning,
+> after wave 1 (§6) shipped whole, and built the same day: §9.0 (the
+> nomenclature and the package renames), §9.1 (the Monitor UI, the token, the
+> region store), §9.2 (the Monitor tab and the SSH tunnel) and §9.3 (this
+> document, the briefs and the user guide). Each subsection carries its own "as
+> built" note naming where the code and the plan disagree — **read those notes
+> before the plan text under them**, because where they disagree the note is the
+> record and the plan is the intent.
 >
 > **What wave 1 left behind, and this wave picks up.** §6.5 shipped split mode
 > with one entry (`--monitor host:port`) and no way to configure the far machine
@@ -1119,7 +1135,50 @@ with the answer, until the phase that implements them lands.
 > nothing else moves, so every anchor and every citation in the other design
 > docs keeps resolving.
 
-### 9.0 Nomenclature — three nouns, and "GUI" is not one of them
+### 9.0 Nomenclature — three nouns, and "GUI" is not one of them — **AS BUILT** (2026-08-25)
+
+> **Built, and binding.** The renames landed as written (`shell/gui` →
+> `shell/chat`, `shell/gui/calibration` → `shell/monitor_ui`, the test trees
+> mirrored). Four deviations, each one honest about what the plan got wrong:
+>
+> - **There is a THIRD package: `shell/webview/`.** The plan said "package
+>   renames, and nothing else". It could not be, because the rename made
+>   `monitor_ui` a *sibling* of `chat` and `tests/test_layering.py`'s
+>   `test_monitor_ui_never_imports_chat_or_app` then forbids the reach the old
+>   parent/child shape allowed. Everything the two windows are made of moved
+>   down instead of sideways: `webview/bridge.py` (the FIFO, the drainer, the
+>   `js_api` shim), `webview/service_editor.py` (the editor's MODEL — the plan
+>   said it "moves with" `monitor_ui`, and it went one package further down
+>   because the Chat UI still reads presets) and `webview/assets.py` (asset dir
+>   + the `file://` entry URL). `shell/chat` keeps no `bridge.py` of its own.
+>   The pywebview rule is therefore pinned over **three** package names, not
+>   two (`WEBVIEW_PACKAGES`).
+> - **`monitor_ui` may import one module of `driver/automation`.** The plan
+>   listed the layering rules as "untouched"; the shipped allowance adds
+>   `agentclip.driver.automation.finish` — and only that module — for the finish
+>   vocabulary the ELEMENTS column labels its sightings with. Not the loop: this
+>   window never drives an `AutomationController`. `shell/webview`'s allowance
+>   stays narrower still (`config`, `driver/screen`, itself, `webview`).
+> - **Identifiers were NOT chased into the corners.** "No module, test, spec
+>   file or docstring says `shell.gui` or `calibration`" is not what shipped and
+>   is not the bar. What survives on purpose: the **`gui` extra** in
+>   `pyproject.toml` (it is the name of a pywebview dependency group, and both
+>   windows need it), the **`[gui]` config table** (`theme` lives there — a
+>   user's config file is not renamed by a refactor), the deprecated **`--gui`**
+>   no-op flag, `run_gui` / `GuiRunner` / `GuiView` in `shell/chat`, and the
+>   whole `Calibration*` family in `shell/monitor_ui` (`CalibrationView`,
+>   `CalibrationBridge`, `CalibrationJsApi`, `CalibrationRunner`,
+>   `CalibrationMonitor`, `open_calibration_window`). The vocabulary is a rule
+>   about **prose and packages**, not a global search-and-replace over every
+>   symbol; renaming those would churn call sites, tests and one config file for
+>   no reader's benefit.
+> - **`agentclip --calibrate` is a stub, not a removal**, and it landed in §9.2
+>   rather than here. It prints
+>   `agentclip: --calibrate was removed in this release; run agentclip-monitor
+>   instead` to stderr and exits 2 — the same one-release courtesy `--tui` got
+>   (§6.6), for the same reason: a script that still carries the flag is told,
+>   rather than silently getting a different thing. It goes for good in the
+>   release after this one.
 
 **Goal.** One word per thing. "GUI" named the pywebview window when there was
 exactly one; there are two now, on two machines, doing two unrelated jobs, and
@@ -1177,7 +1236,108 @@ importers by their new names; `agentclip --calibrate` is gone and no doc offers
 it; `uv run pytest`, `ruff`, `mypy` green; all three exes rebuilt via
 `.\scripts\build-exe.ps1`.
 
-### 9.1 The Monitor UI — `agentclip-monitor` grows a window
+### 9.1 The Monitor UI — `agentclip-monitor` grows a window — **AS BUILT** (2026-08-25)
+
+> **Built, and binding.** `agentclip-monitor` opens a window, the port is
+> authenticated, and the chat region survives a restart. The brief for the
+> window itself is `docs/design/ui-briefs/monitor-ui.md`; what follows is only
+> where the code and the plan below disagree.
+>
+> **The store is two files in a folder, not one `monitor.json`.** The monitor's
+> own config dir is `<platform config dir>/agentclip/monitor/` (`--config-dir`
+> overrides it, for both halves at once), and it holds:
+>
+> - **`monitor-token`** — one line. `secrets.token_hex(16)` (32 hex characters),
+>   not `token_urlsafe`: it is a string a human copies out of one window and
+>   into another, and hex has no `-`/`_` to lose to a line break or a shell.
+>   Written atomically (`mkstemp` → `fsync` → `chmod 0600` → `os.replace`), read
+>   with `.strip()`, and re-minted silently if it is missing, empty or
+>   unreadable. `load_or_create_token` never regenerates; `regenerate_token` is
+>   the deliberate act.
+> - **`regions.json`** — `{"version": 1, "regions": {<service key>: {left, top,
+>   width, height}}}`. A second key in one JSON blob would have coupled the
+>   token's write path to the region's, and the region is written from a
+>   different surface at a different rate. One unreadable entry drops one
+>   service, never the file.
+>
+> The precedence is §8's, unchanged and implemented in `LocalUIMonitor`: a
+> `configure` spec that names a region wins and is written through; a spec with
+> `region=None` is served from the store. `saved_region()` is a local-only read
+> that never crosses the wire.
+>
+> **The wire went to version 2.** `hello` gained `token` (always present,
+> `null` when there is none) and that is a breaking frame change, so
+> `MONITOR_WIRE_VERSION = 2` — deliberately its own number, not the engine's
+> `WIRE_VERSION`. The refusal is an `error` frame with `kind="unauthorized"`
+> (a new member of `ERROR_KINDS`) sent **before `hello_ack`**, so an
+> unauthorised peer never learns the monitor's `server_id` or which clipboard
+> backend that machine has. One sentence covers both "no token" and "wrong
+> token", by design.
+>
+> **The defaults are as decided: token required, loopback included.** A
+> first run mints one; the headless door prints it once on stderr. The
+> refusals live in `MonitorServer.__init__` rather than in the CLI, so the
+> Serve panel gets them for free: a non-loopback bind without `allow_remote`
+> is `BindRefused`, and so is a non-loopback bind with `token=None`. The panel
+> refuses the same pairing one layer up (`NO_TOKEN_OFF_LOOPBACK`) and disables
+> the no-token checkbox whenever the *pending* dropdown row is not loopback.
+> The headless door adds `--token TEXT` / `--token-file PATH` beside
+> `--no-token`, mutually exclusive; the **window** door accepts those two and
+> ignores them with a one-line notice — the Monitor UI serves with the token in
+> its config dir, which the panel shows.
+>
+> **Serve panel, as built.** One `serve` event carries the whole panel state
+> (`serving`, `status`, `address`, `port`, `interfaces`, `loopback`, `warning`,
+> `error`, `no_token`, `token`, `token_path`) and four verbs go the other way:
+> `serve_start(address, port, no_token)`, `serve_stop()`, `token_regenerate()`
+> and `token_copy()`. `token_copy` is the one verb in either window that
+> **returns a value** — the page needs the string to hand `navigator.clipboard`
+> — so it is answered on pywebview's own thread off a plain attribute, never
+> marshalled onto the loop. The status sentences are
+> `not serving` (the plan said "stopped"),
+> `listening on {address} — no Chat UI attached` and
+> `listening on {address} — attached: {peer}`; a 1 s task pushes them and ends
+> by *observing* that the server is gone rather than by being cancelled.
+> Regenerating keeps the attached brain, exactly as planned — the live server's
+> token is swapped in place, each session holds its own copy, and a toast says
+> so.
+>
+> **The suspend bracket did not become "always suspended standalone".** The plan
+> said a standalone Monitor UI could simply stay suspended. It cannot: the
+> ELEMENTS column is the surface you calibrate *against*, and suspending the
+> poller for the whole visit freezes exactly the thing you came to watch. What
+> shipped is **per-capture** in this window — `svc_capture`, the region picker
+> and `/identify` each bracket their own overlay — while the **Chat UI** keeps
+> §6.4's per-visit bracket on its *own* monitor. Two monitors, two brackets,
+> and the embedded case has both.
+>
+> **The header seeds itself from the store.** On start, on a slot switch and on
+> a config adoption, the view fills an unset region from `saved_region()` and
+> deliberately does **not** echo it back through `on_calibration` — otherwise
+> the header would read "not set" over a monitor already polling that exact
+> rectangle. Standalone passes `regions_dir`; the Chat UI's embedded window does
+> not, so a region drawn from `F2` is the session's, as it always was.
+>
+> **`run_calibration` is gone**; the standalone entry is `run_monitor_ui`
+> (§6.4's note is corrected in place). `open_calibration_window` is unchanged
+> and still the embedded door.
+>
+> **Packaging.** `packaging/agentclip-monitor.spec` collects the Monitor UI's
+> assets by package-relative path and names the per-platform pywebview backends
+> in `hiddenimports`; `webview`/`pythonnet`/`clr` moved out of `excludes`. Both
+> build scripts stopped skipping `gui` for `-MonitorOnly` / `--monitor-only`.
+> There is deliberately **no `--gui-smoke` for the monitor exe**: that check is
+> `cli.py:_gui_smoke`, and `cli` is off this binary's layering allowance — so
+> what proves the frozen Monitor UI's pywebview collection is the app binary's
+> own `--gui-smoke`, over the same `webview`, the same backend and the same
+> environment. Giving the monitor one of its own means moving that function into
+> a package both binaries may import; worth doing, and not in this phase.
+>
+> **The layering cost, named.** Making `monitor_ui` a sibling of `chat` is what
+> forced `shell/webview/` into existence (§9.0's note) and what makes
+> `agentclip.driver.automation.finish` an explicit, single-module allowance for
+> this window. Neither was in the plan; both are the plan's own rule being
+> enforced.
 
 **Goal.** The Monitor becomes a thing you can sit in front of: it shows what it
 is watching, lets you configure the service it watches, and lets you decide —
@@ -1412,7 +1572,74 @@ session intact across it; saved `[monitor.<name>]` targets round-trip; a
 localhost e2e test drives a full recipe run over a `direct-tcpip` channel to a
 fake SSH transport; suite green; exes rebuilt.
 
-### 9.3 Docs & briefs
+### 9.3 Docs & briefs — **AS BUILT** (2026-08-25)
+
+> **Built, and binding.** Every row of the plan below is applied, plus the
+> corrections the pass turned up. What landed:
+>
+> - **`docs/design/ui-briefs/monitor-ui.md` is written.** It specifies the
+>   window: the header and its region line, the SERVE band control by control
+>   with the verb each one calls, the three status sentences verbatim, the token
+>   row and its regenerate semantics, the two files the Monitor keeps, the
+>   off-loopback warning, the two refusals, the command line, and the
+>   standalone-vs-embedded table. It carries two things the plan did not ask for
+>   and the code made true: **the Serve band's absence in the embedded window is
+>   decided by the absence of an event, not by a flag**, and the suspend bracket
+>   is **per capture** here rather than per visit (§9.1's note). Two rough edges
+>   are recorded as rough edges rather than dressed up: a non-numeric port is a
+>   silent no-op, and two js_api verbs are declared and never called.
+> - **`service-editor.md` and `elements-panel.md`** were already re-hosted onto
+>   `shell/monitor_ui/` (and, for the editor's model,
+>   `shell/webview/service_editor.py`) by the rename commit. What this pass
+>   fixed is the *door*: both still offered `agentclip --calibrate` as the
+>   standalone entry. It is `agentclip-monitor`, and the flag is a stub.
+> - **`ssh-connect.md` gained §3a, the Monitor tab** — the two tabs and why the
+>   dialog keeps them apart, the two modes, when Attach is armed and the four
+>   validation sentences, the eager `direct-tcpip` tunnel, the refuse-with-hint
+>   rule, where each failure lands, Disconnect, and `[monitor.<name>]`. Its
+>   header gained the two-tab amendment. **§6's question 1 is answered: yes** —
+>   `[monitor.<name>]` shipped exactly the proposed default, so it is precedent
+>   for `[remote.<name>]` rather than a proposal, with two details the proposal
+>   did not have (the offer is suppressed by **address**, not by name; the
+>   forget control sits *beside* the row so a mis-aimed click cannot delete it).
+> - **`README.md`** gained a three-binaries vocabulary table under the run
+>   block, a **"Driving a browser on another machine"** section (the window, the
+>   `--headless` door, the SERVE band and its token, the Monitor tab's two
+>   modes, `--monitor @name`), and the corrections the monitor binary's new
+>   shape forced: it **carries pywebview** now, `-MonitorOnly` skips only `mcp`,
+>   and there is no `--gui-smoke` for it.
+> - **`docs/commands.md`** gained `agentclip-monitor`'s own flag table
+>   (`--headless`, `--port`, `--bind`, `--no-token`, `--token`/`--token-file`,
+>   `--config-dir`) and the Monitor UI's one key (`Esc`). Its
+>   **"the monitor port is unauthenticated"** paragraph was flatly false against
+>   §9.1 and is replaced by the token model and the `--bind`-vs-token split.
+> - **`docs/configuration.md`** gained the vocabulary up front, the token and
+>   region files as rows in the merge-order table, the Serve panel, the region
+>   store's precedence rule, and the same correction to the unauthenticated
+>   claim. Its Linux section now says what a machine with no desktop does
+>   (`--headless`, and calibrate elsewhere against the same config dir).
+> - **`docs/design/architecture.md`**: §1's module tree now breaks out
+>   `shell/chat/`, `shell/monitor_ui/` (`__main__.py`, `window.py`, `view.py`,
+>   `serve.py`, `assets/`) and `shell/webview/` file by file, §0's vocabulary
+>   row stopped offering `--calibrate`, and the seams table's
+>   "the TUI posts a message; a GUI enqueues to its JS bridge" is now the Chat
+>   UI's line alone, with the note that **only the Chat UI implements
+>   `AutomationView`** — the Monitor UI has no loop to paint for.
+> - **`AGENTS.md`**: the vocabulary row, and the build facts the monitor's new
+>   shape changed (`gui` is synced for the monitor too; `-MonitorOnly` skips
+>   `mcp` alone; `--gui-smoke` is the app's only, with the reason).
+> - **`docs/design/gui.md`** already carries its "historical, not binding"
+>   header and keeps its filename, for the reason the plan gives.
+>
+> **What was NOT done, deliberately.** The plan's "no doc under `docs/` uses
+> 'GUI' as a noun for a surface" is not achievable by this pass and was not
+> attempted: `gui.md`, `tui.md`, the four briefs with no status header and §1–§8
+> of this document are **records of what shipped under the old vocabulary**, and
+> rewriting them would break citations across every design doc for no reader's
+> benefit (§9's own status note says so). The rule is enforced where it pays:
+> the product surfaces (`commands.md`, `configuration.md`, `README.md`), the
+> vocabulary tables, and every doc written from here on. The briefs that do
+> carry a status header say in it that "GUI" below means the Chat UI.
 
 **Goal.** One vocabulary everywhere, and a brief for the window §9.1 builds.
 This phase writes no product code.

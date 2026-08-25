@@ -136,7 +136,7 @@ for is binary data (wire.py:92–110 is scalar/dataclass/enum only) — this rul
 means the monitor wire never needs one.
 
 Anything pixel-shaped a human wants to *see* (the ELEMENTS column's crops,
-`shell/gui/view.py:3189 _element_png`; the capture overlay; `/identify`) is a
+`shell/chat/view.py:3189 _element_png`; the capture overlay; `/identify`) is a
 **calibration** surface, and calibration runs where the pixels are (§2.5).
 
 ### 2.3 Policy stays local
@@ -532,7 +532,7 @@ suite green, §7 phase-0 rows all amended, this section marked as built.
 >   tree name `driver/monitor`.
 >
 > **What the four commits above do NOT contain** — the shell half. As of
-> `566a364` neither shell had been touched: `shell/gui/view.py` and
+> `566a364` neither shell had been touched: `shell/chat/view.py` and
 > `shell/tui/screens/main.py` still built `AutomationController(...)` with the
 > pre-phase-1 keywords (`clipboard=`, `poll_interval_ms=`, and in the TUI also
 > `ops=`) and passed no `monitor=`, so constructing either one raised
@@ -765,14 +765,14 @@ for the state label (`paint_loop_state`, tui `main.py:1726`, gui
 ### 6.4 The calibration window — **AS BUILT**
 
 > **Status: built and binding (2026-08-24).** Two parts. Part A built the window
-> — `shell/gui/calibration/` (`window.py`, `view.py`, its own `assets/`), the
-> `--calibrate` flag, and `tests/shell/gui/calibration/`. Part B emptied the
+> — `shell/monitor_ui/` (`window.py`, `view.py`, its own `assets/`), the
+> `--calibrate` flag, and `tests/shell/monitor_ui/`. Part B emptied the
 > chat GUI: the service editor, the `svc_*` bridge/runner/js_api families, the
 > ELEMENTS column (`paint_elements` is a no-op that satisfies the port and no
 > `crop_elements` is wired any more), the chat-region picker, `_picker_open`,
 > `_refuse_second_picker` and `/identify`'s overlay are all gone from
 > `view.py`/`bridge.py`/`runner.py`/`assets/`, together with their CSS, their
-> markup and `tests/shell/gui/test_elements.py`. `service_editor.py` stays where
+> markup and `tests/shell/chat/test_elements.py`. `service_editor.py` stays where
 > it is: it is a MODEL with no window behind it, and the calibration package
 > imports it.
 >
@@ -814,11 +814,11 @@ for the state label (`paint_loop_state`, tui `main.py:1726`, gui
 
 
 A second pywebview window — the GUI has exactly **one** `create_window`
-today (`shell/gui/shell.py:276–285`), so this is new engineering, not a
-refactor. Put it in `shell/gui/calibration/` with its own bridge object and
+today (`shell/chat/shell.py:276–285`), so this is new engineering, not a
+refactor. Put it in `shell/monitor_ui/` with its own bridge object and
 its own HTML/JS/CSS bundle (embedded in Python source per AGENTS.md).
 
-Move in: `ServiceEditor` (`shell/gui/service_editor.py`, already composed and
+Move in: `ServiceEditor` (`shell/chat/service_editor.py`, already composed and
 callback-injected, view.py:2681–2688), the `svc_*` bridge methods
 (`bridge.py:502–518, 715–802`), the elements panel (`view.py:3099–3204`), the
 click-point picker (`view.py:2811`), `/identify` (`view.py:1755–1803`). The
@@ -852,7 +852,7 @@ are amended to name the window; suite green.
 >   one, `latest`/`generation` as local fields, one round trip per action
 >   matched back by id alone, and link loss that fails everything in flight,
 >   raises out of a parked `observe()` and fires `on_disconnect` once.
-> - **The brain side** (`driver/monitor/switchable.py`, `shell/gui/view.py`,
+> - **The brain side** (`driver/monitor/switchable.py`, `shell/chat/view.py`,
 >   `cli.py`): `LoopState.DISCONNECTED` and its transitions — every state may
 >   reach it, and it leaves only to `IDLE`, because a reconnect re-derives from
 >   the screen rather than resuming. The GUI builds its controller over a
@@ -944,8 +944,8 @@ green; exe and monitor exe rebuilt.
 >   verdict went with `tui/graphics.py`; nothing else asked them anything.
 > - **The OS gate moved off the deleted shell.** `tests/conftest.py` used to
 >   re-block `pick_region`/`draw_identify_overlay` at `tui/screens/main.py`'s
->   bound names; it now blocks them at `shell/gui/calibration/view.py` and
->   `shell/gui/service_editor.py` (where those names are from-imported today)
+>   bound names; it now blocks them at `shell/monitor_ui/view.py` and
+>   `shell/chat/service_editor.py` (where those names are from-imported today)
 >   and additionally blanks the seven injecting verbs at
 >   `driver/monitor/ops.py`, which is the adapter the whole automation suite
 >   drives. `tests/test_os_gate.py` covers each new patch point.
@@ -1140,17 +1140,17 @@ nouns, and where a sentence needs the noun it is **Chat UI**.
 
 **Code:** package renames, and nothing else.
 
-- `src/agentclip/shell/gui/` → `src/agentclip/shell/chat/`. Every module inside
+- `src/agentclip/shell/chat/` → `src/agentclip/shell/chat/`. Every module inside
   keeps its name (`view.py`, `bridge.py`, `runner.py`, `shell.py`, `remote.py`,
   `docs.py`, `assets/`).
-- `src/agentclip/shell/gui/calibration/` → `src/agentclip/shell/monitor_ui/` — a
+- `src/agentclip/shell/monitor_ui/` → `src/agentclip/shell/monitor_ui/` — a
   **sibling** of `shell/chat`, not a child of it. It stops being "a second
   window the chat shell can open" and becomes the Monitor's own front end
   (§9.1), which is a different process on a different machine in the deployment
   this whole document exists for. `service_editor.py` moves with it: it is a
   model of a *service preset*, and services are configured where the pixels are.
-- Tests mirror exactly: `tests/shell/gui/` → `tests/shell/chat/`,
-  `tests/shell/gui/calibration/` → `tests/shell/monitor_ui/`.
+- Tests mirror exactly: `tests/shell/chat/` → `tests/shell/chat/`,
+  `tests/shell/monitor_ui/` → `tests/shell/monitor_ui/`.
 - **Untouched, deliberately:** the layering *rules* (the same rules with the new
   names — pywebview may be imported by `shell/chat` and `shell/monitor_ui` and
   nowhere else; `driver/` may not import either); the `UIMonitor` / `Tick` /
@@ -1418,9 +1418,9 @@ This phase writes no product code.
   answered affirmatively for `[monitor.<name>]`, which settles the precedent for
   `[remote.<name>]` too.
 - **`AGENTS.md`** — the vocabulary line in paragraph 1 (three binaries, four
-  nouns, "GUI" retired), the `shell/gui/assets` path in the Dev-commands bullet,
+  nouns, "GUI" retired), the `shell/chat/assets` path in the Dev-commands bullet,
   and the OS-gate bullet's patch points, which name
-  `shell/gui/calibration/view.py` and `shell/gui/service_editor.py` today.
+  `shell/monitor_ui/view.py` and `shell/chat/service_editor.py` today.
 - **`docs/design/gui.md`** keeps its **filename** — it is already headed
   "historical, not binding", and renaming it would break every citation in this
   document and in `architecture.md` for no reader's benefit. Its header gains one

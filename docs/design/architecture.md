@@ -8,11 +8,28 @@ Decisive design for codebase structure, config, persistence, sandboxing, and tes
 
 The **engine is sans-IO with respect to clipboard and UI**: it is a synchronous state machine that consumes *strings* (ingested text, user decisions, user answers) and returns *values* (outbound payload strings, pending actions, results). It performs filesystem and subprocess side effects only through the tool layer, never touches the clipboard, and never imports Textual.
 
+### The vocabulary (2026-08-25)
+
+Five words, and they mean exactly one thing each. Older documents say "GUI" or
+"the shell" where this table says **Chat UI**, and "the calibration window"
+where it says **Monitor UI**; "GUI" is not a term any more.
+
+| term | what it is | where it lives | binary |
+|---|---|---|---|
+| **Chat UI** | what the user looks at and types into | `shell/chat/` | `agentclip` |
+| **Monitor** | the process that watches the Browser, clicks it and owns the clipboard | `driver/monitor/` | `agentclip-monitor` |
+| **Monitor UI** | the Monitor's own window: service editor, ELEMENTS, region picker, `/identify` | `shell/monitor_ui/` | `agentclip-monitor` (and `agentclip --calibrate`) |
+| **Browser** | the desktop chat app AgentClip operates — the thing being watched | not ours | — |
+| **Executor** | permission-gated execution on behalf of the agent, through the Host seam | `executor/` | `agentclip-engine` (with the engine) |
+
+`shell/webview/` is under both UIs rather than beside them: the bridge, the
+service editor's model and the asset resolution both windows are made of.
+
 ### The three named layers
 
 Above the engine the codebase is three packages, and they are the vocabulary the rest of these documents use:
 
-- **Shell** (`shell/`: `app/`, `tui/`, `gui/`) — the user-facing surfaces. `tui` is the Textual terminal app, `gui` the pywebview desktop window, and `app` is the UI-agnostic session controller both of them drive through the `ChatView` port. Two shells, one behaviour: neither may own anything the other cannot have.
+- **Shell** (`shell/`: `app/`, `chat/`, `monitor_ui/`, `webview/`) — the user-facing surfaces. `chat` is the **Chat UI** (the pywebview window `agentclip` opens), `monitor_ui` is the **Monitor UI** (the window that runs where the pixels are), `webview` is the pywebview plumbing both of them are made of, and `app` is the UI-agnostic session controller the Chat UI drives through the `ChatView` port. It had a fourth, `tui/` (a Textual terminal app), until ui-monitor.md §6.6 deleted it; `app` stays UI-agnostic anyway, because that is what let one of the two go without the other noticing.
 - **Driver** (`driver/`: `automation/`, `monitor/`, `screen/`, `clip/`) — everything AgentClip does **to the desktop chat app it operates**. `automation` is the loop that watches, clicks, pastes and harvests the reply; `monitor` is the machine it watches *through* — the poll loop, the trackers, the mouse, the keyboard and the clipboard behind one `UIMonitor` object, destined for a process of its own (docs/design/ui-monitor.md §3); `screen` and `clip` are the OS seams `monitor` is made of (capture, focus click, detection; clipboard providers and the watcher).
 - **Executor** (`executor/`: `tools/`, `hosts/`, `mcp/`, `permissions.py`) — permission-gated execution **on behalf of the agent**, reaching the machine only through the **Host seam**. `tools` is the catalogue the model may call, `permissions` decides which calls are allowed, `hosts` is the one route to files and commands (local or over SSH), and `mcp` bolts external servers onto the same catalogue.
 
@@ -21,7 +38,8 @@ Below them sit `engine/` (the state machine and its `store/`), `protocol/` (the 
 Dependency direction (imports may only point downward; enforced by a lint test, see §8):
 
 ```
-SHELL  ──►  DRIVER, ENGINE           the UIs: shell/tui (Textual) | shell/gui (pywebview)
+SHELL  ──►  DRIVER, ENGINE           the UIs: shell/chat (Chat UI) | shell/monitor_ui (Monitor UI)
+ │                                   both over shell/webview (bridge, service-editor model, assets)
  ├──►  shell/app  ──►  engine        (UI-agnostic session orchestration)
  └──►  driver/automation             (UI-agnostic screen automation)
  │
@@ -43,7 +61,7 @@ EXECUTOR leaves: executor/hosts        ◄── config, tools, engine/store, en
                  executor/mcp          ◄── config (the servers), tools (the client runtime)
 ```
 
-`driver/clip` and `driver/screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `shell/tui`, `shell/gui`, `cli`, `driver/automation` and `driver/monitor`. `protocol`, `config`, `executor/hosts`, `executor/permissions` and `executor/mcp` are leaves. `executor/tools` never imports `engine`. Anything violating this is a bug.
+`driver/clip` and `driver/screen` (the OS side-effect layers: clipboard, screen overlay + focus click) are imported **only** by `shell/chat`, `shell/monitor_ui`, `shell/webview`, `cli`, `driver/automation` and `driver/monitor`. `protocol`, `config`, `executor/hosts`, `executor/permissions` and `executor/mcp` are leaves. `executor/tools` never imports `engine`. Anything violating this is a bug.
 
 **`driver/automation` is the second UI-agnostic layer**, added when the desktop GUI shell was decided (docs/design/gui.md §1) and extracted from `MainScreen` over phase 0. It is `shell/app`'s sibling and its opposite number: `app` drives the *engine* through the `ChatView` port, `automation` drives the *screen* through the `AutomationView` port, and a UI shell is what plugs into both. Allowed imports: `agentclip.driver.monitor`, `agentclip.driver.screen`, `agentclip.driver.clip`, `agentclip.config`, itself (plus `agentclip.engine.states`, for `describe.py` alone — tests/test_layering.py). Banned: `textual`, `agentclip.shell.app`, `agentclip.shell.tui` — a shell depends on the Driver, never the other way round.
 
@@ -211,8 +229,15 @@ src/agentclip/
     │   ├── view.py        # ChatView Protocol (the one UI seam) + SessionView snapshot + RunCall rows
     │   └── types.py       # SessionSpec, SessionRef, SessionStats (EngineRequest is engine-side:
     │                      #   engine/link/factory.py, so a remote engine can decode one)
-    ├── gui/               # the pywebview desktop shell: a native window over hand-written
+    ├── chat/              # the CHAT UI: a native pywebview window over hand-written
     │                      #   HTML/CSS/JS in assets/, Python in the same process (gui.md §2)
+    ├── monitor_ui/        # the MONITOR UI: the window that runs where the pixels are —
+    │                      #   service editor, ELEMENTS, region picker, /identify, over a
+    │                      #   LOCAL UIMonitor and nothing else (ui-monitor.md §2.6, §6.4).
+    │                      #   Never imports chat/ or app/: no session, no engine, no transcript
+    ├── webview/           # what BOTH windows are made of, and neither owns: bridge.py (one
+    │                      #   FIFO, one drainer, the js_api shim), service_editor.py (the
+    │                      #   editor's MODEL) and assets.py (asset dir + file:// entry URL)
     └── tui/
         ├── app.py         # AgentClipApp(App); CSS embedded in class var (PyInstaller, §7)
         ├── messages.py    # ClipboardCaptured, CallStarted/CallFinished/CallOutput (the engine worker
@@ -582,7 +607,7 @@ A `deny` verdict never opens a gate: the call is pre-resolved as a `denied` resu
 
 ### Permission modes: two rulesets, not a dial
 
-`ApprovalPolicy.mode` picks **which ruleset is in force**, and nothing else: `PermissionMode = Literal["build", "plan"]` — OpenCode's two primary agents under their own names — lives in `executor/permissions.py` (the leaf `config.py` reads and `approval.py` applies) and is re-exported from `engine/approval.py`, which is where `shell/app`, `shell/tui` and `shell/gui` import it from. A mode is no longer a dial *above* the rules; it *is* a ruleset, and `ModeRules` holds both so switching is one field.
+`ApprovalPolicy.mode` picks **which ruleset is in force**, and nothing else: `PermissionMode = Literal["build", "plan"]` — OpenCode's two primary agents under their own names — lives in `executor/permissions.py` (the leaf `config.py` reads and `approval.py` applies) and is re-exported from `engine/approval.py`, which is where `shell/app`, `shell/tui` and `shell/chat` import it from. A mode is no longer a dial *above* the rules; it *is* a ruleset, and `ModeRules` holds both so switching is one field.
 
 | mode | its ruleset |
 |---|---|
@@ -1012,14 +1037,16 @@ tests/                               # mirrors src/agentclip: one directory per 
 │                                    #   pushed by hand through the tick_feed seam
 └── shell/
     ├── app/                         # the session controller against a fake ChatView: no UI at all
-    ├── gui/                         # the pywebview shell's Python side, driven without a window
+    ├── chat/                        # the Chat UI's Python side, driven without a window
+    ├── monitor_ui/                  # the Monitor UI's, the same way
+    ├── webview/                     # the bridge and the service-editor model both share
     └── tui/
         └── test_smoke.py            # ONE Pilot test: app boots with FakeClipboard injected, post
                                      #   ClipboardCaptured(reply), approval modal appears, press "y",
                                      #   transcript shows result, status bar shows AWAITING_REPLY
 ```
 
-Principles: the **engine round-trip never touches a real clipboard** — `ScriptedLLM` maps outbound payloads to canned reply strings, proving the loop headless (prime directive a). The watcher is tested against `FakeClipboard` (a `ClipboardProvider` with a settable buffer and change counter). Exactly one Textual Pilot test in MVP — shell behavior beyond boot/approve/render is the GUI designer's territory (the GUI's Python side is driven windowless, under `tests/shell/gui/`; the frozen TUI keeps only this smoke test). Golden files are byte-exact (committed with `* -text` in `.gitattributes` so CRLF fixtures survive checkout).
+Principles: the **engine round-trip never touches a real clipboard** — `ScriptedLLM` maps outbound payloads to canned reply strings, proving the loop headless (prime directive a). The watcher is tested against `FakeClipboard` (a `ClipboardProvider` with a settable buffer and change counter). Exactly one Textual Pilot test in MVP — shell behavior beyond boot/approve/render is the GUI designer's territory (the GUI's Python side is driven windowless, under `tests/shell/chat/`; the frozen TUI keeps only this smoke test). Golden files are byte-exact (committed with `* -text` in `.gitattributes` so CRLF fixtures survive checkout).
 
 ---
 
@@ -1071,8 +1098,8 @@ clipboard.write_text(step.outbound.chunks[0])        # results payload back to t
 5. Bootstrap text must include the **attachment note** ("the user's message may arrive as a file named pasted-text/paste.txt; read it entirely") and, when the preset sets `wrap_blocks_in_fence`, the instruction to emit all blocks inside one fenced code block.
 6. Call `id`s unique per turn; results payloads reference them. Parse issues ⇒ the whole turn is non-executable (no partial execution of a half-parsed reply).
 
-**GUI designer must honor** (and the frozen TUI still does):
-1. The engine API in §1 is the **complete** surface — no reaching into `executor/tools/`, `engine/store/`, or `protocol/` from a shell (`shell/gui/`, `shell/tui/`). The status line reads `engine.status()` only.
+**Chat UI designer must honor** (and the frozen TUI still does):
+1. The engine API in §1 is the **complete** surface — no reaching into `executor/tools/`, `engine/store/`, or `protocol/` from a shell (`shell/chat/`, `shell/monitor_ui/`). The status line reads `engine.status()` only.
 2. The engine is synchronous and **not thread-safe**: call it from exactly one worker off the UI thread — the GUI's `asyncio.to_thread` on `GuiRunner`'s loop thread, the TUI's single `@work(thread=True)` worker — never from the event loop (`execute()` runs subprocesses for minutes). The single exception is `request_cancel()` — it only sets a `threading.Event`, and is *meant* to be called from the UI thread while that worker is inside `execute()`. Cancelling is not an abort: the interrupted call gets a `code=cancelled` error result (with its partial output), the calls after it get `cancelled` skip results, and the turn finishes through the normal `Send` path so the model is told what happened.
 3. The watcher is a plain function (`driver/clip/watcher.py`) — you own wrapping it in a thread and bridging back to your UI (the GUI's bridge queue, the TUI's `post_message`); inject `FakeClipboard` in tests.
 4. Every outbound write must go through `SelfWriteSet.note(text)` before `provider.write_text` (self-detection suppression), and reads/writes should share one clipboard thread.

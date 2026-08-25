@@ -148,7 +148,7 @@ def test_the_gate_swaps_the_adapters_names_out_by_default() -> None:
 def test_the_calibration_windows_overlays_are_blocked_at_its_own_names() -> None:
     """The window that OWNS both overlays since phase 4 (6.4): a forgotten mock
     there would throw a fullscreen child process over the user's desktop."""
-    from agentclip.shell.gui.calibration import view as calibration_view
+    from agentclip.shell.monitor_ui import view as calibration_view
 
     with pytest.raises(AssertionError, match="mock it at the use site"):
         calibration_view.pick_region()
@@ -158,7 +158,7 @@ def test_the_calibration_windows_overlays_are_blocked_at_its_own_names() -> None
 
 @gated_only
 def test_the_service_editors_picker_is_blocked_at_its_own_name() -> None:
-    from agentclip.shell.gui import service_editor
+    from agentclip.shell.webview import service_editor
 
     with pytest.raises(AssertionError, match="mock it at the use site"):
         service_editor.pick_region()

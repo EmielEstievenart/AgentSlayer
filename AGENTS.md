@@ -1,6 +1,20 @@
 # AgentClip — agent instructions
 
-AgentClip is a Python desktop app with **one UI shell**, frozen into a single `agentclip.exe` with PyInstaller: the **GUI** (`agentclip.shell.gui`, pywebview + WebView2), which is what `agentclip` launches. It had a second, a Textual TUI behind `--tui`; `docs/design/ui-monitor.md` §6.6 deleted it on 2026-08-24, and both `--tui` (a stub that says so and exits 2) and `--gui` (a no-op) survive one release for the scripts that carry them.
+AgentClip is a Python desktop app with **one chat shell**, frozen into a single `agentclip.exe` with PyInstaller: the **Chat UI** (`agentclip.shell.chat`, pywebview + WebView2), which is what `agentclip` launches. It had a second, a Textual TUI behind `--tui`; `docs/design/ui-monitor.md` §6.6 deleted it on 2026-08-24, and both `--tui` (a stub that says so and exits 2) and `--gui` (a no-op) survive one release for the scripts that carry them.
+
+## The vocabulary
+
+Fixed 2026-08-25. Five words, one meaning each — **"GUI" is not a term any more**; older design docs still say it and mean the Chat UI.
+
+| term | what it is | where it lives | binary |
+|---|---|---|---|
+| **Chat UI** | what the user looks at and types into | `src/agentclip/shell/chat/` | `agentclip` |
+| **Monitor** | watches the Browser, clicks it, owns the clipboard | `src/agentclip/driver/monitor/` | `agentclip-monitor` |
+| **Monitor UI** | the Monitor's own window: service editor, ELEMENTS, region picker, `/identify` | `src/agentclip/shell/monitor_ui/` | `agentclip-monitor` (and `agentclip --calibrate`) |
+| **Browser** | the desktop chat app AgentClip operates — what the Monitor watches | not ours | — |
+| **Executor** | permission-gated execution for the agent, through the Host seam | `src/agentclip/executor/` | `agentclip-engine` (with the engine) |
+
+`src/agentclip/shell/webview/` sits under both UIs: the bridge, the service editor's model and the asset resolution the two windows share. It never imports either of them.
 
 Design docs in `docs/design/` are binding — but **a status header inside a design doc qualifies that claim**: a document (or a section of one) whose header says "plan, not yet binding" is intent, not law, and only the parts its header calls built are binding.
 
@@ -28,7 +42,7 @@ Delegate work to subagents rather than doing it inline. Use Sonnet for explorati
 
 - Tests: `uv run pytest`
 - Lint / types: `uv run ruff check .` and `uv run mypy src`
-- Third-party assets stay embedded in Python source wherever they can, so the PyInstaller build needs no `--add-data` for them. The one deliberate exception is the GUI page (`shell/gui/assets/`, and the calibration window's own): a browser engine loads those over a `file://` URL, so they are real files and `packaging/agentclip.spec` collects them by package-relative path.
+- Third-party assets stay embedded in Python source wherever they can, so the PyInstaller build needs no `--add-data` for them. The one deliberate exception is the two windows' pages (`shell/chat/assets/` and `shell/monitor_ui/assets/`): a browser engine loads those over a `file://` URL, so they are real files and `packaging/agentclip.spec` collects them by package-relative path.
 
 ### Running OS-touching tests
 

@@ -4,7 +4,11 @@ Three named layers sit above the engine - SHELL (the UI), DRIVER (what
 AgentClip does to the desktop chat app it operates) and EXECUTOR (permission-
 gated execution, reaching the machine through the Host seam):
 
-    SHELL  shell/gui ──► driver/clip   gui is the ONLY importer of pywebview
+    SHELL  shell/chat (the Chat UI) ──► shell/monitor_ui (the Monitor UI)
+            │        └──► shell/webview (bridge + service-editor model +
+            │             assets). Those three are the ONLY importers of
+            │             pywebview, and neither of the two below imports chat
+            ├──► driver/clip
             ├──► shell/app ──► engine
             └──► DRIVER: driver/automation ──► driver/monitor ──► driver/clip,
                          (the shared core, also a clip/screen importer) driver/screen
@@ -215,7 +219,7 @@ RULES: list[tuple[str, frozenset[str]]] = [
     # driver.automation: the Driver's core, which the GUI drives. It IS the loop
     # that watches and clicks the chat window, so it needs
     # driver.monitor/driver.screen/driver.clip the way cli does - but it must
-    # never import shell.app or shell.gui: a shell depends on the Driver, never
+    # never import shell.app or a shell UI: a shell depends on the Driver, never
     # the other way round. It outlived the first shell built on it
     # (docs/design/ui-monitor.md 6.6) precisely because of this rule.
     (
@@ -248,15 +252,15 @@ RULES: list[tuple[str, frozenset[str]]] = [
             }
         ),
     ),
-    # gui: the pywebview shell (docs/design/gui.md section 2), and since
-    # docs/design/ui-monitor.md 6.6 the ONLY one. It drives the app +
-    # automation controllers over the OS seams, plus the one toolkit that IS
-    # this shell, which no other module may import (see
-    # test_pywebview_only_in_the_gui_shell). It has a rule at all, where cli is
-    # unrestricted, because saying what a shell may reach for is cheapest before
-    # it reaches.
+    # shell.chat: the CHAT UI (docs/design/gui.md section 2) - the window the
+    # user looks at and types into, which `agentclip` launches. It drives the
+    # app + automation controllers over the OS seams, and it may reach the two
+    # packages beside it: `shell.webview` (the plumbing both windows are made
+    # of) and `shell.monitor_ui` (the Monitor UI, which it opens beside itself
+    # in local mode). It has a rule at all, where cli is unrestricted, because
+    # saying what a shell may reach for is cheapest before it reaches.
     (
-        "agentclip.shell.gui",
+        "agentclip.shell.chat",
         frozenset(
             {
                 "agentclip",
@@ -264,12 +268,12 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.driver.automation",
                 "agentclip.driver.clip",
                 # The machine the automation acts on. A shell CONSTRUCTS the
-                # monitor and hands it to the controller (ui-monitor.md §6.1) -
+                # monitor and hands it to the controller (ui-monitor.md 6.1) -
                 # which is a shell's job precisely because it is the launch
                 # question "whose screen is this?", the same shape as deciding
-                # which machine the executor runs on. The chat GUI builds a
-                # ``LocalUIMonitor``; §6.4's calibration window is built over one
-                # too, and only ever over a local one.
+                # which machine the executor runs on. The Chat UI builds a
+                # ``LocalUIMonitor``; 6.4's Monitor UI is built over one too,
+                # and only ever over a local one.
                 "agentclip.driver.monitor",
                 "agentclip.driver.screen",
                 # The engine's VALUE types, and only ever as values: `Decision`
@@ -291,7 +295,57 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.executor.hosts",
                 "agentclip.protocol",
                 "agentclip.shell.app",
-                "agentclip.shell.gui",
+                "agentclip.shell.chat",
+                # The Monitor UI it opens beside itself, and the plumbing both
+                # windows share. One-way: neither of those may import back.
+                "agentclip.shell.monitor_ui",
+                "agentclip.shell.webview",
+                "webview",
+            }
+        ),
+    ),
+    # shell.monitor_ui: the MONITOR UI (docs/design/ui-monitor.md 2.6 and 6.4)
+    # - the window that runs where the pixels are, standalone as
+    # ``agentclip-monitor`` on the VM or opened beside the Chat UI in local
+    # mode. It is built over a LOCAL ``UIMonitor`` and over nothing else, so it
+    # reaches driver.monitor / driver.screen / driver.clip and the shared
+    # webview plumbing - and it must NEVER import ``shell.chat`` or
+    # ``shell.app`` (see test_monitor_ui_never_imports_chat_or_app): a monitor
+    # process has no session, no engine and no transcript.
+    (
+        "agentclip.shell.monitor_ui",
+        frozenset(
+            {
+                "agentclip",
+                "agentclip.config",
+                # One module of the Driver's core, for the finish vocabulary the
+                # ELEMENTS column labels its sightings with. Not the loop: this
+                # window never drives an AutomationController.
+                "agentclip.driver.automation.finish",
+                "agentclip.driver.clip",
+                "agentclip.driver.monitor",
+                "agentclip.driver.screen",
+                "agentclip.shell.monitor_ui",
+                "agentclip.shell.webview",
+                "webview",
+            }
+        ),
+    ),
+    # shell.webview: the pywebview plumbing BOTH windows are made of - the
+    # bridge (one FIFO, one drainer), the service editor's model, and the
+    # asset/entry-URL resolution. It sits BELOW both UIs: `chat` and
+    # `monitor_ui` import it, and it imports neither of them (nor `shell.app`),
+    # which is what lets the Monitor UI run in a process with no session in it.
+    # It reaches driver.screen because the service editor's model IS the thing
+    # that picks a region, captures it and writes a template.
+    (
+        "agentclip.shell.webview",
+        frozenset(
+            {
+                "agentclip",
+                "agentclip.config",
+                "agentclip.driver.screen",
+                "agentclip.shell.webview",
                 "webview",
             }
         ),
@@ -314,13 +368,26 @@ RULES: list[tuple[str, frozenset[str]]] = [
 CLIP_SCREEN_IMPORTERS = (
     "agentclip.cli",
     "agentclip.__main__",
-    "agentclip.shell.gui",
+    # All three shell packages that make a window: the Chat UI, the Monitor UI
+    # and the plumbing they share (whose service-editor model picks regions and
+    # captures templates).
+    "agentclip.shell.chat",
+    "agentclip.shell.monitor_ui",
+    "agentclip.shell.webview",
     "agentclip.driver.automation",
     "agentclip.driver.monitor",
 )
 
 # OS side-effect layers (clipboard, screen overlay/click): only CLIP_SCREEN_IMPORTERS.
 OS_LAYERS = ("agentclip.driver.clip", "agentclip.driver.screen")
+
+# The only packages that may import pywebview: the two windows and the
+# plumbing under them.
+WEBVIEW_PACKAGES = (
+    "agentclip.shell.chat",
+    "agentclip.shell.monitor_ui",
+    "agentclip.shell.webview",
+)
 
 
 def module_name(path: Path) -> str:
@@ -440,24 +507,47 @@ def test_paramiko_only_in_the_ssh_host() -> None:
         ), f"{module_name(path)} imports paramiko"
 
 
-def test_pywebview_only_in_the_gui_shell() -> None:
-    """The window toolkit is one package's business.
+def test_pywebview_only_in_the_ui_packages() -> None:
+    """The window toolkit is three packages' business, and no more.
 
-    ``agentclip.shell.gui`` IS pywebview wearing a UI shell, so it imports it;
-    nothing else may, because the ``gui`` extra is optional and an install with
-    no window - the engine half on an SSH target, the standing monitor - must
-    not be able to trip over a missing window library. ``cli.main`` reaches the
-    shell through an import inside the function, which this checker does not
-    see - by design, that is the same allowance every lazy optional import in
-    this project uses.
+    ``agentclip.shell.chat`` (the Chat UI), ``agentclip.shell.monitor_ui`` (the
+    Monitor UI) and ``agentclip.shell.webview`` (the plumbing they share) ARE
+    pywebview wearing a user interface, so they may import it; nothing else may,
+    because the ``gui`` extra is optional and an install with no window - the
+    engine half on an SSH target - must not be able to trip over a missing
+    window library. ``cli.main`` reaches the Chat UI through an import inside
+    the function, which this checker does not see - by design, that is the same
+    allowance every lazy optional import in this project uses.
     """
     for path in all_modules():
         mod = module_name(path)
-        if _matches(mod, "agentclip.shell.gui"):
+        if any(_matches(mod, ui) for ui in WEBVIEW_PACKAGES):
             continue
         assert not any(
             imported.split(".")[0] == "webview" for imported in module_level_imports(path)
         ), f"{mod} imports pywebview"
+
+
+def test_monitor_ui_never_imports_chat_or_app() -> None:
+    """The Monitor UI runs in a process that has no session in it.
+
+    ``agentclip-monitor`` is a standing window on the machine the Browser is on:
+    no engine, no transcript, no SessionController. Everything it shares with
+    the Chat UI lives in ``shell.webview`` (the bridge, the service editor's
+    model, the asset resolution), so a reach into ``shell.chat`` or
+    ``shell.app`` would be either a duplicate of something that belongs one
+    package down, or a session the monitor has no business holding.
+    """
+    monitor_files = sorted((SRC / "shell" / "monitor_ui").rglob("*.py"))
+    assert monitor_files
+    for path in monitor_files:
+        for imported in module_level_imports(path):
+            assert not _matches(
+                imported, "agentclip.shell.chat"
+            ), f"{path.name} imports the Chat UI ({imported})"
+            assert not _matches(
+                imported, "agentclip.shell.app"
+            ), f"{path.name} imports shell.app ({imported})"
 
 
 def test_engine_never_imports_ui_or_clipboard() -> None:
@@ -480,7 +570,7 @@ def test_automation_never_imports_a_shell() -> None:
     """The Driver's core must outlive any one shell - and has: the shell it was
     lifted out of is gone (docs/design/ui-monitor.md 6.6) and this layer did not
     move. It may touch driver.monitor/driver.screen/driver.clip (it is the loop
-    that drives them), but a reach back up into shell.app or shell.gui would
+    that drives them), but a reach back up into shell.app or a shell UI would
     weld it to today's frontend and leave the next one nothing to share.
     """
     automation_files = sorted((SRC / "driver" / "automation").rglob("*.py"))
@@ -503,5 +593,5 @@ def test_app_never_imports_the_clipboard_or_the_window() -> None:
                 imported, "agentclip.driver.clip"
             ), f"{path.name} imports agentclip.driver.clip"
             assert not _matches(
-                imported, "agentclip.shell.gui"
-            ), f"{path.name} imports agentclip.shell.gui"
+                imported, "agentclip.shell.chat"
+            ), f"{path.name} imports agentclip.shell.chat"

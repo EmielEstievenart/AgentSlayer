@@ -1,17 +1,18 @@
 # UI brief: Service editor (F2)
 
-> **Status: BUILT, in the CALIBRATION WINDOW.** The editor described here is
-> drawn by `src/agentclip/shell/gui/calibration/` (its model is
-> `src/agentclip/shell/gui/service_editor.py`, shared and unchanged) — a
+> **Status: BUILT, in the MONITOR UI.** The editor described here is
+> drawn by `src/agentclip/shell/monitor_ui/` (its model is
+> `src/agentclip/shell/webview/service_editor.py`, shared and unchanged) — a
 > pywebview window of its own, beside the ELEMENTS column and the chat-region
 > picker, over a `LocalUIMonitor` of its own (`docs/design/ui-monitor.md` §2.6,
 > §6.4, phase 4). `F2` and the sidebar's **Edit services...** now open that
-> WINDOW rather than a modal inside the chat GUI, and `agentclip --calibrate`
+> WINDOW rather than a modal inside the Chat UI, and `agentclip --calibrate`
 > opens it standalone with no session and no engine behind it. §5.10's "who
 > applies it" is now split across the two: the editor's saved presets reach the
-> chat GUI through the window's `on_config_change`, and the chat GUI suspends
+> Chat UI through the window's `on_config_change`, and the Chat UI suspends
 > its own detectors for the whole visit rather than per capture. Everything
-> else below is unchanged and still binding.
+> else below is unchanged and still binding. ("GUI" further down is the older
+> name for the Chat UI; the prose below is not rewritten.)
 
 
 Audience: engineers building a second frontend (pywebview/HTML/JS) to reach

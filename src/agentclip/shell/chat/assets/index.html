@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Loaded from a file:// URL by agentclip.shell.chat.shell. Everything is local and
+      self-contained: no CDN, no fonts, no network of any kind. app.js is a
+      classic script rather than an ES module because a file:// origin cannot
+      load module scripts (docs/design/gui.md section 2), and it is NOT deferred:
+      it installs window.agentclip.receive at parse time so an event the bridge
+      sends before the DOM is ready is buffered rather than lost.
+    -->
+    <title>AgentClip</title>
+    <link rel="stylesheet" href="app.css" />
+    <script src="app.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="titlebar">
+        <span class="mark">AgentClip</span>
+        <span class="pill" id="phase">no session</span>
+        <span class="pill" id="loop">IDLE</span>
+        <span class="pill" id="service"></span>
+        <span class="spacer"></span>
+        <span class="version" id="version"></span>
+
+        <!-- The USER GUIDE's door: docs/commands.md and docs/configuration.md,
+             rendered in the page (app.js: openDocs). Deliberately NOT the F1
+             sheet - that one is the cheatsheet this window is drawn from (its
+             own KEYS table and the command registry), this one is the manual,
+             and a manual that only opens from a function key is a manual
+             nobody finds. A button and no binding: every F-key is taken and a
+             letter would fire into the transcript's single-key shortcuts. -->
+        <button
+          id="docs-open"
+          class="chrome-btn"
+          type="button"
+          title="User guide - commands and configuration (Esc closes)"
+        >
+          docs
+        </button>
+
+        <!-- The CALIBRATION WINDOW's door (docs/design/ui-monitor.md 2.6): the
+             service editor, the ELEMENTS column, the chat-region picker and
+             /identify, in a window of their own over the machine the pixels are
+             on. A button AND F2, unlike the docs one: F2 has opened this
+             surface since the TUI, and a second window nobody can see the door
+             to is a second window nobody opens. -->
+        <button
+          id="calibrate-open"
+          class="chrome-btn"
+          type="button"
+          title="Calibrate: what each service looks like, and where its chat window is (F2)"
+        >
+          calibrate
+        </button>
+
+        <!-- The "your move" banner the automation raises when a payload is
+             waiting on the user's Ctrl+V or Enter. It blinks, deliberately: the
+             user is looking at their browser, not at this window. Full width
+             rather than inside the sidebar (where the TUI puts it) because a
+             300px column in a 1200px window is the quietest place on screen and
+             this banner's whole job is to be seen - and because F3 must not be
+             able to hide the thing asking for a keystroke. Its one button rides
+             with it, shown only under the Ctrl+V variant (retry=true).
+
+             It lives INSIDE the titlebar so it can hang off its bottom edge as
+             an overlay (app.css: position absolute, top 100%) instead of being
+             a row in the flow: raising and dropping it happens mid-turn, and a
+             strip that shoved the transcript, the run panel and the composer
+             down a notch each time would reflow the page under the user's eyes
+             - which is the one thing a banner asking for a keystroke must not
+             do. Nothing here depends on the titlebar's height being a number
+             anybody wrote down. -->
+        <div class="flash" id="flash" hidden>
+          <span id="flash-text"></span>
+          <button id="retry-insert" type="button" hidden>Retry insert</button>
+        </div>
+      </header>
+
+      <div class="body">
+        <div class="chat">
+          <!-- The window tabs. A tab is a BROWSER WINDOW, not a session view
+               (tui.md section 1.6): it exists before any session, keeps its own
+               service, and survives /new. Two rows because the windows are a
+               two-level tree - row 1 the masters, row 2 the selected master's
+               sub-agent windows - and ONE selection spans both. Selecting a tab
+               shows that window's transcript and points the sidebar at it; it
+               never moves the automation's live target. -->
+          <nav class="wintabs" id="wintabs">
+            <div class="win-row" id="win-row-master"></div>
+            <div class="win-row win-row-sub" id="win-row-sub"></div>
+          </nav>
+
+          <!-- One persistent transcript per window, exactly one shown. A
+               delegated run does not mint a pane: it appends a divider to the
+               sub-agent window's transcript and keeps writing, so the window's
+               history is one scroll. -->
+          <main class="transcripts" id="transcripts">
+            <div class="transcript" id="tr-m1" data-window="m1">
+              <p class="empty">Describe a task below to start a session.</p>
+            </div>
+            <div class="transcript" id="tr-m1-s1" data-window="m1-s1" hidden>
+              <p class="empty">Nothing has been delegated to this window yet.</p>
+            </div>
+          </main>
+
+          <!-- The run panel: one row per planned call while a turn executes,
+               the spinner that says the turn is alive, and the running
+               command's tail behind ctrl+o (main-chat.md section 3, "Run
+               panel"). The spinner is a CSS animation rather than the TUI's
+               braille frames - a shell idiom, and one less thing painted per
+               100ms. -->
+          <section class="run" id="run" hidden>
+            <div class="run-head">
+              <span class="spinner" id="run-spinner"></span>
+              <span id="run-label"></span>
+              <span class="hint" id="run-cancel">ctrl+x to cancel</span>
+            </div>
+            <ol class="run-rows" id="run-rows"></ol>
+            <div class="run-tail-wrap" id="run-tail-wrap" hidden>
+              <div class="run-tail-head">
+                OUTPUT <span class="hint">live · ctrl+o hides</span>
+              </div>
+              <pre class="run-tail" id="run-tail"></pre>
+            </div>
+          </section>
+
+          <!-- The approval gate. A panel, never a modal: the user needs the
+               transcript visible behind the diff (main-chat.md section 6). -->
+          <section class="gate" id="gate" hidden>
+            <div class="gate-title" id="gate-title"></div>
+            <div class="gate-queue" id="gate-queue"></div>
+            <div class="gate-preview" id="gate-preview"></div>
+            <div class="gate-actions">
+              <button id="gate-approve" type="button">Approve (y)</button>
+              <button id="gate-always" type="button" hidden></button>
+              <button id="gate-reject" type="button">Reject (n)</button>
+              <span class="hint" id="gate-hint"></span>
+            </div>
+            <div class="gate-reject" id="gate-reject-row" hidden>
+              <input id="gate-note" type="text" placeholder="why? (optional) - Enter confirms, Esc cancels" />
+              <button id="gate-note-send" type="button">Send rejection</button>
+            </div>
+          </section>
+
+          <!-- The model's own question, pinned above the box that answers it.
+               The gate's structural twin, and for the same reason: a question is
+               a stop, and a transcript note scrolls away while a stop must not.
+               The TUI has no equivalent - there the note plus the composer's
+               ANSWER NEEDED mode are the whole surface (see gui.md). -->
+          <section class="ask" id="ask-banner" hidden>
+            <div class="ask-title">ANSWER NEEDED</div>
+            <div class="ask-question" id="ask-question"></div>
+            <div class="ask-hint">Enter sends your answer · Esc leaves the box, Esc again cancels the question</div>
+          </section>
+
+          <footer class="composer">
+            <!-- The slash-command popup. Absolutely positioned over the
+                 transcript rather than in the flow, so narrowing the list does
+                 not shove the conversation up and down a line at a time; and
+                 deliberately NON-FOCUSABLE - no buttons, no tabindex, no
+                 controls of any kind. It is painted from the composer's own key
+                 and input events and the caret never leaves the box, which is
+                 exactly the TUI's design (its CommandPopup is one Static that
+                 cannot take focus). Rows never wrap: a wrapped summary would
+                 put the highlight on a different line from the command it is
+                 about. -->
+            <div class="cmd-popup" id="cmd-popup" aria-hidden="true" hidden></div>
+            <textarea id="composer" rows="3" disabled placeholder="no session"></textarea>
+            <button id="send" type="button" disabled>Send</button>
+          </footer>
+        </div>
+
+        <!-- The right-hand column (F3): live status plus the two things you
+             steer with, and nothing that has to be configured
+             (docs/design/ui-briefs/sidebar-status-log.md section 2.1). -->
+        <aside class="sidebar" id="sidebar">
+          <div class="side-title">STATE</div>
+          <ol class="rail" id="rail"></ol>
+
+          <!-- The paste flash's structural sibling with the opposite
+               temperament: a standing fact that must survive being looked at
+               for an hour, so it never blinks. -->
+          <div class="side-armed" id="side-armed" hidden></div>
+
+          <div class="side-title">PROJECT</div>
+          <div class="side-status" id="side-root"></div>
+
+          <!-- The standing half of "the target owns its policy" (gui.md 4,
+               ruling 6). The connect-time banner is a moment; this is the fact
+               that has to survive being forgotten - which box the tools run on,
+               whether the link is up, and whose ruleset is governing the
+               session. Absent entirely on a local session. "Reconnect now"
+               spends the LAZY re-dial early (ruling 5); it is the same _ensure
+               the next operation would have called, never a second path. -->
+          <div class="side-remote" id="side-remote" hidden>
+            <div class="side-status" id="side-remote-lines"></div>
+            <button id="reconnect-now" type="button">Reconnect now</button>
+          </div>
+          <button id="connect-remote" type="button" hidden>Connect to remote...</button>
+
+          <!-- Absent - heading included - when the app has no MCP manager,
+               which is most installs. -->
+          <div id="mcp-block" hidden>
+            <div class="side-title">MCP</div>
+            <div id="mcp-rows"></div>
+          </div>
+
+          <!-- Both headings name the SELECTED window, because both blocks
+               configure it: picking a tab points the service picker and the
+               region button at that window. The DETECTION heading below names
+               the LIVE one instead - a different pointer, and the two part
+               company for the whole of a delegation. -->
+          <div class="side-title" id="side-service-title">SERVICE</div>
+          <select id="service-select"></select>
+          <div class="side-status" id="side-service-label"></div>
+          <div class="side-status" id="side-profile-note"></div>
+          <!-- The calibration window's discoverable door; F2 and the
+               titlebar's button are the same call. Not locked with the picker
+               above it: what a session freezes is WHICH preset drives it, not
+               whether its sizes can be edited for the next one. -->
+          <button id="edit-services" type="button">Edit services...</button>
+
+          <div class="side-title" id="side-window-title">CHAT WINDOW</div>
+          <!-- The same window: the box around a chat window is drawn over
+               there now, beside the pictures the drawing is checked against. -->
+          <button id="set-region" type="button">Set chat region...</button>
+          <div class="side-status" id="side-region"></div>
+          <div class="side-status" id="side-slot-note"></div>
+
+          <!-- The heading names the LIVE window, which parts company with what
+               the user is reading for the whole of a delegation. Only the
+               detector machinery writes the five lines under it. -->
+          <div class="side-title" id="side-detection-title">DETECTION</div>
+          <div class="side-status" id="det-SEND_READY"></div>
+          <div class="side-status" id="det-BUSY"></div>
+          <div class="side-status" id="det-IDLE"></div>
+          <div class="side-status" id="det-STALE"></div>
+          <div class="side-status" id="det-COPY"></div>
+
+          <div class="side-hint">
+            F1 help · F3 hides this column · F5 armed · F2 calibrate · F8 log ·
+            F6 next window · e summary
+          </div>
+        </aside>
+
+      </div>
+
+      <!-- The decision log: the STATE rail says WHERE the loop is, this says
+           how it got there. Full width between the columns and the status bar,
+           because one entry is a timestamp, a kind and a whole sentence. -->
+      <section class="logpane" id="logpane" hidden>
+        <div class="logpane-head">
+          HARNESS DECISION LOG <span class="hint">newest last · F8 hides</span>
+        </div>
+        <pre class="log-lines" id="log-lines"></pre>
+      </section>
+
+      <!-- The key hints, the TUI's stock Footer in this shell's chrome: one
+           compact row of "key what", painted from the ONE key table in app.js
+           so a shortcut cannot appear here without existing (and cannot exist
+           without appearing). Its rows carry the footer's three states -
+           normal, dimmed, gone - and the strip itself is always drawn, so its
+           height is reserved and nothing below it ever moves. Nothing in it is
+           focusable and nothing is clickable: it is a cheatsheet, not a
+           toolbar, and stealing the caret out of the composer to read one
+           would be worse than not having it. -->
+      <div class="keyhints" id="keyhints"></div>
+
+      <!-- Ten segments, composed in Python and rendered in order. A segment
+           that must hide is simply not in the list. -->
+      <div class="statusbar" id="statusbar"></div>
+    </div>
+
+    <!-- Toasts stack here and expire on their own. -->
+    <div class="toasts" id="toasts"></div>
+
+    <!-- The SSH CONNECT DIALOG (docs/design/ui-briefs/ssh-connect.md) - the one
+         surface with no TUI equivalent, because the TUI cannot prompt once
+         Textual owns the terminal. Four phases in one element: the picker+form,
+         the checklist while the six steps run, the checklist with a failure and
+         three ways out, and the success screen carrying the target-owns-policy
+         banner. The three questions a dial can ASK (password, host key, 2FA)
+         are not here - they are ordinary prompts on the modal below, because
+         each of them is a flow parked on an answer. -->
+    <div class="conn-scrim" id="conn-scrim" hidden>
+      <div class="conn-modal">
+        <div class="conn-head">
+          Connect to a remote machine
+          <span class="hint">one session, one host - connecting starts a new session</span>
+        </div>
+
+        <div class="conn-body">
+          <div class="conn-cols" id="conn-form">
+            <!-- Two sources, kept apart: a saved [remote.<name>] table knows
+                 which directory the project is in, an ~/.ssh/config alias only
+                 knows how to reach the machine. Selecting either PREFILLS the
+                 form - neither connects, so one Connect action does one thing. -->
+            <div class="conn-col conn-picker">
+              <div class="side-title">SAVED TARGETS</div>
+              <ol class="conn-list" id="conn-saved"></ol>
+              <div class="side-title">FROM ~/.ssh/config</div>
+              <ol class="conn-list" id="conn-aliases"></ol>
+            </div>
+
+            <div class="conn-col conn-fields">
+              <div class="side-title">Target</div>
+              <input
+                id="conn-target"
+                type="text"
+                placeholder="[user@]host[:port], a saved name, or an ssh alias"
+              />
+              <div class="side-status" id="conn-preview"></div>
+              <div class="side-title">Project root on the remote machine</div>
+              <input id="conn-root" type="text" placeholder="e.g. /home/dev/app" />
+              <!-- Validated only for being there: whether the path exists, and
+                   is a directory, needs a live SFTP session - so a bad root is
+                   a retry state and never a form error (brief 3.3). -->
+              <div class="conn-error" id="conn-error"></div>
+            </div>
+          </div>
+
+          <!-- All six rows, always, in the sequence's own order. A stage after
+               a failure stays PENDING rather than being skipped with a tick. -->
+          <ol class="conn-steps" id="conn-steps" hidden></ol>
+          <div class="conn-failure" id="conn-failure" hidden></div>
+
+          <!-- Shown once, after the last step, before the dialog closes: which
+               machine's ruleset governs this session, what stayed on this PC,
+               and any MCP server that was refused by name. -->
+          <div class="conn-policy" id="conn-policy" hidden></div>
+
+          <div class="conn-save" id="conn-save" hidden>
+            <div class="side-title">Save this target for next time</div>
+            <input id="conn-save-name" type="text" placeholder="name" />
+            <button id="conn-save-btn" type="button">Save</button>
+            <div class="side-status">
+              written to the global config.toml - never a password
+            </div>
+          </div>
+          <div class="side-status" id="conn-saved-note"></div>
+        </div>
+
+        <div class="conn-footer">
+          <span class="hint" id="conn-hint"></span>
+          <span class="spacer"></span>
+          <button id="conn-connect" type="button">Connect</button>
+          <button id="conn-edit" type="button" hidden>Edit</button>
+          <button id="conn-close" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- One modal at a time, and ONE implementation of one: the Python prompts
+         (confirm / prompt_text / show_summary - the quit-mid-turn warning among
+         them), the payload block park_off_clipboard falls back to, and the
+         page's own two screens, F1's help sheet and F4's settings. A prompt is a
+         controller flow parked on an answer, so a prompt always wins: F1/F4 are
+         inert while one is up. -->
+    <div class="scrim" id="scrim" hidden>
+      <div class="modal" id="modal">
+        <div class="modal-title" id="modal-title"></div>
+        <div class="modal-body" id="modal-body"></div>
+        <div class="modal-actions" id="modal-actions"></div>
+        <!-- The summary's keys line. Buttons are the GUI's real affordance
+             (the single letters are a terminal convention), but the keys work
+             too and a modal that answered only to a mouse would be the one
+             screen in this app that did. -->
+        <div class="modal-hint" id="modal-hint" hidden></div>
+      </div>
+    </div>
+  </body>
+</html>

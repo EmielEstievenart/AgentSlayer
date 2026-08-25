@@ -353,7 +353,7 @@ MONITOR_BAD_TARGET = "--monitor wants HOST:PORT with a numeric port, not {given!
 # ``--tui``'s epitaph. The flag survives one release as a stub that says what
 # happened rather than an argparse "unrecognized arguments" a script would have
 # to guess at (docs/design/ui-monitor.md §6.6, §8 "Textual removal timing").
-TUI_REMOVED = "the Textual TUI was removed in this release; plain agentclip opens the GUI"
+TUI_REMOVED = "the Textual TUI was removed in this release; plain agentclip opens the Chat UI"
 
 
 def parse_monitor_target(text: str) -> tuple[str, int] | None:
@@ -431,7 +431,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tui",
         action="store_true",
-        help="removed: the Textual TUI is gone; plain agentclip opens the GUI",
+        help="removed: the Textual TUI is gone; plain agentclip opens the Chat UI",
     )
     # Accepted for one release so a muscle-memory `agentclip --gui` (and every
     # shortcut, script and doc that still carries it) keeps working: the GUI is
@@ -440,7 +440,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--gui",
         action="store_true",
-        help="deprecated no-op: the GUI shell is the only shell",
+        help="deprecated no-op; the Chat UI is the only shell",
     )
     # The calibration window on its own (docs/design/ui-monitor.md 6.4): the
     # service editor, the ELEMENTS column, the chat-region picker and
@@ -461,7 +461,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--monitor",
         default=None,
         metavar="HOST:PORT",
-        help="drive the screen of a machine running agentclip-monitor (GUI only)",
+        help="drive the screen of a machine running agentclip-monitor (Chat UI only)",
     )
     parser.add_argument(
         "--list-matchers",
@@ -526,8 +526,9 @@ def _gui_smoke() -> int:
     with no Evergreen runtime must not be able to fail a packaging check, and
     the renderer word is printed so the state is never merely assumed.
     """
-    from agentclip.shell.gui.docs import load_doc_pages
-    from agentclip.shell.gui.shell import ASSET_NAMES, asset_dir, webview2_missing
+    from agentclip.shell.chat.docs import load_doc_pages
+    from agentclip.shell.chat.shell import asset_dir, webview2_missing
+    from agentclip.shell.webview.assets import ASSET_NAMES
 
     try:
         import webview  # noqa: F401
@@ -582,7 +583,7 @@ def _calibrate(args: argparse.Namespace) -> int:
     The import is inside the function for ``run_gui``'s reason: pywebview is the
     optional ``gui`` extra and importing ``cli`` must not pay for it.
     """
-    from agentclip.shell.gui.calibration.window import run_calibration
+    from agentclip.shell.monitor_ui.window import run_calibration
 
     try:
         project_root = Path(args.project).resolve(strict=True)
@@ -633,7 +634,7 @@ class GuiRuntime:
     """A :class:`Launch` after everything derived from it has been built.
 
     What the GUI's connect dialog gets back when it goes remote mid-window
-    (``shell/gui/remote.py:RemoteRuntime``, structurally): the config read off the
+    (``shell/chat/remote.py:RemoteRuntime``, structurally): the config read off the
     target, the session factory that reaches its engine, and the MCP runtime of
     ITS servers - none of which a launch-time dial can produce, because the
     machine is chosen after the window is already up.
@@ -899,8 +900,8 @@ def main(argv: list[str] | None = None) -> int:
     # closure reads a cell the shell writes back through ``on_config_change`` -
     # which is what lets the next session's Engine be built from whatever the
     # service editor last saved, without touching a session already in flight.
-    from agentclip.shell.gui.remote import RemoteConnect
-    from agentclip.shell.gui.shell import run_gui
+    from agentclip.shell.chat.remote import RemoteConnect
+    from agentclip.shell.chat.shell import run_gui
 
     live_config = [config]
     gui_factory = make_engine_factory(

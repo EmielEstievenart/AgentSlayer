@@ -8,9 +8,9 @@ Build via ``scripts/build-exe.ps1``, or by hand from the repo root::
 The app itself is deliberately freeze-friendly (architecture.md S7): third-party
 assets live in Python source, the protocol templates are string constants, and
 nothing resolves paths relative to ``__file__``. Two things are deliberate
-exceptions and are the only ``datas`` of our own here: the GUI shell's page
-(three hand-written files that a browser engine loads over a ``file://`` URL
-cannot be string constants - see ``gui_datas``) and the user guide the GUI's
+exceptions and are the only ``datas`` of our own here: the two windows' pages
+(hand-written files that a browser engine loads over a ``file://`` URL cannot
+be string constants - see ``page_datas``) and the user guide the Chat UI's
 "docs" button shows (``doc_datas``: the markdown IS the source of truth and is
 read, never compiled in). Everything else exists to work around *dependency*
 dynamism that PyInstaller's static analysis cannot see.
@@ -41,46 +41,46 @@ SRC = os.path.join(ROOT, "src")
 # page is three files this spec names below, and it reaches them by
 # package-relative resource path rather than by import.
 
-# The GUI shell's page (docs/design/gui.md S2 and S5). These three files are
-# package data under src/agentclip/shell/gui/assets - hatchling puts everything
+# The CHAT UI's page (docs/design/gui.md S2 and S5). These three files are
+# package data under src/agentclip/shell/chat/assets - hatchling puts everything
 # below src/agentclip into the wheel, but PyInstaller collects only what a spec
 # names, so without this the frozen `--gui` opens a window on nothing.
 #
 # The destination keeps the PACKAGE-RELATIVE path, which is the whole point:
-# shell/gui/shell.py resolves the directory with ``importlib.resources``
-# (``files("agentclip.shell.gui") / "assets"``), never ``__file__``, and
+# shell/chat/shell.py resolves the directory with ``importlib.resources``
+# (``files("agentclip.shell.chat") / "assets"``), never ``__file__``, and
 # PyInstaller's FrozenImporter answers that by looking under sys._MEIPASS at
 # exactly this layout. Copy them to the bundle root instead and the exe would
 # carry the page and still fail to find it - which is why `--gui-smoke` READS
 # all three out of the frozen build rather than trusting they were collected.
 #
-# Globbed rather than listed: shell.py's ASSET_NAMES is the contract for what
+# Globbed rather than listed: webview/assets.py's ASSET_NAMES is the contract for what
 # must be there, and a spec holding a second copy of that list is a fourth asset
 # away from silently shipping three.
-GUI_ASSETS = os.path.join(SRC, "agentclip", "shell", "gui", "assets")
-gui_datas = [
-    (os.path.join(GUI_ASSETS, name), "agentclip/shell/gui/assets")
-    for name in sorted(os.listdir(GUI_ASSETS))
-    if os.path.isfile(os.path.join(GUI_ASSETS, name))
+CHAT_ASSETS = os.path.join(SRC, "agentclip", "shell", "chat", "assets")
+page_datas = [
+    (os.path.join(CHAT_ASSETS, name), "agentclip/shell/chat/assets")
+    for name in sorted(os.listdir(CHAT_ASSETS))
+    if os.path.isfile(os.path.join(CHAT_ASSETS, name))
 ]
 
-# The CALIBRATION window's page (docs/design/ui-monitor.md 6.4). A SECOND bundle
+# The MONITOR UI's page (docs/design/ui-monitor.md 6.4). A SECOND bundle
 # rather than more files in the one above: it is a second pywebview window with
 # its own file:// URL, its own bridge and its own js_api, and
-# shell/gui/calibration/window.py resolves it through
-# ``files("agentclip.shell.gui.calibration") / "assets"`` - so the destination
+# shell/monitor_ui/window.py resolves it through
+# ``files("agentclip.shell.monitor_ui") / "assets"`` - so the destination
 # has to be that package's own relative path, exactly as the chat page's is.
 # Without this, `agentclip --calibrate` in a frozen build opens a window on
 # nothing (and neither shell would notice until somebody pressed the button).
-CALIB_ASSETS = os.path.join(SRC, "agentclip", "shell", "gui", "calibration", "assets")
-gui_datas += [
-    (os.path.join(CALIB_ASSETS, name), "agentclip/shell/gui/calibration/assets")
-    for name in sorted(os.listdir(CALIB_ASSETS))
-    if os.path.isfile(os.path.join(CALIB_ASSETS, name))
+MONITOR_UI_ASSETS = os.path.join(SRC, "agentclip", "shell", "monitor_ui", "assets")
+page_datas += [
+    (os.path.join(MONITOR_UI_ASSETS, name), "agentclip/shell/monitor_ui/assets")
+    for name in sorted(os.listdir(MONITOR_UI_ASSETS))
+    if os.path.isfile(os.path.join(MONITOR_UI_ASSETS, name))
 ]
 
-# The USER GUIDE - docs/commands.md and docs/configuration.md, which the GUI's
-# "docs" button renders (shell/gui/docs.py). The same argument as the page
+# The USER GUIDE - docs/commands.md and docs/configuration.md, which the Chat
+# UI's "docs" button renders (shell/chat/docs.py). The same argument as the page
 # assets above, one package up, with one wrinkle of its own: these files live at
 # the REPO ROOT rather than under src/, so they are the only data of ours that a
 # checkout does not already carry as package data. The destination is
@@ -176,8 +176,8 @@ hiddenimports = (
     # extensions once the module is reachable. Naming them is about
     # REACHABILITY, which is exactly what a lazy import makes fragile.
     + ["cv2", "numpy"]
-    # The GUI shell (docs/design/gui.md). Same lazy shape again, twice over:
-    # cli.py imports agentclip.shell.gui.shell inside the function that opens
+    # The Chat UI (docs/design/gui.md). Same lazy shape again, twice over:
+    # cli.py imports agentclip.shell.chat.shell inside the function that opens
     # the window, and that module imports `webview` inside its own functions, so
     # nothing static reaches any of this. And pywebview is itself dynamic below that line -
     # webview/guilib.py picks a backend per platform at import time, so
@@ -186,7 +186,7 @@ hiddenimports = (
     # AT IMPORT) is reachable only by name. Both renderers are named because
     # that choice belongs to the USER'S machine, not to the build box: an exe
     # frozen here, where WebView2 is present, must still land on a Windows
-    # install where it is not - and gui/shell.py's webview2_missing() check
+    # install where it is not - and chat/shell.py's webview2_missing() check
     # reads winforms' verdict, so it has to be able to import that module
     # either way.
     #
@@ -233,7 +233,7 @@ a = Analysis(
     [os.path.join(SRC, "agentclip", "__main__.py")],
     pathex=[SRC],
     binaries=[],
-    datas=gui_datas + doc_datas,
+    datas=page_datas + doc_datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},

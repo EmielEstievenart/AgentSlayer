@@ -16,18 +16,18 @@ AgentClip reads two kinds of files: **TOML app config** (settings) and **JSON pe
 > per-service editor (sizes, finish signals, captured templates, click points),
 > the box you draw around a chat window, and the live ELEMENTS column showing
 > what the tool is recognising right now. It is a **window of its own**, not a
-> panel — open it from the chat GUI with `F2`, the titlebar's **calibrate**
+> panel — open it from the Chat UI with `F2`, the titlebar's **calibrate**
 > button, or the sidebar's **Edit services...** / **Set chat region...**, and
 > run it alone with `agentclip --calibrate` on the machine the browser is on.
 > One at a time: a second press says it is already open. While it is up the chat
-> GUI stops polling the screen, because its capture overlays land on the very
+> Chat UI stops polling the screen, because its capture overlays land on the very
 > browser the detectors watch. See `docs/design/ui-monitor.md` §2.6 and §6.4.
 
 TOML merge order: **built-in defaults → global config.toml → project .agentclip.toml → CLI flags.** Tables merge per key; scalars *and lists* replace (a project can tighten a list, never extend it by accident). A broken file never crashes startup — problems become warnings and the default wins.
 
 **Remote sessions** (`--ssh`): the project config and *both* permission files are read from the **target machine** — the machine running your code owns its policy. The global config.toml stays local (it describes this PC: clipboard, screen, themes).
 
-**Split mode** (`--monitor host:port`): the *screen* moves instead of the files. The chat GUI runs here; the browser, the mouse, the clipboard and the appearance profiles all live on the machine running `agentclip-monitor` there. Two commands run over there, and neither needs a session or an engine:
+**Split mode** (`--monitor host:port`): the *screen* moves instead of the files. The Chat UI runs here; the browser, the mouse, the clipboard and the appearance profiles all live on the machine running `agentclip-monitor` there. Two commands run over there, and neither needs a session or an engine:
 
 - `agentclip --calibrate` — capture the appearances and draw the chat region on that machine. The profiles stay there; they never cross the link.
 - `agentclip-monitor --port 7777` — the standing monitor, on loopback. It keeps running across disconnects and serves one brain at a time.
@@ -36,7 +36,7 @@ TOML merge order: **built-in defaults → global config.toml → project .agentc
 
 **The monitor port is unauthenticated** (`docs/design/ui-monitor.md` §5). It is a channel to that machine's mouse, keyboard and clipboard, so the default bind is `127.0.0.1` and `--bind` is the opt-in; the intended deployment is a VM on a private host-only network, or an SSH forward: `ssh -N -L 7777:127.0.0.1:7777 you@the-vm`.
 
-If the link drops, the GUI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. While split mode is on, the chat GUI's `F2` is closed: calibration runs on the monitor's machine.
+If the link drops, the Chat UI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. While split mode is on, the Chat UI's `F2` is closed: calibration runs on the monitor's machine.
 
 In-app changes (the calibration window, theme pickers, saved remote targets) are persisted to the **global** config.toml.
 
@@ -116,7 +116,7 @@ A result too big for `max_result_chars`, or a whole turn too big for the service
 | Key | Default | Meaning |
 |---|---|---|
 | `notify.bell` / `notify.toast` | `true` / `true` | Attention signals |
-| `gui.theme` | `"dark"` | GUI palette: `dark`, `light`, `claude-warm`, `claude-dark` (separate from `[general] theme` — different theme systems) |
+| `gui.theme` | `"dark"` | Chat UI palette: `dark`, `light`, `claude-warm`, `claude-dark` (separate from `[general] theme` — different theme systems) |
 | `backup.keep_sessions` | `5` | Per-turn backup retention, 1–1000 |
 | `paths.exclude` | `.git`, `node_modules`, `.venv`, `__pycache__`, caches, `dist`, `build`, IDE dirs, … | Directory names kept out of listings and sweeps (`list_dir`, `glob`, `grep` never descend into them) and **write-protected** — but a file inside one **can be read** when the model names it explicitly, so "read `.vscode/settings.json`" works. This is budget hygiene, not secrecy. `.agentclip/` and `.agentclip.toml` are **always** excluded and stay sealed in *both* directions — the model can never read or rewrite its own rules and backups |
 

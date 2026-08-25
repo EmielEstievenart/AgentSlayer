@@ -144,15 +144,15 @@ def _no_real_os_input(request: pytest.FixtureRequest, monkeypatch: pytest.Monkey
     # uses: both modules from-import these, so a monkeypatch at the definition
     # module alone would leave their copies pointing at the real overlay.
     monkeypatch.setattr(
-        "agentclip.shell.gui.calibration.view.pick_region", _blocked_pick_region, raising=False
+        "agentclip.shell.monitor_ui.view.pick_region", _blocked_pick_region, raising=False
     )
     monkeypatch.setattr(
-        "agentclip.shell.gui.calibration.view.draw_identify_overlay",
+        "agentclip.shell.monitor_ui.view.draw_identify_overlay",
         _blocked_identify_overlay,
         raising=False,
     )
     monkeypatch.setattr(
-        "agentclip.shell.gui.service_editor.pick_region", _blocked_pick_region, raising=False
+        "agentclip.shell.webview.service_editor.pick_region", _blocked_pick_region, raising=False
     )
     # The Driver's OS adapter from-imports every injecting primitive out of
     # ``screen.focus`` (``driver/monitor/ops.py``), so it holds a second binding

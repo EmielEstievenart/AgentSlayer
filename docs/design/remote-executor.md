@@ -244,8 +244,8 @@ Two modes, one rule, and it is worth being explicit about the second:
   belongs to the config of the machine the work happens on — and the pinning it
   replaces was the answer to `remote-ssh.md`'s superseded model, not to this one.
 
-The GUI's post-connect policy banner says so rather than claiming otherwise
-(`shell/gui/remote.py:APPROVAL_POLICY`), for the same reason it names the
+The Chat UI's post-connect policy banner says so rather than claiming otherwise
+(`shell/chat/remote.py:APPROVAL_POLICY`), for the same reason it names the
 ruleset's machine: an invisible policy fact is a footgun whichever way it points.
 
 ### 2.6 Deployment: a pre-installed engine on the target's PATH
@@ -943,7 +943,7 @@ the absent local session tree, the
 `RemoteEngine` as the shells' MCP source, channel-before-host teardown, and both
 dead-launch sentences arriving on stderr with exit 2; plus the legacy assembly,
 kept and renamed, still building a whole session over one host),
-`tests/shell/gui/test_connect.py` (the seventh row: seven steps in order, a
+`tests/shell/chat/test_connect.py` (the seventh row: seven steps in order, a
 not-installed launch failing that row with the six before it still green and
 nothing adopted, a version mismatch naming both installs, and a retry in place),
 and — gated behind `AGENTCLIP_SSH_TESTS=1`, needing `agentclip` actually

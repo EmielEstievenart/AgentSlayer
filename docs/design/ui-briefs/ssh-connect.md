@@ -366,7 +366,7 @@ happy-path notice, only for wiring it to the dialog:
   read entirely on *target*: its config.toml merged with its `.agentclip.toml`" —
   because the engine doing the merge is over there and this PC's config.toml is
   not reachable from it (`engine_command` sends no `--global-config`, §2.6).
-  (`shell/gui/remote.py:APPROVAL_POLICY`.)
+  (`shell/chat/remote.py:APPROVAL_POLICY`.)
 - Any stdio MCP server is listed by name in this same post-connect summary, with
   the machine that starts it. **Revised (2026-08-19):** this bullet used to be
   about a *refusal* — stdio servers were not supported in a remote session,
@@ -374,7 +374,7 @@ happy-path notice, only for wiring it to the dialog:
   engine moved to the target they start, over there, with the target's argv,
   environment and cwd (remote-executor.md §2.7 reverses remote-ssh.md), so the
   line names the box instead of apologising: "stdio MCP servers for this session
-  are started on *target*: *names*" (`shell/gui/remote.py:STDIO_ON_TARGET`). The
+  are started on *target*: *names*" (`shell/chat/remote.py:STDIO_ON_TARGET`). The
   reason for having the line at all is unchanged — which machine a server really
   runs on is exactly what a user should not have to find the MCP panel to learn.
 

@@ -438,7 +438,7 @@ def shell(args: argparse.Namespace, monkeypatch: pytest.MonkeyPatch) -> FakeShel
     """``main`` with the window replaced by the dial the dialog would run."""
     FakeShell.last = None
     fake = FakeShell(args)
-    monkeypatch.setattr("agentclip.shell.gui.shell.run_gui", fake.run)
+    monkeypatch.setattr("agentclip.shell.chat.shell.run_gui", fake.run)
     return fake
 
 
@@ -549,7 +549,7 @@ def test_an_install_hidden_from_sshds_path_is_found_under_local_bin(
 # -- the dead launches. The sentence is the same one it always was; where it
 # LANDS moved with the dial: ``EngineLinkError`` used to reach ``main``, which
 # printed it and exited 2, and now it reaches the connect dialog, which paints it
-# on the engine row and offers Retry (tests/shell/gui/test_connect.py). What is
+# on the engine row and offers Retry (tests/shell/chat/test_connect.py). What is
 # asserted here is the sentence and the cleanup, which are the launch's own.
 
 

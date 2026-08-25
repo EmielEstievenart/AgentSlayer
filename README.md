@@ -37,7 +37,7 @@ uv run agentclip            # in the project you want the agent to work on
 # or: uv run agentclip --project path/to/project --service chatgpt-attach
 ```
 
-`agentclip` opens the **desktop GUI** — a native window rendering an HTML frontend in the WebView2 runtime Windows already ships. It is the only shell: the Textual terminal shell that used to sit behind `--tui` was removed, and the flag survives one release as a message saying so. (`--gui` is still accepted and does nothing.)
+`agentclip` opens the **Chat UI** — a native window rendering an HTML frontend in the WebView2 runtime Windows already ships. It is the only shell: the Textual terminal shell that used to sit behind `--tui` was removed, and the flag survives one release as a message saying so. (`--gui` is still accepted and does nothing.)
 
 Linux clipboard: the bundled backend works on X11 and Wayland-with-XWayland out of the box. On a pure-Wayland system install `wl-clipboard` (and `xclip` for X11 fallback).
 
@@ -84,7 +84,7 @@ This builds **three** artifacts (PyInstaller onefile, no Python needed to run th
 
 Re-run to update after changing the source. Useful flags: `-Clean` (fresh build), `-EngineOnly` (skip the app, and its `cv`/`gui` extras), `-MonitorOnly` (skip the app, and its `gui`/`mcp` extras), `-NoInstall` (build only), `-InstallDir <path>`. Naming both "only" switches builds those two halves and skips the full app.
 
-The exe carries **the shell and every optional extra the desktop needs**: the GUI (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the GUI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three of those against the app exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
+The exe carries **the shell and every optional extra the desktop needs**: the Chat UI (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the Chat UI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three of those against the app exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
 
 The monitor exe is proved the same way, minus the shell half: `--version` walks its whole import tree and `--list-matchers` imports the OpenCV backend for real — which matters more there than in the app, because the monitor machine is where every template search actually runs.
 
@@ -116,13 +116,13 @@ A frozen binary is architecture- and glibc-specific, so build it on (or for) the
 
 ## Configuration
 
-TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (Windows: `%APPDATA%\agentclip\config.toml`) → `<project>/.agentclip.toml` → CLI flags. See [docs/configuration.md](docs/configuration.md) for every setting, the service presets (paste-size budgets per chat service), the `permissions.json` rule format, and MCP server config — and [docs/commands.md](docs/commands.md) for all slash commands and keyboard shortcuts. Both pages are readable inside the app: the GUI's titlebar has a **docs** button that opens them (`F1` stays the key/command cheatsheet).
+TOML, merged in order: built-in defaults → `~/.config/agentclip/config.toml` (Windows: `%APPDATA%\agentclip\config.toml`) → `<project>/.agentclip.toml` → CLI flags. See [docs/configuration.md](docs/configuration.md) for every setting, the service presets (paste-size budgets per chat service), the `permissions.json` rule format, and MCP server config — and [docs/commands.md](docs/commands.md) for all slash commands and keyboard shortcuts. Both pages are readable inside the app: the Chat UI's titlebar has a **docs** button that opens them (`F1` stays the key/command cheatsheet).
 
 ## Design documents
 
 - `docs/design/architecture.md` — module layout (Shell / Driver / Executor), config, persistence, tests
 - `docs/design/protocol.md` — the CLIP/1 wire protocol
-- `docs/design/gui.md` — the GUI wave: one core, two shells, and why pywebview. Per-surface behavior contracts live in `docs/design/ui-briefs/`
+- `docs/design/gui.md` — the Chat UI (the doc predates the name and still says "GUI"): one core, two shells, and why pywebview. Per-surface behavior contracts live in `docs/design/ui-briefs/`
 - `docs/design/tui.md` — **historical**: the Textual shell, deleted 2026-08-24. Kept because the automation rules designed there — the finish decision, the send gate, the auto-copy flow — still run one layer down
 - `docs/design/remote-executor.md` — running the engine on the SSH target instead of round-tripping every call: the link seam, the wire codec, `agentclip-engine`
 - `docs/design/remote-ssh.md` — the earlier per-call SSH design, superseded by the above where they disagree

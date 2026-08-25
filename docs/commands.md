@@ -1,6 +1,6 @@
 # Commands
 
-Slash commands are typed in the chat box: Enter sends, and a newline is `shift+enter` or `ctrl+j`. Most keyboard shortcuts only fire when the chat box is *not* focused (press Esc in an empty box to get there) — a focused text box swallows bare letters, which is the only thing keeping `y`/`n`/`a` out of a sentence you are typing. **The key list below is the GUI's** — the shell `agentclip` opens, and the one rendering this page behind the titlebar's **docs** button. It is the only shell; the terminal one that used to share these keys was removed.
+Slash commands are typed in the chat box: Enter sends, and a newline is `shift+enter` or `ctrl+j`. Most keyboard shortcuts only fire when the chat box is *not* focused (press Esc in an empty box to get there) — a focused text box swallows bare letters, which is the only thing keeping `y`/`n`/`a` out of a sentence you are typing. **The key list below is the Chat UI's** — the shell `agentclip` opens, and the one rendering this page behind the titlebar's **docs** button. It is the only shell; the terminal one that used to share these keys was removed.
 
 ## Slash commands
 
@@ -116,7 +116,7 @@ own machine:
 ssh -N -L 7777:127.0.0.1:7777 you@the-vm     # then: agentclip --monitor 127.0.0.1:7777
 ```
 
-While a monitor link is up the chat GUI's own calibration door (`F2`) is
+While a monitor link is up the Chat UI's own calibration door (`F2`) is
 closed: the pixels are on the other machine, so calibration runs there.
 
 **Inside the chat box:**

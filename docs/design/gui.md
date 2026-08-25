@@ -1,5 +1,11 @@
 # GUI wave — core + two UIs
 
+> **This document describes the Chat UI (`shell/chat/`); "GUI" below is the
+> older name.** The vocabulary was fixed on 2026-08-25 (architecture.md §0):
+> **Chat UI** is what the user looks at and types into, **Monitor**/**Monitor
+> UI** is what watches the **Browser**, and "GUI" is not a term any more. The
+> paths below are current; the prose is not rewritten.
+
 Status: binding. Written 2026-08-14, at the start of the GUI wave. This doc records
 the decisions; the per-surface behavior contracts live in `docs/design/ui-briefs/`.
 
@@ -22,7 +28,7 @@ which is what the two ports were for):
 
 - the existing Textual TUI (`agentclip.shell.tui`) — stayed, unchanged in
   behavior, until phase 6 deleted it;
-- a new desktop GUI built on **pywebview + WebView2** (`agentclip.shell.gui`) — a native
+- a new desktop GUI built on **pywebview + WebView2** (`agentclip.shell.chat`) — a native
   window rendering an HTML/CSS/JS frontend, Python in-process.
 
 Both shells drove the same two UI-agnostic controllers:
@@ -250,17 +256,17 @@ compatibility seams the Pilot suites patch.
 
 ## 2. The GUI shell
 
-- Package `agentclip.shell.gui`; entry `agentclip --gui` (same binary; TUI stays the
+- Package `agentclip.shell.chat`; entry `agentclip --gui` (same binary; TUI stays the
   default until the GUI reaches parity — flipping the default is a later decision).
 - **No Node toolchain.** The frontend is hand-written JS + CSS shipped as
   package data; no build step, no npm. If we ever outgrow this, that's a new decision
   here first.
 - pywebview is the optional extra **`gui`** (`uv sync --extra gui`, `pip install
-  agentclip[gui]`), the same shape as `cv` and `mcp`: `shell/gui/shell.py` imports
+  agentclip[gui]`), the same shape as `cv` and `mcp`: `shell/chat/shell.py` imports
   `webview` inside its functions and `cli.main` imports the shell only on `--gui`,
   so a TUI launch never pays for it and an install without the extra still runs —
   it exits 2 naming the extra. The extra is in the `dev` group too, so the suite
-  can exercise the real toolkit. `tests/test_layering.py` gives `agentclip.shell.gui` its
+  can exercise the real toolkit. `tests/test_layering.py` gives `agentclip.shell.chat` its
   own RULES entry (the TUI's reach minus Textual, plus `webview`), adds it to
   `CLIP_SCREEN_IMPORTERS`, keeps it OUT of the textual exemption, and names two
   boundary tests: `test_gui_never_imports_textual`,
@@ -271,7 +277,7 @@ compatibility seams the Pilot suites patch.
   could not name them would have to re-declare vocabulary its own controller
   already speaks — which is the drift the ports exist to prevent — and
   `agentclip.shell.app` already depends on that layer, so the direction is unchanged.
-- The assets are located with `importlib.resources` (`files("agentclip.shell.gui") /
+- The assets are located with `importlib.resources` (`files("agentclip.shell.chat") /
   "assets"`, materialized by `as_file` for the lifetime of the window loop), never
   `__file__` — so a wheel, a source checkout and the PyInstaller extraction all
   resolve the same way.
@@ -285,7 +291,7 @@ compatibility seams the Pilot suites patch.
 - Bridge: Python→JS via pywebview `evaluate_js` fed from a thread-safe queue (the
   GUI's implementation of the view-port thread contract); JS→Python via pywebview's
   `js_api` object whose methods call the same controller methods the TUI calls.
-  **Shipped in slice 2 (`agentclip/shell/gui/bridge.py`), with the pywebview facts the
+  **Shipped in slice 2 (`agentclip/shell/webview/bridge.py`), with the pywebview facts the
   plan had assumed rather than checked.** `Window.evaluate_js` *is* safe to call
   from any thread — the WebView2 backend marshals the script onto the WinForms
   UI thread with `Control.Invoke` — but it then **blocks the caller** on a
@@ -305,7 +311,7 @@ compatibility seams the Pilot suites patch.
   (`webview/util.py:js_bridge_call`), so every one of them is a one-line marshal
   onto the GUI's loop and the page never touches controller state.
 
-### The GUI's concurrency model (slice 2, `agentclip/shell/gui/runner.py`)
+### The GUI's concurrency model (slice 2, `agentclip/shell/chat/runner.py`)
 
 `SessionController` is asyncio to the bone and the TUI hands it Textual's loop.
 pywebview has none to hand: `webview.start()` runs a native message pump on the
@@ -350,7 +356,7 @@ every later increment is built on:
   default is to switch it off by injecting `body { user-select: none }` after
   the stylesheet has loaded — which no rule in `app.css` can outrank. So
   `create_window` is passed `text_select=True` (`shell.WINDOW_TEXT_SELECT`, and
-  `tests/shell/gui/test_shell.py` pins it on a real window), and the page
+  `tests/shell/chat/test_shell.py` pins it on a real window), and the page
   answers the question per element: everything the user *reads* — transcripts,
   code blocks, the gate preview, run output, the log pane, sidebar status,
   modal bodies — can be dragged over and copied with Ctrl+C, and only *click
@@ -363,7 +369,7 @@ every later increment is built on:
 ### How big the window may be
 
 The window is freely resizable and the layout owes it a usable page at any size
-it can reach. The policy, in `shell/gui/shell.py` and `assets/app.css`:
+it can reach. The policy, in `shell/chat/shell.py` and `assets/app.css`:
 
 - **Minimum `400×300`.** Chosen so the window can take *half of a small
   portrait monitor* — half of a 900×1400 panel is 450×1400 split vertically and
@@ -408,7 +414,7 @@ a toast where a user could otherwise be left staring at nothing:
 implements is now the real one; what is left of the parity backlog is one whole
 SURFACE (the SSH dialog), not methods implemented smaller than their contract.
 
-~~One duplication is tracked with them: `shell/gui/view.py:_distinct_rects` and
+~~One duplication is tracked with them: `shell/chat/view.py:_distinct_rects` and
 `find_all`.~~ **Done, in its own commit.** The fold is
 `driver/automation/flow.py:distinct_rects`, the union around it is `flow.element_rects`
 (the search passed in as `ScreenOps.all_matches`, the way `lowest_match_scored`
@@ -718,9 +724,9 @@ leaves to the child process on purpose.
 
 **Parity increment 5** — the SERVICE EDITOR (F2), against
 `docs/design/ui-briefs/service-editor.md`. The first surface whose MODEL was
-extracted rather than re-implemented against widgets: `shell/gui/service_editor.py`
+extracted rather than re-implemented against widgets: `shell/webview/service_editor.py`
 holds the working copy, the validation, the commit models and the capture
-orchestration with no window, no page and no toolkit in it, and `shell/gui/view.py`
+orchestration with no window, no page and no toolkit in it, and `shell/chat/view.py`
 plus `app.js` hold only the two things a model cannot do (schedule the capture
 coroutine, and draw). It is why the editor's ~600 no-window tests exist at all —
 the TUI's equivalent needs a Pilot and a 120×45 terminal for the same
@@ -908,7 +914,7 @@ against `docs/design/ui-briefs/modals-keys-esc.md`. Two more families cross
   its screen stack.
 - **The user guide is a fourth rider on that element, and the titlebar's only
   button.** `docs/commands.md` and `docs/configuration.md` — the user-facing
-  manual — are read at run time (`shell/gui/docs.py`) and pushed whole on a
+  manual — are read at run time (`shell/chat/docs.py`) and pushed whole on a
   `docs` event, `commands`' twin: once per page load, because it is something
   the page needs to HAVE. The files stay the source of truth; nothing copies
   them into `assets/` and nothing pre-renders them, so the two documents and
@@ -1025,7 +1031,7 @@ was written into `cli.remote_launch`'s body.
   once Textual owns the terminal.
 - `{type: "connect"}` carries the whole surface in one event, `open: false`
   being the closed state — the service editor's shape, and its model lives in
-  `shell/gui/remote.py` with no window in it for the same reason. All six checklist
+  `shell/chat/remote.py` with no window in it for the same reason. All six checklist
   rows cross on every push whatever has happened, because a stage after a
   failure must stay **pending** rather than skipped-with-a-checkmark. The three
   questions a dial can ask ride the ORDINARY `modal` family
@@ -1096,8 +1102,8 @@ spec names what a lazy import hides. Four findings, because only one of them was
 the thing this section predicted:
 
 - **The page assets were the real gap, and they were the only one.** They are
-  collected to `agentclip/shell/gui/assets` — the PACKAGE-relative path, not the
-  bundle root — because `shell/gui/shell.py` resolves them with
+  collected to `agentclip/shell/chat/assets` — the PACKAGE-relative path, not the
+  bundle root — because `shell/chat/shell.py` resolves them with
   `importlib.resources` (§2), and PyInstaller's `FrozenImporter` answers that by
   looking under `sys._MEIPASS` at exactly that layout. Verified against a real
   onefile build rather than assumed: the spec before this change produced an exe
@@ -1130,7 +1136,7 @@ the thing this section predicted:
   ours that is not already package data in a checkout: `docs/commands.md` and
   `docs/configuration.md` live at the REPO ROOT, not under `src/`. They go to
   `agentclip/docs` because that is where `files("agentclip") / "docs"` looks
-  (`shell/gui/docs.py`), and `pyproject.toml` force-includes them at the same
+  (`shell/chat/docs.py`), and `pyproject.toml` force-includes them at the same
   path so a wheel answers the reader identically. Losing them does not crash
   anything — the GUI's "docs" button opens a note saying the build carries no
   guide — which is precisely why the check below reads them too.

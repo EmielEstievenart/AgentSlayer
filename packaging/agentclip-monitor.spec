@@ -57,8 +57,8 @@ shell, the engine or the executor - and the ``excludes`` list is that rule said
 to PyInstaller, so the day a stray import appears it is a fat binary and a spec
 conflict rather than a VM that needs a browser engine to start polling.
 
-**No GUI here, deliberately.** The calibration window (6.4) does run where the
-pixels are, but it is a SHELL package (``agentclip.shell.gui.calibration``, with
+**No window UI here, deliberately.** The Monitor UI (6.4) does run where the
+pixels are, but it is a SHELL package (``agentclip.shell.monitor_ui``, with
 its own pywebview window and its own asset bundle) and this binary may not
 import a shell at all. It ships in the app binary instead, which is what
 ``agentclip --calibrate`` opens on the monitor machine - so ``webview`` and its
@@ -91,6 +91,11 @@ hiddenimports = [
     # The region picker's toolkit, imported inside a function so a tk-less
     # machine can still run the rest.
     "tkinter",
+    # The interface list behind the Serve panel's "dial me here" addresses
+    # (driver/monitor/interfaces.py). Same lazy, function-body import as
+    # everything above, and the same consequence if it were missed: a monitor
+    # that runs but cannot tell the operator which address to type.
+    "psutil",
 ]
 
 # The X11 backend (driver/screen/x11.py) - capture, XTest input and EWMH focus
@@ -113,7 +118,7 @@ excludes = [
     # the shell and dropped both dependencies, which is a stronger version of the
     # same guarantee.
     "pygments",
-    # The GUI shell's stack. See the module docstring: the calibration window is
+    # The window UI's stack. See the module docstring: the Monitor UI is
     # a later phase's addition to this binary, not a silent one.
     "webview",
     "pythonnet",

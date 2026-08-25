@@ -521,14 +521,15 @@ async def test_a_version_mismatch_is_refused_naming_both_installs(
 
 
 async def test_a_non_loopback_bind_needs_the_opt_in(wire: Callable[..., Wiring]) -> None:
-    """§5: the monitor port is an unauthenticated channel to this machine's
-    mouse, keyboard and clipboard, so listening anywhere but loopback has to be
-    asked for by name. Checked at construction, so nothing is bound either way -
-    which is also why this test does not open a socket on every interface.
+    """§5: the monitor port is a channel to this machine's mouse, keyboard and
+    clipboard, so listening anywhere but loopback has to be asked for by name -
+    and, since the token landed, guarded by one too (test_auth.py owns that
+    half). Checked at construction, so nothing is bound either way - which is
+    also why this test does not open a socket on every interface.
     """
     wiring = wire()
     with pytest.raises(BindRefused):
         MonitorServer(wiring.monitor, host="0.0.0.0", port=0)
     # The opt-in is the whole API: one keyword, set by ``--bind``.
-    MonitorServer(wiring.monitor, host="0.0.0.0", port=0, allow_remote=True)
+    MonitorServer(wiring.monitor, host="0.0.0.0", port=0, allow_remote=True, token="s3cret")
     MonitorServer(wiring.monitor, port=0)

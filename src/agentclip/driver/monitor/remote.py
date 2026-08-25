@@ -84,9 +84,12 @@ class MonitorDisconnected(MonitorLinkError):
 class MonitorRefused(MonitorLinkError):
     """The monitor answered the dial with a refusal instead of a ``hello_ack``.
 
-    ``kind`` is the wire's error kind, and in v1 the one that matters is
-    ``"busy"``: one brain at a time (§2.8), and the message names the address of
-    the one that got there first.
+    ``kind`` is the wire's error kind, and two of them mean this:
+    ``"busy"`` - one brain at a time (§2.8), and the message names the address
+    of the one that got there first - and ``"unauthorized"`` - the hello carried
+    no token, or the wrong one (§5). Neither is worth a retry: one needs the
+    other brain to let go, the other needs the operator to read the token off
+    the monitor's terminal.
     """
 
     def __init__(self, kind: str, message: str) -> None:
@@ -158,10 +161,20 @@ class RemoteUIMonitor:
     # == connecting ============================================================
 
     @classmethod
-    async def connect(cls, host: str, port: int) -> RemoteUIMonitor:
+    async def connect(
+        cls, host: str, port: int, *, token: str | None = None
+    ) -> RemoteUIMonitor:
         """Dial a monitor and complete the handshake.
 
-        Raises :class:`MonitorRefused` when the monitor already has a brain,
+        ``token`` is §5's shared secret, as the monitor printed it on the machine
+        with the screen. ``None`` is a real value and the right one for a monitor
+        started with ``--no-token``; a monitor that HAS a token refuses ``None``
+        the same way it refuses a wrong one.
+
+        Raises :class:`MonitorRefused` when the monitor already has a brain
+        (``kind="busy"``) or the token did not authorise us
+        (``kind="unauthorized"`` - the one a UI turns into "check the token on
+        the other machine" rather than into a retry),
         :class:`~agentclip.driver.monitor.wire.WireVersionError` (naming BOTH
         installs) on a version mismatch, and :class:`MonitorDisconnected` when
         the far side hangs up without saying anything.
@@ -169,7 +182,7 @@ class RemoteUIMonitor:
         reader, writer = await asyncio.open_connection(host, port, limit=LINE_LIMIT)
         peer = f"{host}:{port}"
         try:
-            writer.write(encode_line(hello_frame()).encode("utf-8"))
+            writer.write(encode_line(hello_frame(token)).encode("utf-8"))
             await writer.drain()
             raw = await reader.readline()
             if not raw:

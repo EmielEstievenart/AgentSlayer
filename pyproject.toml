@@ -26,6 +26,13 @@ dependencies = [
     # Windows/macOS the marker means it is never even resolved. Imported lazily
     # inside functions, like every other OS binding in that layer.
     "python-xlib>=0.33; sys_platform == 'linux'",
+    # The monitor's interface list (driver/monitor/interfaces.py): which
+    # addresses this machine can be dialled on, shown to the operator who has to
+    # carry one to the other machine. A CORE dependency for the same reason as
+    # python-xlib - the monitor is expected to run on a bare VM with no extras -
+    # and imported lazily inside the one function that uses it, so a build that
+    # somehow lost it still polls, serves and clicks.
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
@@ -42,12 +49,12 @@ cv = [
 mcp = [
     "mcp>=2,<3",
 ]
-# The GUI shell (agentclip.shell.gui): a native window rendering the packaged
+# The Chat UI (agentclip.shell.chat): a native window rendering the packaged
 # HTML/CSS/JS frontend through the WebView2 runtime Windows already ships
 # (docs/design/gui.md section 2). An extra rather than a runtime dependency for
 # the same reason as the others: the halves that never open a window - the
 # engine on an SSH target, the standing monitor on the VM - must not pay for
-# one, so `agentclip.shell.gui.shell` imports pywebview lazily inside its
+# one, so `agentclip.shell.chat.shell` imports pywebview lazily inside its
 # functions and cli.py only reaches for the package when it opens the window.
 gui = [
     "pywebview>=5.3,<6",
@@ -84,7 +91,7 @@ build = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentclip"]
 
-# The user guide, which the GUI's "docs" button renders (shell/gui/docs.py reads
+# The user guide, which the Chat UI's "docs" button renders (shell/chat/docs.py reads
 # it, app.js renders it). The files live at the repo root - they are documents
 # first and package data second - so a wheel would otherwise ship an app whose
 # help button has nothing to open. Copied to `agentclip/docs`, where
@@ -137,6 +144,14 @@ ignore_missing_imports = true
 # signatures are annotated - what is untyped is the library surface.
 [[tool.mypy.overrides]]
 module = ["Xlib", "Xlib.*"]
+ignore_missing_imports = true
+
+# psutil ships no py.typed (its stubs are a separate types-psutil package). Only
+# driver/monitor/interfaces.py imports it, inside the one function that calls
+# `net_if_addrs`, and that module's own signatures are annotated - what is
+# untyped is the library surface, not our use of it.
+[[tool.mypy.overrides]]
+module = ["psutil", "psutil.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]

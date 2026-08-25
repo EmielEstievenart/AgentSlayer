@@ -41,6 +41,7 @@ import uuid
 from typing import Any
 
 from agentclip.driver.clip.base import ClipboardUnavailable
+from agentclip.driver.monitor.auth import tokens_match
 from agentclip.driver.monitor.protocol import ClipHook, Tick, TickHook, UIMonitor
 from agentclip.driver.monitor.wire import (
     CLOSE,
@@ -63,13 +64,16 @@ from agentclip.driver.monitor.wire import (
 
 _log = logging.getLogger(__name__)
 
-#: The addresses that need no opt-in. §5: the monitor port is an
-#: unauthenticated channel to a machine's mouse, keyboard and clipboard, so v1
-#: binds loopback and anything else is a decision somebody has to make out loud.
+#: The addresses that need no opt-in. §5: the monitor port is a channel to a
+#: machine's mouse, keyboard and clipboard, so the default bind is loopback and
+#: anything else is a decision somebody has to make out loud - twice, now: the
+#: address by name (``allow_remote``) and a ``token`` to guard it with.
 LOOPBACK: tuple[str, ...] = ("127.0.0.1", "localhost", "::1")
 
+
 class BindRefused(ValueError):
-    """A bind to something other than loopback, without the explicit opt-in.
+    """A bind this server will not make: off loopback without the opt-in, or
+    off loopback without a token.
 
     Its own type so a launcher can turn it into the one sentence a user can act
     on, rather than pattern-matching a ValueError's text.
@@ -94,12 +98,18 @@ class _Session:
         *,
         peer: str,
         server_id: str,
+        token: str | None = None,
     ) -> None:
         self._monitor = monitor
         self._reader = reader
         self._writer = writer
         self.peer = peer
         self._server_id = server_id
+        # The secret this session's hello has to carry, or None for the
+        # no-token mode. Held per session rather than read off the server on
+        # the fly, so a token regenerated mid-connection cannot retroactively
+        # unauthorise a brain that is already clicking.
+        self._token = token
         self._loop = asyncio.get_running_loop()
         # One frame per write, never interleaved. Held across the drain as well
         # as the write, because a partially-flushed line is the same corruption
@@ -132,21 +142,41 @@ class _Session:
             await self.teardown()
 
     async def _handshake(self) -> bool:
-        """Read ``hello``, answer ``hello_ack``. False if the peer is refused.
+        """Read ``hello``, check the token, answer ``hello_ack``. False if the
+        peer is refused.
 
-        The version gate is hard and comes before anything else is read: every
-        frame after this one is decoded as v1, and reading a v2 call as v1 is
-        exactly the guess a protocol boundary must not make.
+        Three gates, in this order, and the order is the design. The version
+        gate is hard and comes first: every frame after this one is decoded as
+        v2, and reading a v3 call as v2 is exactly the guess a protocol
+        boundary must not make - and a peer that cannot even be parsed is told
+        to upgrade rather than told its token is wrong. The TOKEN gate comes
+        next and **before the ack**: an unauthorised peer must not learn the
+        monitor's ``server_id`` or which clipboard backend this machine has,
+        which is exactly what the ack would tell it.
         """
         line = await self._readline()
         if line is None:
             return False
         try:
-            read_hello(decode_line(line))
+            hello = read_hello(decode_line(line))
         except WireError as exc:
             # WireVersionError's message already names BOTH installs, which is
             # the half a human can act on; it is sent verbatim.
             await self._send(error_frame(None, "bad_request", str(exc)))
+            return False
+        if not tokens_match(self._token, hello.token):
+            # One sentence for "no token" and for "wrong token", deliberately:
+            # they are the same refusal, and a message that told them apart
+            # would tell a dialler which half of the guess to fix.
+            await self._send(
+                error_frame(
+                    None,
+                    "unauthorized",
+                    "this monitor requires a token and the hello did not carry"
+                    " a matching one - the monitor prints its token on startup"
+                    " (--token / --token-file on that machine)",
+                )
+            )
             return False
         await self._send(
             hello_ack_frame(self._server_id, self._monitor.clipboard_kind)
@@ -327,17 +357,30 @@ class MonitorServer:
         host: str = LOOPBACK[0],
         port: int,
         allow_remote: bool = False,
+        token: str | None = None,
     ) -> None:
         if host not in LOOPBACK and not allow_remote:
             raise BindRefused(
-                f"refusing to listen on {host!r}: the monitor port is an"
-                " unauthenticated channel to this machine's mouse, keyboard and"
-                " clipboard, so a non-loopback bind has to be asked for by name"
+                f"refusing to listen on {host!r}: the monitor port is a channel"
+                " to this machine's mouse, keyboard and clipboard, so a"
+                " non-loopback bind has to be asked for by name"
                 " (--bind, which sets allow_remote)"
+            )
+        if host not in LOOPBACK and token is None:
+            # §5's other half. Loopback with no token is a decision about ONE
+            # machine - anything that can reach 127.0.0.1 can already drive the
+            # mouse. Off loopback it is a decision about everything else on the
+            # network, and that one is not the operator's to make by omission.
+            raise BindRefused(
+                f"refusing to listen on {host!r} without a token: off loopback"
+                " the monitor port is reachable by anything on that network,"
+                " and it is a channel to this machine's mouse, keyboard and"
+                " clipboard - a token is required (--no-token is loopback only)"
             )
         self._monitor = monitor
         self._host = host
         self._port = port
+        self._token = token
         self._server: asyncio.Server | None = None
         self._session: _Session | None = None
         # The PROCESS's id, not a session's: a redial that comes back with a
@@ -376,6 +419,17 @@ class MonitorServer:
         return self._host
 
     @property
+    def token(self) -> str | None:
+        """The secret a hello must carry, or None for the no-token mode.
+
+        Read-only: a token is chosen when the process starts and printed for
+        the operator to copy, so a setter would be a way to make the sentence
+        on their screen a lie. Replacing one is
+        :func:`agentclip.driver.monitor.auth.regenerate_token` plus a restart.
+        """
+        return self._token
+
+    @property
     def port(self) -> int:
         """The port actually bound - which is the point of asking for 0."""
         if self._server is None or not self._server.sockets:
@@ -393,6 +447,22 @@ class MonitorServer:
     def peer(self) -> str | None:
         """The attached brain's address, or None. What the refusal names."""
         return None if self._session is None else self._session.peer
+
+    @property
+    def attached(self) -> bool:
+        """Is a brain on the line right now? The status line's first word."""
+        return self._session is not None
+
+    @property
+    def address(self) -> str:
+        """``host:port``, with the port actually bound.
+
+        The one string an operator has to carry to the other machine, so it is
+        built here rather than in each caller that wants to print it - and it
+        reads the LIVE port, which is the whole point of being allowed to ask
+        for 0.
+        """
+        return f"{self._host}:{self.port}"
 
     async def disconnect(self) -> bool:
         """Drop the attached brain, keep listening. True if there was one.
@@ -425,6 +495,7 @@ class MonitorServer:
             writer,
             peer=_peer_name(writer),
             server_id=self.server_id,
+            token=self._token,
         )
         self._session = session
         try:
@@ -460,12 +531,17 @@ async def serve(
     host: str = LOOPBACK[0],
     port: int,
     allow_remote: bool = False,
+    token: str | None = None,
 ) -> MonitorServer:
     """Build a :class:`MonitorServer` over ``monitor`` and start it.
 
     ``port=0`` binds an ephemeral one; read it back off :attr:`MonitorServer.port`.
-    ``allow_remote`` is §5's opt-in and the only way past loopback.
+    ``allow_remote`` is §5's opt-in and the only way past loopback; ``token``
+    is the secret every hello must carry, and is REQUIRED once the bind leaves
+    loopback.
     """
-    server = MonitorServer(monitor, host=host, port=port, allow_remote=allow_remote)
+    server = MonitorServer(
+        monitor, host=host, port=port, allow_remote=allow_remote, token=token
+    )
     await server.start()
     return server

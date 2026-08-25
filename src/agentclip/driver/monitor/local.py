@@ -33,10 +33,12 @@ replaces the controller's ``feed_probe``.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import threading
 import time
 from collections.abc import Callable, Mapping
+from pathlib import Path
 
 from agentclip.config import SCROLL_END, SCROLL_PAGE_DOWN
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
@@ -56,6 +58,7 @@ from agentclip.driver.monitor.protocol import (
     TickHook,
     UIMonitor,
 )
+from agentclip.driver.monitor.regions import load_region, save_region
 from agentclip.driver.monitor.search import element_rects, lowest_match, lowest_match_scored
 from agentclip.driver.monitor.verdicts import roll_arm_streak, roll_changed_streak
 from agentclip.driver.screen.busy import BusyProbe
@@ -175,6 +178,7 @@ class LocalUIMonitor:
         capture: CaptureFn | None = None,
         poll_seconds: float = POLL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
+        regions_dir: Path | None = None,
     ) -> None:
         # What a service KEY looks like on this machine. Profiles are template
         # PNGs and never cross the wire (§2.10): the spec names a service, and
@@ -182,6 +186,12 @@ class LocalUIMonitor:
         # callback rather than a store, so the shell's profile cache stays the
         # shell's.
         self._profile_for = profile_for
+        # Where chat regions drawn on THIS machine are remembered (§8, closed by
+        # regions.py). ``None`` is the old behaviour exactly - no store, no
+        # fallback, no save - which is what every suite that does not care about
+        # persistence gets, and what an embedded monitor inside the app binary
+        # gets until somebody hands it a directory.
+        self._regions_dir = regions_dir
         self._ops = ops if ops is not None else ScreenOps()
         # Injected rather than reached for, because the suites stub the capture
         # at their own call site and because the calibration window will want to
@@ -267,7 +277,15 @@ class LocalUIMonitor:
         The loop the old run is still finishing is free to finish it, exactly as
         it was when this was ``retarget_detectors``: its ticks carry the OLD
         stamp, which is the whole point.
+
+        Before any of that, and outside the lock because it is a disk read: the
+        region store gets its say (§8). A spec that CARRIES a region is
+        authoritative and is what gets remembered; a spec with none falls back to
+        whatever was drawn on this machine last time. That is why the store is
+        consulted here rather than by the brain - the rectangle is a fact about
+        this desktop, and the brain may be on another OS entirely.
         """
+        spec = self._remember_region(spec)
         with self._tick_lock:
             self._stop_poller()
             self._generation += 1
@@ -306,6 +324,53 @@ class LocalUIMonitor:
             return generation
         self._start(self._compose(detector, region, generation, stop), stop)
         return generation
+
+    @property
+    def regions_dir(self) -> Path | None:
+        """Where remembered regions are stored, or None for a monitor that
+        remembers nothing."""
+        return self._regions_dir
+
+    def saved_region(self, service: str) -> ScreenRegion | None:
+        """What this machine remembers about where ``service``'s chat is.
+
+        The local-only tier (§3): it never crosses the wire, because the answer
+        is either already ON the spec the brain gets back or is a rectangle in
+        this desktop's coordinates that the brain has no use for. It exists for
+        the calibration window and the Serve panel, which want to say "there is
+        a box saved for this service" without configuring anything.
+        """
+        if self._regions_dir is None:
+            return None
+        return load_region(self._regions_dir, service)
+
+    def _remember_region(self, spec: MonitorSpec) -> MonitorSpec:
+        """Fill a region-less spec from the store, or save the one it carries.
+
+        A read and possibly a write, both on the caller's thread and both
+        OUTSIDE ``configure``'s lock - the poller takes that lock once a tick and
+        a disk write has no business in it.
+
+        The save is conditional on the value CHANGING, which is not an
+        optimisation: ``configure`` is called on every reconnect and on every
+        service switch, and a store rewritten each time would be a file whose
+        mtime says nothing about when the operator last drew a box.
+        """
+        if self._regions_dir is None:
+            return spec
+        if spec.region is None:
+            saved = load_region(self._regions_dir, spec.service)
+            if saved is None:
+                return spec
+            return dataclasses.replace(spec, region=saved)
+        if load_region(self._regions_dir, spec.service) != spec.region:
+            try:
+                save_region(self._regions_dir, spec.service, spec.region)
+            except OSError:
+                # A read-only or full disk costs the operator a redraw after the
+                # next reboot. It must not cost them the retarget they asked for.
+                _log.warning("could not remember the chat region for %s", spec.service)
+        return spec
 
     async def suspend(self) -> None:
         """Stop polling without bumping the generation.

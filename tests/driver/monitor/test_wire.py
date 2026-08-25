@@ -27,6 +27,8 @@ import pytest
 
 from agentclip.driver.monitor.protocol import ElementClick, Located, MonitorSpec, Tick
 from agentclip.driver.monitor.wire import (
+    ERROR_KINDS,
+    MONITOR_WIRE_VERSION,
     OURS,
     VERBS,
     Versions,
@@ -324,9 +326,43 @@ def test_a_line_that_is_not_a_json_object_is_refused() -> None:
 
 
 def test_the_handshake_round_trips() -> None:
-    assert read_hello(decode_line(encode_line(hello_frame()))) == OURS
+    hello = read_hello(decode_line(encode_line(hello_frame())))
+    assert (hello.versions, hello.token) == (OURS, None)
     ack = read_hello_ack(decode_line(encode_line(hello_ack_frame("srv-1", "copykitten"))))
     assert (ack.server_id, ack.versions, ack.clipboard_kind) == ("srv-1", OURS, "copykitten")
+
+
+def test_the_hello_carries_the_token_and_null_is_a_value() -> None:
+    """§5's secret rides the first line, and "no token" is stated rather than
+    omitted: the server reads one field either way."""
+    secret = "a" * 32
+    assert read_hello(decode_line(encode_line(hello_frame(secret)))).token == secret
+    assert hello_frame()["token"] is None
+    assert read_hello(hello_frame()).token is None
+
+
+def test_a_hello_with_a_non_string_token_is_refused() -> None:
+    with pytest.raises(WireError):
+        read_hello({**hello_frame(), "token": 7})
+    with pytest.raises(WireError):
+        read_hello({key: value for key, value in hello_frame().items() if key != "token"})
+
+
+def test_the_wire_version_is_the_monitors_own_and_is_two() -> None:
+    """Bumped from 1 when the hello grew a token (§5). Asserted as a NUMBER on
+    purpose: the two installs gate on it, and a silent bump is a silent refusal
+    of every monitor that was not upgraded with the brain."""
+    assert MONITOR_WIRE_VERSION == 2
+    assert OURS.wire == 2
+    assert hello_frame()["version"] == 2
+    assert hello_ack_frame("srv-1", None)["version"] == 2
+
+
+def test_unauthorized_is_an_error_kind_that_belongs_to_the_connection() -> None:
+    """No id, because it answers no call - the same shape as the busy refusal."""
+    assert "unauthorized" in ERROR_KINDS
+    error = read_error(decode_line(encode_line(error_frame(None, "unauthorized", "nope"))))
+    assert (error.id, error.kind, error.message) == (None, "unauthorized", "nope")
 
 
 def test_a_monitor_with_no_clipboard_says_so_in_the_handshake() -> None:
@@ -338,7 +374,7 @@ def test_a_monitor_with_no_clipboard_says_so_in_the_handshake() -> None:
 
 def test_a_version_mismatch_names_both_installs() -> None:
     with pytest.raises(WireVersionError) as caught:
-        read_hello({"type": "hello", "version": 99, "package": "9.9.9"})
+        read_hello({"type": "hello", "version": 99, "package": "9.9.9", "token": None})
     error = caught.value
     assert error.peer == Versions(wire=99, package="9.9.9")
     assert error.ours == OURS

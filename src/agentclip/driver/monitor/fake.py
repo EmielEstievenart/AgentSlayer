@@ -93,6 +93,13 @@ class FakeUIMonitor:
         # -- configuration ----------------------------------------------------
         self.spec: MonitorSpec | None = None
         self.specs: list[MonitorSpec] = []
+        # What the real monitor's region store would hold (regions.py): every
+        # region this fake was ever configured with, by service key. RECORDED
+        # rather than acted on - the fake never fills a region-less spec from it,
+        # because a suite that hands over ``region=None`` is saying "nothing is
+        # calibrated" and a double that quietly disagreed would hide the branch
+        # under test. It is here so a caller can assert the save happened.
+        self.saved_regions: dict[str, ScreenRegion] = {}
         # THE generation: bumped by every ``configure``, stamped into ticks,
         # and what makes one a ghost. Public because a test writes scenarios in
         # terms of it ("...and now a delegation starts").
@@ -140,8 +147,14 @@ class FakeUIMonitor:
         if spec is not None:
             self.spec = spec
             self.specs.append(spec)
+            if spec.region is not None:
+                self.saved_regions[spec.service] = spec.region
         self.generations += 1
         return self.generations
+
+    def saved_region(self, service: str) -> ScreenRegion | None:
+        """The local tier's region-store read, answered from :attr:`saved_regions`."""
+        return self.saved_regions.get(service)
 
     async def suspend(self) -> None:
         self.suspends += 1

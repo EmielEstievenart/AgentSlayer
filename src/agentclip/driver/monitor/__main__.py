@@ -20,10 +20,19 @@ backend, a profile lookup and no region to watch - and it stays running through
 every disconnect after that, because a monitor outlives every brain that dials
 it (§2.8).
 
-**The bind is §5's, spelled as a flag.** The port is an unauthenticated channel
-to this machine's mouse, keyboard and clipboard, so the default is loopback and
-``--bind`` is the explicit opt-in the design asks for: typing it IS the consent,
-which is why passing it hands ``allow_remote`` to the server.
+**The bind is §5's, spelled as a flag.** The port is a channel to this machine's
+mouse, keyboard and clipboard, so the default is loopback and ``--bind`` is the
+explicit opt-in the design asks for: typing it IS the consent, which is why
+passing it hands ``allow_remote`` to the server.
+
+**And so is the token.** §5's other half, and the reason that port is no longer
+unauthenticated: a secret is loaded (or minted) from this machine's monitor
+config directory unless ``--token`` / ``--token-file`` names another, and it is
+PRINTED to stderr at startup - once, next to the address - because the person
+who has to type it into the brain is looking at this terminal. ``--no-token``
+turns the guard off and the server refuses that off loopback: on one machine
+anything that can reach ``127.0.0.1`` can already drive the mouse, and on a
+network it cannot.
 """
 
 from __future__ import annotations
@@ -36,6 +45,7 @@ from pathlib import Path
 from agentclip import __version__
 from agentclip.config import default_profile_dir, load_config
 from agentclip.driver.clip.base import select_provider
+from agentclip.driver.monitor.auth import default_monitor_dir, load_or_create_token
 from agentclip.driver.monitor.local import LocalUIMonitor
 from agentclip.driver.monitor.server import LOOPBACK, BindRefused, serve
 from agentclip.driver.screen.matchers import MATCHERS, select_matcher
@@ -127,9 +137,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         metavar="ADDRESS",
         help=(
             "address to listen on (default 127.0.0.1). Naming anything else is"
-            " the explicit opt-in for an unauthenticated port onto this"
-            " machine's mouse, keyboard and clipboard - use a host-only network"
-            " or an SSH -L forward."
+            " the explicit opt-in for a port onto this machine's mouse,"
+            " keyboard and clipboard, and requires a token - use a host-only"
+            " network or an SSH -L forward."
         ),
     )
     parser.add_argument(
@@ -153,6 +163,46 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="PATH",
         help="where captured appearances live (default: the platform profile dir)",
+    )
+    # Everything this process persists about THIS machine: the token and the
+    # chat regions drawn here. One flag for both, because they are one
+    # directory and a deployment that relocates one wants the other with it.
+    parser.add_argument(
+        "--config-dir",
+        default=None,
+        metavar="PATH",
+        help=(
+            "where this monitor keeps its token and its remembered chat regions"
+            " (default: the platform config dir's monitor/ folder)"
+        ),
+    )
+    # The three ways to answer "what is the secret", and exactly one may be
+    # given: a token that came from two places at once is a token nobody can
+    # tell you the value of.
+    token = parser.add_mutually_exclusive_group()
+    token.add_argument(
+        "--token",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "the shared secret a brain's hello must carry (default: read or mint one"
+            " in the config dir). Beware the shell history - --token-file is the"
+            " quieter door."
+        ),
+    )
+    token.add_argument(
+        "--token-file",
+        default=None,
+        metavar="PATH",
+        help="read the shared secret from this file instead of the config dir",
+    )
+    token.add_argument(
+        "--no-token",
+        action="store_true",
+        help=(
+            "serve with no authentication at all. Loopback only: the server"
+            " refuses a non-loopback bind without a token."
+        ),
     )
     return parser
 
@@ -185,10 +235,53 @@ def build_monitor(args: argparse.Namespace) -> LocalUIMonitor:
         profile_for=lambda key: load_profile(root, key),
         clipboard=select_provider(config.clipboard.provider),
         clip_poll_interval_ms=config.clipboard.poll_interval_ms,
+        # The standing monitor is the deployment §8 named: it outlives every
+        # brain, so the box an operator drew over here has to survive a reboot
+        # rather than being redrawn after each one.
+        regions_dir=config_dir(args),
     )
 
 
+def config_dir(args: argparse.Namespace) -> Path:
+    """Where this monitor keeps the token and the remembered regions."""
+    if args.config_dir is None:
+        return default_monitor_dir()
+    return Path(args.config_dir).expanduser().resolve()
+
+
+def resolve_token(args: argparse.Namespace) -> str | None:
+    """The secret this run serves with, or None for ``--no-token``.
+
+    ``--token-file`` is read whole and stripped, so a file written by an echo,
+    a password manager or a provisioning script all work; an empty one is a
+    usage error rather than a silent ``--no-token``, which is the one way this
+    could quietly open the port.
+    """
+    if args.no_token:
+        return None
+    if args.token is not None:
+        token = args.token.strip()
+        if not token:
+            raise ValueError("--token is empty")
+        return token
+    if args.token_file is not None:
+        path = Path(args.token_file).expanduser()
+        try:
+            token = path.read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            raise ValueError(f"cannot read --token-file {path}: {exc}") from exc
+        if not token:
+            raise ValueError(f"--token-file {path} is empty")
+        return token
+    return load_or_create_token(config_dir(args))
+
+
 async def _run(args: argparse.Namespace, monitor: LocalUIMonitor) -> int:
+    try:
+        token = resolve_token(args)
+    except ValueError as exc:
+        print(f"agentclip-monitor: {exc}", file=sys.stderr)
+        return 2
     try:
         server = await serve(
             monitor,
@@ -197,8 +290,9 @@ async def _run(args: argparse.Namespace, monitor: LocalUIMonitor) -> int:
             # Typing --bind IS the opt-in (§5); the parser's default is loopback,
             # so anything else got here because somebody asked for it out loud.
             allow_remote=True,
+            token=token,
         )
-    except BindRefused as exc:  # kept for a future launcher that does not opt in
+    except BindRefused as exc:  # --no-token off loopback is the live one
         print(f"agentclip-monitor: {exc}", file=sys.stderr)
         return 2
     except OSError as exc:
@@ -207,7 +301,18 @@ async def _run(args: argparse.Namespace, monitor: LocalUIMonitor) -> int:
     # stderr, not stdout: nothing here speaks a protocol on the standard
     # streams, but a launcher that captures one of them should get the port
     # somewhere it can read without racing a log line.
-    print(f"agentclip-monitor: listening on {server.host}:{server.port}", file=sys.stderr)
+    print(f"agentclip-monitor: listening on {server.address}", file=sys.stderr)
+    # The token, in the clear, once. This is a terminal on the machine with the
+    # screen: the operator standing at it is the person who has to type the
+    # secret into the brain on the other machine, and a secret they cannot read
+    # is a monitor nobody can attach to.
+    if token is None:
+        print(
+            "agentclip-monitor: token: none - this port is unauthenticated",
+            file=sys.stderr,
+        )
+    else:
+        print(f"agentclip-monitor: token: {token}", file=sys.stderr)
     try:
         # Forever. The process is the standing half (§2.8) - it does not end
         # when a brain detaches, only when the operator ends it.

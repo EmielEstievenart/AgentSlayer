@@ -1,4 +1,4 @@
-"""The wire vocabulary of the brain<->monitor link - monitor protocol version 1.
+"""The wire vocabulary of the brain<->monitor link - monitor protocol version 2.
 
 The one place the two halves of docs/design/ui-monitor.md §6.5 agree on what a
 message looks like. Both ends import it: :mod:`agentclip.driver.monitor.server`,
@@ -25,11 +25,17 @@ schedules: a monitor VM is redeployed when the calibration surface changes, an
 SSH target when the engine does, and a shared integer would make each of those
 a forced upgrade of the other.
 
-Frame vocabulary (v1)
+Frame vocabulary (v2)
 ---------------------
-``{"type":"hello","version":1,"package":"0.1.0"}``
-    The client's first line. Nothing else may precede it.
-``{"type":"hello_ack","version":1,"package":"0.1.0","server_id":"<uuid4>",
+``{"type":"hello","version":2,"package":"0.1.0","token":"<32 hex>"|null}``
+    The client's first line. Nothing else may precede it. ``token`` is §5's
+    shared secret (:mod:`agentclip.driver.monitor.auth`) and **null is a real
+    value**: a monitor started with ``--no-token`` accepts it, and one started
+    with a token refuses it exactly as it refuses a wrong one. Adding the field
+    is what took this wire from 1 to 2 - the handshake had "room for a secret"
+    from the start, and filling that room changes the shape of the first line,
+    which is precisely what a version gate is for.
+``{"type":"hello_ack","version":2,"package":"0.1.0","server_id":"<uuid4>",
 "clipboard_kind":"copykitten"|null}``
     The server's reply. ``server_id`` identifies the PROCESS (a monitor is
     long-lived and survives every brain that dials it, §2.8, so a redial wants
@@ -48,9 +54,10 @@ Frame vocabulary (v1)
     return.
 ``{"type":"error","id":<int>|null,"kind":"<kind>","message":"<str>"}``
     A failure. ``id`` is the call it answers, or **null** for a failure that
-    belongs to the CONNECTION rather than to any one call - which is what the
-    second brain's refusal is (``kind="busy"``), and the only frame a server
-    ever sends before a call has been made.
+    belongs to the CONNECTION rather than to any one call - the second brain's
+    refusal (``kind="busy"``) and the unauthenticated one's
+    (``kind="unauthorized"``), which are the only frames a server ever sends
+    before a call has been made.
 ``{"type":"tick","tick":{...}}``
     One :class:`~agentclip.driver.monitor.protocol.Tick`, pushed. Unsolicited:
     the monitor polls on its own (§2.1) and the client's reader task is where
@@ -80,7 +87,7 @@ from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
-MONITOR_WIRE_VERSION = 1
+MONITOR_WIRE_VERSION = 2
 
 #: Per-line ceiling for both ends' stream readers. asyncio's default is 64 KiB,
 #: and a ``write_clipboard`` carrying a long reply is bigger than that on a
@@ -90,7 +97,7 @@ LINE_LIMIT = 16 * 1024 * 1024
 
 
 class WireError(Exception):
-    """A line, frame or value that is not valid monitor protocol v1.
+    """A line, frame or value that is not valid monitor protocol v2.
 
     Raised by every decoder here and by nothing else. Both ends treat it as
     fatal for the frame it was raised on: the server answers the offending call
@@ -136,7 +143,7 @@ class WireVersionError(WireError):
         self.ours = ours
 
 
-# The frame types of v1, and the error kinds an ``error`` frame may carry.
+# The frame types of v2, and the error kinds an ``error`` frame may carry.
 FRAME_TYPES: tuple[str, ...] = (
     "hello",
     "hello_ack",
@@ -148,12 +155,21 @@ FRAME_TYPES: tuple[str, ...] = (
 )
 
 #: ``busy``   - a second brain dialled a monitor that already has one (§2.8).
+#: ``unauthorized`` - the hello carried no token, or the wrong one (§5). Sent
+#:   BEFORE the ``hello_ack``, so an unauthorised peer never learns the
+#:   monitor's ``server_id`` or which clipboard backend the machine has.
 #: ``bad_request`` - the frame or its params did not decode.
 #: ``clipboard_unavailable`` - the one monitor-side exception with a type of its
 #:   own on this seam, because a delivery path catches it BY TYPE and a wire that
 #:   flattened it to "internal" would turn a manual-paste fallback into a crash.
 #: ``internal`` - anything else the verb raised.
-ERROR_KINDS: tuple[str, ...] = ("busy", "bad_request", "clipboard_unavailable", "internal")
+ERROR_KINDS: tuple[str, ...] = (
+    "busy",
+    "unauthorized",
+    "bad_request",
+    "clipboard_unavailable",
+    "internal",
+)
 
 
 # -- lines ---------------------------------------------------------------------
@@ -790,6 +806,20 @@ class ErrorFrame:
 
 
 @dataclass(frozen=True, slots=True)
+class Hello:
+    """The client's first line, once it has been checked.
+
+    Two fields rather than one, because the two are answered by different parts
+    of the server: the versions are a WIRE question the decoder has already
+    settled by the time this exists, and the token is a POLICY question only the
+    server that owns the secret can answer.
+    """
+
+    versions: Versions
+    token: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class HelloAck:
     """The server's reply, once it has been checked."""
 
@@ -799,7 +829,7 @@ class HelloAck:
 
 
 def frame_type(frame: dict[str, Any]) -> str:
-    """The frame's ``type``, checked against the v1 vocabulary."""
+    """The frame's ``type``, checked against the v2 vocabulary."""
     kind = _str_at(frame, "type", "frame")
     if kind not in FRAME_TYPES:
         raise WireError(f"unknown frame type {kind!r}")
@@ -829,13 +859,33 @@ def _read_versions(frame: dict[str, Any], what: str) -> Versions:
     return peer
 
 
-def hello_frame() -> dict[str, Any]:
-    return {"type": "hello", "version": OURS.wire, "package": OURS.package}
+def hello_frame(token: str | None = None) -> dict[str, Any]:
+    """The dial. ``token`` is always written, ``null`` included: the far side
+    reads one field either way, so "this build has no auth" cannot be confused
+    with "this build sent nothing"."""
+    return {
+        "type": "hello",
+        "version": OURS.wire,
+        "package": OURS.package,
+        "token": token,
+    }
 
 
-def read_hello(frame: dict[str, Any]) -> Versions:
-    """The client's versions, or :class:`WireVersionError` naming both installs."""
-    return _read_versions(_typed(frame, "hello"), "hello")
+def read_hello(frame: dict[str, Any]) -> Hello:
+    """The client's versions and token, or :class:`WireVersionError` naming both
+    installs.
+
+    The version gate fires FIRST (inside ``_read_versions``), which is what
+    keeps a v1 client's tokenless hello a version error rather than an
+    authentication one - the message a human can act on is "upgrade the other
+    half", not "your token is wrong".
+    """
+    data = _typed(frame, "hello")
+    versions = _read_versions(data, "hello")
+    return Hello(
+        versions=versions,
+        token=_as_opt_str(_field(data, "token", "hello"), "hello.token"),
+    )
 
 
 def hello_ack_frame(server_id: str, clipboard_kind: str | None) -> dict[str, Any]:

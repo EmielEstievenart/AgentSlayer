@@ -19,7 +19,7 @@ them. When the loop is idle or merely interpreting, the browser has nothing to
 add and the phase speaks.
 
 Wording is inherited rather than invented: where the GUI's watch segment
-already had a sentence for a situation (``gui/view.py`` ``_base_watch_segment``:
+already had a sentence for a situation (``chat/view.py`` ``_base_watch_segment``:
 "ready - paste the reply", "working...", "done - reply to continue", "idle") it
 is kept verbatim, minus the leading glyph - the glyph and its colour are the
 shell's styling decision, and the TUI draws them differently. The rail's terse

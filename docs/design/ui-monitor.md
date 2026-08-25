@@ -33,7 +33,16 @@
 >   2026-08-25 (the `SshHost` per-call path is deleted; `SshHost` is a
 >   connection, not a `Host`).
 >
-> Every row in §7 is applied. What is left open is §8 and nothing else.
+> Every row in §7 is applied. Of §8's open points, two are **closed by §9.1**
+> (auth on the port; chat-region persistence) the moment that phase lands; Wayland
+> and the manual states in split mode stay open.
+>
+> **§9 is PLAN.** Wave 2 — the monitor gets its own UI — was decided on
+> 2026-08-25 and nothing in it is built. It carries its own status header and
+> its four phases graduate the same way §6's did. Where §9 renames things
+> (§9.0), the new words apply to §9 and to the code it produces; §1–§8 keep the
+> vocabulary they shipped under, so every anchor and every citation still
+> resolves.
 >
 > **Where this document overrides others** — say it here so no two docs
 > disagree:
@@ -68,6 +77,12 @@ the way `remote-executor.md` split the *engine* half:
 | **UI monitor** (VM) | on the machine whose browser shows the chat | pixels, template matching, debounce/streak counters, mouse, keyboard, clipboard, the calibration GUI |
 | **Brain** (local GUI) | on the operator's machine | every recipe, every transition, the meaning of everything, the chat/session GUI |
 | **Executor** (remote engine) | wherever `agentclip-engine` was launched | unchanged — `remote-executor.md` |
+
+**The words in that table are wave 1's.** §9.0 renames them: **UI monitor** →
+**Monitor** (with a **Monitor UI** of its own), **brain / local GUI** → **Chat
+UI**, the chat app it drives → the **Browser**, and "GUI" stops being a term at
+all. §1–§8 are left in the old vocabulary on purpose — they are the record of
+what shipped — so read them through this row.
 
 Drivers, in priority order:
 
@@ -360,8 +375,11 @@ of phase 2. Each gets a test that fails if it regresses.
 The monitor port is an unauthenticated channel to a machine's mouse, keyboard
 and clipboard. v1 binds `127.0.0.1` by default and requires an explicit
 `--bind` to listen elsewhere; the intended deployment is a VM on a private
-host-only network or an SSH `-L` forward. Adding a shared-secret handshake is
-**OPEN** (§8) and must be resolved before this document calls phase 5 binding.
+host-only network or an SSH `-L` forward. Adding a shared-secret handshake was
+**OPEN** and is now **decided: §9.1** — `hello` carries a token, a wrong or
+missing one is refused with `kind="unauthorized"`, and the default is token
+required even on loopback. Everything in the paragraph above is what stands
+until that phase lands.
 
 ### 5.1 Which desktops the monitor can serve — **as built**
 
@@ -1025,13 +1043,22 @@ per-call machinery is still in the code" now say it is gone.
 
 **Every row in this table is applied**, and every phase of §6 is as built.
 
-## 8. Open points (**OPEN**)
+## 8. Open points (**OPEN**, except where §9 closed one)
 
-- **Auth on the monitor port** (§5). Shared secret in `hello`? Rely on SSH
-  forwarding only? **Still open, with phase 5 built**: what shipped is §5's
-  bind default (loopback unless `--bind` is typed) and the documented SSH `-L`
-  deployment, which is a deployment answer rather than a protocol one. The
-  handshake has room for a secret and does not use it.
+Two of the points below are answered by §9 and struck through; they stay listed,
+with the answer, until the phase that implements them lands.
+
+- ~~**Auth on the monitor port**~~ (§5). **CLOSED by §9.1** (decided 2026-08-25;
+  not built until that phase lands). The answer is the shared secret the
+  handshake always had room for: `hello` carries a `token`, a wrong or missing
+  one is refused with an `error` frame of `kind="unauthorized"`, the token is
+  generated and shown by the Monitor UI, and the default is **token required —
+  on loopback too**, waivable only by an explicit `--no-token` / checkbox that
+  is itself refused off loopback. §5's bind default keeps its own meaning
+  beside it: `--bind` answers who can reach the port, the token answers who may
+  use it. Phase 5's shipped state — loopback-by-default plus a documented SSH
+  `-L` deployment — is what stands until §9.1 lands, and §9.2 turns the forward
+  itself into a `direct-tcpip` channel on the connection the app already has.
 - **Which clipboard the manual fallback states mean in split mode.**
   `MANUAL_INSERT` / `MANUAL_COPY` assume the operator can reach the browser's
   clipboard. On a VM that is the VM's clipboard — the brain's GUI can show the
@@ -1040,15 +1067,17 @@ per-call machinery is still in the code" now say it is gone.
   unsupported in split mode. **Still open with phases 2 and 5 built**: both
   states have a recipe that parks and an alarm that nags, and neither knows
   which machine the human is sitting at.
-- **Chat regions are not persisted on the monitor** (§6.4's note, restated by
-  §6.5's). A box drawn in the calibration window reaches a brain through
-  `on_calibration` and dies with the process; standalone (`--calibrate`) there
-  is nobody to hand it to at all. A monitor that outlives its brain (§2.8) is
-  exactly the deployment where that hurts — a restarted monitor is re-targeted
-  by the brain's next `configure`, but a region the operator drew over there has
-  to be drawn again. Where it should live (the monitor's own store, beside the
-  `ServiceProfile` PNGs? the brain's config, re-sent on every connect?) is
-  undecided.
+- ~~**Chat regions are not persisted on the monitor**~~ (§6.4's note, restated by
+  §6.5's). **CLOSED by §9.1** (decided 2026-08-25; not built until that phase
+  lands). It lives in **the monitor's own store** — the monitor's config dir,
+  keyed by service key — which is the half of the question that was undecided;
+  the brain's config was the other candidate and it loses, because the machine
+  that can see the box is the machine that should remember it. `MonitorSpec.region`
+  becomes optional and the precedence is one line: a spec that names a region
+  wins and is written to the store, a spec that omits one is served from it. So
+  a restarted monitor keeps the box drawn on that machine, a standalone Monitor
+  UI has somewhere to put one at all, and a Chat UI that knows better still
+  overrides.
 - ~~**Tick cadence on the wire.**~~ **RESOLVED** at phase 5: drop-to-latest.
   `latest` is a field the newest tick overwrites and `observe()` only ever
   wants the newest, so nothing is queued and nothing is replayed — a link that
@@ -1066,3 +1095,341 @@ per-call machinery is still in the code" now say it is gone.
   so a script or a shortcut that still carries the flag is told, rather than
   meeting an argparse "unrecognized arguments" or, worse, silently getting a
   different shell. It goes for good in the release after this one.
+
+## 9. Wave 2 — the monitor gets its own UI
+
+> **Status: PLAN, not yet binding.** Decided by the user on 2026-08-25, after
+> wave 1 (§6) shipped whole. Everything above this line describes code;
+> everything below it is intent, and graduates one phase at a time exactly as
+> §6's did — a phase lands, its subsection gets an "as built" note, its status
+> flips. Phases run in order 9.0 → 9.1 → 9.2 → 9.3; 9.3 may start early for the
+> rows whose surface is already decided.
+>
+> **What wave 1 left behind, and this wave picks up.** §6.5 shipped split mode
+> with one entry (`--monitor host:port`) and no way to configure the far machine
+> except by sitting at it and typing `agentclip --calibrate`; §5 and §8 left the
+> port unauthenticated; §6.4 left a drawn chat region dying with the process.
+> Those are three faces of the same gap: **the monitor is a real, standing,
+> user-facing process and it has no user interface.** This wave gives it one,
+> and renames everything the old vocabulary made confusing on the way.
+>
+> **Words used below** are §9.0's, not §1–§8's. The earlier sections are the
+> record of a wave that shipped under the old vocabulary and are **not**
+> retroactively rewritten — §1's table gains an old-word → new-word row and
+> nothing else moves, so every anchor and every citation in the other design
+> docs keeps resolving.
+
+### 9.0 Nomenclature — three nouns, and "GUI" is not one of them
+
+**Goal.** One word per thing. "GUI" named the pywebview window when there was
+exactly one; there are two now, on two machines, doing two unrelated jobs, and
+every sentence that says "the GUI" has to be read twice to find out which. The
+word is retired.
+
+| Term | What it is | Where it runs | Binary |
+|---|---|---|---|
+| **Chat UI** | what the user looks at and types into: the transcript, the sidebar, the log pane, the run panel, the connect dialog. Holds the session, the recipes and every decision — what §1 called "the brain" | the operator's machine | `agentclip` |
+| **Monitor** | watches the **Browser**, clicks it, types into it, owns the clipboard; polls, matches templates, keeps the streaks. Has a small **Monitor UI** of its own (§9.1) | the machine whose screen shows the browser — a VM, or the same PC in local mode | `agentclip-monitor` |
+| **Browser** | the chat web page the Monitor operates — Claude, ChatGPT, whatever the service preset describes. Not ours, never automated through an API, only through pixels | with the Monitor, by definition | — |
+| **Executor** | unchanged (`remote-executor.md`): permission-gated tools, files and commands on behalf of the agent | wherever it was launched | `agentclip-engine` |
+
+"Monitor" is the process; "Monitor UI" is its window. Both are correct and they
+are not interchangeable — `--headless` (§9.1) is a Monitor with no Monitor UI.
+"Brain" survives only as informal prose about the split; it is not one of the
+nouns, and where a sentence needs the noun it is **Chat UI**.
+
+**Code:** package renames, and nothing else.
+
+- `src/agentclip/shell/gui/` → `src/agentclip/shell/chat/`. Every module inside
+  keeps its name (`view.py`, `bridge.py`, `runner.py`, `shell.py`, `remote.py`,
+  `docs.py`, `assets/`).
+- `src/agentclip/shell/gui/calibration/` → `src/agentclip/shell/monitor_ui/` — a
+  **sibling** of `shell/chat`, not a child of it. It stops being "a second
+  window the chat shell can open" and becomes the Monitor's own front end
+  (§9.1), which is a different process on a different machine in the deployment
+  this whole document exists for. `service_editor.py` moves with it: it is a
+  model of a *service preset*, and services are configured where the pixels are.
+- Tests mirror exactly: `tests/shell/gui/` → `tests/shell/chat/`,
+  `tests/shell/gui/calibration/` → `tests/shell/monitor_ui/`.
+- **Untouched, deliberately:** the layering *rules* (the same rules with the new
+  names — pywebview may be imported by `shell/chat` and `shell/monitor_ui` and
+  nowhere else; `driver/` may not import either); the `UIMonitor` / `Tick` /
+  `MonitorSpec` contract; `driver/monitor/wire.py`; every `js_api` method name
+  and every event name the pages already speak; the asset filenames; the
+  ui-briefs' *content* (§9.3 re-hosts them, it does not rewrite their
+  specifications).
+- **`agentclip --calibrate` is removed.** It existed because the calibration
+  surfaces needed a windowless machine to be opened from; `agentclip-monitor`
+  **is** that window now (§9.1), so the standalone door is the monitor binary
+  and there is exactly one of it. In local mode the Chat UI keeps its in-app
+  doors (`F2`, the titlebar button, the two sidebar entries) opening the Monitor
+  UI over its own in-process `LocalUIMonitor` — that is `open_calibration_window`
+  under a new name and it does not change. What goes is the *second process*
+  spelling, its `cli.py` flag, its `_calibrate` assembly and its help text.
+
+**Docs:** none in this phase beyond docstrings and module headers — §9.3 does the
+prose in one pass, once the shapes it describes exist.
+
+**Done when:** no module, test, spec file or docstring under `src/` or `tests/`
+says `shell.gui` or `calibration`; `packaging/agentclip.spec`'s asset collection
+names the new package paths; `tests/test_layering.py` pins the two pywebview
+importers by their new names; `agentclip --calibrate` is gone and no doc offers
+it; `uv run pytest`, `ruff`, `mypy` green; all three exes rebuilt via
+`.\scripts\build-exe.ps1`.
+
+### 9.1 The Monitor UI — `agentclip-monitor` grows a window
+
+**Goal.** The Monitor becomes a thing you can sit in front of: it shows what it
+is watching, lets you configure the service it watches, and lets you decide —
+out loud, in a panel — who may drive it. This is where **auth** lands (§5, §8)
+and where the **chat region** finally gets somewhere to live (§6.4, §8).
+
+**Code.**
+
+*Where the entry point goes.* `driver/monitor/` may not import pywebview: the
+Driver is pure, and `tests/test_layering.py` says so about every module at once.
+So the console script `agentclip-monitor` re-points from
+`agentclip.driver.monitor.__main__:main` to
+`agentclip.shell.monitor_ui.__main__:main`, which is a thin dispatcher:
+
+- it parses with the **same** `build_arg_parser` (imported from
+  `driver/monitor/__main__.py` — argument grammar is the Driver's, the window is
+  not);
+- `--headless` delegates to `driver.monitor.__main__.main(argv)` **verbatim** —
+  the windowless server for a VM with no desktop, unchanged, still importing no
+  toolkit, still `--port N [--bind A]`, still the thing the frozen-binary smoke
+  tests drive;
+- anything else builds the `LocalUIMonitor` (the existing `build_monitor`, which
+  stays in the Driver) and opens the window over it.
+
+`--port` becomes optional, and required only under `--headless`: with a window,
+the port is a field in the Serve panel. `--version` and `--list-matchers` keep
+working at the shell layer by delegating, so `scripts/build-exe.ps1`'s smoke
+tests do not change shape.
+
+*What the window hosts.* Two things, in one pywebview window built on
+`shell/monitor_ui/window.py`'s existing shape (its own bridge, its own `js_api`,
+its own assets, one `webview.start()` per process — every note in that module's
+header still applies):
+
+1. **The whole service configuration, exactly as the app had it before the
+   split**: the service editor, the ELEMENTS column with its live crops, the
+   chat-region picker, `/identify`'s overlay. This is today's
+   `calibration/view.py` re-hosted with no behaviour change. The suspend bracket
+   stays per-visit where the Chat UI embeds it, and is simply *always* the case
+   standalone: a Monitor UI on the VM is the only thing on that screen that
+   matters.
+2. **A Serve panel**, new:
+   - an **interface dropdown**: loopback first, then every address on every NIC,
+     from `psutil.net_if_addrs()` — a **new core dependency**, imported lazily
+     inside the function that fills the dropdown, with the dropdown degrading to
+     loopback plus `0.0.0.0` if the import fails, so a freeze that lost it is
+     not a broken window;
+   - a **port field**, a **Start/Stop** button;
+   - a **status line**, in these words: `listening on 192.168.1.40:7777 — no
+     chat UI attached`, and once a brain dials, `attached: 192.168.1.7:51422`.
+     Not listening reads `stopped`;
+   - choosing anything that is not loopback shows the **unauthenticated-port
+     warning** inline, in the sentence `--bind`'s help and `server.BindRefused`
+     already carry, before Start is armed. Choosing it *is* the `--bind` opt-in
+     §5 asks for, spelled as a click instead of a flag.
+
+*Auth, decided.* The handshake has had room for a secret since §6.5 and has not
+used it. It uses it now:
+
+- The Serve panel shows a **token** — generated on first run
+  (`secrets.token_urlsafe`), persisted in the monitor's own config dir
+  (`platformdirs.user_config_dir("agentclip")/monitor.json`, mode `0600` where
+  the platform has modes), with a **copy** button and a **Regenerate** button.
+  Regenerating does **not** drop an attached brain: the token gates `hello`, and
+  a connection that already shook hands was already authorised. It changes what
+  the *next* `hello` must carry, and the panel says so.
+- `hello` gains a `token` field. The server compares it in constant time and, on
+  a wrong or missing one, answers a single `error` frame with a new
+  `kind="unauthorized"` (a new member of `ERROR_KINDS`, beside the second-brain
+  refusal) and closes. The message never says whether a token was configured,
+  which one was expected, or which half was wrong — it says
+  `the monitor refused this connection: bad or missing token`. The Chat UI turns
+  that into a form error on the token field (§9.2), not a link-drop retry loop:
+  redialling a wrong token forever is how you lock yourself out of noticing.
+- **The default is "token required", on loopback too**, and that is the change
+  from §5. Today's default treats loopback as consent — which is a claim about
+  who else is on the machine, and it is false on exactly the machine this design
+  targets. A VM whose whole job is to run a browser is a machine with a browser
+  on it: any local process, any extension, anything a page can talk to gets the
+  mouse, the keyboard and the clipboard of the operator's chat session for the
+  cost of one TCP connect. A token costs one copy and one paste, once, and
+  deletes that class of mistake entirely.
+- The escape hatch is explicit and loopback-only: `--no-token` on the command
+  line, or an **allow unauthenticated loopback connections** checkbox in the
+  Serve panel that is disabled whenever the selected interface is not loopback.
+  `--no-token` together with a non-loopback `--bind` is **refused** (exit 2, one
+  sentence): the two opt-ins compose to "anyone on this network may drive this
+  desktop", and that is not a thing a command line gets to say by accident.
+- This **closes §5 and §8's auth point.** `--bind` keeps its meaning and is
+  orthogonal: `--bind` answers *who can reach the port*, the token answers *who
+  may use it*.
+
+*The chat region, persisted.* A second key in the same config file
+(`monitor.json`'s `regions` table, keyed by **service key**) holds the region the
+Monitor UI last drew for that service. `MonitorSpec.region` becomes optional on
+the wire, and the rule is one line: **a spec that names a region wins and is
+written to the store; a spec that omits one is served from the store.** So a
+monitor restarted on the VM keeps the box somebody drew over there, a standalone
+Monitor UI has somewhere to put one at all, and a Chat UI that knows better
+still overrides. No new frame, no new round trip. This **closes §8's chat-region
+point** and §6.4's own note.
+
+*Packaging.* `packaging/agentclip-monitor.spec` gains the Monitor UI's assets by
+package-relative path (the Chat UI's spec is the precedent) and the monitor
+binary now needs the `gui` extra: `scripts/build-exe.ps1`'s `-MonitorOnly` stops
+skipping `gui`, and `build-exe.sh` matches. The headless path still imports no
+toolkit, which is what keeps `--headless` honest on a server with no desktop.
+
+**Docs:** deferred to §9.3, except `--headless`, the token and the Serve panel
+appearing in `agentclip-monitor --help`.
+
+**Done when:** `agentclip-monitor` with no `--port` opens a window; every service
+configuration surface works in it exactly as it did in the calibration window;
+the Serve panel lists real NIC addresses, starts and stops the server, and shows
+both status sentences; a brain with the right token attaches and one with a
+wrong or missing token gets `kind="unauthorized"` and no session; `--no-token`
+works on loopback and is refused off it; `agentclip-monitor --headless --port N`
+serves with pywebview uninstalled; a region drawn in the window survives a
+monitor restart and a `configure` that omits one; suite green; all three exes
+rebuilt.
+
+### 9.2 Connect a Monitor from the Chat UI
+
+**Goal.** Stop making split mode a launch-time flag. §6.5 refused an in-app
+connect field on the grounds that "a second one would have to answer what a
+mid-session retarget means to a live loop"; this phase answers it and builds the
+field.
+
+**The answer:** a mid-session dial is a **link event, not a new session.** It
+parks the loop in `DISCONNECTED`, swaps the `SwitchableMonitor`'s inner monitor
+— which is exactly what a redial already does — and re-derives from the screen
+(§2.9). Nothing is buffered, nothing is replayed, and dialling a *different*
+monitor is indistinguishable from the old one having been restarted somewhere
+else. The session, the transcript and the engine are untouched: they are the
+Executor's half and the Monitor knows nothing about them.
+
+**Code.**
+
+*The dialog.* A **Monitor** tab on the existing connect dialog, beside the SSH
+one. `shell/chat/remote.py` is the precedent and the pattern: the tab is a
+**model** with no window in it — which targets are offered, what the form must
+say before Connect is armed, which failure lands where, what the three ways out
+of a failure do — and `view.py` keeps only running the coroutine and drawing.
+`docs/design/ui-briefs/ssh-connect.md` is the brief its shape follows.
+
+Two modes:
+
+- **Direct** — host, port, token. Dials `RemoteUIMonitor` at that address. The
+  failures worth spelling: nothing listening, a wrong token
+  (`kind="unauthorized"`, shown on the token field), a second brain already
+  attached (the server's existing refusal, which names the peer — show it
+  verbatim), and a wire-version mismatch (which already names both installs).
+- **Via SSH** — pick a **saved SSH target**, give the remote port and the token.
+  The Chat UI dials (or reuses) the paramiko connection the SSH tab already
+  builds, opens a **`direct-tcpip`** channel on it to `127.0.0.1:<remote port>`,
+  and hands that channel's reader/writer to `RemoteUIMonitor`. **No external
+  `ssh -L`, no second login, no second password prompt, no second host-key
+  question.** This is the deployment §5 always documented, finally spelled as a
+  button.
+
+  Precedent, and why this is small: `SshHost.open_link_channel` already turns a
+  paramiko channel into the reader/writer pair a wire client consumes
+  (`executor/hosts/ssh.py:LinkChannel`, `_ChannelReader`, `_ChannelWriter`), and
+  `RemoteLinkClient` already consumes exactly that. The change is
+  `transport.open_channel("direct-tcpip", ...)` in place of `open_session()`, a
+  sibling method on `SshHost`, and one seam adjustment: **`RemoteUIMonitor` takes
+  a reader/writer pair**, with `connect_tcp(host, port)` as the convenience that
+  opens a socket and calls it. That mirrors `RemoteLink`/`LinkChannel` exactly.
+
+  A token is still required over the tunnel. SSH proves who reached the port; it
+  does not prove which of the several things on that VM did.
+
+*Saved monitor targets*, like saved SSH targets. `[monitor.<name>]` tables in
+the **global** `config.toml` only — never the project's, for `[remote.<name>]`'s
+reason and ssh-connect.md §6.1's: a monitor target is a fact about how *this PC*
+finds a machine, not a property of the project. Fields: `host`, `port`, `mode`
+(`direct` | `ssh`), `ssh` (the saved SSH target's name, for `mode = "ssh"`), and
+`token`. The token in a config file is stated plainly rather than hidden, and
+`AGENTCLIP_MONITOR_TOKEN` overrides it for anyone who will not keep a secret in
+one. The dialog offers "save this monitor as…" on a successful connect, writing
+through the same `tomli_w` path the service editor already uses.
+
+*The scriptable path stays.* `--monitor HOST:PORT` is unchanged — its
+right-partition parse and its pinned `MONITOR_BAD_TARGET` sentence keep working,
+including for `[::1]:7777` — and gains `--monitor @name` for a saved target. The
+token does **not** ride in the target string: it comes from the saved target,
+from `AGENTCLIP_MONITOR_TOKEN`, or from `--monitor-token TOKEN`, documented last
+of the three because `argv` is world-readable on the machines this runs on.
+
+**Docs:** deferred to §9.3.
+
+**Done when:** the Chat UI connects to a monitor from the dialog with no restart,
+in both modes; a Via-SSH connect opens no second authentication and no external
+process; a wrong token shows on the field rather than starting a retry loop; a
+mid-session dial parks in `DISCONNECTED` and comes back re-derived, with the
+session intact across it; saved `[monitor.<name>]` targets round-trip; a
+localhost e2e test drives a full recipe run over a `direct-tcpip` channel to a
+fake SSH transport; suite green; exes rebuilt.
+
+### 9.3 Docs & briefs
+
+**Goal.** One vocabulary everywhere, and a brief for the window §9.1 builds.
+This phase writes no product code.
+
+**Docs.**
+
+- **`docs/configuration.md`** — the §9.0 vocabulary up front; `agentclip-monitor`
+  as a window rather than a daemon; the Serve panel; the token, where it is
+  stored and what "token required by default" means for a loopback split; the
+  region store; `[monitor.<name>]`; and the "Running the monitor on Linux"
+  section reworded around the new binary shape (X11 backend unchanged, §5.1).
+- **`docs/commands.md`** — `--calibrate` deleted; `--monitor @name`,
+  `--monitor-token` and `AGENTCLIP_MONITOR_TOKEN` added; `agentclip-monitor`'s
+  own flags (`--headless`, `--port`, `--bind`, `--no-token`) documented as a
+  table beside `agentclip`'s; the Monitor UI's keys. Note this file is rendered
+  *inside* the Chat UI by the docs button, so it is a product surface, not a
+  README.
+- **`README.md`** — the three binaries by their new names and their one-line
+  jobs; the design-doc list gains nothing but the vocabulary line.
+- **`docs/design/architecture.md`** — §0's layer paragraph and its dependency
+  diagram (`shell/chat`, `shell/monitor_ui`), §1's module tree, and the seams
+  table's prose, which still says "a GUI enqueues to its JS bridge". The
+  standing claim that `shell/` is "the user-facing surfaces … one behaviour"
+  needs the honest amendment: there are two windows now and one of them is not a
+  front end for the engine at all.
+- **`docs/design/ui-briefs/monitor-ui.md` — NEW.** The window: its two halves
+  (service configuration, Serve), the Serve panel's controls and its two status
+  sentences, the token row and its regenerate semantics, the region store, the
+  unauthenticated-port warning, and the one difference between the standalone
+  and embedded lives of the same page (who owns the pump, who owns the loop, and
+  the suspend bracket). Written as the other briefs are: it specifies the
+  surface, it does not re-decide anything §9.1 settled.
+- **`docs/design/ui-briefs/service-editor.md`, `elements-panel.md`** — re-hosted:
+  their §6.4 status notes become "this surface lives in the **Monitor UI**", with
+  the package path and the new brief cited. Their specifications are unchanged.
+- **`docs/design/ui-briefs/ssh-connect.md`** — the Monitor tab (§9.2), and its §6
+  open question 1 ("should a successful connection offer to save itself?")
+  answered affirmatively for `[monitor.<name>]`, which settles the precedent for
+  `[remote.<name>]` too.
+- **`AGENTS.md`** — the vocabulary line in paragraph 1 (three binaries, four
+  nouns, "GUI" retired), the `shell/gui/assets` path in the Dev-commands bullet,
+  and the OS-gate bullet's patch points, which name
+  `shell/gui/calibration/view.py` and `shell/gui/service_editor.py` today.
+- **`docs/design/gui.md`** keeps its **filename** — it is already headed
+  "historical, not binding", and renaming it would break every citation in this
+  document and in `architecture.md` for no reader's benefit. Its header gains one
+  sentence: the shell it describes is the **Chat UI**, and "GUI" is not a term
+  any more.
+- **This document** — §1's table gains an old-word → new-word row; nothing else
+  above §9 is rewritten (see §9's status note).
+
+**Done when:** no doc under `docs/` or `README.md`/`AGENTS.md` uses "GUI" as a
+noun for a surface; `monitor-ui.md` exists and covers every control §9.1 built;
+every path and flag named in the docs resolves against the code; the Chat UI's
+docs button renders the amended `commands.md` without a broken anchor.

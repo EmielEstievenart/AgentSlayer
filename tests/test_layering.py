@@ -318,10 +318,12 @@ RULES: list[tuple[str, frozenset[str]]] = [
             {
                 "agentclip",
                 "agentclip.config",
-                # One module of the Driver's core, for the finish vocabulary the
-                # ELEMENTS column labels its sightings with. Not the loop: this
-                # window never drives an AutomationController.
-                "agentclip.driver.automation.finish",
+                # NOT ``agentclip.driver.automation``, in any spelling. It used
+                # to reach one module of it for the send gate's tick budgets;
+                # ui-monitor.md §10.5 made those the monitor's own constants
+                # (``driver/monitor/beats.py``), and with them went the last
+                # thread between this window and the brain's loop. The monitor
+                # binary is now automation-free by rule as well as by intent.
                 "agentclip.driver.clip",
                 "agentclip.driver.monitor",
                 "agentclip.driver.screen",

@@ -45,13 +45,7 @@ from agentclip.config import (
     default_profile_dir,
     save_services,
 )
-from agentclip.driver.automation.finish import (
-    SEND_ARM_MIN_DIFF,
-    SEND_ARM_TICKS,
-    SEND_GATE_SEEN_TIMEOUT_TICKS,
-    SEND_GATE_TIMEOUT_TICKS,
-)
-from agentclip.driver.monitor.protocol import MonitorSpec
+from agentclip.driver.monitor.protocol import MonitorSpec, SpecFor, spec_from_preset
 from agentclip.driver.screen.capture import CaptureError, RegionImage, crop
 from agentclip.driver.screen.detector import RUNTIME_KINDS, Sighting
 from agentclip.driver.screen.identify import IdentifiedElement, identify_elements, summarise
@@ -174,11 +168,17 @@ class CalibrationMonitor(Protocol):
 
     ``saved_region`` is the region store's READ (``driver/monitor/regions.py``):
     where this machine last saw a service's chat window. It answers ``None`` for
-    a monitor that remembers nothing - which is every monitor the Chat UI opens
-    this window over, because those regions are the session's.
+    a monitor that remembers nothing.
+
+    ``set_spec_for`` is §10.5's seam and the reason this window is not merely a
+    reader: what a brain gets back from ``watch(slot)`` is composed by the
+    callable installed here, so the service picked and the box drawn in THIS
+    window are what the far Chat UI is told it is driving. One state, two
+    surfaces - which is the disagreement wave 3 exists to end.
     """
 
     async def configure(self, spec: MonitorSpec) -> int: ...
+    def set_spec_for(self, spec_for: SpecFor | None) -> None: ...
     async def suspend(self) -> None: ...
     async def resume(self) -> None: ...
     async def close(self) -> None: ...
@@ -210,6 +210,11 @@ class CalibrationView:
         self._bridge = bridge
         self._config = config
         self._monitor = monitor
+        # §10.5: the window IS the monitor's configuration. Installed here rather
+        # than at :meth:`start`, so a ``watch`` that arrives over the wire before
+        # the page has finished loading is still answered with this window's
+        # selection instead of with the config file's.
+        monitor.set_spec_for(self.spec_for)
         self._profile_root = profile_root if profile_root is not None else default_profile_dir()
         self._global_config_path = (
             global_config_path if global_config_path is not None else default_global_config_path()
@@ -386,11 +391,21 @@ class CalibrationView:
         slot = SLOT_BY_NAME.get(name)
         if slot is None or slot is self._slot:
             return
+        self._adopt_slot(slot)
+        self._retarget()
+
+    def _adopt_slot(self, slot: AgentSlot) -> None:
+        """Show ``slot`` and repaint every surface that is about it.
+
+        Everything :meth:`select_slot` does EXCEPT the retarget, because the
+        other caller is :meth:`spec_for` - where the retarget is the very call
+        being answered, and asking for a second one would configure the monitor
+        twice for one ``watch``.
+        """
         self._slot = slot
         self._seed_region()
         self._clear_elements()
         self._push_calibration()
-        self._retarget()
 
     def set_elements_visible(self, visible: bool) -> None:
         """The column opened or closed.
@@ -937,32 +952,41 @@ class CalibrationView:
 
     # == the monitor's target ==================================================
 
+    def spec_for(self, slot: AgentSlot) -> MonitorSpec:
+        """What this window watches for ``slot`` - the monitor's own ``spec_for``.
+
+        Wave 3 §10.5: a brain names a window and the MONITOR answers with the
+        service. On a machine with a Monitor UI the answer has to be this
+        window's, not the config file's, because the config file does not know
+        which service the operator just picked or which box they just drew.
+
+        Which is why a ``watch`` for a slot this window is not showing SWITCHES
+        it. The alternative is worse in both directions: answering for the other
+        slot silently would leave the header, the ELEMENTS column and the
+        service line describing a window nobody is watching, and refusing would
+        make the brain's slot switch impossible to honour at all. Switching is
+        also what the user wants to see - a delegation starting is exactly when
+        the sub-agent's window is worth looking at.
+
+        Called on the loop (the Serve panel's server runs on this view's own
+        loop), so painting from here is the same thread every other paint uses.
+        """
+        if slot is not self._slot:
+            self._adopt_slot(slot)
+        return self._spec()
+
     def _spec(self) -> MonitorSpec:
         """What the monitor has to know to watch the SELECTED window.
 
         Scalars only, and every one of them read fresh: the service KEY (never
         the profile - the template PNGs are this machine's own business), the
-        drawn rectangle, the preset's finish checklist, and the send gate's four
-        tick budgets. ``stable_seconds`` goes over RAW; converting it into a
-        tick count belongs to whatever is doing the ticking (§2.10).
+        drawn rectangle, and the preset - the searching half for the poller, the
+        acting half for whatever brain reads it back off ``Watched`` (§10.5).
+        ``stable_seconds`` goes over RAW; converting it into a tick count
+        belongs to whatever is doing the ticking (§2.10).
         """
-        preset = self._preset()
-        return MonitorSpec(
-            service=self._service_key(),
-            region=self._regions[self._slot],
-            finish_signals=tuple(preset.finish_signals),
-            stable_seconds=preset.stable_seconds,
-            tolerance=preset.tolerance,
-            matcher=preset.matcher,
-            hover_scan=preset.hover_scan,
-            scroll_action=preset.scroll_action,
-            snap_back=preset.snap_back,
-            delivery=preset.delivery,
-            auto_submit=preset.auto_submit,
-            send_arm_min_diff=SEND_ARM_MIN_DIFF,
-            send_arm_ticks=SEND_ARM_TICKS,
-            send_gate_timeout_ticks=SEND_GATE_TIMEOUT_TICKS,
-            send_gate_seen_timeout_ticks=SEND_GATE_SEEN_TIMEOUT_TICKS,
+        return spec_from_preset(
+            self._preset(), self._regions[self._slot], service=self._service_key()
         )
 
     def _retarget(self) -> None:

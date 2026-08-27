@@ -35,7 +35,10 @@ from agentclip.shell.monitor_ui.window import (
 )
 from agentclip.shell.webview.assets import ASSET_DIR, ASSET_NAMES, ENTRY_PAGE
 
-SPEC = Path(__file__).resolve().parents[3] / "packaging" / "agentclip.spec"
+# The MONITOR's spec, not the app's: ui-monitor.md §10.3 took the whole screen
+# half out of ``agentclip.exe``, this page with it, and the only binary that
+# ships the Monitor UI is ``agentclip-monitor``.
+SPEC = Path(__file__).resolve().parents[3] / "packaging" / "agentclip-monitor.spec"
 
 
 def asset(name: str) -> str:
@@ -167,7 +170,12 @@ def test_the_spec_ships_the_page_where_importlib_resources_will_look() -> None:
     """The frozen build's half of ``asset_dir``. PyInstaller collects only what
     the spec names, and the destination has to be this PACKAGE's relative path
     or ``files("agentclip.shell.monitor_ui")`` finds nothing under
-    ``_MEIPASS``."""
+    ``_MEIPASS``.
+
+    Asserted against ``agentclip-monitor.spec`` because that is now the only
+    binary this window is in (§10.3): the app's spec dropped the block, and a
+    test still pointed at it would be pinning the page into an exe that never
+    opens it."""
     text = SPEC.read_text(encoding="utf-8")
     assert '"agentclip/shell/monitor_ui/assets"' in text
     assert "MONITOR_UI_ASSETS" in text
@@ -329,6 +337,11 @@ class _NullMonitor:
 
     async def configure(self, spec: Any) -> int:
         return 1
+
+    def set_spec_for(self, spec_for: Any) -> None:
+        """§10.5's seam: the view installs its own ``spec_for`` at construction,
+        so the smallest possible monitor has to be able to take one."""
+        self.spec_for = spec_for
 
     async def suspend(self) -> None: ...
     async def resume(self) -> None: ...

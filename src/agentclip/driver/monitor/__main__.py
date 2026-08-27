@@ -16,12 +16,16 @@ is only what a launcher can tell it - which project's configuration to read
 (services are configured per project, exactly as ``cli.py --calibrate`` resolves
 them), which service preset, and where to listen.
 
-**It starts unconfigured, and that is correct.** No ``MonitorSpec`` is built
-here: the spec is the brain's payload (§2.10) and arrives over the wire on the
-first ``configure``. Until then the monitor is a process with a clipboard
-backend, a profile lookup and no region to watch - and it stays running through
-every disconnect after that, because a monitor outlives every brain that dials
-it (§2.8).
+**It starts unconfigured, and that is still correct - but the configuration is
+now ours.** No ``MonitorSpec`` is built at startup: nothing is watched until a
+brain names a window (``watch(slot)``, §10.5). What changed in wave 3 is where
+the answer comes FROM - this process's own config, not a payload the brain
+sends - so :func:`build_monitor` hands the monitor a ``spec_for``: one preset
+per slot off ``general.service`` / ``general.subagent_service``, with the region
+left None so the machine's own store fills it. Until the first ``watch`` the
+monitor is a process with a clipboard backend, a profile lookup and no region to
+watch - and it stays running through every disconnect after that, because a
+monitor outlives every brain that dials it (§2.8).
 
 **The bind is §5's, spelled as a flag.** The port is a channel to this machine's
 mouse, keyboard and clipboard, so the default is loopback and ``--bind`` is the
@@ -43,6 +47,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 from agentclip import __version__
@@ -50,10 +55,12 @@ from agentclip.config import Config, default_profile_dir, load_config
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.monitor.auth import default_monitor_dir, load_or_create_token
 from agentclip.driver.monitor.local import LocalUIMonitor
+from agentclip.driver.monitor.protocol import MonitorSpec, spec_from_preset
 from agentclip.driver.monitor.server import LOOPBACK, BindRefused, serve
 from agentclip.driver.screen.matchers import MATCHERS, select_matcher
 from agentclip.driver.screen.picker import add_overlay_flags, overlay_child
 from agentclip.driver.screen.profile_store import load_profile
+from agentclip.driver.screen.slot import AgentSlot
 
 
 def _list_matchers() -> int:
@@ -275,6 +282,39 @@ def profile_root(args: argparse.Namespace) -> Path:
     return Path(args.profile_root).expanduser().resolve()
 
 
+def service_key(config: Config, slot: AgentSlot) -> str:
+    """Which service THIS machine runs in ``slot``'s window.
+
+    ``general.service`` for the master, ``general.subagent_service`` for the
+    sub-agent, and the master's again whenever the sub-agent's names a preset
+    this config does not have - the same fallback the Monitor UI's header does,
+    said once so the poller and the panel cannot disagree about which row a
+    window is.
+    """
+    general = config.general
+    key = general.service if slot is AgentSlot.MASTER else general.subagent_service
+    return key if key in config.services else general.service
+
+
+def spec_for_config(config: Config) -> Callable[[AgentSlot], MonitorSpec]:
+    """This process's answer to "what do you watch for that window" (§10.5).
+
+    The headless half of the inversion. With a window the Monitor UI's own
+    ``_spec()`` takes this job over (it has a live selection the config file
+    does not), so the two doors differ in exactly one thing: whether a human is
+    picking. The region is left None on purpose - the store fills it inside
+    ``configure`` (``local.py:_remember_region``), which is where the rectangle
+    an operator drew on THIS desktop lives.
+    """
+
+    def spec_for(slot: AgentSlot) -> MonitorSpec:
+        key = service_key(config, slot)
+        preset = config.services.get(key) or config.preset()
+        return spec_from_preset(preset, service=key)
+
+    return spec_for
+
+
 def build_monitor(args: argparse.Namespace, config: Config | None = None) -> LocalUIMonitor:
     """The machine this process serves.
 
@@ -297,6 +337,10 @@ def build_monitor(args: argparse.Namespace, config: Config | None = None) -> Loc
         # brain, so the box an operator drew over here has to survive a reboot
         # rather than being redrawn after each one.
         regions_dir=config_dir(args),
+        # What ``watch(slot)`` runs (§10.5). Headless this IS the whole
+        # configuration; with a window the Monitor UI replaces it with its own
+        # live selection the moment its view is built.
+        spec_for=spec_for_config(resolved),
     )
 
 

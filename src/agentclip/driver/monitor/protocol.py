@@ -324,7 +324,12 @@ class MonitorSpec:
     extra_instructions: str = ""
 
 
-def spec_from_preset(preset: ServicePreset, region: ScreenRegion | None = None) -> MonitorSpec:
+def spec_from_preset(
+    preset: ServicePreset,
+    region: ScreenRegion | None = None,
+    *,
+    service: str | None = None,
+) -> MonitorSpec:
     """One ``[services.*]`` row, as the monitor's target for a window.
 
     The single place a config preset becomes a spec, so the headless monitor
@@ -333,9 +338,16 @@ def spec_from_preset(preset: ServicePreset, region: ScreenRegion | None = None) 
     region is separate because it is not in the preset at all: it is a fact
     about this desktop, kept in the monitor's region store, and ``None`` here
     is the honest "let the store fill it" that ``configure`` already handles.
+
+    ``service`` overrides the key the spec is filed under, for the one config a
+    window can be in that a preset cannot describe: ``general.service`` naming a
+    row that does not exist. The caller falls back to a default PRESET but keeps
+    the KEY it was asked for, because the key is what the profile store and the
+    region store are indexed by and answering about another one would report a
+    calibration that belongs to a different service.
     """
     return MonitorSpec(
-        service=preset.key,
+        service=preset.key if service is None else service,
         region=region,
         finish_signals=tuple(preset.finish_signals),
         stable_seconds=preset.stable_seconds,

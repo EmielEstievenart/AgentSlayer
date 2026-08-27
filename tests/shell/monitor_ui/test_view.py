@@ -989,3 +989,142 @@ def test_the_spec_carries_the_whole_preset_the_brain_acts_on(
     assert built.extra_instructions == preset.extra_instructions
     assert built.delivery == preset.delivery
     assert built.auto_submit == preset.auto_submit
+
+
+# == the ONE service selection (§11.6) ========================================
+# The bug: the Services dropdown moved the EDITOR's selection and nothing else,
+# while ``_service_key`` - what ``spec_for``/``watch`` answer with - kept
+# reading ``[general] service`` off the config file. So a Monitor UI showing
+# 'chatgpt-attach' served a Chat UI that was driving 'zai'. The service is
+# entirely the monitor's domain and there is exactly one selection: the
+# dropdown IS the service this window watches for the tab it is showing.
+
+
+def test_the_dropdown_is_the_service_this_window_watches(calib: CalibHarness) -> None:
+    """One control. Picking in it moves what the monitor is pointed at, not
+    merely which preset the editor draws."""
+    view = calib.view
+    view.start()
+    assert view._service_key() == view.config.general.service
+    calib.scheduled.clear()
+
+    view.svc_select("claude")
+
+    assert view._service_key() == "claude"
+    assert view._spec().service == "claude"
+    assert calib.flush().last("editor")["selected"] == "claude"
+    assert calib.flush().last("calib")["service"] == "claude"
+    # ...and the running poller was repointed rather than left on the old one.
+    assert "CalibrationView._configure" in calib.scheduled
+
+
+async def test_a_watch_answers_the_dropdown_and_bumps_the_generation(
+    calib: CalibHarness,
+) -> None:
+    """What the attached brain gets back. The generation is how it learns: the
+    retarget bumps it, and a tick carrying a stamp it has not seen makes it
+    re-read ``watched()`` - so a service picked here reaches the far Chat UI
+    without anybody pressing anything over there."""
+    view = calib.view
+    view.start()
+    view.svc_select("claude")
+    before = calib.monitor.generations
+
+    watched = await calib.monitor.watch(AgentSlot.MASTER)
+
+    assert watched.service == "claude"
+    assert calib.monitor.generations == before + 1
+
+
+def test_picking_a_service_is_remembered_for_the_next_launch(
+    calib: CalibHarness, project: Path
+) -> None:
+    """Persisted to the GLOBAL config, through the same writer the sidebar
+    picker used before that door left the Chat UI."""
+    view = calib.view
+    view.start()
+
+    view.svc_select("claude")
+
+    assert calib.global_config_path.exists()
+    reloaded = load_config(project, global_config_path=calib.global_config_path)
+    assert reloaded.general.service == "claude"
+
+
+def test_each_window_keeps_its_own_service_and_the_tab_repaints_it(
+    calib: CalibHarness, project: Path
+) -> None:
+    """Two windows, two selections, one control: switching tab shows that
+    window's service in the very dropdown that sets it."""
+    view = calib.view
+    view.start()
+    view.svc_select("claude")
+
+    view.select_slot(SUBAGENT)
+    # Its own selection, seeded from the file and untouched by the master's
+    # pick: two windows are two services, which is the whole point of the tab.
+    assert view._service_key() == view.config.general.service
+    assert calib.flush().last("editor")["selected"] == view.config.general.service
+    view.svc_select("gemini")
+    assert view._service_key() == "gemini"
+    assert calib.flush().last("editor")["selected"] == "gemini"
+
+    view.select_slot(MASTER)
+    assert view._service_key() == "claude"
+    events = calib.flush()
+    assert events.last("editor")["selected"] == "claude"
+    assert events.last("calib")["service"] == "claude"
+
+    reloaded = load_config(project, global_config_path=calib.global_config_path)
+    assert (reloaded.general.service, reloaded.general.subagent_service) == ("claude", "gemini")
+
+
+def test_the_config_file_is_only_where_the_selection_starts(calib: CalibHarness) -> None:
+    """After the first pick nothing reads ``[general]`` again for this run - the
+    file is the initial value, and the two-readers arrangement it replaced is
+    what let the window and the monitor answer differently."""
+    view = calib.view
+    view.start()
+    started_on = view.config.general.service
+
+    view.svc_select("claude")
+
+    assert view.config.general.service == started_on  # untouched in memory
+    assert view._service_key() == "claude"
+    assert view.spec_for(AgentSlot.MASTER).service == "claude"
+
+
+def test_an_unwritable_config_still_switches_the_watched_service(
+    calib: CalibHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pick is real for this run even when the file it should outlive it in
+    could not be written - the same bargain the preset save makes."""
+    view = calib.view
+    view.start()
+    monkeypatch.setattr(
+        f"{VIEW}.save_active_services",
+        lambda service, subagent_service, path: (_ for _ in ()).throw(OSError("read-only")),
+    )
+    calib.flush().clear()
+
+    view.svc_select("claude")
+
+    assert view._service_key() == "claude"
+    assert any(
+        event["severity"] == "error" and "could not save" in event["message"]
+        for event in calib.flush().of_type("toast")
+    )
+
+
+def test_the_same_service_again_is_not_a_retarget(calib: CalibHarness) -> None:
+    """The page repaints the dropdown from every ``editor`` event, so a redraw
+    must not look like a pick: a retarget per paint would bump the generation
+    once a keystroke and have every attached brain re-reading ``watched()``."""
+    view = calib.view
+    view.start()
+    calib.scheduled.clear()
+
+    view.svc_select(view._service_key())
+
+    assert calib.scheduled == []
+    assert not calib.global_config_path.exists()

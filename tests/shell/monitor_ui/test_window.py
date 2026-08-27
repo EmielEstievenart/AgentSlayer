@@ -104,7 +104,6 @@ def test_the_page_draws_the_serve_panel_and_can_reach_all_four_of_its_verbs() ->
         "serve-toggle",
         "serve-status",
         "link-badge",
-        "serve-mismatch",
         "serve-warning",
         "serve-error",
         "serve-token",

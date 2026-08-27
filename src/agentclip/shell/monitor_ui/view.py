@@ -43,6 +43,7 @@ from agentclip.config import (
     ServicePreset,
     default_global_config_path,
     default_profile_dir,
+    save_active_services,
     save_services,
 )
 from agentclip.driver.monitor.protocol import MonitorSpec, SpecFor, spec_from_preset
@@ -210,11 +211,6 @@ class CalibrationView:
         self._bridge = bridge
         self._config = config
         self._monitor = monitor
-        # §10.5: the window IS the monitor's configuration. Installed here rather
-        # than at :meth:`start`, so a ``watch`` that arrives over the wire before
-        # the page has finished loading is still answered with this window's
-        # selection instead of with the config file's.
-        monitor.set_spec_for(self.spec_for)
         self._profile_root = profile_root if profile_root is not None else default_profile_dir()
         self._global_config_path = (
             global_config_path if global_config_path is not None else default_global_config_path()
@@ -254,6 +250,16 @@ class CalibrationView:
 
         # -- what is being calibrated ------------------------------------------
         self._slot = AgentSlot.MASTER
+        # §11.6: the ONE service selection. Per window, held here rather than
+        # re-read off ``general.service`` on every ask, because the config file
+        # is only where this window STARTED - the dropdown is where it is now.
+        # Two selections is exactly the bug this replaced: the editor showed
+        # what the operator picked while ``spec_for``/``watch`` kept answering
+        # with the file, so the attached Chat UI drove another service entirely.
+        self._service: dict[AgentSlot, str] = {
+            AgentSlot.MASTER: self._configured_service(AgentSlot.MASTER),
+            AgentSlot.SUBAGENT: self._configured_service(AgentSlot.SUBAGENT),
+        }
         self._regions: dict[AgentSlot, ScreenRegion | None] = {
             AgentSlot.MASTER: None,
             AgentSlot.SUBAGENT: None,
@@ -287,6 +293,14 @@ class CalibrationView:
         # -- blocking prompts (the confirm the editor asks for) ------------------
         self._prompts: dict[str, asyncio.Future[Any]] = {}
         self._prompt_ids = itertools.count(1)
+
+        # §10.5: the window IS the monitor's configuration. Installed at
+        # construction rather than at :meth:`start`, so a ``watch`` that arrives
+        # over the wire before the page has finished loading is still answered
+        # with this window's selection instead of with the config file's - and
+        # LAST in this method, because the callable it hands over reads every
+        # field above it and a ``watch`` can land on the next line.
+        monitor.set_spec_for(self.spec_for)
 
     # == reading (for tests and for the hosting shell) =========================
 
@@ -401,11 +415,19 @@ class CalibrationView:
         other caller is :meth:`spec_for` - where the retarget is the very call
         being answered, and asking for a second one would configure the monitor
         twice for one ``watch``.
+
+        The editor is repointed too (§11.6): one dropdown, so the preset on show
+        is always the service the window now being calibrated is watching. This
+        is a REPAINT, not a pick - nothing is persisted and nothing retargets
+        from it, because ``self._service`` already said this.
         """
         self._slot = slot
         self._seed_region()
         self._clear_elements()
         self._push_calibration()
+        if self._editor is not None:
+            self._editor.select(self._service[slot])
+            self._push_editor()
 
     def set_elements_visible(self, visible: bool) -> None:
         """The column opened or closed.
@@ -582,9 +604,19 @@ class CalibrationView:
         self._bridge.send("editor", **editor.state())
 
     def svc_select(self, key: str) -> None:
+        """The Services dropdown - which is the ONE service selection there is.
+
+        §11.6: the service is the monitor's domain, and this control is where
+        it is set. So the dropdown does not merely change which preset the
+        editor shows: it changes what this window WATCHES for the selected
+        slot, writes that to the global config so the next launch remembers it,
+        and retargets the running poller - which bumps the generation, so every
+        attached brain re-reads ``watched()`` and follows within a tick.
+        """
         if self._editor is None:
             return
         self._editor.select(key)
+        self._follow_editor()
         self._push_editor()
 
     def svc_form(self, fields: dict[str, Any]) -> None:
@@ -649,6 +681,9 @@ class CalibrationView:
         if self._editor is None:
             return
         self._editor.add()
+        # The editor lands ON the service it just created, so the dropdown now
+        # shows it - and §11.6's rule is that the dropdown IS what is watched.
+        self._follow_editor()
         self._push_editor()
 
     def svc_reset(self) -> None:
@@ -661,6 +696,10 @@ class CalibrationView:
         if self._editor is None:
             return
         self._editor.delete()
+        # Same rule as ``svc_add``, from the other direction: a delete drops the
+        # editor onto the next key, and a window left watching the service that
+        # no longer exists is the mismatch §11.6 ended.
+        self._follow_editor()
         self._push_editor()
 
     def svc_prev(self, kind_name: str) -> None:
@@ -1056,12 +1095,74 @@ class CalibrationView:
     def _service_key(self) -> str:
         """Which service the SELECTED window is pointed at.
 
-        Read off the global config rather than off a controller: this window has
-        no session and therefore no per-window service map of its own.
+        The dropdown's answer, not the config file's (§11.6). Everything that
+        asks "what is this window" - ``_spec``/``spec_for`` for the brain, the
+        header, ``Identify``, the region store's key - goes through here, so
+        there is exactly one place a second selection could have crept back in.
+        """
+        return self._service[self._slot]
+
+    def _configured_service(self, slot: AgentSlot) -> str:
+        """Where a slot's service STARTS: ``[general]`` in the merged config.
+
+        ``subagent_service`` is blank for a user who never split the two
+        windows, and a stale key survives a preset the editor deleted, so both
+        fall back to the master's - the same resolution the picker did before
+        the selection moved in here.
         """
         general = self._config.general
-        key = general.service if self._slot is AgentSlot.MASTER else general.subagent_service
+        key = general.service if slot is AgentSlot.MASTER else general.subagent_service
         return key if key in self._config.services else general.service
+
+    def _follow_editor(self) -> None:
+        """Adopt the editor's selection as the selected window's service.
+
+        The one writer of ``self._service``, and the reason §11.6 is one
+        control rather than two states kept in step: every path that moves the
+        editor's selection comes through here, so what the dropdown shows and
+        what ``watch()`` answers cannot part company.
+
+        "+ Add new" (a ``None`` selection) is the one that moves nothing: there
+        is no service there to watch yet, and the window keeps polling the one
+        it had until the key is committed.
+        """
+        editor = self._editor
+        if editor is None:
+            return
+        key = editor.selected_key
+        if key is None or key == self._service[self._slot]:
+            return
+        self._service[self._slot] = key
+        self._persist_services()
+        # The region store is keyed by SERVICE, so the new one may have a
+        # rectangle of its own this window has never seen. A DRAWN box still
+        # wins, exactly as it does on a slot switch or a config edit
+        # (:meth:`_seed_region` only ever fills a hole).
+        self._seed_region()
+        self._push_calibration()
+        self._retarget()
+
+    def _persist_services(self) -> None:
+        """Both windows' services into the GLOBAL config, so the next launch of
+        this monitor comes up on what was picked here.
+
+        The same writer the sidebar picker used before §11.1 took that door out
+        of the Chat UI: only ``[general] service`` / ``subagent_service`` are
+        touched, and ``subagent_service`` is dropped when the two agree (which
+        keeps the sub-agent window FOLLOWING the master rather than freezing it
+        on today's coincidence). A failed write degrades to a toast: the
+        selection is real for this run either way.
+        """
+        try:
+            save_active_services(
+                self._service[AgentSlot.MASTER],
+                self._service[AgentSlot.SUBAGENT],
+                self._global_config_path,
+            )
+        except OSError as exc:
+            self.notify(
+                f"could not save the service selection: {exc}", severity="error", timeout=8
+            )
 
     def _preset(self) -> ServicePreset:
         return self._config.services.get(self._service_key()) or self._config.preset()

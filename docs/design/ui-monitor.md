@@ -2300,3 +2300,72 @@ shell tests that stage the three reports (a captured new-chat on the monitor,
 none on the brain: `/new` clicks; a reply finishes: the copy click uses
 `located.target`; a paste lands with `auto_submit` on: `send_enter` is
 called). Memory note `wave4-brain-knows-no-pixels`.
+
+### 11.6 One service selection, and it is the dropdown — **AS BUILT** (2026-08-27)
+
+**The report.** The Monitor UI showed `chatgpt-attach` selected in its Services
+dropdown; the attached Chat UI's badge said `driving zai`; and the Serve panel
+printed the `SERVICE_MISMATCH` line under the band, telling the operator to
+"select the same service on both sides" — with no second side left to select it
+on, because §11.2 took every service door out of the Chat UI.
+
+**The cause.** `shell/monitor_ui/view.py` had TWO selections. `svc_select(key)`
+called `self._editor.select(key)` and nothing else — which preset the editor
+*draws*. `_service_key()` — what `_spec()`, `spec_for()`, `watch()`,
+`Identify` and the region store answer with — read `general.service` /
+`general.subagent_service` off the config file on every ask. Picking in the
+dropdown therefore moved the editor and left the monitor watching whatever the
+file said, and §10.5's rule that the monitor owns the service turned that
+disagreement into the brain's, too.
+
+**The rule.** The service is entirely the monitor's domain and there is ONE
+selection: the Services dropdown IS the service the monitor watches for the
+window the tab strip is showing. The config file is where that selection
+*starts*, and nothing more.
+
+* `CalibrationView._service: dict[AgentSlot, str]`, initialised per slot from
+  `general.service` / `general.subagent_service` with the resolution the old
+  `_service_key` did (a blank or stale sub-agent key falls back to the
+  master's). `_service_key()` returns `self._service[self._slot]` and is the
+  only reader — every other surface goes through it.
+* `svc_select(key)` selects in the editor, adopts the editor's resulting
+  `selected_key` as this slot's service, writes both slots to the GLOBAL config
+  (`save_active_services`, the writer the sidebar picker used before that door
+  left the Chat UI), re-seeds the region (a drawn box still wins; the store is
+  keyed by service) and `_retarget()`s. The retarget bumps the generation, so
+  every attached brain re-reads `watched()` on its next tick and follows —
+  no frame, no reconnect, nothing pressed on the other machine.
+* `_follow_editor()` is the one writer, and every path that moves the editor's
+  selection goes through it: the dropdown, `svc_add` (which lands on the key it
+  just created) and `svc_delete` (which falls back to the next key). `+ Add new`
+  — a `None` selection — moves nothing: there is no service there to watch yet.
+  Selecting the service already selected is not a pick: it neither persists nor
+  retargets, because the page repaints the dropdown from every `editor` event
+  and a retarget per paint would bump the generation once a keystroke.
+* `_adopt_slot` (so: the MASTER / SUB-AGENT tab, and a `watch` for the slot this
+  window is not showing) repaints the editor to that slot's service. A repaint,
+  not a pick — nothing is persisted and nothing retargets, because
+  `self._service` already said it.
+* Two windows are now two independent selections. Where the sub-agent used to
+  FOLLOW the master whenever `subagent_service` was blank, a pick on the master
+  now pins the sub-agent's own value into the file as well (that value is
+  unchanged — it is the one the sub-agent window was already watching).
+* `monitor.set_spec_for(self.spec_for)` moved to the END of `__init__` — still
+  at construction, not at `start`, so a `watch` arriving before the page has
+  loaded is answered with this window's selection; but after every field the
+  callable reads, since a `watch` can land on the next line.
+* **`SERVICE_MISMATCH` is gone**, by construction: `serve.py`'s `state()` no
+  longer carries `mismatch`, and the page lost `#serve-mismatch`, `paintMismatch`
+  and its two module variables. The `driving <key>` half of the link badge
+  stays — it is what the operator reads to see which service the attached Chat
+  UI is on, and it can no longer disagree with the dropdown. (The §9.1 as-built
+  note above still describes the mismatch line; this section supersedes it.)
+* `driver/monitor/__main__.py`'s `spec_for_config` — the headless monitor, which
+  has no dropdown — is untouched: the config file is its whole selection.
+* Tests: seven in `tests/shell/monitor_ui/test_view.py` (the dropdown is what is
+  watched and what `_spec` carries; `watch(MASTER)` answers the picked key and
+  the generation bumps; the pick is written to the global config; each window
+  keeps its own service and the tab repaints the dropdown; the config file is
+  only the initial value; an unwritable config still switches the watched
+  service; the same key again is not a retarget), and the two mismatch
+  assertions in `test_serve.py` / `test_window.py` are gone.

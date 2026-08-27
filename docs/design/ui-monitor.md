@@ -1985,3 +1985,110 @@ above that lives under `driver/monitor/` and `shell/monitor_ui/`.
   is `watched()`, never `watch()`, because a second retarget would bump the
   generation again and the two would chase each other. The stamp is claimed on
   the tick thread, so several ticks do not queue several reads.
+
+## 11. Wave 4 — the brain knows no pixels; the GUI starts idle (2026-08-27)
+
+> **Status:** PLANNED. Each sub-section gets an "as built" note when it lands.
+
+### 11.0 Why
+
+Three reports on the same day, one cause. With a green link and a Monitor UI
+whose ELEMENTS column saw every button: `/new` answered "did not land
+(not_calibrated)", the reply was never auto-copied, and the pasted prompt was
+never submitted. Every one of those decisions was taken by the brain against a
+**service profile read from the brain's own disk** (`shell/chat/view.py`'s
+`profile_for` → `driver/screen/profile_store.load_profile`, the "unpaid bill" of
+§10.3/§10.4). On any machine other than the one the appearances were captured
+on that profile is empty, so the brain refused before asking. The rule this
+wave installs, in the user's words: *the GUI is the brain and the monitor is
+its follower. The GUI does not know what a new-chat button looks like; it can
+know whether the monitor sees one, and if so tell the monitor to click it.*
+Behavioural settings (auto-submit, delivery, chunk size, …) stay the monitor's
+to configure and reach the brain in `Watched` (§10.5); the brain drives the
+monitor from them. Corollary: nothing in `shell/chat` or `driver/automation`
+may import `driver.screen.profile_store`, hold a `ServiceProfile`, or read a
+template.
+
+Second decision: a Chat UI started by double-click **does nothing** — no
+monitor is launched or dialled — until the user attaches one from the Monitor
+tab. `--monitor local|HOST:PORT|@NAME` remain terminal opt-ins.
+
+### 11.1 Idle start
+
+* `cli.resolve_monitor_target`: flag absent → `None` (idle); `local` →
+  `LaunchLocal`. Nothing else changes. The Chat UI starts parked in
+  DISCONNECTED with the red `NO MONITOR · attach or launch one` badge and the
+  loop never ticks.
+* Monitor tab, mode **Local**: the one button reads **Launch & connect a local
+  monitor** (loopback TCP, token from the shared file, as §10.1 built). Its help
+  line says the monitor window opens beside this one and closes with it.
+* Docs (`commands.md` `--monitor` table, `configuration.md`, README quick-start)
+  say: double-click = idle; attach from the Monitor tab.
+
+### 11.2 Every calibration door leaves the Chat UI
+
+Deleted, not re-pointed: sidebar **Edit services...** and **Set chat
+region...**, the titlebar **monitor UI** button (`#calibrate-open`), `F2`,
+`/identify`, `CALIBRATION_ELSEWHERE`, `GuiView.open_calibration`,
+`show_identify_overlay`, `bridge.calibrate`, `runner.open_calibration`, the
+help/palette entries, and the F-key row's `F2 calibrate`. DETECTION-panel hints
+that say "F2" (`STALE_UNTICKED`, `STALE_OFF`, `PROFILE_HINT`) say "in the
+Monitor UI" instead. `/identify` stays a Monitor UI feature only
+(`docs/commands.md` moves the row to that section).
+
+### 11.3 The monitor answers every pixel question
+
+Wire **v4** (`MONITOR_WIRE_VERSION = 4`):
+
+* `Watched.captured: tuple[TemplateKind, ...]` — the kinds the monitor's own
+  profile holds for the watched service (empty when unprofiled). Encoded as kind
+  names. `watched_from(spec, profile=...)` fills it; the fake takes it from its
+  `specs_for`/profiles.
+* `Located.target: ScreenRegion | None` — the ONE pixel to click, i.e. the
+  service's click point (`ServiceProfile.click_point(kind)`, a per-image
+  percentage the user set in the Monitor UI) applied to `region`. `None` iff
+  `region` is None. Computed in `LocalUIMonitor._locate_now`, so the brain never
+  sees a click point. `hover_scan` returns a `Located` too (same field, so the
+  copy click after a hover uses the same point).
+* Brain-side replacements, one per former `live_profile()` read:
+  * `acts.click_profile_element`: `NOT_CALIBRATED` when `cal.chat_region is None`
+    **or** `kind not in ctx.captured(slot)` — `RecipeContext.captured(slot)` is
+    `host.captured_for(slot)` = `Watched.captured` of that slot. The refusal
+    sentence names the monitor: `the monitor has no {kind.label} captured for
+    {service} - capture one in the Monitor UI`.
+  * `auto_copy.py`: "no copy button is captured" ← `COPY not in captured`;
+    the click target is `located.target` (keep the `Located`, not just its
+    region; the hover-scan branch likewise).
+  * `chatbox.py` `target`/`verified_target`: `found.target`.
+  * `context.copy_status`: drop the template-size prefix (the Monitor UI shows
+    sizes); the line is the status text alone.
+* Gone: `AutomationHost.profile_for`, `NullHost.profile_for`,
+  `AutomationController.live_profile`, `RecipeContext.live_profile`,
+  `GuiView.profile_for/_profile/_profiles/_profile_root`, the `load_profile`
+  import, `click_point_region` imports in the recipes. New:
+  `AutomationHost.captured_for(slot) -> tuple[TemplateKind, ...]`.
+* `tests/test_layering.py`: `shell.chat` and `driver.automation` may import
+  from `driver.screen` only `profile.TemplateKind`, `region`, `slot`, `focus`
+  (the explicit allowlist loses `profile_store`).
+
+### 11.4 F2 — what the monitor sees
+
+A sidebar block **MONITOR SEES**, hidden by default, toggled by `F2` (the key
+is free after §11.2), remembered like the other sidebar toggles. One row per
+kind in `TICK_KINDS ∪ Watched.captured` of the SELECTED slot: `✓ on screen` /
+`· captured, not on screen` / `✗ not captured`, from the latest tick's
+`sightings` and `Watched.captured`; under it the received settings the brain
+drives from: `auto-submit on/off · delivery <mode> · paste ≤ N chars · hover
+scan on/off · snap back on/off`. Pushed only when the rendered text changes
+(a tick a second must not repaint an unchanged block). Help/palette entry:
+`F2 — what the monitor sees (and the settings it sent)`.
+
+### 11.5 Docs, tests, memory
+
+`commands.md`, `configuration.md`, README, AGENTS.md vocabulary row,
+`ui-briefs/*` headers that mention the Chat UI doors; unit tests for every
+gate above with a `FakeUIMonitor` whose profile lives "over there"; the
+shell tests that stage the three reports (a captured new-chat on the monitor,
+none on the brain: `/new` clicks; a reply finishes: the copy click uses
+`located.target`; a paste lands with `auto_submit` on: `send_enter` is
+called). Memory note `wave4-brain-knows-no-pixels`.

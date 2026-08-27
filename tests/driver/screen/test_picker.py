@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import pytest
 
-from agentclip.cli import _show_identify_child
 from agentclip.driver.screen import picker
 from agentclip.driver.screen.identify import IdentifiedElement, format_payload
+from agentclip.driver.screen.picker import show_identify_child
 from agentclip.driver.screen.region import ScreenRegion
 
 # Bound at import, before the suite-wide OS gate swaps the module attribute for
@@ -46,7 +46,9 @@ def test_the_identify_child_is_the_same_program_with_its_own_flag() -> None:
     command line, so it travels on stdin."""
     argv = picker._child_argv("--show-identify")
     assert argv[-1] == "--show-identify"
-    assert argv[:3] == [picker.sys.executable, "-m", "agentclip"]
+    # The MONITOR's entry point since ui-monitor.md §10.1: cli.py no longer
+    # answers the overlay flags, so a checkout's child must not be `-m agentclip`.
+    assert argv[:3] == [picker.sys.executable, "-m", "agentclip.driver.monitor"]
 
 
 def test_frozen_identify_child_invokes_the_exe_directly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -69,7 +71,7 @@ def test_the_identify_child_draws_exactly_what_it_was_sent(
         "agentclip.driver.screen.overlay.run_identify_overlay",
         lambda parsed, *args, **kwargs: drawn.append(list(parsed)),
     )
-    assert _show_identify_child(format_payload(elements)) == 0
+    assert show_identify_child(format_payload(elements)) == 0
     assert drawn == [elements]
 
 
@@ -82,7 +84,7 @@ def test_the_identify_child_rejects_a_bad_payload_before_drawing_anything(
         "agentclip.driver.screen.overlay.run_identify_overlay",
         lambda *args, **kwargs: pytest.fail("drew a malformed payload"),
     )
-    assert _show_identify_child("{not json") == 1
+    assert show_identify_child("{not json") == 1
     assert "bad payload" in capsys.readouterr().err
 
 
@@ -95,7 +97,7 @@ def test_the_identify_child_survives_an_environment_with_no_overlay(
         raise ImportError("No module named 'tkinter'")
 
     monkeypatch.setattr("agentclip.driver.screen.overlay.run_identify_overlay", boom)
-    assert _show_identify_child(format_payload([])) == 1
+    assert show_identify_child(format_payload([])) == 1
     assert "identify overlay unavailable" in capsys.readouterr().err
 
 

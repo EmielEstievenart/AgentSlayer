@@ -21,6 +21,7 @@ from agentclip.driver.clip.base import select_provider
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.hosts.local import LocalHost
 from agentclip.shell.app.link import Link
+from agentclip.shell.app.monitor_launch import LaunchLocal
 from agentclip.shell.chat.shell import (
     ASSET_PACKAGE,
     MIN_WINDOW_SIZE,
@@ -375,8 +376,9 @@ def test_argparse_help_names_both_retired_flags_for_what_they_now_are() -> None:
 
 
 def test_the_gui_smoke_flag_is_hidden() -> None:
-    """It is a build-script probe, not a user-facing feature - like
-    --pick-region and --show-identify beside it."""
+    """It is a build-script probe, not a user-facing feature. The last one this
+    parser has: --pick-region, --show-identify and --list-matchers left it in
+    ui-monitor.md §10.1 for the binary that actually draws and matches."""
     args = cli.build_arg_parser().parse_args([])
     assert args.gui_smoke is False
     assert cli.build_arg_parser().parse_args(["--gui-smoke"]).gui_smoke is True
@@ -528,9 +530,16 @@ def test_the_monitor_target_reaches_the_gui_resolved(
         name="box:7777", host="box", port=7777
     )
 
+    # An ABSENT flag resolves too, and to LaunchLocal - there is no in-process
+    # monitor left to be the default by omission (§10.1). Until §10.2 teaches
+    # view.py the sentinel, ``main`` flattens it to the None that shell still
+    # reads as "local", which is what reaches run_gui for one phase.
     kwargs.clear()
     assert cli.main(["--project", str(tmp_path)]) == 0
     assert kwargs["monitor_target"] is None
+    assert isinstance(
+        cli.resolve_monitor_target(None, None, _launch(tmp_path).config, {}), LaunchLocal
+    )
 
 
 # == --monitor @name, the token's three sources, and --calibrate's epitaph =====
@@ -649,6 +658,34 @@ def test_a_saved_targets_token_is_used_when_nothing_overrides_it(
     resolved = cli.resolve_monitor_target("@vm", None, config, {})
     assert isinstance(resolved, MonitorTarget)
     assert resolved.token == "a" * 32
+
+
+# == --monitor local / none: the launcher's two bare words (ui-monitor.md §10.1)
+
+
+@pytest.mark.parametrize("given", [None, "local"])
+def test_no_flag_and_local_both_mean_launch_one_here(
+    tmp_path: Path, given: str | None
+) -> None:
+    """The sentinel, not a target: the port a local monitor listens on is chosen
+    when it is launched, so there is nothing to resolve here yet."""
+    config = _launch(tmp_path).config
+    assert cli.resolve_monitor_target(given, None, config, {}) == LaunchLocal()
+
+
+def test_none_is_the_window_with_no_screen_attached(tmp_path: Path) -> None:
+    """The third answer, and the only way to open the Chat UI without a monitor
+    - which is why it is a WORD: every direct target must carry a port, so
+    ``none`` could never have been one."""
+    config = _launch(tmp_path).config
+    assert cli.resolve_monitor_target("none", None, config, {}) is None
+
+
+def test_the_help_names_all_four_monitor_spellings() -> None:
+    help_text = cli.build_arg_parser().format_help()
+    assert "local|none|HOST:PORT|@NAME" in help_text
+    for word in ("local", "none", "agentclip-monitor"):
+        assert word in help_text
 
 
 def test_calibrate_is_refused_with_the_command_that_replaced_it(

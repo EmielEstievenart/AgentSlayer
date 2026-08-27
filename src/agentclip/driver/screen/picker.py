@@ -2,8 +2,9 @@
 
 The Textual TUI cannot host tkinter (both want an event loop; tkinter also
 demands the main thread), so every overlay re-invokes THIS program with a hidden
-flag. Works identically frozen (PyInstaller: ``sys.executable`` is
-agentclip.exe) and from source (``python -m agentclip``).
+flag. Works identically frozen (PyInstaller: ``sys.executable`` is whichever
+exe asked - the app's or the monitor's) and from source, where the child is
+``python -m agentclip.driver.monitor`` (see :data:`CHILD_MODULE`).
 
 Two children, same shape - arguments in, one line of result out:
 
@@ -36,11 +37,20 @@ class ScreenPickError(Exception):
     """The picker child could not run or died - distinct from a user cancel."""
 
 
+#: The module the from-source child runs. The MONITOR's, not the app's: since
+#: docs/design/ui-monitor.md §10.1 the Chat UI draws no overlay and ``cli.py``
+#: no longer answers these flags at all, so a checkout's ``-m agentclip`` would
+#: be an "unrecognized arguments" error. This module IS the one both frozen
+#: binaries reach through ``add_overlay_flags`` / :func:`overlay_child`, and
+#: ``agentclip.driver.monitor`` is its entry point one layer up.
+CHILD_MODULE = "agentclip.driver.monitor"
+
+
 def _child_argv(flag: str) -> list[str]:
     """This program again, with one hidden overlay flag."""
     if getattr(sys, "frozen", False):
         return [sys.executable, flag]
-    return [sys.executable, "-m", "agentclip", flag]
+    return [sys.executable, "-m", CHILD_MODULE, flag]
 
 
 def _command(prompt: str | None) -> list[str]:

@@ -21,7 +21,6 @@ from agentclip.config import (
     load_config,
 )
 from agentclip.driver.clip.base import select_provider
-from agentclip.driver.screen.matchers import MATCHERS, select_matcher
 from agentclip.engine.link.factory import EngineBuilder, EngineRequest, make_engine_builder
 from agentclip.engine.link.wire import EngineLinkError
 from agentclip.engine.store.session import prune_sessions
@@ -47,6 +46,7 @@ from agentclip.shell.app.engine_launch import (
     is_missing_engine,
 )
 from agentclip.shell.app.link import Link, LocalLink, McpStatusLine, SkillReport
+from agentclip.shell.app.monitor_launch import LaunchLocal
 from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLinkClient
 from agentclip.shell.app.sizes import fmt_tokens
 
@@ -382,6 +382,12 @@ MONITOR_NO_SAVED = "--monitor @{name} names no [monitor.{name}] target in the gl
 # runs on.
 MONITOR_TOKEN_ENV = "AGENTCLIP_MONITOR_TOKEN"
 
+# The two ``--monitor`` values that name no address at all (ui-monitor.md §10.1).
+# Bare words rather than an address, and unambiguous ones: every direct target
+# has to carry a port, so neither of these can ever have been one.
+MONITOR_LOCAL = "local"
+MONITOR_NONE = "none"
+
 
 def parse_monitor_target(text: str) -> tuple[str, int] | None:
     """``host:port`` → ``(host, port)``, or None when it is not one.
@@ -409,20 +415,38 @@ def parse_monitor_target(text: str) -> tuple[str, int] | None:
 
 
 def resolve_monitor_target(
-    given: str, token_flag: str | None, config: Config, environ: Mapping[str, str] | None = None
-) -> MonitorTarget | str:
-    """``--monitor``'s value into the target to dial, or one sentence refusing it.
+    given: str | None,
+    token_flag: str | None,
+    config: Config,
+    environ: Mapping[str, str] | None = None,
+) -> MonitorTarget | LaunchLocal | None | str:
+    """``--monitor``'s value into the thing to dial, or one sentence refusing it.
 
-    Two spellings, and the ``@`` is what tells them apart because a host name
-    cannot start with one: ``@name`` is a saved ``[monitor.<name>]`` table
-    (ui-monitor.md §9.2) and everything else is the ``HOST:PORT`` §6.5 shipped,
-    right-partitioned so an IPv6 literal survives.
+    Four spellings and four answers (docs/design/ui-monitor.md §10.1):
+
+    * absent (``None``) or ``local`` → :class:`LaunchLocal`, the sentinel that
+      means *start an ``agentclip-monitor`` on this PC and dial it*. It is a
+      sentinel rather than a target because the port is chosen at launch time;
+    * ``none`` → ``None``, the window with no screen attached;
+    * ``@name`` → the saved ``[monitor.<name>]`` table (ui-monitor.md §9.2);
+    * anything else → the ``HOST:PORT`` §6.5 shipped, right-partitioned so an
+      IPv6 literal survives - and refused with one sentence when it is not one.
+
+    The ``@`` is what tells the last two apart, because a host name cannot start
+    with one; ``local`` and ``none`` are safe as bare words for the same reason
+    a host name is not enough on its own here - every direct target must carry a
+    port, so neither word can ever have been a valid one.
 
     The token rides none of it. It comes from the saved table, from
     ``AGENTCLIP_MONITOR_TOKEN`` or from ``--monitor-token``, and the flag is
     LAST in the documentation and FIRST in precedence for the ordinary reason a
-    flag beats a file: it is the thing the person typed just now.
+    flag beats a file: it is the thing the person typed just now. A local launch
+    needs none of the three - the child and the launcher read one shared file.
     """
+    if given is None or given == MONITOR_LOCAL:
+        return LaunchLocal()
+    if given == MONITOR_NONE:
+        return None
     env = environ if environ is not None else os.environ
     token = token_flag if token_flag is not None else env.get(MONITOR_TOKEN_ENV, "")
     if given.startswith("@"):
@@ -472,15 +496,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="project root ON the remote machine (required with --ssh unless the"
         " saved target names one)",
     )
-    # Hidden: the app re-invokes itself with this flag to run the draw-a-box
-    # screen overlay in a child process (tkinter can't share either shell's
-    # process).
-    parser.add_argument("--pick-region", action="store_true", help=argparse.SUPPRESS)
-    # Hidden: the instruction that overlay shows; only meaningful with --pick-region.
-    parser.add_argument("--pick-prompt", default=None, help=argparse.SUPPRESS)
-    # Hidden: /identify's read-only twin of --pick-region - the element list
-    # arrives as JSON on stdin and is drawn where each element sits on screen.
-    parser.add_argument("--show-identify", action="store_true", help=argparse.SUPPRESS)
+    # The two overlay re-invocation flags left this parser in ui-monitor.md
+    # §10.1: the Chat UI draws no overlay and runs no matcher, so it has no
+    # reason to answer `--pick-region` or `--show-identify`. Both still exist -
+    # on the binary that draws them. `agentclip-monitor` adds them through
+    # `driver.screen.picker.add_overlay_flags`, which is where the picker's
+    # `sys.executable` re-invocation now lands, and where `--list-matchers`
+    # (deleted below for the same reason) also still lives.
+    #
     # Kept for one release as a STUB, not as a shell: the Textual TUI is gone
     # (docs/design/ui-monitor.md §6.6), and ``main`` refuses this flag with one
     # line saying so. Argparse would otherwise answer "unrecognized arguments",
@@ -513,11 +536,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # WHOLE entry - the Chat UI's connect dialog grew a Monitor tab in §9.2 -
     # but still the scriptable one, and it gained `@name` for a saved
     # [monitor.<name>] target.
+    #
+    # Since §10.1 it also names the LOCAL case, because there is no longer an
+    # in-process one to be the default by omission: `local` starts an
+    # `agentclip-monitor` on this PC and dials it exactly as it dials a remote
+    # one, and that is what an absent flag means too. `none` is the third
+    # spelling, and the only way to open the window with no screen attached.
     parser.add_argument(
         "--monitor",
         default=None,
-        metavar="HOST:PORT|@NAME",
-        help="drive the screen of a machine running agentclip-monitor (Chat UI only)",
+        metavar="local|none|HOST:PORT|@NAME",
+        help=(
+            "which screen this window drives: 'local' (the default - launch an"
+            " agentclip-monitor here), 'none', HOST:PORT, or @name for a saved"
+            " [monitor.<name>] target"
+        ),
     )
     # The monitor port's shared secret (ui-monitor.md §9.1). Documented last of
     # the three sources on purpose: argv is world-readable on the machines this
@@ -532,41 +565,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "$AGENTCLIP_MONITOR_TOKEN, since argv is world-readable"
         ),
     )
-    parser.add_argument(
-        "--list-matchers",
-        action="store_true",
-        help="print which appearance-matcher backends this build can run, and exit",
-    )
-    # Hidden: --list-matchers' twin for the GUI shell - does THIS build carry a
+    # `--list-matchers` left this parser in ui-monitor.md §10.1 with the overlay
+    # flags: every template search runs on the MONITOR (§2.5), so the question
+    # "can this build match?" is a question about that binary and it answers it
+    # itself (`agentclip-monitor --list-matchers`, driver/monitor/__main__.py).
+    #
+    # Hidden: the GUI shell's own build probe - does THIS build carry a
     # working window? Run against the frozen exe by scripts/build-exe.ps1; see
     # _gui_smoke for what it proves and what it deliberately does not.
     parser.add_argument("--gui-smoke", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--version", action="version", version=f"agentclip {__version__}")
     return parser
-
-
-def _list_matchers() -> int:
-    """Say which candidate-generation backends this build can actually run.
-
-    The service editor already reports this where a user configures it, but by
-    then it is a complaint rather than a check, and it needs a window open to
-    ask at all - where a *build* has to be able to answer it from a terminal.
-    Bundling OpenCV into the frozen exe (architecture.md 6) is only correct
-    if it is really in there and really loads, and "the file is in the archive"
-    is not the same claim: a onefile build extracts to a temp directory and a
-    compiled extension can still fail to find its DLLs. So this actually
-    imports the backend and reports what happened, which is what
-    scripts/build-exe.ps1 runs against the exe it just produced.
-    """
-    frozen = bool(getattr(sys, "frozen", False))
-    print(f"agentclip {__version__} ({'frozen build' if frozen else 'from source'})")
-    for name in MATCHERS:
-        chosen = select_matcher(name)
-        if chosen.name == name:
-            print(f"  {name:<8} available")
-        else:
-            print(f"  {name:<8} NOT AVAILABLE - would fall back to {chosen.name!r}")
-    return 0
 
 
 def _gui_smoke() -> int:
@@ -827,12 +836,6 @@ def main(argv: list[str] | None = None) -> int:
     if args.tui:
         print(f"agentclip: {TUI_REMOVED}", file=sys.stderr)
         return 2
-    if args.pick_region:
-        return _pick_region_child(args.pick_prompt)
-    if args.show_identify:
-        return _show_identify_child(sys.stdin.read())
-    if args.list_matchers:
-        return _list_matchers()
     if args.gui_smoke:
         return _gui_smoke()
     # Beside ``--tui`` and for its reason: the window this opened is a binary of
@@ -865,13 +868,15 @@ def main(argv: list[str] | None = None) -> int:
     # config to read it out of until the launch has loaded one - and refused
     # here too, so nothing below this line can be handed a target it would have
     # to re-parse or re-validate.
-    monitor_target: MonitorTarget | None = None
-    if args.monitor is not None:
-        resolved = resolve_monitor_target(args.monitor, args.monitor_token, config)
-        if isinstance(resolved, str):
-            print(f"agentclip: {resolved}", file=sys.stderr)
-            return 2
-        monitor_target = resolved
+    #
+    # Since §10.1 an ABSENT flag is resolved as well, and to a value rather than
+    # to nothing: there is no in-process monitor left to be the default by
+    # omission, so "no --monitor" means ``LaunchLocal`` - start one here and dial
+    # it - and ``--monitor none`` is the spelling for a window with no screen.
+    monitor_target = resolve_monitor_target(args.monitor, args.monitor_token, config)
+    if isinstance(monitor_target, str):
+        print(f"agentclip: {monitor_target}", file=sys.stderr)
+        return 2
 
     if args.list_services:
         for key in sorted(config.services):
@@ -1031,11 +1036,18 @@ def main(argv: list[str] | None = None) -> int:
                 service_override=args.service,
                 pending=pending_connect,
             ),
-            # Split mode, and deliberately handed over as the resolved
-            # ``MonitorTarget`` rather than the raw string: ``main`` is where a
-            # bad target - and an ``@name`` that names nothing - is refused, so
-            # nothing below this line can be given one.
-            monitor_target=monitor_target,
+            # Deliberately handed over resolved rather than as the raw string:
+            # ``main`` is where a bad target - and an ``@name`` that names
+            # nothing - is refused, so nothing below this line can be given one.
+            #
+            # ``LaunchLocal`` is flattened to ``None`` here because view.py still
+            # reads ``None`` as "build a local monitor"; §10.2 teaches it the
+            # sentinel and this line becomes a plain pass-through. Until it
+            # does, ``--monitor none`` lands on that same ``None`` and therefore
+            # behaves like ``local`` - the new value is one phase ahead of the
+            # view that will honour it.
+            # §10.2 replaces this
+            monitor_target=None if isinstance(monitor_target, LaunchLocal) else monitor_target,
         )
     finally:
         # The hand-back, over what is LIVE rather than what the launch started
@@ -1049,19 +1061,3 @@ def main(argv: list[str] | None = None) -> int:
         close = getattr(owned["host"], "close", None)
         if close is not None:
             close()
-
-
-def _pick_region_child(prompt: str | None = None) -> int:
-    """The --pick-region child. The body lives with the picker (screen.picker),
-    because the MONITOR binary re-invokes itself with the same flag and may not
-    import this module."""
-    from agentclip.driver.screen.picker import pick_region_child
-
-    return pick_region_child(prompt)
-
-
-def _show_identify_child(payload: str) -> int:
-    """The --show-identify child; same home as above, same reason."""
-    from agentclip.driver.screen.picker import show_identify_child
-
-    return show_identify_child(payload)

@@ -40,6 +40,7 @@ it are about the brain and not about the machine:
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 from collections.abc import Callable, Mapping
 from typing import TypeVar, cast
@@ -100,6 +101,11 @@ class FakeUIMonitor:
         # calibrated" and a double that quietly disagreed would hide the branch
         # under test. It is here so a caller can assert the save happened.
         self.saved_regions: dict[str, ScreenRegion] = {}
+        # ...unless a suite says otherwise. Opt-in mirror of the real store rule
+        # (local.py:_remember_region), for the one story that needs the double
+        # to BEHAVE like a far monitor: the brain has no box, the monitor's
+        # machine remembers one, and ``configured_region`` hands it back.
+        self.fills_from_store = False
         # THE generation: bumped by every ``configure``, stamped into ticks,
         # and what makes one a ghost. Public because a test writes scenarios in
         # terms of it ("...and now a delegation starts").
@@ -145,16 +151,25 @@ class FakeUIMonitor:
         scenario can say "and now the automation moved to another window"
         without an event loop. Test-only; nothing in ``src`` calls it."""
         if spec is not None:
-            self.spec = spec
-            self.specs.append(spec)
+            # The real one's store rule (local.py:_remember_region), in one
+            # line each way: a spec with a box is remembered, a spec without
+            # one is filled from what was remembered.
             if spec.region is not None:
                 self.saved_regions[spec.service] = spec.region
+            elif self.fills_from_store and spec.service in self.saved_regions:
+                spec = dataclasses.replace(spec, region=self.saved_regions[spec.service])
+            self.spec = spec
+            self.specs.append(spec)
         self.generations += 1
         return self.generations
 
     def saved_region(self, service: str) -> ScreenRegion | None:
         """The local tier's region-store read, answered from :attr:`saved_regions`."""
         return self.saved_regions.get(service)
+
+    async def configured_region(self) -> ScreenRegion | None:
+        self.calls.append(("configured_region", ()))
+        return self.spec.region if self.spec is not None else None
 
     async def suspend(self) -> None:
         self.suspends += 1

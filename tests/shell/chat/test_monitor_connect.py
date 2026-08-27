@@ -32,6 +32,7 @@ from agentclip.driver.clip.base import select_provider
 from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.monitor.local import LocalUIMonitor
 from agentclip.driver.monitor.switchable import SwitchableMonitor
+from agentclip.driver.screen.region import ScreenRegion
 from agentclip.shell.chat import view as view_module
 from agentclip.shell.chat.remote import (
     MONITOR_BAD_TOKEN,
@@ -631,3 +632,30 @@ async def test_a_dropped_link_paints_the_badge_down_with_the_reason(
     badge = tab.flush().last("monitor_link")
     assert badge["state"] == "down"
     assert "lost" in badge["reason"]
+
+
+async def test_a_box_remembered_over_there_becomes_the_brains_calibration(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """The bug as seen: the monitor's badge is green, its ELEMENTS column sees
+    everything, and /new still says no chat window is drawn - because the box
+    was drawn on the MONITOR's desktop and the brain never asked for it. After
+    a dial the brain adopts what the monitor settled on."""
+    link = ScriptedLink()
+    tab = build(project, app_config, tmp_path, Dialler(link))
+    tab.view.start()
+    await settle()
+    live = tab.view.automation.live_slot
+    assert tab.view.automation.calibration(live).chat_region is None
+    service = tab.view._service_for(live)
+    box = ScreenRegion(100, 200, 640, 480)
+    link.fills_from_store = True
+    link.saved_regions[service] = box
+
+    tab.view.monitor_open()
+    tab.view.monitor_fields("direct", "10.0.0.5", "7777", TOKEN, "")
+    tab.view.monitor_start()
+    await settle()
+
+    assert tab.view.automation.calibration(live).chat_region == box
+    assert "chatbot window" in tab.flush().last("sidebar")["region"]

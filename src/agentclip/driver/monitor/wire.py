@@ -655,6 +655,7 @@ CLOSE = "close"
 
 _PARAMS: dict[str, tuple[_Param, ...]] = {
     CONFIGURE: (_Param("spec", encode_spec, decode_spec),),
+    "configured_region": (),
     SUSPEND: (),
     RESUME: (),
     # In the table because the Protocol has it, and answered by the server as an
@@ -694,6 +695,7 @@ _PARAMS: dict[str, tuple[_Param, ...]] = {
 
 _RESULTS: dict[str, _Value] = {
     CONFIGURE: _Value(_identity, _as_int),
+    "configured_region": _Value(encode_opt_region, decode_opt_region),
     SUSPEND: _Value(_encode_none, _decode_none),
     RESUME: _Value(_encode_none, _decode_none),
     CLOSE: _Value(_encode_none, _decode_none),

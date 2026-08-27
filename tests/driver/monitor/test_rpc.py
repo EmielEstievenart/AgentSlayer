@@ -533,3 +533,16 @@ async def test_a_non_loopback_bind_needs_the_opt_in(wire: Callable[..., Wiring])
     # The opt-in is the whole API: one keyword, set by ``--bind``.
     MonitorServer(wiring.monitor, host="0.0.0.0", port=0, allow_remote=True, token="s3cret")
     MonitorServer(wiring.monitor, port=0)
+
+
+async def test_configured_region_is_the_far_monitors_answer(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """A brain with no rectangle asks, and gets the one the monitor's machine
+    remembered (§9.1): the only way a split-mode Chat UI ever learns where the
+    chat window is."""
+    wiring = wire()
+    _server, client = await linked(wiring, listen, dial)
+    assert await client.configured_region() is None
+    await client.configure(spec(region=CHAT))
+    assert await client.configured_region() == CHAT

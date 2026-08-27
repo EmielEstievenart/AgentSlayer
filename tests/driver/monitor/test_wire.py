@@ -232,6 +232,7 @@ CALLS: dict[str, dict[str, Any]] = {
     "locate": {"kind": COPY, "exclude_kinds": (CHATBOX, TemplateKind.SEND_READY)},
     "click_element": {"kind": COPY, "settle_s": None},
     "hover_scan": {"kind": COPY},
+    "configured_region": {},
     "snap_to_bottom": {"action": "wheel"},
 }
 
@@ -256,6 +257,7 @@ RETURNS: dict[str, Any] = {
     "click_element": ElementClick.AMBIGUOUS,
     "hover_scan": REGION,
     "snap_to_bottom": None,
+    "configured_region": REGION,
 }
 
 

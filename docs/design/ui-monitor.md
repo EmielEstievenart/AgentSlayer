@@ -276,6 +276,7 @@ file, not a sketch of it:
 class UIMonitor(Protocol):
     # -- lifecycle / configuration ---------------------------------------
     async def configure(self, spec: MonitorSpec) -> int: ...       # §2.10 payload; a retarget. Returns the new generation
+    async def configured_region(self) -> ScreenRegion | None: ...  # the box actually watched: the spec's, or the store's (§9.1)
     async def suspend(self) -> None: ...                           # stop polling (capture overlay is up)
     async def resume(self) -> None: ...
     async def close(self) -> None: ...                             # end every thread/task for good; idempotent
@@ -1264,6 +1265,17 @@ it; `uv run pytest`, `ruff`, `mypy` green; all three exes rebuilt via
 > `configure` spec that names a region wins and is written through; a spec with
 > `region=None` is served from the store. `saved_region()` is a local-only read
 > that never crosses the wire.
+>
+> **Amended 2026-08-27 — the brain has to be TOLD.** Serving the store's box
+> to the poller was half the feature: the recipes that say "no chat window is
+> drawn" read the brain's calibration, and a split-mode Chat UI has none, so a
+> monitor whose ELEMENTS column saw everything sat under a `/new` that said
+> nothing was visible. `configured_region()` is the verb that closes it — the
+> rectangle the monitor settled on after the last `configure` — and the Chat
+> UI's `_retarget_monitor` adopts a differing answer into the live slot's
+> calibration (`set_calibration`) and repaints the sidebar. Over the wire it
+> is one round trip after each `configure`; the store itself still never
+> crosses.
 >
 > **The wire went to version 2.** `hello` gained `token` (always present,
 > `null` when there is none) and that is a breaking frame change, so

@@ -250,6 +250,11 @@ class RemoteUIMonitor:
         self._generation = generation
         return generation
 
+    async def configured_region(self) -> ScreenRegion | None:
+        answer = await self._call("configured_region")
+        assert answer is None or isinstance(answer, ScreenRegion)
+        return answer
+
     async def suspend(self) -> None:
         await self._call("suspend")
 

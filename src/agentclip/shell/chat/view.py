@@ -501,6 +501,8 @@ class ShellMonitor(MonitorLike, Protocol):
 
     async def close(self) -> None: ...
 
+    async def configured_region(self) -> ScreenRegion | None: ...
+
     @property
     def detector(self) -> ScreenDetector | None: ...
 
@@ -3393,6 +3395,16 @@ class GuiView:
         """
         spec = self._live_spec()
         await self._monitor.configure(spec)
+        # What the monitor SETTLED on. A brain with no rectangle - every
+        # split-mode Chat UI, whose box was drawn on the monitor's desktop and
+        # lives in its store (§9.1) - gets the monitor's answer and adopts it,
+        # or every recipe keeps saying "no chat window is drawn" over a link
+        # whose far end can see the window perfectly well.
+        watched = await self._monitor.configured_region()
+        if watched != spec.region:
+            self._automation.set_calibration(self._automation.live_slot, watched)
+            spec = replace(spec, region=watched)
+            self._push_sidebar()
         self._automation.forget_verdicts()
         detector = self._monitor.detector
         active = detector.active_detectors if detector is not None else ()

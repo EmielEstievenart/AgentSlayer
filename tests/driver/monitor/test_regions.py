@@ -119,6 +119,8 @@ async def test_a_region_less_spec_falls_back_to_what_was_drawn_here(
         await live.configure(spec(region=None, service="svc"))
         assert live.spec is not None
         assert live.spec.region == CHAT
+        # ...and the brain can ASK for it, which is the whole point over a wire.
+        assert await live.configured_region() == CHAT
     finally:
         await live.close()
 
@@ -176,3 +178,16 @@ async def test_the_fake_records_the_region_it_was_configured_with() -> None:
     await fake.configure(spec(region=None, service="svc"))
     assert fake.spec is not None and fake.spec.region is None
     assert fake.saved_region("svc") == CHAT
+
+
+async def test_the_fake_fills_a_region_less_spec_from_its_store_too() -> None:
+    """The double follows the real one's rule, so a shell test can stage 'the
+    monitor over there remembers the box' in one assignment."""
+    fake = FakeUIMonitor()
+    fake.fills_from_store = True
+    fake.saved_regions["svc"] = CHAT
+    await fake.configure(spec(region=None, service="svc"))
+    assert await fake.configured_region() == CHAT
+    await fake.configure(spec(region=OTHER, service="svc"))
+    assert await fake.configured_region() == OTHER
+    assert fake.saved_regions["svc"] == OTHER

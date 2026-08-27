@@ -372,6 +372,11 @@ class LocalUIMonitor:
                 _log.warning("could not remember the chat region for %s", spec.service)
         return spec
 
+    async def configured_region(self) -> ScreenRegion | None:
+        """The box ``configure`` settled on - the spec's, or the store's."""
+        spec = self._spec
+        return spec.region if spec is not None else None
+
     async def suspend(self) -> None:
         """Stop polling without bumping the generation.
 

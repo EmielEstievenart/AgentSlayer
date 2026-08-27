@@ -250,6 +250,20 @@ class UIMonitor(Protocol):
         configured but idle (``latest`` stops advancing)."""
         ...
 
+    async def configured_region(self) -> ScreenRegion | None:
+        """The rectangle this monitor is ACTUALLY watching after the last
+        ``configure``: the spec's own box, or - when the spec carried none -
+        the one this monitor's machine remembered for the service (§9.1's
+        region store). ``None`` when neither exists.
+
+        The brain has to ask, because the store is on the monitor's disk: a
+        Chat UI on another machine holds no rectangle of its own, and every
+        recipe that says "no chat window is drawn" is reading the brain's
+        calibration, not the monitor's. Adopting this answer is how the two
+        stop disagreeing.
+        """
+        ...
+
     async def suspend(self) -> None:
         """Stop polling without bumping the generation - a capture overlay is
         about to own the screen and nothing has moved."""

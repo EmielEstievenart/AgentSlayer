@@ -88,6 +88,9 @@ class IdleMonitor:
         watched, so there is no run for a tick to be a ghost of."""
         return 0
 
+    async def configured_region(self) -> ScreenRegion | None:
+        return None
+
     async def suspend(self) -> None:
         return None
 
@@ -276,6 +279,9 @@ class SwitchableMonitor:
     async def configure(self, spec: MonitorSpec) -> int:
         self._spec = spec
         return await self._inner.configure(spec)
+
+    async def configured_region(self) -> ScreenRegion | None:
+        return await self._inner.configured_region()
 
     async def suspend(self) -> None:
         await self._inner.suspend()

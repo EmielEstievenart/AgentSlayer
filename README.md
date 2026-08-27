@@ -104,6 +104,7 @@ To use `agentclip` from any directory without the checkout, freeze it into self-
 .\scripts\build-exe.ps1                 # all three exes
 .\scripts\build-exe.ps1 -EngineOnly     # just the engine
 .\scripts\build-exe.ps1 -MonitorOnly    # just the monitor
+.\scripts\build-dist.ps1                # clean build of all three into dist\, no install
 ```
 
 This builds **three** artifacts (PyInstaller onefile, no Python needed to run them), smoke-tests each, and copies them to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`:
@@ -130,6 +131,7 @@ The builds are driven by `packaging/agentclip.spec`, `packaging/agentclip-engine
 scripts/build-exe.sh               # all three binaries
 scripts/build-exe.sh --engine-only
 scripts/build-exe.sh --monitor-only
+scripts/build-dist.sh              # clean build of all three into dist/, no install
 ```
 
 The same three artifacts as the Windows script above, which matters because a POSIX box is usually a machine being *driven onto* rather than the one driving:

@@ -10,11 +10,13 @@ Fixed 2026-08-25. Five words, one meaning each — **"GUI" is not a term any mor
 |---|---|---|---|
 | **Chat UI** | what the user looks at and types into | `src/agentclip/shell/chat/` | `agentclip` |
 | **Monitor** | watches the Browser, clicks it, owns the clipboard | `src/agentclip/driver/monitor/` | `agentclip-monitor` |
-| **Monitor UI** | the Monitor's own window: Serve panel, service editor, ELEMENTS, region picker, `/identify` | `src/agentclip/shell/monitor_ui/` | `agentclip-monitor` (`agentclip --calibrate` is a stub that names the binary) |
+| **Monitor UI** | the Monitor's own window: Serve panel, service editor, ELEMENTS, region picker, Identify | `src/agentclip/shell/monitor_ui/` | `agentclip-monitor` (`agentclip --calibrate` is a stub that names the binary) |
 | **Browser** | the desktop chat app AgentClip operates — what the Monitor watches | not ours | — |
 | **Executor** | permission-gated execution for the agent, through the Host seam | `src/agentclip/executor/` | `agentclip-engine` (with the engine) |
 
 `src/agentclip/shell/webview/` sits under both UIs: the bridge, the service editor's model and the asset resolution the two windows share. It never imports either of them.
+
+Since `ui-monitor.md` §11.2 the Chat UI has **no door to the Monitor UI at all**: `F2`, the titlebar's **monitor UI** button, the sidebar's **Edit services...** / **Set chat region...** and `/identify` are deleted, not re-pointed. And since §11.1 a Chat UI launched with no `--monitor` flag starts **idle** — the user attaches a monitor from the Monitor tab, and `--monitor local` is the terminal opt-in.
 
 Design docs in `docs/design/` are binding — but **a status header inside a design doc qualifies that claim**: a document (or a section of one) whose header says "plan, not yet binding" is intent, not law, and only the parts its header calls built are binding.
 

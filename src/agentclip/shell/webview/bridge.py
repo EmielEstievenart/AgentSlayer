@@ -397,12 +397,11 @@ class JsCalls(Protocol):
     def force_ingest(self) -> None: ...
     def reinstruct(self) -> None: ...
     def retry_insert(self) -> None: ...
-    # F2, the titlebar's **monitor UI** button and both sidebar doors: say where
-    # calibration lives (``agentclip-monitor``'s own window). One method,
-    # because there is one answer - this window hosts none of those surfaces
-    # (ui-monitor.md §10.2). ``set_service`` left this list with them: the
-    # service is the MONITOR's, and the sidebar's picker is a read-only line.
-    def open_calibration(self) -> None: ...
+    # ``open_calibration`` left this list with the doors it served (F2, the
+    # titlebar's **monitor UI** button and both sidebar doors): ui-monitor.md
+    # §11.2 deleted them rather than re-pointing them, so there is no affordance
+    # left to marshal. ``set_service`` went the same way in §10.5 - the service
+    # is the MONITOR's, and the sidebar's picker is a read-only line.
     # The window tabs. Both are pure view-side navigation - no controller call
     # is made for either - but they still cross here, because the page is where
     # the click happens and the SELECTION lives in the view.
@@ -536,18 +535,6 @@ class JsApi:
         """The paste flash's button: run the click-and-paste that did not land
         again."""
         self._safely(self._calls.retry_insert)
-
-    def calibrate(self) -> None:
-        """F2, the titlebar's **monitor UI** button and both sidebar doors.
-
-        One call for four affordances because they all ask for one thing - the
-        window where the pixels are - and since ui-monitor.md §10.2 they all get
-        one answer: that window belongs to the monitor PROCESS, and this one
-        neither opens it nor hosts it. Nothing comes back through here either: a
-        chat region drawn over there arrives as the monitor's next ``watched()``
-        answer, not as a call into this shell.
-        """
-        self._safely(self._calls.open_calibration)
 
     def window(self, key: str = "") -> None:
         """A window tab was clicked: show that window and point the sidebar at

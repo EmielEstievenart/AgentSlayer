@@ -34,7 +34,6 @@ from agentclip.driver.screen.slot import AgentSlot
 from agentclip.shell.app.monitor_launch import LOCAL_MONITOR_EXITED, LaunchLocal
 from agentclip.shell.chat import view as view_module
 from agentclip.shell.chat.view import (
-    CALIBRATION_ELSEWHERE,
     MONITOR_LOCAL_STARTING,
     MONITOR_RESTARTED,
     MONITOR_UP,
@@ -451,17 +450,9 @@ async def test_a_child_still_running_gets_no_exit_sentence(
 # == what this window does not own =============================================
 
 
-async def test_calibration_points_at_the_monitor_ui_window(
-    project: Path, app_config: Config, tmp_path: Path
-) -> None:
-    """Every surface made of pixels is the monitor PROCESS's (§10.2), so the
-    door is one sentence rather than a window - and the sentence names both
-    places that window can be, because the answer does not depend on which."""
-    split = build(project, app_config, tmp_path, Dialler(ScriptedLink()))
-    split.view.start()
-    await settle()
-    split.flush().clear()
-
-    split.view.open_calibration()
-
-    assert CALIBRATION_ELSEWHERE in split.toasts()
+def test_this_window_has_no_calibration_door_at_all() -> None:
+    """Every surface made of pixels is the monitor PROCESS's (§10.2), and since
+    §11.2 so is every DOOR to one: the affordances that used to answer with a
+    sentence are deleted, not re-pointed."""
+    assert not hasattr(GuiView, "open_calibration")
+    assert not hasattr(GuiView, "show_identify_overlay")

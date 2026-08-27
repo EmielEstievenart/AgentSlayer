@@ -49,22 +49,13 @@
           docs
         </button>
 
-        <!-- The MONITOR UI's door (docs/design/ui-monitor.md 10.2): the service
-             editor, the ELEMENTS column, the chat-region picker and /identify
-             are surfaces of the agentclip-monitor PROCESS's own window - the
-             child this app launched here, or the one running where the browser
-             is. This window opens none of them, so the button says where they
-             live. A button AND F2, unlike the docs one: F2 has asked for this
-             surface since the TUI. The id is unchanged on purpose - it is the
-             same door, onto a window that moved. -->
-        <button
-          id="calibrate-open"
-          class="chrome-btn"
-          type="button"
-          title="Where calibration lives: the agentclip-monitor window (F2)"
-        >
-          monitor UI
-        </button>
+        <!-- A "monitor UI" button stood here (ui-monitor.md 10.2), and did
+             nothing but name the window calibration lives in. 11.2 deleted it
+             along with F2, the sidebar's two doors and /identify: the service
+             editor, the ELEMENTS column, the chat-region picker and Identify
+             are surfaces of the agentclip-monitor PROCESS's own window, and a
+             row of affordances here that can only point at that window is
+             worse than none. -->
 
         <!-- The "your move" banner the automation raises when a payload is
              waiting on the user's Ctrl+V or Enter. It blinks, deliberately: the
@@ -235,14 +226,12 @@
           <div class="side-status" id="service-name"></div>
           <div class="side-status" id="side-service-label"></div>
           <div class="side-status" id="side-profile-note"></div>
-          <!-- The Monitor UI's discoverable door; F2 and the titlebar's button
-               are the same call, and all three answer with the same sentence. -->
-          <button id="edit-services" type="button">Edit services...</button>
 
           <div class="side-title" id="side-window-title">CHAT WINDOW</div>
-          <!-- The same window: the box around a chat window is drawn over
-               there now, beside the pictures the drawing is checked against. -->
-          <button id="set-region" type="button">Set chat region...</button>
+          <!-- "Edit services..." and "Set chat region..." stood here until
+               ui-monitor.md 11.2. The service editor and the region picker are
+               the Monitor UI's; the lines below are this window's read-back of
+               what it decided. -->
           <div class="side-status" id="side-region"></div>
           <div class="side-status" id="side-slot-note"></div>
 
@@ -257,7 +246,7 @@
           <div class="side-status" id="det-COPY"></div>
 
           <div class="side-hint">
-            F1 help · F3 hides this column · F5 armed · F2 calibrate · F8 log ·
+            F1 help · F3 hides this column · F5 armed · F8 log ·
             F6 next window · e summary
           </div>
         </aside>
@@ -437,8 +426,8 @@
                   <input id="mon-token" type="password" placeholder="from the Serve panel" />
                 </div>
                 <div class="side-status" id="mon-local-note" hidden>
-                  starts agentclip-monitor here, with its own window - that
-                  window is where calibration lives
+                  opens the agentclip-monitor window beside this one; it closes
+                  with this window
                 </div>
                 <div class="conn-error" id="mon-error"></div>
               </div>

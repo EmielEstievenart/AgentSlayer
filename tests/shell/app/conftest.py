@@ -81,7 +81,9 @@ class FakeChatView:
         self.call_events: list[tuple[str, int, str]] = []
         self.call_output_chunks: list[tuple[int, str]] = []
         self.new_chats_opened = 0  # /new asking for a fresh BROWSER chat, now
-        self.identify_overlays = 0  # /identify asking for the debug boxes
+        # ``/identify`` is the Monitor UI's since ui-monitor.md §11.2, so nothing
+        # here ever bumps this - it stays as the assertion that nothing does.
+        self.identify_overlays = 0
         self.harness_log_toggles = 0  # /log flipping the decision-log pane
         # Every /armed target as the controller sent it (None = "toggle"), plus
         # the state a real view would be in after them - the port is fire-and-
@@ -251,17 +253,13 @@ class FakeChatView:
         self.trace.append("open-new-chat" if self.new_chat_lands else "open-new-chat-refused")
         self._later(self._reset_after_new_chat)
 
-    def show_identify_overlay(self) -> None:
-        # /identify is one call and no answer - the whole feature is the view's.
-        self.identify_overlays += 1
-
     def toggle_harness_log(self) -> None:
         # /log, the same shape again: the decisions it lists were all taken on
         # this side of the port, so the controller only asks for the pane.
         self.harness_log_toggles += 1
 
     def set_os_armed(self, target: bool | None) -> None:
-        # Same shape as show_identify_overlay: one call, no answer, no session.
+        # Same shape as toggle_harness_log: one call, no answer, no session.
         self.armed_targets.append(target)
         self.os_armed = (not self.os_armed) if target is None else target
 

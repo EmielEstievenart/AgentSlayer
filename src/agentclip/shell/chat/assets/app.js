@@ -11,10 +11,10 @@
    pure show/hide of a page element. /log comes back the other way as a `toggle`
    event, so the command and the key stay one implementation. F1 (help) and `t`
    (put the caret back in the chat box) are wholly local; F4's theme picker
-   paints locally and tells Python, which is what persists it. F2 leaves this
-   file entirely - it opens the CALIBRATION WINDOW, which is a second pywebview
-   window with its own page, its own bridge and its own vocabulary
-   (monitor_ui/, ui-monitor.md 6.4); nothing it draws is drawn here.
+   paints locally and tells Python, which is what persists it. F2 is UNBOUND
+   since ui-monitor.md 11.2 deleted the calibration doors: everything it used
+   to reach lives in the Monitor UI, which is another process's window with its
+   own page, its own bridge and its own vocabulary (monitor_ui/).
 
    Two tables are the spine of the key surface, and both exist so that a thing
    cannot be done without being documented: KEYS below drives BOTH the keydown
@@ -1341,7 +1341,7 @@
         "what this would have refused."
     ],
     [
-      "Sub-agents (only once the sub-agent window is calibrated - see the sidebar)",
+      "Sub-agents (only once the sub-agent window is calibrated in the Monitor UI)",
       "The model can hand one bounded sub-task to a fresh sub-agent in its own " +
         "chat. That tab shows the run's state and the status bar goes magenta - " +
         "you still approve every edit and command. ctrl+x cancels the calls " +
@@ -1990,7 +1990,11 @@
     el.monAttach.hidden = event.phase === "done";
     el.monAttach.disabled = Boolean(event.busy);
     el.monAttach.textContent =
-      event.phase === "failed" ? "Retry" : local ? "Launch a local monitor" : "Attach";
+      event.phase === "failed"
+        ? "Retry"
+        : local
+          ? "Launch & connect a local monitor"
+          : "Attach";
     el.monEdit.hidden = event.phase !== "failed";
     // Disconnect is about the LINK and Close is about the dialog: a monitor
     // that is attached can be let go of without ending the session, and the two
@@ -2274,7 +2278,7 @@
        foot    the KEY HINT FOOTER's short label, and its presence is what puts
                the row in the strip at all - the TUI's `show=` on a Binding,
                with the Binding's own wording. Absent on every key the TUI's
-               footer hides for the same reason it does (x, F2, F4, F6-F8,
+               footer hides for the same reason it does (x, F4, F6-F8,
                ctrl+o, ctrl+q, ctrl+enter, shift+tab): the strip is one row and
                the loop's one-key answers are what belongs on it.
        avail   the footer's three-way state - "on" | "dim" | "off" - which is
@@ -2289,9 +2293,8 @@
     { keys: ["F1", "?"], on: ["F1", "?"], mods: "", hot: true, section: "App",
       foot: "help",
       what: "this help", run: function () { openHelp(); } },
-    { keys: ["F2"], on: ["F2"], mods: "", hot: true, section: "App",
-      what: "where calibration lives: what each service LOOKS like, where its chat window is, and what the tool is recognising right now - all of it in the agentclip-monitor window",
-      run: function () { api("calibrate"); } },
+    // F2 is deliberately absent (ui-monitor.md 11.2): it used to say where
+    // calibration lives, and calibration lives in another window entirely.
     { keys: ["F3"], on: ["F3"], mods: "", hot: true, section: "App",
       foot: "sidebar",
       what: "hide/show the sidebar", run: function () { toggleSidebar(); } },
@@ -2352,7 +2355,7 @@
     // §3 records, now down to one key instead of three.
     { keys: ["r"], on: ["r"], mods: "", section: "Session", avail: availSession,
       foot: "re-instruct",
-      what: "re-send this service's extra instructions with the next payload (set them with F2)",
+      what: "re-send this service's extra instructions with the next payload (set them in the Monitor UI)",
       run: function () { api("reinstruct"); } },
     { keys: ["w"], on: ["w"], mods: "", section: "Session", avail: availWatch,
       foot: "watcher",
@@ -2917,12 +2920,9 @@
       sideProfileNote: id("side-profile-note"),
       sideServiceTitle: id("side-service-title"),
       sideWindowTitle: id("side-window-title"),
-      setRegion: id("set-region"),
       sideRegion: id("side-region"),
       sideSlotNote: id("side-slot-note"),
       sideDetectionTitle: id("side-detection-title"),
-      editServices: id("edit-services"),
-      calibrateOpen: id("calibrate-open"),
       logpane: id("logpane"),
       logLines: id("log-lines"),
       keyhints: id("keyhints"),
@@ -3051,22 +3051,11 @@
     // picker except paintSidebar, and setting .value programmatically fires no
     // change event - which is the whole of the TUI's _reported_service dance,
     // for free (Sidebar.show_service).
-    // -- the Monitor UI's three doors ---------------------------------------
-    // F2, the titlebar's button and the sidebar's two buttons all ask for one
-    // thing: the window where the pixels are. Since ui-monitor.md 10.2 that
-    // window belongs to the monitor PROCESS and this one opens nothing, so all
-    // four affordances get the same sentence back as a toast. The sidebar
-    // buttons keep their old words because they still name what the user goes
-    // there to do - the surface behind them moved, the errand did not.
-    el.setRegion.addEventListener("click", function () {
-      api("calibrate");
-    });
-    el.editServices.addEventListener("click", function () {
-      api("calibrate");
-    });
-    el.calibrateOpen.addEventListener("click", function () {
-      api("calibrate");
-    });
+    // The Monitor UI's doors used to be wired here - F2, the titlebar's
+    // button and the sidebar's two buttons, all one `calibrate` call that
+    // answered with one toast. ui-monitor.md 11.2 deleted every one of them:
+    // the window where the pixels are belongs to the monitor PROCESS, and an
+    // affordance that can only name another window is not one.
     // -- the SSH connect dialog's own wiring --------------------------------
     // Both text boxes send the WHOLE form on any input and NOTHING comes back:
     // the model owns the values, but repainting an input the caret is in would

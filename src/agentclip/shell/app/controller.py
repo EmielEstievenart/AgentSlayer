@@ -794,7 +794,6 @@ class SessionController:
             "new": lambda _arg: self._cmd_new(),
             "abort": lambda _arg: self._cmd_abort(),
             "help": lambda _arg: self._cmd_help(),
-            "identify": lambda _arg: self._cmd_identify(),
             "log": lambda _arg: self._cmd_log(),
             "mcp": lambda _arg: self._cmd_mcp(),
             "skills": lambda _arg: self._cmd_skills(),
@@ -1072,7 +1071,8 @@ class SessionController:
             return
         if result == "no-instructions":
             self._view.notify(
-                "this service has no extra instructions - add them in the service editor (F2)",
+                "this service has no extra instructions - add them in the"
+                " service editor, in the Monitor UI",
                 severity="warning",
             )
             return
@@ -1337,34 +1337,24 @@ class SessionController:
         listing = _skill_rows(report.skills)
         self._view.spawn(self._view.add_note(f"Skills ({len(report.skills)}):\n{listing}"))
 
-    def _cmd_identify(self) -> None:
-        """Show the user what the tool believes it can see in the chat window.
-
-        The only command with NO session gate, deliberately: it is a calibration
-        aid, and the moments it is most needed - a paste that landed in the wrong
-        box, a copy that never fired - are exactly the moments the session is
-        wedged or over. Nothing here can affect a run either; it captures one
-        frame and draws on top of it.
-
-        Which is also why the controller has no more to say about it than
-        "please do": what a chat region is, which window is live and what a copy
-        button looks like all live in the screen layer, on the far side of the
-        ChatView port.
-        """
-        self._view.show_identify_overlay()
+    # ``_cmd_identify`` lived here. ``/identify`` is a Monitor UI feature only
+    # since ui-monitor.md §11.2: the overlay is drawn over the BROWSER, on the
+    # machine the browser is on, so the window that can draw it is the one that
+    # owns those pixels - and a command here that could do nothing but point at
+    # that window was a door pretending to be a feature.
 
     def _cmd_log(self) -> None:
         """Show (or put away) the harness decision log - every loop move, with
         its reason.
 
-        `/identify` answers "what can you see?"; this answers "why did you do
-        that?", and the two share a rationale for having NO session gate: the
-        moment a user wants either one is the moment the automation has stopped
-        making sense to them, which is routinely after a run has wedged or
-        ended. A log you can only read from a healthy session is a log you
-        cannot read when it matters.
+        The Monitor UI's Identify answers "what can you see?"; this answers
+        "why did you do that?", and the two share a rationale for having NO
+        session gate: the moment a user wants either one is the moment the
+        automation has stopped making sense to them, which is routinely after a
+        run has wedged or ended. A log you can only read from a healthy session
+        is a log you cannot read when it matters.
 
-        And, like `/identify`, the controller has nothing to add: every decision
+        And the controller has nothing to add either: every decision
         in it was taken on the view's side of the port - the paste attempt, the
         send gate, the finish detectors, the auto-copy flow - so it says "show
         it" and stops. It is a toggle on the far side (a pane, not a modal), so
@@ -1375,7 +1365,7 @@ class SessionController:
     def _cmd_armed(self, arg: str) -> None:
         """Arm or disarm the whole OS-acting half of the tool (bare = toggle).
 
-        NO session gate, for `/identify`'s reason and more sharply: the moments
+        NO session gate, for `/log`'s reason and more sharply: the moments
         a user reaches for this are the moments something is going wrong on
         their screen - a paste landing in the wrong window, a click flow that
         will not stop - and a switch that could only be reached from a healthy
@@ -2275,8 +2265,9 @@ class SessionController:
             return (body, "error", "delegation_unavailable")
 
         # The sub-agent window's service is frozen at bootstrap (both pickers
-        # lock for the session's life), but the service EDITOR is not: F2
-        # mid-session can delete the very preset that key names. Building the
+        # lock for the session's life), but the service EDITOR is not: an edit
+        # in the Monitor UI mid-session can delete the very preset that key
+        # names. Building the
         # engine anyway falls through cli.build's "unknown preset" fallback to
         # [general], so the run would quietly get neither the budget readiness
         # advertised nor the one the sub window is pointed at. Refuse instead -

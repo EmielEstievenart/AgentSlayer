@@ -9,7 +9,6 @@ Slash commands are typed in the chat box: Enter sends, and a newline is `shift+e
 | `/help` | List all commands (aliases: `/commands`, `/?`) |
 | `/new` | Start over: click "new chat" in the browser, clear the transcript, fresh session. Works mid-turn — the running turn is aborted first |
 | `/abort` | End a **sub-agent delegation** in flight (contrast `ctrl+x`, which only cancels the tool calls running right now) |
-| `/identify` | Says where the boxes are drawn over the real screen — calibration lives in the **Monitor UI**: the `agentclip-monitor` window (local), or that window on the monitor's machine (remote) |
 | `/log` | Toggle the harness decision-log pane |
 | `/mcp` | List MCP servers: state, tools, errors — including entries whose config was refused (`invalid`, with the reason) |
 | `/skills` | List loaded skills grouped by the folder they came from — name, description, and a `[hidden from the model]` mark on the ones only you can reach |
@@ -53,7 +52,6 @@ exception: a printable character never fires a shortcut mid-sentence.)
 | Key | Does |
 |---|---|
 | `F1` / `?` | This help sheet (`Esc` or `F1` closes it) |
-| `F2` | Calibration lives in the **Monitor UI**: the `agentclip-monitor` window (local), or that window on the monitor's machine (remote) — what each service *looks* like, its sizes and finish signals, where its chat window is, and what it is recognising right now. The titlebar's **monitor UI** button and the sidebar's **Edit services...** / **Set chat region...** say the same thing; this window never opens one of its own |
 | `F3` | Hide/show the sidebar |
 | `F4` | Appearance (theme) |
 | `F5` | ARM / DISARM the tool (same as `/armed`). Disarmed it still watches and shows everything, but never clicks, pastes or reads your clipboard |
@@ -90,8 +88,9 @@ clipboard watcher to run — leaves the strip instead of fading.
 | Flag | Does |
 |---|---|
 | `--ssh <target>` | Run this session's tools, files and skills on another machine (`user@host`, an ssh-config alias, or a pasted `ssh …` command) |
-| `--monitor local` | The default when the flag is absent: launch an `agentclip-monitor` beside this window and drive **this** machine's screen over `127.0.0.1` |
-| `--monitor none` | Start with no monitor at all. Nothing is watched or clicked until you attach or launch one from the **Monitor** tab |
+| *(flag absent)* | **Idle.** No monitor is launched and none is dialled: nothing is watched or clicked until you attach or launch one from the **Monitor** tab. This is what a double-click gets you |
+| `--monitor local` | Launch an `agentclip-monitor` beside this window and drive **this** machine's screen over `127.0.0.1`. The terminal opt-in for "come up watching this PC" |
+| `--monitor none` | The same idle start, said out loud |
 | `--monitor <host:port>` | Drive the **screen** of another machine — the one running `agentclip-monitor` |
 | `--monitor @<name>` | The same, from a saved `[monitor.<name>]` target in your global `config.toml` (see `docs/configuration.md`) |
 | `--monitor-token <token>` | The monitor's token. Prefer a saved target or `AGENTCLIP_MONITOR_TOKEN` — `argv` is world-readable |
@@ -150,6 +149,10 @@ ssh -N -L 7777:127.0.0.1:7777 you@the-vm     # then: agentclip --monitor 127.0.0
 the window. That is the whole list — everything else on that window is a control
 you click, and it is specified by `docs/design/ui-briefs/monitor-ui.md`.
 
+| Control | Does |
+|---|---|
+| **Identify** | Draws boxes over the real screen showing what the monitor recognises inside the chat region right now. It used to be the Chat UI's `/identify`; the overlay lands on the *browser*, so it belongs to the window that owns those pixels |
+
 ### Attaching a monitor from the window
 
 You do not have to know any of those flags, and you do not have to restart to
@@ -160,7 +163,7 @@ change your mind. The **Connect** dialog has two tabs:
 
 The Monitor tab offers three ways to reach one:
 
-- **Local** — one button, **Launch a local monitor**: AgentClip starts an `agentclip-monitor` beside this window and dials it on `127.0.0.1`. No host, port or token to type. This is what a plain `agentclip` does at startup.
+- **Local** — one button, **Launch & connect a local monitor**: AgentClip starts an `agentclip-monitor` beside this window and dials it on `127.0.0.1`. No host, port or token to type. The window it opens closes with this one. This is the same thing `--monitor local` does at startup; a plain `agentclip` starts idle and waits for you to press it.
 - **Direct** — host, port and token. The monitor's own address, on a network this PC can reach.
 - **Via SSH** — pick one of your saved SSH targets, then give the port *as seen from that machine* (usually `127.0.0.1:7777`, which is where a monitor bound to loopback is). AgentClip forwards it over the SSH connection it already holds: no second login, no password asked twice, no `ssh -L` to leave running. The Executor has to be connected to that target first — the Monitor tab rides the same connection, and it says so rather than quietly starting a second one.
 

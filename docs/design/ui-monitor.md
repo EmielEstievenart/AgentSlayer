@@ -2025,6 +2025,27 @@ tab. `--monitor local|HOST:PORT|@NAME` remain terminal opt-ins.
 * Docs (`commands.md` `--monitor` table, `configuration.md`, README quick-start)
   say: double-click = idle; attach from the Monitor tab.
 
+**As built (2026-08-27).** `resolve_monitor_target` now answers `None` for an
+absent flag and for `none`, and `LaunchLocal` for `local` alone — three
+spellings, three answers, one line each. Nothing downstream changed: `main`
+already handed all three values through unflattened (§10.2), so an idle start is
+the DISCONNECTED path §10.1 built for `--monitor none`, red badge and parked loop
+included.
+
+* `--monitor`'s help gained the sentence "Omitted, the window starts idle and you
+  attach a monitor from its Monitor tab"; `commands.md`'s table gained a
+  *(flag absent)* row above `local`, and `local`'s row lost the words "the
+  default when the flag is absent".
+* Monitor tab, Local mode: the button reads **Launch & connect a local monitor**
+  (`app.js`, the one place its label is decided) and `#mon-local-note` reads
+  "opens the agentclip-monitor window beside this one; it closes with this
+  window" — the *closes with* half being the fact a user cannot see before
+  pressing it.
+* `tests/shell/chat/test_shell.py`: `test_local_means_launch_one_here` and
+  `test_an_absent_flag_and_none_both_start_idle` replace the old pair that
+  parametrized `[None, "local"]` over `LaunchLocal`, and the end-to-end
+  `--monitor` test loops the idle case over `["--monitor", "none"]` and `[]`.
+
 ### 11.2 Every calibration door leaves the Chat UI
 
 Deleted, not re-pointed: sidebar **Edit services...** and **Set chat
@@ -2035,6 +2056,40 @@ help/palette entries, and the F-key row's `F2 calibrate`. DETECTION-panel hints
 that say "F2" (`STALE_UNTICKED`, `STALE_OFF`, `PROFILE_HINT`) say "in the
 Monitor UI" instead. `/identify` stays a Monitor UI feature only
 (`docs/commands.md` moves the row to that section).
+
+**As built (2026-08-27).** Deleted, in one pass, with nothing left pointing:
+
+* Chat UI page: `#calibrate-open` (titlebar), `#edit-services` and `#set-region`
+  (sidebar), their three `api("calibrate")` listeners, their `el` lookups, the
+  `F2` row of `KEYS` and the `F2 calibrate` text in the sidebar's key-hint line.
+  Two `KEYS` descriptions that said "set them with F2" / "see the sidebar" now
+  say "in the Monitor UI".
+* Python: `GuiView.open_calibration`, `GuiView.show_identify_overlay`,
+  `CALIBRATION_ELSEWHERE`, `GuiRunner.open_calibration`, `JsApi.calibrate`,
+  `JsCalls.open_calibration`, `ChatView.show_identify_overlay`,
+  `SessionController._cmd_identify` and the `identify` rows of `COMMANDS` and
+  the dispatch table. `/identify` is now an unknown command like any typo, and
+  the unknown-command hint no longer lists it.
+* DETECTION-panel hints: `STALE_UNTICKED` → "stillness not watched for this
+  service - in the Monitor UI", `STALE_OFF` → "finish detection off - configure
+  it in the Monitor UI", `PROFILE_HINT` → " · captures + detection in the
+  Monitor UI". Two controller toasts that named F2 (no extra instructions; a
+  preset deleted mid-session) name the Monitor UI instead.
+* `F2` is left BOUND TO NOTHING, on purpose — §11.4 is what takes it — and
+  `tests/shell/chat/test_keys.py::test_f2_is_bound_to_nothing` is what keeps it
+  free until then.
+* Tests: the three "every door gives the same sentence" tests became `hasattr`
+  assertions on `GuiView` (a door that came back as a no-op would still be a
+  door), plus `test_the_bridge_marshals_no_calibrate_verb` — the bridge is the
+  whole of what the page may call, so a missing `calibrate` is the enforceable
+  form of "no button, key or palette row can reach a calibration surface".
+  `FakeChatView.show_identify_overlay` is gone; its counter stays, asserted at
+  zero.
+* Docs: `commands.md` lost the `F2` and `/identify` rows and gained an
+  **Identify** row in its Monitor UI section; `configuration.md` and `AGENTS.md`
+  say the Chat UI has no door to the Monitor UI at all; the headers of
+  `ui-briefs/elements-panel.md`, `monitor-ui.md` and `service-editor.md` amend
+  their §10 notes to say the doors those notes described are deleted.
 
 ### 11.3 The monitor answers every pixel question
 

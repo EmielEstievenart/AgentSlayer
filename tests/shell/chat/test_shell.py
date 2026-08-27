@@ -533,21 +533,20 @@ def test_the_monitor_target_reaches_the_gui_resolved(
         name="box:7777", host="box", port=7777
     )
 
-    # An ABSENT flag resolves to LaunchLocal - there is no in-process monitor
-    # left to be the default by omission (§10.1), so "no --monitor" means
-    # "start one on this PC and dial it".
+    # ``--monitor local`` is the sentinel: start one on this PC and dial it.
     kwargs.clear()
-    assert cli.main(["--project", str(tmp_path)]) == 0
+    assert cli.main(["--monitor", "local", "--project", str(tmp_path)]) == 0
     assert isinstance(kwargs["monitor_target"], LaunchLocal)
     # ...and the launcher that carries it out is handed over too: the real one,
     # because deciding HOW a monitor process is spawned is a launch question.
     assert isinstance(kwargs["launcher"], SubprocessLauncher)
 
-    # ``--monitor none`` is the third value, and the only one that reaches the
-    # shell as None: a window with no screen until the Monitor tab gives it one.
-    kwargs.clear()
-    assert cli.main(["--monitor", "none", "--project", str(tmp_path)]) == 0
-    assert kwargs["monitor_target"] is None
+    # ``--monitor none`` is the third value - and since §11.1 so is an ABSENT
+    # flag: a window with no screen until the Monitor tab gives it one.
+    for argv in (["--monitor", "none"], []):
+        kwargs.clear()
+        assert cli.main([*argv, "--project", str(tmp_path)]) == 0
+        assert kwargs["monitor_target"] is None
 
 
 # == --monitor @name, the token's three sources, and --calibrate's epitaph =====
@@ -671,28 +670,31 @@ def test_a_saved_targets_token_is_used_when_nothing_overrides_it(
 # == --monitor local / none: the launcher's two bare words (ui-monitor.md §10.1)
 
 
-@pytest.mark.parametrize("given", [None, "local"])
-def test_no_flag_and_local_both_mean_launch_one_here(
-    tmp_path: Path, given: str | None
-) -> None:
+def test_local_means_launch_one_here(tmp_path: Path) -> None:
     """The sentinel, not a target: the port a local monitor listens on is chosen
     when it is launched, so there is nothing to resolve here yet."""
     config = _launch(tmp_path).config
-    assert cli.resolve_monitor_target(given, None, config, {}) == LaunchLocal()
+    assert cli.resolve_monitor_target("local", None, config, {}) == LaunchLocal()
 
 
-def test_none_is_the_window_with_no_screen_attached(tmp_path: Path) -> None:
-    """The third answer, and the only way to open the Chat UI without a monitor
-    - which is why it is a WORD: every direct target must carry a port, so
-    ``none`` could never have been one."""
+@pytest.mark.parametrize("given", [None, "none"])
+def test_an_absent_flag_and_none_both_start_idle(tmp_path: Path, given: str | None) -> None:
+    """§11.1: a double-clicked window reaches for no screen of its own.
+
+    ``none`` is the explicit spelling and an omitted flag is the same answer -
+    the user attaches a monitor from the Monitor tab, and ``--monitor local``
+    is the terminal opt-in for the machine that wants one at startup. ``none``
+    can be a bare WORD safely because every direct target must carry a port, so
+    it could never have been one.
+    """
     config = _launch(tmp_path).config
-    assert cli.resolve_monitor_target("none", None, config, {}) is None
+    assert cli.resolve_monitor_target(given, None, config, {}) is None
 
 
 def test_the_help_names_all_four_monitor_spellings() -> None:
     help_text = cli.build_arg_parser().format_help()
     assert "local|none|HOST:PORT|@NAME" in help_text
-    for word in ("local", "none", "agentclip-monitor"):
+    for word in ("local", "none", "agentclip-monitor", "idle"):
         assert word in help_text
 
 

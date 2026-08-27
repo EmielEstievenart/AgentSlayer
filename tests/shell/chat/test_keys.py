@@ -139,7 +139,7 @@ def test_the_help_sheet_is_rendered_from_the_key_table() -> None:
 
 @pytest.mark.parametrize(
     "key",
-    ["F1", "F2", "F3", "F4", "F5", "F6", "F8", "shift+tab", "ctrl+x", "ctrl+o",
+    ["F1", "F3", "F4", "F5", "F6", "F8", "shift+tab", "ctrl+x", "ctrl+o",
      "ctrl+q", "y", "n", "a", "u", "c", "i", "r", "w", "t", "e", "l", "x"],
 )
 def test_the_table_carries_every_binding_the_brief_lists(key: str) -> None:
@@ -151,6 +151,15 @@ def test_the_table_carries_every_binding_the_brief_lists(key: str) -> None:
     modal-local rows, which belong to their own handlers.
     """
     assert any(f'"{key}"' in entry["keys"] for entry in key_entries())
+
+
+def test_f2_is_bound_to_nothing() -> None:
+    """ui-monitor.md §11.2 deleted the calibration doors, F2 among them.
+
+    Left UNBOUND rather than re-used in the same breath: the key is spoken for
+    (§11.4 gives it the MONITOR SEES block), and a key that quietly kept doing
+    its old job would be the door §11.2 is about."""
+    assert not any('"F2"' in entry["keys"] for entry in key_entries())
 
 
 def test_every_row_is_described_and_filed_under_a_section() -> None:

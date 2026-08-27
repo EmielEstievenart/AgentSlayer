@@ -78,7 +78,6 @@ class GuiRunner:
         provider: ClipboardProvider,
         engine_factory: Callable[[EngineRequest], Link],
         project_root: Path,
-        profile_root: Path | None = None,
         global_config_path: Path | None = None,
         mcp_manager: McpStatusSource | None = None,
         skills: Callable[[], SkillReport] | None = None,
@@ -108,7 +107,6 @@ class GuiRunner:
             provider=provider,
             engine_factory=engine_factory,
             project_root=project_root,
-            profile_root=profile_root,
             global_config_path=global_config_path,
             mcp_manager=mcp_manager,
             skills=skills,
@@ -363,9 +361,6 @@ class GuiRunner:
 
     def retry_insert(self) -> None:
         self.schedule_call(self.view.retry_insert)
-
-    def open_calibration(self) -> None:
-        self.schedule_call(self.view.open_calibration)
 
     def select_window(self, window: str) -> None:
         self.schedule_call(self.view.select_window, window)

@@ -28,7 +28,6 @@ from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app.types import SessionRef, SessionSpec
 from agentclip.shell.app.view import ChatView, RunCall, SessionView
 from agentclip.shell.chat.view import (
-    CALIBRATION_ELSEWHERE,
     MASTER_WINDOW,
     SUBAGENT_WINDOW,
     GuiView,
@@ -869,39 +868,28 @@ def test_exit_app_closes_the_window(harness: Harness) -> None:
     assert harness.exits == 1
 
 
-def test_identify_names_the_window_the_overlay_is_drawn_from(harness: Harness) -> None:
-    """The list this test used to parametrize over is empty.
-
-    ``toggle_harness_log`` came off it with parity increment 2 (the pane
-    landed), the three session-view methods with increment 3, and the last two -
-    ``show_identify_overlay`` and ``paint_elements`` - with increment 4.
-
-    Since ui-monitor.md §10.2 ``/identify`` is one sentence rather than a window
-    this shell opens, and that is still not a reduction: the overlay is thrown
-    over the BROWSER, on the machine the browser is on, so the honest answer to
-    the command is where to go and see it. There is no second window for this
-    process to open any more, and the sentence names both places the Monitor UI
-    can be, because the answer does not depend on which.
-    """
-    harness.view.show_identify_overlay()
-    toasts = [event["message"] for event in harness.flush().of_type("toast")]
-    assert CALIBRATION_ELSEWHERE in toasts
-
-
-def test_every_calibration_door_gives_the_same_one_sentence(harness: Harness) -> None:
+def test_no_calibration_door_survives_on_this_view() -> None:
     """F2 / the titlebar's **monitor UI** button, **Edit services...**, **Set
-    chat region...** and ``/identify`` are four affordances and one answer.
+    chat region...** and ``/identify`` were four affordances and one answer -
+    the sentence saying the surfaces they named belong to the monitor process.
 
-    Four, because they used to open four different surfaces and the page still
-    names the errands separately (a user going to edit a preset and a user going
-    to draw a box want different things over there). One answer, because every
-    one of those surfaces belongs to the monitor process now.
+    ui-monitor.md §11.2 deleted all four rather than keeping a row of buttons
+    whose only behaviour is to say they do nothing. Asserted on the CLASS, not
+    an instance: a door that came back as a no-op would still be a door.
     """
-    for door in (harness.view.open_calibration, harness.view.show_identify_overlay):
-        harness.recorder.clear()
-        door()
-        toasts = [event["message"] for event in harness.flush().of_type("toast")]
-        assert toasts == [CALIBRATION_ELSEWHERE]
+    for door in ("open_calibration", "show_identify_overlay"):
+        assert not hasattr(GuiView, door), door
+
+
+def test_the_bridge_marshals_no_calibrate_verb() -> None:
+    """The other half of §11.2: nothing on the page can ask for it either.
+
+    The bridge is the whole of what the page may call, so a missing ``calibrate``
+    is the enforceable statement that no button, key or palette row can reach a
+    calibration surface from this window.
+    """
+    assert not hasattr(JsApi, "calibrate")
+    assert "calibrate" not in port_methods(JsApi)
 
 
 async def test_a_generation_the_view_has_not_seen_re_reads_what_is_watched(

@@ -79,10 +79,6 @@ COMMANDS: tuple[ChatCommand, ...] = (
         summary="end the sub-agent run in flight (ctrl+x only cancels the calls running now)",
     ),
     ChatCommand(
-        name="identify",
-        summary="draw boxes where the tool sees the chat window's parts",
-    ),
-    ChatCommand(
         name="log",
         summary="show why the harness moved through its recent states",
     ),

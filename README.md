@@ -47,7 +47,7 @@ uv run agentclip            # in the project you want the agent to work on
 | `agentclip-monitor` | the **Monitor** and its **Monitor UI**: watches the **Browser**, clicks it, owns the clipboard — and a window to configure and serve it from | the machine whose *screen* shows the chat |
 | `agentclip-engine` | the **Executor**: permission-gated files and commands on behalf of the agent | the machine whose *files* you are working on |
 
-In the ordinary case all three are this PC and you only ever type the first: plain `agentclip` launches an `agentclip-monitor` beside itself and drives this machine's screen over `127.0.0.1` — the same wire a remote monitor is reached on, because there is only one way to reach a screen (`docs/design/ui-monitor.md` §10). ("GUI" is not a term any more; older design docs still say it and mean the Chat UI.)
+In the ordinary case all three are this PC and you only ever type the first. A plain `agentclip` — or a double-click — starts **idle**: no screen is watched and nothing is clicked until you attach one from the Chat UI's **Monitor** tab, whose **Launch & connect a local monitor** button starts an `agentclip-monitor` beside this window and dials it on `127.0.0.1`. From the terminal, `agentclip --monitor local` does that at startup instead. Either way it is the same wire a remote monitor is reached on, because there is only one way to reach a screen (`docs/design/ui-monitor.md` §10, §11.1). ("GUI" is not a term any more; older design docs still say it and mean the Chat UI.)
 
 Linux clipboard: the bundled backend works on X11 and Wayland-with-XWayland out of the box. On a pure-Wayland system install `wl-clipboard` (and `xclip` for X11 fallback).
 

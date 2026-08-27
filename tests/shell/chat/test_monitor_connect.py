@@ -40,7 +40,7 @@ from agentclip.shell.chat.remote import (
     MONITOR_CONNECT_FIRST,
     MONITOR_MISSING_HOST,
 )
-from agentclip.shell.chat.view import CALIBRATION_ELSEWHERE, MONITOR_NONE, GuiView
+from agentclip.shell.chat.view import MONITOR_NONE, GuiView
 from agentclip.shell.webview.bridge import Bridge
 
 from .conftest import HARNESS_SERVICE, FakeLauncher, Recorder
@@ -606,24 +606,12 @@ async def test_a_local_launch_that_refuses_lands_on_the_form(
     assert "could not start a local monitor" in tab.event()["failure"]
 
 
-async def test_the_calibration_doors_all_point_at_the_monitor_ui(
-    project: Path, app_config: Config, tmp_path: Path
-) -> None:
-    """One sentence, with no branch on where the pixels are: this window hosts
-    none of those surfaces either way (§10.2)."""
-    tab = build(project, app_config, tmp_path, Dialler(ScriptedLink()))
-    tab.view.start()
-    await settle()
-    tab.view.open_calibration()
-    assert CALIBRATION_ELSEWHERE in tab.toasts()
-
-    tab.view.monitor_open()
-    tab.view.monitor_fields("direct", "10.0.0.5", "7777", TOKEN, "")
-    tab.view.monitor_start()
-    await settle()
-    tab.recorder.clear()
-    tab.view.show_identify_overlay()
-    assert CALIBRATION_ELSEWHERE in tab.toasts()
+def test_the_calibration_doors_are_gone_from_this_view() -> None:
+    """§11.2: deleted, not re-pointed. A view that still answered these would
+    be a door the user can find, and every one of them could do nothing but
+    name another process's window."""
+    for door in ("open_calibration", "show_identify_overlay"):
+        assert not hasattr(GuiView, door), door
 
 
 async def test_disconnect_closes_the_ssh_tunnel_under_the_link(

@@ -8,12 +8,16 @@
 > and re-decides nothing — where a rule here has a reason, the reason is
 > ui-monitor.md's and is cited.
 >
-> **2026-08-27, ui-monitor.md §10:** the *embedded* case this brief describes
-> beside the standalone one — the Chat UI opening this same page in-process on
-> `F2` — was **removed**. There is one Monitor UI and it is the
-> `agentclip-monitor` window; the Chat UI only says where it is. Everything
-> below about the standalone window stands; the paragraphs about the embedded
-> one are history, marked where they sit rather than deleted.
+> **2026-08-27, ui-monitor.md §10 and §11.2:** the *embedded* case this brief
+> describes beside the standalone one — the Chat UI opening this same page
+> in-process on `F2` — was **removed** by §10, and §11.2 then deleted the doors
+> §10 had left pointing here (`F2`, the titlebar's **monitor UI** button, the
+> sidebar's **Edit services...** / **Set chat region...**, and `/identify`).
+> There is one Monitor UI, it is the `agentclip-monitor` window, and the Chat UI
+> does not so much as name it: you open it yourself, or the Monitor tab's
+> **Launch & connect a local monitor** starts one beside the Chat UI.
+> Everything below about the standalone window stands; the paragraphs about the
+> embedded one are history, marked where they sit rather than deleted.
 
 Audience: whoever changes this window next, and whoever has to know what the
 Monitor UI promises before changing something underneath it.

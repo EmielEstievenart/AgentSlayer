@@ -39,9 +39,11 @@ service editor - belongs to the Monitor UI, which is a PROCESS of its own
 (``shell/app/monitor_launch.py``) or one already running on the machine the
 browser is on. Both are reached the same way - one dial, one token, one
 ``watched()`` stream - so there is no second path to a screen for the two to
-disagree on (§10.0). What is left here is one sentence pointing at that window,
-and a brain that reads its service back off :class:`Watched` rather than out of
-this host's ``[services.*]`` tables (§10.5).
+disagree on (§10.0). Since §11.2 not even a DOOR is left here: the sidebar's two
+buttons, the titlebar's **monitor UI** button, ``F2`` and ``/identify`` are all
+deleted rather than re-pointed. What remains is a brain that reads its service
+back off :class:`Watched` rather than out of this host's ``[services.*]`` tables
+(§10.5).
 """
 
 from __future__ import annotations
@@ -64,7 +66,6 @@ from agentclip.config import (
     RemoteTarget,
     ServicePreset,
     default_global_config_path,
-    default_profile_dir,
     drop_monitor_target,
     save_gui_theme,
     save_monitor_target,
@@ -90,8 +91,7 @@ from agentclip.driver.monitor.remote import RemoteUIMonitor
 from agentclip.driver.monitor.switchable import IdleMonitor, SwitchableMonitor
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.focus import foreground_window
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
-from agentclip.driver.screen.profile_store import load_profile
+from agentclip.driver.screen.profile import TemplateKind, describe_captured
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot, can_delegate, missing
 from agentclip.engine.engine import Decision, PendingAction
@@ -186,10 +186,9 @@ WINDOW_STATE_GLYPH: dict[str, str] = {
 # two shells may not import each other (tests/test_layering.py), and widening
 # that boundary so a frontend could reach another frontend's display strings
 # would be a worse trade than a block of literals with a comment saying where
-# the original lives. The four that name F2 are verbatim again as of parity
-# increment 5: this shell has a service editor behind that key now, so the
-# increment-2 divergence (name the door, not a key that does nothing) is
-# reversed - docs/design/gui.md §3.
+# the original lives. The four that named F2 name the Monitor UI instead as of
+# ui-monitor.md §11.2: this window has no service editor behind that key any
+# more - it has no key - so the words point at the window that does.
 
 # The STATE rail, in LOOP order rather than declaration order. A tuple rather
 # than ``list(LoopState)`` for the sidebar's reason: the rail is a picture of
@@ -245,11 +244,12 @@ COPY_RESTING = "no click yet"
 # will ever produce a verdict" (``_adopt_watched``).
 STALE_UNSET = "no chat region - staleness check disabled"
 STALE_CALIBRATED = "watching the chat region"
-STALE_UNTICKED = "stillness not watched for this service - F2"
-STALE_OFF = "finish detection off - F2 to configure"
-# What the SERVICE block's appearance count is followed by: the door to the
-# captures, which is the editor this key opens (``sidebar.PROFILE_HINT``).
-PROFILE_HINT = " · F2 for captures + detection"
+STALE_UNTICKED = "stillness not watched for this service - in the Monitor UI"
+STALE_OFF = "finish detection off - configure it in the Monitor UI"
+# What the SERVICE block's appearance count is followed by: where the captures
+# are made, which since §11.2 is not a key this window has
+# (``sidebar.PROFILE_HINT``).
+PROFILE_HINT = " · captures + detection in the Monitor UI"
 # What the read-only SERVICE line says after the monitor's own words for it
 # (§10.5): the key is not a choice this window offers any more, it is a fact
 # read back off the machine that owns the screen.
@@ -327,17 +327,11 @@ CONNECT_MID_TURN = "a turn is running - connecting would end this session"
 CONNECT_UNAVAILABLE = "this build has no way to go remote"
 CONNECT_DONE = "connected to {target} - this session's tools now run over there"
 
-# The ONE answer every calibration affordance gives now (ui-monitor.md §10.2):
-# F2, the titlebar's **monitor UI** button, the sidebar's two doors and
-# ``/identify``. There is no in-process calibration window any more, and there
-# is no branch on which machine the pixels are on - the Monitor UI is a window
-# of the MONITOR PROCESS, which is either the child this app launched here or
-# the one already running over there, and the sentence names both so the user
-# knows which window to go and look for.
-CALIBRATION_ELSEWHERE = (
-    "calibration lives in the Monitor UI: the agentclip-monitor window (local),"
-    " or that window on the monitor's machine (remote)"
-)
+# ``CALIBRATION_ELSEWHERE`` lived here: the one sentence F2, the titlebar's
+# **monitor UI** button, the sidebar's two doors and ``/identify`` all answered
+# with. ui-monitor.md §11.2 deleted the doors instead of re-pointing them - a
+# window that hosts none of those surfaces should not carry five affordances
+# that exist to say so - so the sentence has nobody left to say it.
 
 # == the monitor link (--monitor host:port, ui-monitor.md §6.5) ================
 # Split mode's four sentences. Each one is a moment the user cannot see for
@@ -781,7 +775,6 @@ class GuiView:
         provider: ClipboardProvider,
         engine_factory: Callable[[EngineRequest], Link],
         project_root: Path,
-        profile_root: Path | None = None,
         global_config_path: Path | None = None,
         mcp_manager: McpStatusSource | None = None,
         skills: Callable[[], SkillReport] | None = None,
@@ -798,11 +791,10 @@ class GuiView:
         self._config = config
         self._provider = provider
         self._project_root = project_root
-        self._profile_root = profile_root if profile_root is not None else default_profile_dir()
         # Where the service editor persists what it saved. Defaults to the real
         # global config.toml; tests override it so no run ever writes into the
         # user's actual config - the same shape (and the same reason) as
-        # ``profile_root`` above and as ``AgentClipApp._global_config_path``.
+        # ``AgentClipApp._global_config_path``.
         self._global_config_path = (
             global_config_path if global_config_path is not None else default_global_config_path()
         )
@@ -813,7 +805,6 @@ class GuiView:
         # equivalent is a hand-back: the factory reads a cell cli.py owns and
         # this is what writes it (see ``_adopt_config``).
         self._on_config_change = on_config_change if on_config_change is not None else _no_config
-        self._profiles: dict[str, ServiceProfile] = {}
         self._mcp_manager = mcp_manager
         # Where `/skills` reads before a session exists. A cell rather than a
         # constructor-time binding for ``_mcp_manager``'s reason: a connect
@@ -1200,7 +1191,7 @@ class GuiView:
         """One door for every composer send - ``MainScreen._submit_text``.
 
         While the start prompt is up the text IS the task, except for a slash
-        line, which is dispatched as a command so ``/identify`` and friends stay
+        line, which is dispatched as a command so ``/log`` and friends stay
         reachable in exactly the state they are most needed (a task that really
         begins with a slash is written ``//...``). Otherwise the text goes to
         the controller, where an open ``ask_user`` gate wins over slash parsing
@@ -1884,7 +1875,7 @@ class GuiView:
 
     # == the fullscreen child processes ========================================
     # There are none left in this window. The region picker, the capture overlay
-    # and ``/identify`` are all translucent always-on-top tkinter windows in a
+    # and Identify are all translucent always-on-top tkinter windows in a
     # CHILD PROCESS (``screen/picker.py``), and every one of them is raised from
     # the calibration window now (``monitor_ui/view.py``), which owns the
     # one-at-a-time mutex over them. What is left on this side is the pair
@@ -2872,7 +2863,6 @@ class GuiView:
         self._mcp_manager = runtime.mcp_manager
         self._skills = runtime.skills
         self._mcp_announced.clear()
-        self._profiles.clear()
         # cli.py's engine factory reads a cell it owns, and the one this runtime
         # carries was built against the remote config - hand it over for the
         # same reason the service editor does (``_adopt_config``).
@@ -2987,28 +2977,19 @@ class GuiView:
         """
         self._schedule(self._automation.retry_insert())
 
-    # == the Monitor UI's door (F2) ============================================
-    # Everything made of PIXELS is the MONITOR PROCESS's now (ui-monitor.md
-    # §10.2): the service editor, the ELEMENTS column, the chat-region picker
-    # and ``/identify`` are surfaces of ``agentclip-monitor``'s own window - the
+    # == no calibration door ==================================================
+    # Everything made of PIXELS is the MONITOR PROCESS's (ui-monitor.md §10.2):
+    # the service editor, the ELEMENTS column, the chat-region picker and
+    # ``/identify`` are surfaces of ``agentclip-monitor``'s own window - the
     # child this app launched here, or the one already running on the machine
     # the browser is on. This window opens none of them and hosts none of them.
     #
-    # So what is left is ONE sentence, given by every affordance that used to
-    # open something: F2, the titlebar's **monitor UI** button, the sidebar's
-    # **Edit services...** and **Set chat region...**, and ``/identify``. One
-    # answer for all five, with no branch on where the pixels are, because the
-    # answer does not depend on it - it is the same window either way, and the
-    # sentence names both places to look for it.
-
-    def open_calibration(self) -> None:
-        """F2, the titlebar's **monitor UI** button and the sidebar's two doors.
-
-        A toast, always. The alternative would be this window opening a
-        calibration surface over its OWN screen while the monitor watches
-        another one, which is precisely the disagreement §10.0 is about.
-        """
-        self.notify(CALIBRATION_ELSEWHERE, severity="warning", timeout=10)
+    # §10.2 left five affordances behind pointing AT that window - F2, the
+    # titlebar's **monitor UI** button, the sidebar's **Edit services...** and
+    # **Set chat region...**, and ``/identify`` - each of which did nothing but
+    # say where to go. §11.2 deleted all five: ``open_calibration`` and
+    # ``show_identify_overlay`` are gone from this view, ``calibrate`` from the
+    # bridge and ``/identify`` from the command table.
 
     def _after_calibration(self) -> None:
         """Tell the user ONCE when the sub-agent window becomes usable.
@@ -3024,16 +3005,6 @@ class GuiView:
             self.notify("sub-agent slot ready - /new to give the model the delegate tool")
         self._delegation_ready = ready
 
-    def show_identify_overlay(self) -> None:
-        """``/identify``: say where the overlay is drawn from now.
-
-        Kept pointing at something rather than dropped. The overlay is the
-        MONITOR's - it is thrown over the browser, on the machine the browser is
-        on - so what a user who typed this wants is the Monitor UI, and the one
-        sentence names it (§10.2).
-        """
-        self.open_calibration()
-
     def _adopt_config(self, config: Config) -> None:
         """``MainScreen.update_config``, spelled for this shell's readouts.
 
@@ -3048,10 +3019,6 @@ class GuiView:
         # rebound the config has to hand it over - the TUI's equivalent is that
         # its closure reads the attribute the editor reassigned.
         self._on_config_change(config)
-        # The editor can delete a service's captured appearances (and a service
-        # itself), so the per-run cache is no longer trustworthy - drop it and
-        # let the next read come off disk.
-        self._profiles.clear()
         # Which service each window drives is NOT re-derived here any more: it
         # is the monitor's answer (§10.5), and a config saved on this host says
         # nothing about it. What a fresh config can still change is the alarm
@@ -3066,13 +3033,13 @@ class GuiView:
     def delegation_available(self) -> bool:
         return can_delegate(
             self._automation.calibration(AgentSlot.SUBAGENT),
-            self.profile_for(AgentSlot.SUBAGENT),
+            self.captured_for(AgentSlot.SUBAGENT),
         )
 
     def delegation_missing(self) -> tuple[str, ...]:
         return missing(
             self._automation.calibration(AgentSlot.SUBAGENT),
-            self.profile_for(AgentSlot.SUBAGENT),
+            self.captured_for(AgentSlot.SUBAGENT),
         )
 
     async def start_chat(self, session: SessionRef) -> bool:
@@ -3242,8 +3209,16 @@ class GuiView:
         """
         return self._preset_for(self._automation.live_slot)
 
-    def profile_for(self, slot: AgentSlot) -> ServiceProfile:
-        return self._profile(self._service_for(slot))
+    def captured_for(self, slot: AgentSlot) -> tuple[TemplateKind, ...]:
+        """Which appearances the MONITOR holds for ``slot``'s service (§11.3).
+
+        Read straight off the last ``Watched`` this window adopted, which is the
+        whole of the change: this used to load a ``ServiceProfile`` from THIS
+        machine's profile store, and on any desktop but the one the pictures
+        were taken on that store is empty - so a green link and a fully
+        calibrated browser still got NOT_CALIBRATED on every click.
+        """
+        return self._watched[slot].captured
 
     async def find_all(
         self,
@@ -3780,7 +3755,7 @@ class GuiView:
     def _live_has(self, kind: TemplateKind) -> bool:
         """Has the LIVE window's service a capture of ``kind``? Called on the
         POLLER thread, so it reads immutable state and nothing else."""
-        return self.profile_for(self._automation.live_slot).has(kind)
+        return kind in self._watched[self._automation.live_slot].captured
 
     # == MCP: the sidebar block, the status segment, and a toast per transition =
 
@@ -4114,7 +4089,7 @@ class GuiView:
             )
             if preset and service
             else "",
-            profile_note=f"appearance: {self.profile_for(slot).describe()}{PROFILE_HINT}",
+            profile_note=f"appearance: {describe_captured(self.captured_for(slot))}{PROFILE_HINT}",
             window=window,
             region=f"{region.describe()} · chatbot window" if region is not None else REGION_UNSET,
             slot_note=self._slot_note(slot),
@@ -4133,10 +4108,10 @@ class GuiView:
         if slot is AgentSlot.MASTER:
             return SLOT_NOTE_MASTER
         cal = self._automation.calibration(slot)
-        profile = self.profile_for(slot)
-        if can_delegate(cal, profile):
+        captured = self.captured_for(slot)
+        if can_delegate(cal, captured):
             return SLOT_NOTE_READY
-        return SLOT_NOTE_MISSING + ", ".join(missing(cal, profile))
+        return SLOT_NOTE_MISSING + ", ".join(missing(cal, captured))
 
     def _mcp_counts(self) -> tuple[int, int | None]:
         """``connected`` over ``enabled`` - or ``None`` when there is no manager.
@@ -4219,26 +4194,6 @@ class GuiView:
         (:func:`preset_from_watched`).
         """
         return preset_from_watched(self._watched[slot], alerts=self._config.preset())
-
-    def _profile(self, key: str) -> ServiceProfile:
-        """A service's captured appearances, read off disk once per app run.
-
-        The one thing on this side that still reads the profile store, and it is
-        a KNOWN gap rather than a design (§10.3's layering line stops one module
-        short of it): ``AutomationHost.profile_for`` and the delegation
-        readiness rules want a per-KIND answer, and the monitor's only answer is
-        :attr:`Watched.profiled` - one boolean. So the pair below still asks
-        this machine's store, which is right for a local child and stale for a
-        remote monitor. An empty key answers an empty profile rather than
-        reading a directory called "".
-        """
-        if not key:
-            return ServiceProfile(key="")
-        profile = self._profiles.get(key)
-        if profile is None:
-            profile = load_profile(self._profile_root, key)
-            self._profiles[key] = profile
-        return profile
 
     # == small helpers =========================================================
 

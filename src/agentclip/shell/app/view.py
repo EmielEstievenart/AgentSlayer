@@ -213,14 +213,14 @@ class ChatView(Protocol):
     # two ways to ask for one thing, one implementation of it.
     def open_new_chat_now(self) -> None: ...
 
-    # /identify's whole implementation, for the same reason: the controller can
-    # say "show the user what you can see", and nothing more - where the tool is
-    # looking, what it is looking for and how a rectangle gets drawn on a real
-    # screen are all the view's. Never blocking: the overlay it puts up owns the
-    # screen for a few seconds, and the controller must not be parked on it.
-    def show_identify_overlay(self) -> None: ...
+    # ``show_identify_overlay`` lived here - ``/identify``'s whole
+    # implementation on this port. ui-monitor.md §11.2 deleted the command: the
+    # overlay is thrown over the BROWSER, on the machine the browser is on, so
+    # the only window that can draw it is the Monitor UI, and a port method
+    # whose every implementation could do nothing but point at another window
+    # was not carrying a decision.
 
-    # /log's whole implementation, for the third time and the same reason: the
+    # /log's whole implementation, for the second time and the same reason: the
     # controller can say "show the user why you did what you did", and the
     # decisions themselves are all the view's - the paste attempt, the send
     # gate, the finish detectors and the auto-copy flow live on the far side of

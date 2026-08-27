@@ -19,11 +19,14 @@
 > to the Monitor UI's page exactly as written. ("GUI" further down is the older
 > name for the Chat UI; the prose below is not rewritten.)
 >
-> **2026-08-27, ui-monitor.md §10:** the second entry point above is gone.
-> The Chat UI no longer opens this beside itself — `F2`, the titlebar button,
-> the sidebar doors and `/identify` all just say where the Monitor UI is, and in
-> local mode that is an `agentclip-monitor` process the Chat UI launched. One
-> window, one `LocalUIMonitor`, one entry point.
+> **2026-08-27, ui-monitor.md §10 and §11.2:** the second entry point above is
+> gone, and so is every door to it. §10 left `F2`, the titlebar button, the
+> sidebar doors and `/identify` saying where the Monitor UI is; §11.2 **deleted
+> all five** rather than keep affordances whose only behaviour is to name
+> another window. There is one window, one `LocalUIMonitor`, one entry point —
+> `agentclip-monitor` — and `/identify` is a Monitor UI feature only (its
+> **Identify** button). Everything §2.2, §3.2 and §4.5 below specify about the
+> overlay is unchanged; only who can ask for it moved.
 
 
 Audience: engineers building a second frontend (pywebview/HTML/JS) that must reach

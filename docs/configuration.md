@@ -27,12 +27,14 @@ AgentClip reads two kinds of files: **TOML app config** (settings) and **JSON pe
 > the tool is recognising right now, and — standalone only — the **SERVE** band
 > that decides who may drive this machine. It is a **window of its own**, not a
 > panel — it is the **`agentclip-monitor` window**, and it opens nowhere else.
-> In local mode the Chat UI launches that process beside itself and connects to
-> it on `127.0.0.1`, so the window is already on your screen; on the machine the
-> browser is on, you run `agentclip-monitor` there. The Chat UI's `F2`, the
-> titlebar's **monitor UI** button and the sidebar's **Edit services...** /
-> **Set chat region...** all say where it is; none of them opens a window of its
-> own. See `docs/design/ui-monitor.md` §2.6, §6.4, §9.1 and §10, and
+> In local mode the Monitor tab's **Launch & connect a local monitor** (or
+> `--monitor local`) starts that process beside the Chat UI and connects to it
+> on `127.0.0.1`, so the window is already on your screen; on the machine the
+> browser is on, you run `agentclip-monitor` there. The Chat UI has **no door to
+> it at all** — the `F2` key, the titlebar's **monitor UI** button, the
+> sidebar's **Edit services...** / **Set chat region...** and `/identify` were
+> all deleted rather than left pointing at another window. See
+> `docs/design/ui-monitor.md` §2.6, §6.4, §9.1, §10 and §11.2, and
 > `docs/design/ui-briefs/monitor-ui.md` for the window itself.
 
 TOML merge order: **built-in defaults → global config.toml → project .agentclip.toml → CLI flags.** Tables merge per key; scalars *and lists* replace (a project can tighten a list, never extend it by accident). A broken file never crashes startup — problems become warnings and the default wins.

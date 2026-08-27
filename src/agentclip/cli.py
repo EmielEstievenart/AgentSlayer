@@ -422,12 +422,17 @@ def resolve_monitor_target(
 ) -> MonitorTarget | LaunchLocal | None | str:
     """``--monitor``'s value into the thing to dial, or one sentence refusing it.
 
-    Four spellings and four answers (docs/design/ui-monitor.md §10.1):
+    Four spellings and four answers (docs/design/ui-monitor.md §10.1, §11.1):
 
-    * absent (``None``) or ``local`` → :class:`LaunchLocal`, the sentinel that
-      means *start an ``agentclip-monitor`` on this PC and dial it*. It is a
-      sentinel rather than a target because the port is chosen at launch time;
-    * ``none`` → ``None``, the window with no screen attached;
+    * absent (``None``) → ``None``: a window with no screen attached. Since
+      §11.1 an omitted flag starts the Chat UI IDLE - a double-click launches
+      nothing and dials nothing, and the user attaches a monitor from the
+      Monitor tab. ``--monitor local`` is the terminal opt-in;
+    * ``local`` → :class:`LaunchLocal`, the sentinel that means *start an
+      ``agentclip-monitor`` on this PC and dial it*. It is a sentinel rather
+      than a target because the port is chosen at launch time;
+    * ``none`` → ``None`` as well, the explicit spelling of the same idle
+      window;
     * ``@name`` → the saved ``[monitor.<name>]`` table (ui-monitor.md §9.2);
     * anything else → the ``HOST:PORT`` §6.5 shipped, right-partitioned so an
       IPv6 literal survives - and refused with one sentence when it is not one.
@@ -443,10 +448,10 @@ def resolve_monitor_target(
     flag beats a file: it is the thing the person typed just now. A local launch
     needs none of the three - the child and the launcher read one shared file.
     """
-    if given is None or given == MONITOR_LOCAL:
-        return LaunchLocal()
-    if given == MONITOR_NONE:
+    if given is None or given == MONITOR_NONE:
         return None
+    if given == MONITOR_LOCAL:
+        return LaunchLocal()
     env = environ if environ is not None else os.environ
     token = token_flag if token_flag is not None else env.get(MONITOR_TOKEN_ENV, "")
     if given.startswith("@"):
@@ -547,9 +552,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="local|none|HOST:PORT|@NAME",
         help=(
-            "which screen this window drives: 'local' (the default - launch an"
+            "which screen this window drives: 'local' (launch an"
             " agentclip-monitor here), 'none', HOST:PORT, or @name for a saved"
-            " [monitor.<name>] target"
+            " [monitor.<name>] target. Omitted, the window starts idle and you"
+            " attach a monitor from its Monitor tab"
         ),
     )
     # The monitor port's shared secret (ui-monitor.md §9.1). Documented last of
@@ -869,10 +875,12 @@ def main(argv: list[str] | None = None) -> int:
     # here too, so nothing below this line can be handed a target it would have
     # to re-parse or re-validate.
     #
-    # Since §10.1 an ABSENT flag is resolved as well, and to a value rather than
-    # to nothing: there is no in-process monitor left to be the default by
-    # omission, so "no --monitor" means ``LaunchLocal`` - start one here and dial
-    # it - and ``--monitor none`` is the spelling for a window with no screen.
+    # Since §11.1 an ABSENT flag means IDLE: there is no in-process monitor left
+    # to be the default by omission and a double-clicked window must not go
+    # reaching for the screen on its own, so "no --monitor" resolves the same
+    # way ``--monitor none`` does - no screen attached - and the user attaches
+    # one from the Monitor tab. ``--monitor local`` is the terminal opt-in that
+    # starts one here and dials it.
     monitor_target = resolve_monitor_target(args.monitor, args.monitor_token, config)
     if isinstance(monitor_target, str):
         print(f"agentclip: {monitor_target}", file=sys.stderr)
@@ -1041,12 +1049,14 @@ def main(argv: list[str] | None = None) -> int:
             # nothing - is refused, so nothing below this line can be given one.
             # All three values reach the shell as they are since §10.2: a
             # ``MonitorTarget`` to dial, ``LaunchLocal`` to start one here first,
-            # or ``None`` for a window with no screen.
+            # or ``None`` for a window with no screen - which since §11.1 is
+            # what an omitted flag resolves to.
             monitor_target=monitor_target,
             # ...and the one thing only a launch can decide about the middle
             # case: how a monitor process is actually spawned. The real one, so
-            # ``agentclip`` with no flags comes up watching this PC's screen
-            # through a child of its own (ui-monitor.md §10.1).
+            # ``--monitor local`` - and the Monitor tab's **Launch & connect a
+            # local monitor** - come up watching this PC's screen through a
+            # child of ours (ui-monitor.md §10.1, §11.1).
             launcher=SubprocessLauncher(),
         )
     finally:

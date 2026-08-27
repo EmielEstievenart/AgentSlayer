@@ -46,7 +46,6 @@ def test_the_registry_is_the_documented_commands() -> None:
         "help",
         "new",
         "abort",
-        "identify",
         "log",
         "mcp",
         "skills",
@@ -110,28 +109,30 @@ def test_unknown_command_hint_lists_every_command() -> None:
         assert command.slash in hint
     # An English list, not a dump.
     assert hint == (
-        "/help, /new, /abort, /identify, /log, /mcp, /skills, /armed, /mode, /theme, "
+        "/help, /new, /abort, /log, /mcp, /skills, /armed, /mode, /theme, "
         "/config, /unattended, or /yolo"
     )
 
 
-def test_identify_dispatches_to_the_view_with_no_session_of_any_kind(
+def test_identify_is_not_a_command_of_this_shell(
     controller: SessionController, view: FakeChatView
 ) -> None:
-    """The one command with no session gate. It is a calibration aid, and the
-    states it is most needed in - nothing armed, or a run wedged against a chat
-    window the tool cannot read - are exactly the states a gate would lock it out
-    of. It cannot touch a session either: the view captures one frame and draws
-    on top of it."""
+    """ui-monitor.md §11.2: ``/identify`` is a Monitor UI feature only.
+
+    The overlay is thrown over the BROWSER, on the machine the browser is on,
+    so the window that can draw it is the one that owns those pixels - and a
+    command here could do nothing but name that window. Deleted rather than
+    re-pointed, so it lands in the unknown-command hint like any other typo."""
+    assert "identify" not in {command.name for command in COMMANDS}
     controller.submit_message("/identify")
-    assert view.identify_overlays == 1
-    assert view.toasts() == []  # no refusal, no "start a session first"
+    assert view.identify_overlays == 0
+    assert any("identify" in message for message in view.toasts())
 
 
 def test_log_dispatches_to_the_view_with_no_session_of_any_kind(
     controller: SessionController, view: FakeChatView
 ) -> None:
-    """`/identify`'s rule again, and for the same reason: the harness log is
+    """No session gate, and for a good reason: the harness log is
     read when the automation has stopped making sense, which is routinely after
     a run wedged or ended. Gating it behind a live session would lock it away
     exactly when it is wanted, and the controller has nothing to add - every
@@ -1293,7 +1294,7 @@ def test_match_prefix_narrows_as_the_user_types() -> None:
     assert [c.name for c in match_prefix("/m")] == ["mcp", "mode"]  # registry order
     assert [c.name for c in match_prefix("/mo")] == ["mode"]
     assert [c.name for c in match_prefix("/mc")] == ["mcp"]
-    assert [c.name for c in match_prefix("/i")] == ["identify"]
+    assert [c.name for c in match_prefix("/i")] == []  # /identify is the Monitor UI's
     assert [c.name for c in match_prefix("/c")] == ["config"]
     assert [c.name for c in match_prefix("/n")] == ["new"]
     assert [c.name for c in match_prefix("/t")] == ["theme"]

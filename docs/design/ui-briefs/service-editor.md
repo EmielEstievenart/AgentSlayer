@@ -19,12 +19,15 @@
 > still binding. ("GUI" further down is the older name for the Chat UI; the
 > prose below is not rewritten.)
 >
-> **2026-08-27, ui-monitor.md §10:** `F2` and **Edit services...** open no
-> window at all now — they say where the Monitor UI is, which in local mode is
-> an `agentclip-monitor` process the Chat UI launched beside itself. With the
-> in-process case gone, so is the split above: there is one monitor, the editor
-> runs against it, and §10.4 records that a preset saved over there reaches the
-> Chat UI on its next config reload rather than through `on_config_change`.
+> **2026-08-27, ui-monitor.md §10 and §11.2:** §10 stopped `F2` and **Edit
+> services...** opening any window at all — they only said where the Monitor UI
+> is — and §11.2 **deleted both**, along with the titlebar's button, **Set chat
+> region...** and `/identify`. The editor is reached in the
+> `agentclip-monitor` window and nowhere else; the Chat UI's title *(F2)* above
+> is history. With the in-process case gone, so is the split above: there is one
+> monitor, the editor runs against it, and §10.4 records that a preset saved
+> over there reaches the Chat UI on its next config reload rather than through
+> `on_config_change`.
 
 
 Audience: engineers building a second frontend (pywebview/HTML/JS) to reach

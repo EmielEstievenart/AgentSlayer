@@ -359,8 +359,9 @@ class _NullMonitor:
 # window, opened from the app binary. ui-monitor.md 9.1 removed it - the
 # standalone door is ``agentclip-monitor`` and there is exactly one of it - so
 # what those tests checked is checked one file over, in ``test_main.py``. What
-# stays in the app is ``open_calibration_window``, the in-app door the Chat UI's
-# F2 uses, which is exercised by ``tests/shell/chat``.
+# stays is ``open_calibration_window``, the window assembly ``run_monitor_ui``
+# builds on - the Chat UI's F2 used it until ui-monitor.md 11.2 deleted that
+# door, so this binary is now its only caller.
 
 
 # == the import graph ========================================================

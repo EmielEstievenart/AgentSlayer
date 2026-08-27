@@ -6,19 +6,19 @@ refactor of an existing pattern; what it copies from ``shell.py`` and
 ``runner.py`` is their SHAPE, and the two-window facts that shape does not cover
 are spelled out below.
 
-**One pump, two windows.** ``webview.start()`` runs a native message pump on the
+**One pump, one window.** ``webview.start()`` runs a native message pump on the
 process's MAIN thread and returns only when the LAST window closes; calling it
-twice in one process is not a thing pywebview supports. So there are two entry
-points and they are not symmetric:
+twice in one process is not a thing pywebview supports. There used to be two
+entry points because the Chat UI opened this surface beside itself, inside the
+pump it already owned; ui-monitor.md §10.2 removed that door, and this window
+now only ever belongs to the monitor PROCESS.
 
-* :func:`run_monitor_ui` is the STANDALONE one (``agentclip-monitor``). It owns
+* :func:`run_monitor_ui` is the entry point (``agentclip-monitor``). It owns
   everything - the asyncio loop thread, the window, and the pump.
-* :func:`open_calibration_window` is the door a shell that is ALREADY pumping
-  uses (the chat GUI's titlebar button, phase 4B). It creates the window and
-  wires it, and returns; the running pump picks the new window up. It
-  deliberately does not call ``webview.start()`` and does not own a loop - the
-  caller passes ``schedule``, which in the chat GUI is ``GuiRunner.schedule``,
-  so both windows' work runs on the one loop that shell already has.
+* :func:`open_calibration_window` is the window creation on its own, still
+  separate because it does NOT call ``webview.start()``: the standalone door
+  creates the window first and takes the main thread afterwards, and keeping
+  the two apart is what makes the creation testable without a pump.
 
 **The js_api is per window.** pywebview binds the object passed as ``js_api`` to
 that window's ``window.pywebview.api``, so the calibration page reaches
@@ -619,8 +619,7 @@ def build_monitor(
         clipboard=provider,
         clip_poll_interval_ms=config.clipboard.poll_interval_ms,
         # Where a box drawn in this window is remembered (regions.py). ``None``
-        # for the window the Chat UI opens beside itself: that monitor's regions
-        # are the session's, and the app already carries them.
+        # only where a caller wants the monitor's default location.
         regions_dir=regions_dir,
     )
 
@@ -634,11 +633,13 @@ def open_calibration_window(
 ) -> Any:
     """Create the window for ``runner`` and wire it. Does NOT start a pump.
 
-    The door for a shell that is already pumping (phase 4B's titlebar button):
-    pywebview shows a window created after ``start()`` as soon as the pump gets
-    round to it, and ``webview.start()`` may only ever be called once per
-    process. Standalone, :func:`run_monitor_ui` reaches this through
-    :func:`_run_window` and then takes the main thread.
+    Split from the pump because ``webview.start()`` may only ever be called once
+    per process and it has to be called from the MAIN thread: the caller creates
+    the window here and takes the main thread afterwards
+    (:func:`run_monitor_ui`). It was also, until ui-monitor.md §10.2, the door a
+    Chat UI already pumping used to open this surface beside itself - that
+    caller is gone, and with it the only reason two processes could ever have
+    been looking at one screen through two monitors.
     """
     with asset_dir() as assets:
         window = webview.create_window(
@@ -719,11 +720,11 @@ def _run_window(
     global_config_path: Path | None = None,
     serve: ServePanel | None = None,
 ) -> int:
-    """One window, one loop thread, one pump - what the standalone door is.
+    """One window, one loop thread, one pump - the whole of this binary's UI.
 
-    The other door is :func:`open_calibration_window`, which the Chat UI calls
-    from inside a pump it already owns; nothing below this function is shared
-    with it except the window creation it delegates to.
+    The only door since ui-monitor.md §10.2: the Chat UI opens no calibration
+    window of its own any more, so every surface made of pixels is reached
+    through a process that ran this function.
 
     Order is ``run_gui``'s and is the design's: the window is created with the
     ``js_api`` object first (pywebview injects the API at load), the bridge is

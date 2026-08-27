@@ -254,11 +254,12 @@ RULES: list[tuple[str, frozenset[str]]] = [
     ),
     # shell.chat: the CHAT UI (docs/design/gui.md section 2) - the window the
     # user looks at and types into, which `agentclip` launches. It drives the
-    # app + automation controllers over the OS seams, and it may reach the two
-    # packages beside it: `shell.webview` (the plumbing both windows are made
-    # of) and `shell.monitor_ui` (the Monitor UI, which it opens beside itself
-    # in local mode). It has a rule at all, where cli is unrestricted, because
-    # saying what a shell may reach for is cheapest before it reaches.
+    # app + automation controllers over the OS seams, and it may reach
+    # `shell.webview` (the plumbing both windows are made of). It may NOT reach
+    # `shell.monitor_ui`: since ui-monitor.md §10.2 the Monitor UI is a window
+    # of the monitor PROCESS and this shell neither opens nor hosts it. It has
+    # a rule at all, where cli is unrestricted, because saying what a shell may
+    # reach for is cheapest before it reaches.
     (
         "agentclip.shell.chat",
         frozenset(
@@ -267,15 +268,36 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.config",
                 "agentclip.driver.automation",
                 "agentclip.driver.clip",
-                # The machine the automation acts on. A shell CONSTRUCTS the
-                # monitor and hands it to the controller (ui-monitor.md 6.1) -
-                # which is a shell's job precisely because it is the launch
-                # question "whose screen is this?", the same shape as deciding
-                # which machine the executor runs on. The Chat UI builds a
-                # ``LocalUIMonitor``; 6.4's Monitor UI is built over one too,
-                # and only ever over a local one.
-                "agentclip.driver.monitor",
-                "agentclip.driver.screen",
+                # The machine, named module by module rather than as a package
+                # (§10.2/§10.3): the CONTRACT, a link over the wire and the
+                # handle that swaps one link for the next. Deliberately NOT
+                # ``driver.monitor.local`` - a Chat UI that could construct a
+                # LocalUIMonitor would have a second way to reach a screen, and
+                # two ways to reach a screen were §10.0's two bugs.
+                "agentclip.driver.monitor.auth",
+                "agentclip.driver.monitor.protocol",
+                "agentclip.driver.monitor.remote",
+                "agentclip.driver.monitor.switchable",
+                # ``driver.screen`` is likewise a LIST now, and everything on it
+                # is a VALUE TYPE the automation ports speak: a slot, a
+                # rectangle, an appearance kind, a captured frame. Nothing that
+                # LOOKS at a screen is reachable - no detector, no picker, no
+                # capture backend, no template matcher - which is what makes the
+                # Chat UI's exe able to exclude cv2/tkinter/Xlib by name
+                # (packaging/agentclip.spec).
+                "agentclip.driver.screen.slot",
+                "agentclip.driver.screen.region",
+                "agentclip.driver.screen.capture",
+                "agentclip.driver.screen.profile",
+                # The two that are still a REACH rather than a value, and the
+                # only ones: this window's own handle (which is where a snap
+                # back after an auto-send lands) and the profile store behind
+                # ``AutomationHost.profile_for``. The second is §10.3's one
+                # unpaid bill - the port wants a per-KIND answer and the
+                # monitor's is one boolean (``Watched.profiled``) - and it is
+                # named here so the day it moves, this line is what changes.
+                "agentclip.driver.screen.focus",
+                "agentclip.driver.screen.profile_store",
                 # The engine's VALUE types, and only ever as values: `Decision`
                 # is what an approval answer IS,
                 # `PendingAction` is what a gate is handed, and `Engine` is the
@@ -296,9 +318,8 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.protocol",
                 "agentclip.shell.app",
                 "agentclip.shell.chat",
-                # The Monitor UI it opens beside itself, and the plumbing both
-                # windows share. One-way: neither of those may import back.
-                "agentclip.shell.monitor_ui",
+                # The plumbing both windows share. One-way: it may not import
+                # back. ``shell.monitor_ui`` left this set with §10.2.
                 "agentclip.shell.webview",
                 "webview",
             }
@@ -366,7 +387,12 @@ RULES: list[tuple[str, frozenset[str]]] = [
 
 # Modules allowed to import agentclip.driver.clip / agentclip.driver.screen:
 # the shell and the launcher, plus the Driver's own core and monitor (which are
-# made of exactly those seams).
+# made of exactly those seams). ``shell.chat`` is still on it and that is a
+# NARROWER fact than it looks: its own rule above lists the four value modules
+# and the two reaches it may take out of ``driver.screen``, so this entry only
+# has to leave ``driver.clip`` open - the clipboard PROVIDER is still a launch
+# decision handed to the Chat UI (``[clipboard] provider``), read for its name
+# in the status bar and for the manual-mode ingest.
 CLIP_SCREEN_IMPORTERS = (
     "agentclip.cli",
     "agentclip.__main__",

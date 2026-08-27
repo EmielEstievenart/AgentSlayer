@@ -21,7 +21,7 @@ from agentclip.driver.clip.base import select_provider
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.executor.hosts.local import LocalHost
 from agentclip.shell.app.link import Link
-from agentclip.shell.app.monitor_launch import LaunchLocal
+from agentclip.shell.app.monitor_launch import LaunchLocal, SubprocessLauncher
 from agentclip.shell.chat.shell import (
     ASSET_PACKAGE,
     MIN_WINDOW_SIZE,
@@ -514,11 +514,14 @@ def test_a_bad_monitor_target_is_fatal_before_anything_is_started(
 def test_the_monitor_target_reaches_the_gui_resolved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Threaded like ``pending_connect``: resolved in ``main``, handed to
-    ``run_gui`` as the value type, and absent (None) on a launch that did not
-    ask. A ``MonitorTarget`` rather than the old pair since §9.2, because the
-    address is no longer all of it - a token rides along, and ``@name`` can put
-    an SSH hop in front of the whole thing."""
+    """Threaded like ``pending_connect``: resolved in ``main`` and handed to
+    ``run_gui`` as the value type. A ``MonitorTarget`` rather than the old pair
+    since §9.2, because the address is no longer all of it - a token rides
+    along, and ``@name`` can put an SSH hop in front of the whole thing.
+
+    All THREE values now reach the shell as they are (§10.2): an address to
+    dial, ``LaunchLocal`` for "start one here first", and ``None`` for a window
+    with no screen. ``main`` flattens none of them any more."""
     kwargs: dict[str, object] = {}
     monkeypatch.setattr(cli, "local_launch", lambda args: _launch(tmp_path))
     monkeypatch.setattr(
@@ -530,16 +533,21 @@ def test_the_monitor_target_reaches_the_gui_resolved(
         name="box:7777", host="box", port=7777
     )
 
-    # An ABSENT flag resolves too, and to LaunchLocal - there is no in-process
-    # monitor left to be the default by omission (§10.1). Until §10.2 teaches
-    # view.py the sentinel, ``main`` flattens it to the None that shell still
-    # reads as "local", which is what reaches run_gui for one phase.
+    # An ABSENT flag resolves to LaunchLocal - there is no in-process monitor
+    # left to be the default by omission (§10.1), so "no --monitor" means
+    # "start one on this PC and dial it".
     kwargs.clear()
     assert cli.main(["--project", str(tmp_path)]) == 0
+    assert isinstance(kwargs["monitor_target"], LaunchLocal)
+    # ...and the launcher that carries it out is handed over too: the real one,
+    # because deciding HOW a monitor process is spawned is a launch question.
+    assert isinstance(kwargs["launcher"], SubprocessLauncher)
+
+    # ``--monitor none`` is the third value, and the only one that reaches the
+    # shell as None: a window with no screen until the Monitor tab gives it one.
+    kwargs.clear()
+    assert cli.main(["--monitor", "none", "--project", str(tmp_path)]) == 0
     assert kwargs["monitor_target"] is None
-    assert isinstance(
-        cli.resolve_monitor_target(None, None, _launch(tmp_path).config, {}), LaunchLocal
-    )
 
 
 # == --monitor @name, the token's three sources, and --calibrate's epitaph =====

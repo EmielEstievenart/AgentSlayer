@@ -269,7 +269,6 @@ def test_every_key_action_reaches_the_binding_the_tui_makes() -> None:
     api.ingest()
     api.reinstruct()
     api.retry_insert()
-    api.service("chatgpt")
     api.window("m1-s1")
     api.next_window()
     api.end_session()
@@ -282,7 +281,10 @@ def test_every_key_action_reaches_the_binding_the_tui_makes() -> None:
         ("force_ingest",),
         ("reinstruct",),
         ("retry_insert",),
-        ("set_service", "chatgpt"),
+        # ``service`` used to sit here. It left with ui-monitor.md §10.5: the
+        # service is the MONITOR's, the sidebar shows a read-only line, and a
+        # verb that could send a key from this side would be a control quietly
+        # disagreeing with the process driving the browser.
         # Increment 3's: the two tab moves are pure view-side navigation (no
         # controller call is made for either) and `e` is gated on the far side.
         ("select_window", "m1-s1"),
@@ -291,14 +293,13 @@ def test_every_key_action_reaches_the_binding_the_tui_makes() -> None:
     ]
 
 
-def test_a_bare_armed_toggles_and_a_bare_service_is_a_no_key() -> None:
+def test_a_bare_armed_toggles() -> None:
     """``armed``'s default is the bare ``/armed`` and F5 - toggle - and every
     other parameter defaults to "the user said nothing"."""
     calls = Calls()
     api = JsApi(calls)
     api.armed()
-    api.service()
-    assert calls.trace == [("set_os_armed", None), ("set_service", "")]
+    assert calls.trace == [("set_os_armed", None)]
 
 
 def test_the_js_api_methods_take_the_page_s_defaults() -> None:

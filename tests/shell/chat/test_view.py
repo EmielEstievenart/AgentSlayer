@@ -27,9 +27,14 @@ from agentclip.engine.engine import Decision, PendingAction, Phase, StatusSnapsh
 from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app.types import SessionRef, SessionSpec
 from agentclip.shell.app.view import ChatView, RunCall, SessionView
-from agentclip.shell.chat.view import MASTER_WINDOW, SUBAGENT_WINDOW, GuiView
+from agentclip.shell.chat.view import (
+    CALIBRATION_ELSEWHERE,
+    MASTER_WINDOW,
+    SUBAGENT_WINDOW,
+    GuiView,
+)
 from agentclip.shell.webview.bridge import JsApi
-from tests.shell.chat.conftest import Harness, settle
+from tests.shell.chat.conftest import HARNESS_SERVICE, Harness, settle
 
 
 def port_methods(port: type) -> list[str]:
@@ -740,6 +745,37 @@ async def test_prompt_new_session_is_inline_and_the_composer_send_resolves_it(
     assert harness.flush().of_type("composer_reset")
 
 
+async def test_the_session_is_built_for_the_service_the_monitor_is_driving(
+    harness: Harness,
+) -> None:
+    """§10.5, at the one place it decides the most: the bootstrap's BUDGET.
+
+    A session is sized against the preset the engine is built from, and that
+    preset is looked up by the key on the ``SessionSpec`` this view fills in. So
+    a Chat UI still reading its own ``general.service`` would size the bootstrap
+    for one service and paste it into another - which is a session that either
+    refuses to start or overruns the chat it is actually running in.
+
+    The harness's monitor drives ``claude``; this host's config names a
+    different preset with a different budget, and the spec has to carry the
+    monitor's.
+    """
+    view = harness.view
+    host_default = view._config.general.service
+    assert host_default != HARNESS_SERVICE
+
+    pending = asyncio.ensure_future(view.prompt_new_session())
+    await settle()
+    view.submit_text("rename the helper")
+    spec = await pending
+
+    assert spec is not None
+    assert spec.service == HARNESS_SERVICE
+    monitored = view._config.services[HARNESS_SERVICE]
+    assert monitored.max_paste_chars != view._config.services[host_default].max_paste_chars
+    assert view.live_preset().max_paste_chars == monitored.max_paste_chars
+
+
 async def test_a_slash_line_at_the_task_prompt_is_a_command_not_a_task(
     harness: Harness,
 ) -> None:
@@ -833,20 +869,92 @@ def test_exit_app_closes_the_window(harness: Harness) -> None:
     assert harness.exits == 1
 
 
-def test_no_port_method_is_reduced_scope_any_more(harness: Harness) -> None:
-    """The list this used to parametrize over is empty.
+def test_identify_names_the_window_the_overlay_is_drawn_from(harness: Harness) -> None:
+    """The list this test used to parametrize over is empty.
 
-    ``toggle_harness_log`` came off it with parity increment 2 (the pane landed),
-    the three session-view methods with increment 3, and the last two -
-    ``show_identify_overlay`` and ``paint_elements`` - with increment 4. Neither
-    of those two is drawn by THIS window any more (ui-monitor.md 6.4), and that
-    is not a re-reduction: ``/identify`` opens the window it is drawn from, which
-    is a real answer to the command rather than a toast saying no.
+    ``toggle_harness_log`` came off it with parity increment 2 (the pane
+    landed), the three session-view methods with increment 3, and the last two -
+    ``show_identify_overlay`` and ``paint_elements`` - with increment 4.
+
+    Since ui-monitor.md §10.2 ``/identify`` is one sentence rather than a window
+    this shell opens, and that is still not a reduction: the overlay is thrown
+    over the BROWSER, on the machine the browser is on, so the honest answer to
+    the command is where to go and see it. There is no second window for this
+    process to open any more, and the sentence names both places the Monitor UI
+    can be, because the answer does not depend on which.
     """
-    view = harness.view
-    view.show_identify_overlay()
-    assert view._calibration is not None, "/identify went nowhere"
-    assert not harness.flush().of_type("toast")
+    harness.view.show_identify_overlay()
+    toasts = [event["message"] for event in harness.flush().of_type("toast")]
+    assert CALIBRATION_ELSEWHERE in toasts
+
+
+def test_every_calibration_door_gives_the_same_one_sentence(harness: Harness) -> None:
+    """F2 / the titlebar's **monitor UI** button, **Edit services...**, **Set
+    chat region...** and ``/identify`` are four affordances and one answer.
+
+    Four, because they used to open four different surfaces and the page still
+    names the errands separately (a user going to edit a preset and a user going
+    to draw a box want different things over there). One answer, because every
+    one of those surfaces belongs to the monitor process now.
+    """
+    for door in (harness.view.open_calibration, harness.view.show_identify_overlay):
+        harness.recorder.clear()
+        door()
+        toasts = [event["message"] for event in harness.flush().of_type("toast")]
+        assert toasts == [CALIBRATION_ELSEWHERE]
+
+
+async def test_a_generation_the_view_has_not_seen_re_reads_what_is_watched(
+    harness: Harness,
+) -> None:
+    """§10.5's back channel: a service picked or a region redrawn in the MONITOR's
+    own window reaches this one with no frame from the brain at all.
+
+    The monitor bumps its generation when it retargets itself, and that stamp
+    rides every tick. So an arriving tick whose generation the view has not seen
+    is the signal to ask again - and asking is ``watched()``, never ``watch()``,
+    because a second retarget would bump the generation once more and the two
+    would chase each other.
+    """
+    monitor = harness.monitor
+    before = monitor.generations
+    monitor.retarget()  # what the Monitor UI's own tab switch does over there
+    assert monitor.generations != before
+
+    harness.view._on_monitor_tick(monitor.make_tick(generation=monitor.generations))
+    assert harness.scheduled[-1].endswith("_reread_watched")
+
+    await harness.view._reread_watched()
+    assert ("watched", ()) in monitor.calls
+    assert harness.view._watched_generation == monitor.generations
+
+
+def test_a_tick_carrying_the_generation_already_read_asks_nothing(
+    harness: Harness,
+) -> None:
+    """The other half: one read per retarget, not one per tick. A monitor pushes
+    several ticks a second and a round trip on each of them would be a round trip
+    per frame over a socket."""
+    harness.scheduled.clear()
+    tick = harness.monitor.make_tick(generation=harness.monitor.generations)
+    harness.view._on_monitor_tick(tick)
+    harness.view._on_monitor_tick(tick)
+    assert harness.scheduled == []
+
+
+def test_the_detection_readout_comes_off_the_tick_not_off_a_detector(
+    harness: Harness,
+) -> None:
+    """Which finish detectors are running is a fact about the monitor's
+    configuration, and it rides every tick (``Tick.active_detectors``).
+
+    This shell used to read it off a ``ScreenDetector`` it owned. There is no
+    such object here since §10.2, and this is the seam that replaced it: the
+    subscription the view takes out on the handle in its constructor.
+    """
+    harness.view.automation.active_detectors = ()
+    harness.monitor.feed(harness.monitor.make_tick(active_detectors=("busy", "stale")))
+    assert harness.view.automation.active_detectors == ("busy", "stale")
 
 
 async def test_delegation_is_unavailable_and_says_what_is_missing(harness: Harness) -> None:

@@ -31,11 +31,13 @@ from agentclip.shell.chat.view import (
     COPY_RESTING,
     DETECTOR_LABEL,
     PROBE_RESTING,
+    SERVICE_UNWATCHED,
     STALE_UNSET,
+    SUBAGENT_WINDOW,
     GuiView,
 )
 from agentclip.shell.webview.bridge import JsApi
-from tests.shell.chat.conftest import Harness
+from tests.shell.chat.conftest import HARNESS_SERVICE, Harness
 from tests.shell.chat.test_view import ControllerSpy, session_view, snapshot
 
 ASSETS = Path(__file__).resolve().parents[3] / "src" / "agentclip" / "shell" / "chat" / "assets"
@@ -449,8 +451,11 @@ def test_the_sidebar_carries_every_block_the_column_draws(harness: Harness) -> N
     harness.view.start()
     event = harness.flush().last("sidebar")
     assert event["project"].endswith("project")
-    assert [pair[0] for pair in event["services"]] == sorted(harness.view._config.services)
-    assert event["service"] in harness.view._config.services
+    # The SERVICE line is READ-ONLY since §10.5: it names the key the MONITOR
+    # answered with, and says where that came from, instead of offering a list
+    # this window could pick out of.
+    assert event["service"] == f"Claude.ai ({HARNESS_SERVICE}) · from the monitor"
+    assert "services" not in event
     # Both units on the budget caption: characters because that is what the
     # preset is configured in, the token estimate because that is what says
     # whether the budget is big enough (``shell/app/sizes.py``).
@@ -471,14 +476,20 @@ def test_the_detection_heading_follows_the_live_window(harness: Harness) -> None
     assert harness.flush().last("sidebar")["detection_title"] == "DETECTION · SUB-AGENT"
 
 
-def test_the_service_picker_is_locked_except_between_sessions(harness: Harness) -> None:
-    """The master's budget is baked into its Engine at bootstrap, so the preset
-    may not move mid-session."""
-    harness.view._push_sidebar()
-    assert harness.flush().last("sidebar")["locked"] is True
-    harness.view._awaiting_new_session = True
-    harness.view._push_sidebar()
-    assert harness.flush().last("sidebar")["locked"] is False
+def test_the_service_line_says_so_when_the_monitor_has_not_answered(
+    harness: Harness,
+) -> None:
+    """A window the monitor has said nothing about - no link yet, or a monitor
+    with nothing configured for it - gets an honest line rather than a blank.
+
+    The sub-agent tab is that window in the default harness: only the LIVE slot
+    has been watched, and looking at a tab is not driving it (§10.5's
+    ``watch(slot)`` is the retarget, not the selection).
+    """
+    harness.view.select_window(SUBAGENT_WINDOW)
+    event = harness.flush().last("sidebar")
+    assert event["service"] == SERVICE_UNWATCHED
+    assert event["service_label"] == ""
 
 
 async def test_a_rebuilt_detector_paints_the_resting_lines_it_owns(harness: Harness) -> None:
@@ -786,50 +797,41 @@ def test_w_pauses_and_resumes_a_running_watcher(harness: Harness) -> None:
         view.automation.stop_input()
 
 
-def test_the_service_picker_moves_the_window_and_remembers_the_pick(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_there_is_no_way_at_all_to_pick_a_service_from_this_window(
+    harness: Harness,
 ) -> None:
-    """The same path ``MainScreen._on_service_changed`` takes: the key lands in
-    the window's slot, the pick is written back to the global config so the next
-    launch comes up on it, and the detectors are rebuilt because a different
-    service is a different set of captured appearances."""
-    saved: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        "agentclip.shell.chat.view.save_active_services",
-        lambda master, sub: saved.append((master, sub)),
-    )
+    """§10.5, stated as an absence.
+
+    The service is the monitor's, so there is no ``set_service`` on the view, no
+    ``service`` verb on the bridge and no ``<select>`` on the page - three
+    surfaces, because a leftover on any one of them is a control that either
+    throws or, worse, quietly disagrees with the machine driving the browser.
+    """
+    from importlib.resources import files
+
+    from agentclip.shell.webview.bridge import JsApi, JsCalls
+
+    assert not hasattr(harness.view, "set_service")
+    assert not hasattr(JsApi, "service")
+    assert not hasattr(JsCalls, "set_service")
+    html = (files("agentclip.shell.chat.assets") / "index.html").read_text(encoding="utf-8")
+    assert "<select id=\"service-select\"" not in html
+
+
+def test_the_service_the_monitor_answers_with_is_the_one_the_brain_acts_on(
+    harness: Harness,
+) -> None:
+    """The whole of §10.5 in one read: the key, the budgets and the fences the
+    session builder and the recipes use all come out of ``Watched``, not out of
+    this host's ``[services.*]`` table (whose ``general.service`` is a different
+    preset entirely)."""
     view = harness.view
-    view._awaiting_new_session = True  # unlocked between sessions
-    other = next(key for key in sorted(view._config.services) if key != view._service_for(AgentSlot.MASTER))
-
-    api_of(harness).service(other)
-
-    assert view._service_for(AgentSlot.MASTER) == other
-    assert saved and saved[0][0] == other
-    assert harness.flush().last("sidebar")["service"] == other
-
-
-def test_the_picker_refuses_mid_session_and_repaints_itself(harness: Harness) -> None:
-    """The lock is the page's, and this is the door the lock cannot cover: an
-    answer that arrived anyway is refused and the picker is put back."""
-    view = harness.view
-    before = view._service_for(AgentSlot.MASTER)
-    other = next(key for key in sorted(view._config.services) if key != before)
-
-    api_of(harness).service(other)
-
-    assert view._service_for(AgentSlot.MASTER) == before
-    recorder = harness.flush()
-    assert any("fixed while a session runs" in e["message"] for e in recorder.of_type("toast"))
-    assert recorder.last("sidebar")["service"] == before
-
-
-def test_an_unknown_service_key_is_ignored(harness: Harness) -> None:
-    view = harness.view
-    view._awaiting_new_session = True
-    before = view._service_for(AgentSlot.MASTER)
-    api_of(harness).service("no-such-service")
-    assert view._service_for(AgentSlot.MASTER) == before
+    assert view._config.general.service != HARNESS_SERVICE
+    preset = view.live_preset()
+    monitored = view._config.services[HARNESS_SERVICE]
+    assert preset.key == HARNESS_SERVICE
+    assert preset.max_paste_chars == monitored.max_paste_chars
+    assert preset.total_context_chars == monitored.total_context_chars
 
 
 def test_every_key_action_is_on_the_view_the_runner_marshals_to() -> None:
@@ -844,7 +846,6 @@ def test_every_key_action_is_on_the_view_the_runner_marshals_to() -> None:
         "force_ingest",
         "reinstruct",
         "retry_insert",
-        "set_service",
     ):
         assert callable(getattr(GuiView, name, None)), name
 

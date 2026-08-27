@@ -21,12 +21,13 @@ from agentclip.engine.engine import Phase
 from agentclip.shell.app.types import SessionRef
 from agentclip.shell.chat.view import (
     MASTER_WINDOW,
+    SERVICE_UNWATCHED,
     SLOT_NOTE_MASTER,
     SUBAGENT_WINDOW,
     GuiView,
 )
 from agentclip.shell.webview.bridge import JsApi
-from tests.shell.chat.conftest import Harness, settle
+from tests.shell.chat.conftest import HARNESS_SERVICE, Harness, settle
 from tests.shell.chat.test_chrome import KeySpy, api_of
 from tests.shell.chat.test_view import session_view, snapshot
 
@@ -284,16 +285,19 @@ async def test_the_controller_focusing_a_run_moves_the_view_with_it(
 
 def test_every_per_window_block_follows_the_selection(harness: Harness) -> None:
     """Picking a tab shows a window's transcript AND points every per-window
-    control at that window (``MainScreen._select_window``)."""
+    readout at that window (``MainScreen._select_window``).
+
+    The SERVICE line follows it too, and since §10.5 it follows it to the
+    monitor's answer ABOUT that window: the sub-agent tab has none until a
+    delegation makes that slot live, so it says so rather than borrowing the
+    master's.
+    """
     view = harness.view
-    view._awaiting_new_session = True
-    other = next(key for key in sorted(view._config.services) if key != view._service_for(AgentSlot.MASTER))
-    view.automation.set_service(SUBAGENT_WINDOW, other)
 
     view.select_window(SUBAGENT_WINDOW)
     event = harness.flush().last("sidebar")
     assert event["window"] == SUBAGENT_WINDOW
-    assert event["service"] == other
+    assert event["service"] == SERVICE_UNWATCHED
     # The readiness line is the sub-agent window's, and nothing is calibrated
     # here, so it names the gaps rather than claiming delegation is on.
     assert event["slot_note"].startswith("delegation off · need: ")
@@ -301,6 +305,7 @@ def test_every_per_window_block_follows_the_selection(harness: Harness) -> None:
     view.select_window(MASTER_WINDOW)
     event = harness.flush().last("sidebar")
     assert event["window"] == MASTER_WINDOW
+    assert event["service"].endswith("· from the monitor")
     assert event["slot_note"] == SLOT_NOTE_MASTER
 
 
@@ -315,27 +320,24 @@ def test_the_detection_heading_still_names_the_live_window_not_the_selected_one(
     assert harness.flush().last("sidebar")["detection_title"] == "DETECTION · SUB-AGENT"
 
 
-def test_the_service_picker_edits_the_selected_window(
-    harness: Harness, monkeypatch: pytest.MonkeyPatch
+async def test_a_tab_carries_the_service_the_monitor_answered_for_its_window(
+    harness: Harness,
 ) -> None:
-    saved: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        "agentclip.shell.chat.view.save_active_services",
-        lambda master, sub: saved.append((master, sub)),
-    )
+    """The service key is part of what a tab IS - and since §10.5 it is the
+    monitor's answer for that window, not a pick this shell made.
+
+    The sub-agent tab carries none until the automation moves the LIVE slot
+    there, which is what a delegation does: that retarget is a ``watch``, and
+    the answer to it is where the tab's label comes from.
+    """
     view = harness.view
-    view._awaiting_new_session = True
-    before = view._service_for(AgentSlot.MASTER)
-    other = next(key for key in sorted(view._config.services) if key != before)
+    view._push_tabs()
+    assert tabs(harness)[MASTER_WINDOW]["label"].endswith(f"· {HARNESS_SERVICE}")
+    assert tabs(harness)[SUBAGENT_WINDOW]["label"] == "SUB-AGENT"
 
-    view.select_window(SUBAGENT_WINDOW)
-    api_of(harness).service(other)
-
-    assert view.automation.service_of(SUBAGENT_WINDOW) == other
-    assert view.automation.service_of(MASTER_WINDOW) == before  # untouched
-    assert saved and saved[-1] == (before, other)
-    # ...and the tab says so: the service key is part of what a tab IS.
-    assert tabs(harness)[SUBAGENT_WINDOW]["label"].endswith(f"· {other}")
+    view.automation.select_live_slot(AgentSlot.SUBAGENT)
+    await view._retarget_monitor()
+    assert tabs(harness)[SUBAGENT_WINDOW]["label"].endswith(f"· {HARNESS_SERVICE}")
 
 
 # == /new keeps the windows and forgets the runs ==============================
@@ -345,7 +347,6 @@ async def test_a_reset_forgets_the_runs_and_keeps_both_windows(harness: Harness)
     """Session/run bookkeeping resets; window calibration does not. The tab
     drops its ``✓`` because the runs are gone, not because the window is."""
     view = harness.view
-    view.automation.set_service(SUBAGENT_WINDOW, view._service_for(AgentSlot.MASTER))
     await view.open_session_view(sub_ref())
     await view.finish_session_view("sub-1", "✓ delivered", ok=True)
 
@@ -357,9 +358,10 @@ async def test_a_reset_forgets_the_runs_and_keeps_both_windows(harness: Harness)
     assert event["selected"] == MASTER_WINDOW and event["focused"] == MASTER_WINDOW
     assert view._sub_runs == []
     assert not view.has_transcript_events()
-    # The calibrations and the services are facts about the browser, not about
-    # the session that just ended.
-    assert view.automation.service_of(SUBAGENT_WINDOW)
+    # The calibrations are facts about the browser, not about the session that
+    # just ended - and the service is a fact about the MONITOR, which a /new
+    # over here cannot touch at all (§10.5).
+    assert view._service_for(AgentSlot.MASTER) == HARNESS_SERVICE
 
 
 # == the session summary =======================================================

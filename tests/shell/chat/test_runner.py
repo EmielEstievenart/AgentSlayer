@@ -21,7 +21,7 @@ from agentclip.config import Config
 from agentclip.driver.clip.base import select_provider
 from agentclip.shell.chat.runner import GuiRunner
 from agentclip.shell.webview.bridge import JsCalls
-from tests.shell.chat.conftest import Recorder
+from tests.shell.chat.conftest import FakeLauncher, Recorder
 
 
 def build(project: Path, config: Config, tmp_path: Path, **kwargs: object) -> GuiRunner:
@@ -42,6 +42,37 @@ def wait_for(predicate, what: str, timeout: float = 5.0) -> None:  # type: ignor
             return
         time.sleep(0.01)
     raise AssertionError(f"timed out waiting for {what}")
+
+
+def test_the_teardown_stops_the_local_monitor_child_after_the_link(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """§10.1's last line: a monitor this window started dies with this window.
+
+    AFTER the wire link is closed and not before - the child terminates either
+    way, and stopping it first would turn an orderly close of the socket into a
+    dropped link the teardown then reports as a failure it caused itself.
+    """
+    launcher = FakeLauncher()
+    launcher.start(project)  # as a landed launch leaves it
+    runner = build(project, app_config, tmp_path, launcher=launcher)
+    runner.start()
+    runner.stop()
+    assert launcher.stops == 1
+    assert not launcher.alive()
+
+
+def test_a_teardown_with_no_child_stops_nothing_and_does_not_mind(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """``--monitor none``, a remote target, or a launch that never happened: the
+    stop is unconditional and the launcher is the thing that knows it owns
+    nothing."""
+    launcher = FakeLauncher()
+    runner = build(project, app_config, tmp_path, launcher=launcher)
+    runner.start()
+    runner.stop()
+    assert launcher.starts == 0
 
 
 # == the loop ==================================================================
@@ -251,7 +282,6 @@ def test_every_key_action_marshals_onto_the_loop_too(
         "force_ingest",
         "reinstruct",
         "retry_insert",
-        "set_service",
     ):
         setattr(runner.view, name, spy(name))
     try:
@@ -264,12 +294,11 @@ def test_every_key_action_marshals_onto_the_loop_too(
                 runner.js_api.ingest(),
                 runner.js_api.reinstruct(),
                 runner.js_api.retry_insert(),
-                runner.js_api.service("chatgpt"),
             )
         )
         caller.start()
         caller.join()
-        wait_for(lambda: len(seen) == 8, "every key action to land on the loop")
+        wait_for(lambda: len(seen) == 7, "every key action to land on the loop")
         assert seen == [
             "set_os_armed",
             "cycle_permission_mode",
@@ -278,7 +307,6 @@ def test_every_key_action_marshals_onto_the_loop_too(
             "force_ingest",
             "reinstruct",
             "retry_insert",
-            "set_service",
         ]
     finally:
         runner.stop()

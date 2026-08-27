@@ -30,31 +30,46 @@ from agentclip.config import Config, MonitorTarget, load_config
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.monitor.fake import FakeUIMonitor
-from agentclip.driver.monitor.local import LocalUIMonitor
-from agentclip.driver.monitor.switchable import SwitchableMonitor
+from agentclip.driver.monitor.protocol import spec_from_preset
+from agentclip.driver.monitor.switchable import IdleMonitor, SwitchableMonitor
 from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.shell.chat import view as view_module
 from agentclip.shell.chat.remote import (
     MONITOR_BAD_TOKEN,
     MONITOR_CONNECT_FIRST,
     MONITOR_MISSING_HOST,
 )
-from agentclip.shell.chat.view import CALIBRATION_REMOTE, GuiView
+from agentclip.shell.chat.view import CALIBRATION_ELSEWHERE, MONITOR_NONE, GuiView
 from agentclip.shell.webview.bridge import Bridge
 
-from .conftest import Recorder
+from .conftest import HARNESS_SERVICE, FakeLauncher, Recorder
 
 TOKEN = "a" * 32
 PEER = "10.0.0.5:7777"
 
 
 class ScriptedLink(FakeUIMonitor):
-    """A dialled monitor: the fake, plus the three members only a LINK has."""
+    """A dialled monitor: the fake, plus the three members only a LINK has.
 
-    def __init__(self, *, server_id: str = "monitor-1", peer: str = PEER) -> None:
+    It runs a REAL service for both windows, because since §10.5 that is what
+    the brain reads its whole preset off: a link answering ``watch`` with the
+    double's zero-budget default would hand the session builder a paste budget
+    no monitor can be in.
+    """
+
+    def __init__(
+        self,
+        *,
+        server_id: str = "monitor-1",
+        peer: str = PEER,
+        service: str = HARNESS_SERVICE,
+    ) -> None:
         super().__init__(clipboard=select_provider("manual"))
         self.server_id = server_id
         self.peer = peer
+        preset = load_config(Path("."), global_config_path=Path("no-such")).services[service]
+        self.specs_for = {slot: spec_from_preset(preset) for slot in AgentSlot}
         self.disconnect_hooks: list[Callable[[], None]] = []
 
     def on_disconnect(self, hook: Callable[[], None]) -> Callable[[], None]:
@@ -123,7 +138,6 @@ class Tab:
         self.recorder = recorder
         self.bridge = bridge
         self.dial = dial
-        self.calibrations = 0
 
     def flush(self) -> Recorder:
         self.bridge.drain_pending()
@@ -178,6 +192,7 @@ def build(
     *,
     global_path: Path | None = None,
     host: Any = None,
+    launcher: FakeLauncher | None = None,
 ) -> Tab:
     recorder = Recorder()
     bridge = Bridge(recorder)
@@ -198,9 +213,12 @@ def build(
         # nothing (``test_monitor_link.py``'s bargain).
         schedule=lambda coro: asyncio.ensure_future(coro),
         dial=dial,
-        open_calibration=lambda *_a: holder["t"].__setattr__(
-            "calibrations", holder["t"].calibrations + 1
-        ),
+        # This suite is about the TAB: every view here starts with no monitor at
+        # all (``--monitor none``), which is also the state a Disconnect leaves
+        # one in, and dials from the form. The local-launch door has its own
+        # tests below and passes its own launcher.
+        monitor_target=None,
+        launcher=launcher if launcher is not None else FakeLauncher(),
     )
     holder["t"] = Tab(view, recorder, bridge, dial)
     return holder["t"]
@@ -209,6 +227,21 @@ def build(
 async def settle(times: int = 40) -> None:
     for _ in range(times):
         await asyncio.sleep(0)
+
+
+async def until(done: Callable[[], bool], what: str, times: int = 400) -> None:
+    """Turn the loop until ``done`` - the shape a REDIAL has to be waited for in.
+
+    A fixed number of turns is fine for a dial (one round trip, a known number
+    of awaits); a backoff round is a sleep, a dial, a ``watch`` and a repaint,
+    and how many turns that comes to is an implementation detail no test should
+    be pinning by accident.
+    """
+    for _ in range(times):
+        if done():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError(f"timed out waiting for {what}")
 
 
 @pytest.fixture(autouse=True)
@@ -224,18 +257,20 @@ def _instant_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_a_local_window_runs_over_a_switchable_handle_around_a_local_monitor(
     project: Path, app_config: Config, tmp_path: Path
 ) -> None:
-    """§9.2's one structural change: the controller is handed a
-    ``SwitchableMonitor`` even with no ``--monitor`` flag, whose inner is the
-    ordinary ``LocalUIMonitor``. That is what makes a mid-session dial a swap
-    rather than a rebuild - and what makes the way back a swap too."""
+    """§9.2's structural change, taken all the way by §10.2: the controller is
+    handed a ``SwitchableMonitor`` in every mode, and it now starts INERT rather
+    than around an in-process monitor. That is what makes a dial a swap rather
+    than a rebuild - and the reason there is nothing to rebuild is that this
+    window hosts no monitor at all."""
     tab = build(project, app_config, tmp_path, Dialler(ScriptedLink()))
 
     assert isinstance(tab.view.monitor, SwitchableMonitor)
-    assert isinstance(tab.inner, LocalUIMonitor)
-    # ...and the local-only tier still answers through the handle, which is
-    # what the DETECTION block and the ELEMENTS surface read.
-    assert tab.view.monitor.self_writes is tab.inner.self_writes
+    assert isinstance(tab.inner, IdleMonitor)
+    # ...and an inert handle still ANSWERS every verb, which is the other half
+    # of why nothing has to be rebuilt: a brain that acts before a link is up
+    # takes the branch it would take against an uncalibrated screen.
     tab.view.monitor.reset_trackers()  # forwarded, and not an AttributeError
+    assert tab.view.monitor.self_writes is not None
 
 
 # == the form ==================================================================
@@ -353,8 +388,8 @@ async def test_a_wrong_token_lands_on_the_dialogs_failed_phase(
     assert event["phase"] == "failed"
     assert "bad or missing token" in event["failure"]
     # ...and the failed attempt left no redial loop chasing that machine: the
-    # window is still watching the screen it was watching before.
-    assert isinstance(tab.inner, LocalUIMonitor)
+    # window is where it was before, which here is attached to nothing.
+    assert isinstance(tab.inner, IdleMonitor)
 
 
 # == the Via-SSH dial ==========================================================
@@ -444,7 +479,7 @@ async def test_a_redial_over_ssh_opens_a_fresh_tunnel(
     await settle()
 
     first.drop()
-    await settle(80)
+    await until(lambda: tab.inner is second, "the redial to land on a fresh link")
 
     assert len(host.tunnels) == 2
     assert host.tunnels[0].closes == 1
@@ -454,12 +489,17 @@ async def test_a_redial_over_ssh_opens_a_fresh_tunnel(
 # == letting go ================================================================
 
 
-async def test_disconnect_swaps_a_local_monitor_back_and_reopens_calibration(
+async def test_disconnect_leaves_no_monitor_at_all_and_never_falls_back(
     project: Path, app_config: Config, tmp_path: Path
 ) -> None:
-    """The swap in the other direction, and it is the same swap. The calibration
-    door - closed for as long as the pixels were on another machine (§6.4) -
-    opens again, because they are back on this one."""
+    """§10.2's flip: there is nothing to swap BACK to.
+
+    A disconnect used to build a fresh ``LocalUIMonitor`` and point the handle
+    at this machine's screen. There is no in-process monitor any more, and
+    quietly launching a child instead would make the button mean "attach a
+    different one" - so the handle goes inert, the loop parks, and the badge
+    says NO MONITOR until the user attaches or launches one.
+    """
     link = ScriptedLink()
     tab = build(project, app_config, tmp_path, Dialler(link))
     tab.view.start()
@@ -469,20 +509,121 @@ async def test_disconnect_swaps_a_local_monitor_back_and_reopens_calibration(
     tab.view.monitor_start()
     await settle()
 
-    tab.view.open_calibration()
-    assert tab.calibrations == 0
-    assert CALIBRATION_REMOTE in tab.toasts()
-
     tab.view.monitor_disconnect()
     await settle()
 
-    assert isinstance(tab.inner, LocalUIMonitor)
+    assert isinstance(tab.inner, IdleMonitor)
     assert link.closed
     assert tab.event()["attached"] == ""
-    assert tab.view.automation.loop_state is LoopState.IDLE
+    assert tab.view.automation.loop_state is LoopState.DISCONNECTED
+    assert MONITOR_NONE in tab.toasts()
+    # ...and nothing dials again on its own: the detach was deliberate.
+    dialled = len(tab.dial.dialled)
+    await settle(80)
+    assert len(tab.dial.dialled) == dialled
 
+
+async def test_disconnect_stops_the_child_this_window_launched(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """A monitor WE started is a process we own; one somebody else started is
+    not. So the stop is conditional on having launched it, and the launch door
+    is the only thing that sets that."""
+    launcher = FakeLauncher()
+    tab = build(project, app_config, tmp_path, Dialler(ScriptedLink()), launcher=launcher)
+    tab.view.start()
+    await settle()
+    tab.view.monitor_open()
+    tab.view.monitor_fields("local", "", "", "", "")
+    tab.view.monitor_start()
+    await settle()
+    assert launcher.starts == 1
+
+    tab.view.monitor_disconnect()
+    await settle()
+    assert launcher.stops == 1
+    assert tab.flush().last("monitor_link")["state"] == "none"
+
+
+async def test_disconnect_leaves_a_monitor_somebody_else_started_running(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    launcher = FakeLauncher()
+    tab = build(project, app_config, tmp_path, Dialler(ScriptedLink()), launcher=launcher)
+    tab.view.start()
+    await settle()
+    tab.view.monitor_open()
+    tab.view.monitor_fields("direct", "10.0.0.5", "7777", TOKEN, "")
+    tab.view.monitor_start()
+    await settle()
+
+    tab.view.monitor_disconnect()
+    await settle()
+    assert launcher.starts == 0
+    assert launcher.stops == 0
+
+
+async def test_local_mode_launches_a_child_and_dials_the_port_it_chose(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """The third mode (§10.2). No host, no port, no token in the form: the
+    launcher picks the port and the token is the file both processes read, so
+    what the button does is spawn one and dial what came back."""
+    launcher = FakeLauncher()
+    tab = build(project, app_config, tmp_path, Dialler(ScriptedLink()), launcher=launcher)
+    tab.view.start()
+    await settle()
+    tab.view.monitor_open()
+    tab.view.monitor_fields("local", "", "", "", "")
+    tab.view.monitor_start()
+    await settle()
+
+    assert launcher.starts == 1
+    assert tab.dial.dialled == [("127.0.0.1", 45678)]
+    badge = tab.flush().last("monitor_link")
+    assert (badge["state"], badge["peer"]) == ("up", "local")
+    # The dialog says it landed, and offers no save: there is no address to save.
+    event = tab.event()
+    assert (event["attached"], event["can_save"]) == ("local", False)
+
+
+async def test_a_local_launch_that_refuses_lands_on_the_form(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """A spawn that failed is not a dial that failed: nothing was ever started,
+    and the sentence has to say which of the two it was."""
+    launcher = FakeLauncher()
+    launcher.refuse = OSError("no agentclip-monitor beside this one")
+    tab = build(project, app_config, tmp_path, Dialler(ScriptedLink()), launcher=launcher)
+    tab.view.start()
+    await settle()
+    tab.view.monitor_open()
+    tab.view.monitor_fields("local", "", "", "", "")
+    tab.view.monitor_start()
+    await settle()
+
+    assert tab.dial.dialled == []
+    assert "could not start a local monitor" in tab.event()["failure"]
+
+
+async def test_the_calibration_doors_all_point_at_the_monitor_ui(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """One sentence, with no branch on where the pixels are: this window hosts
+    none of those surfaces either way (§10.2)."""
+    tab = build(project, app_config, tmp_path, Dialler(ScriptedLink()))
+    tab.view.start()
+    await settle()
     tab.view.open_calibration()
-    assert tab.calibrations == 1
+    assert CALIBRATION_ELSEWHERE in tab.toasts()
+
+    tab.view.monitor_open()
+    tab.view.monitor_fields("direct", "10.0.0.5", "7777", TOKEN, "")
+    tab.view.monitor_start()
+    await settle()
+    tab.recorder.clear()
+    tab.view.show_identify_overlay()
+    assert CALIBRATION_ELSEWHERE in tab.toasts()
 
 
 async def test_disconnect_closes_the_ssh_tunnel_under_the_link(
@@ -592,17 +733,17 @@ def test_every_monitor_element_the_page_reaches_for_is_in_the_page() -> None:
         assert f'id="{name}"' in html, f"app.js reaches for #{name}, index.html has none"
 
 
-async def test_the_titlebar_badge_says_local_then_connected_then_local_again(
+async def test_the_titlebar_badge_says_none_then_connected_then_none_again(
     project: Path, app_config: Config, tmp_path: Path
 ) -> None:
-    """The standing fact, not the toast: the titlebar's MONITOR badge is painted
-    on mount (this PC), goes `up` with the peer on a landed dial, and back to
-    local on a deliberate detach."""
+    """The standing fact, not the toast. Three states since §10.2 and `local` is
+    not one of them: a window with no monitor says NO MONITOR, a landed dial
+    says CONNECTED with the peer, and a deliberate detach goes back to none."""
     link = ScriptedLink()
     tab = build(project, app_config, tmp_path, Dialler(link))
     tab.view.start()
     await settle()
-    assert tab.flush().last("monitor_link")["state"] == "local"
+    assert tab.flush().last("monitor_link")["state"] == "none"
 
     tab.view.monitor_open()
     tab.view.monitor_fields("direct", "10.0.0.5", "7777", TOKEN, "")
@@ -613,7 +754,7 @@ async def test_the_titlebar_badge_says_local_then_connected_then_local_again(
 
     tab.view.monitor_disconnect()
     await settle()
-    assert tab.flush().last("monitor_link")["state"] == "local"
+    assert tab.flush().last("monitor_link")["state"] == "none"
 
 
 async def test_a_dropped_link_paints_the_badge_down_with_the_reason(
@@ -647,7 +788,7 @@ async def test_a_box_remembered_over_there_becomes_the_brains_calibration(
     await settle()
     live = tab.view.automation.live_slot
     assert tab.view.automation.calibration(live).chat_region is None
-    service = tab.view._service_for(live)
+    service = HARNESS_SERVICE
     box = ScreenRegion(100, 200, 640, 480)
     link.fills_from_store = True
     link.saved_regions[service] = box

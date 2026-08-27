@@ -1,18 +1,17 @@
-"""Split mode: the GUI over a monitor on another machine (ui-monitor.md §6.5).
+"""The monitor LINK: dial, drop, redial (ui-monitor.md §6.5, §10.2).
 
-``--monitor host:port`` is the whole entry (there is deliberately no in-app
-connect field in this phase), and everything it changes about this shell is
-here: the controller is built over a ``SwitchableMonitor`` that is inert until
-the first dial lands after first paint, a lost link parks the loop in
-``DISCONNECTED`` and starts a backoff, a redial re-derives from the screen, and
-the calibration door is closed because the pixels are somewhere else.
+``--monitor host:port`` is this suite's entry, and since §10.2 it is not a
+special mode any more - it is the shape EVERY monitor is reached in, a local
+child included. What it changes about this shell is all here: the controller is
+built over a ``SwitchableMonitor`` that is inert until the first dial lands
+after first paint, a lost link parks the loop in ``DISCONNECTED`` and starts a
+backoff, and a redial re-derives from the screen.
 
-Nothing here opens a socket. The dial is an injected seam exactly as
-``open_calibration`` is, so a "monitor" is a :class:`ScriptedLink` - a
-``FakeUIMonitor`` with the three members only a LINK has (``peer``,
-``server_id``, ``on_disconnect``) - and a "disconnect" is a method call. What
-is under test is the SEQUENCE the view runs on each event, which is the half
-that a real socket would only make slower to assert.
+Nothing here opens a socket. The dial is an injected seam, so a "monitor" is a
+:class:`ScriptedLink` - a ``FakeUIMonitor`` with the three members only a LINK
+has (``peer``, ``server_id``, ``on_disconnect``) - and a "disconnect" is a
+method call. What is under test is the SEQUENCE the view runs on each event,
+which is the half that a real socket would only make slower to assert.
 """
 
 from __future__ import annotations
@@ -25,21 +24,25 @@ from typing import Any
 import pytest
 
 from agentclip.cli import make_engine_factory
-from agentclip.config import Config
+from agentclip.config import Config, load_config
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.clip.base import select_provider
 from agentclip.driver.monitor.fake import FakeUIMonitor
+from agentclip.driver.monitor.protocol import spec_from_preset
 from agentclip.driver.monitor.switchable import SwitchableMonitor
+from agentclip.driver.screen.slot import AgentSlot
+from agentclip.shell.app.monitor_launch import LOCAL_MONITOR_EXITED, LaunchLocal
 from agentclip.shell.chat import view as view_module
 from agentclip.shell.chat.view import (
-    CALIBRATION_REMOTE,
+    CALIBRATION_ELSEWHERE,
+    MONITOR_LOCAL_STARTING,
     MONITOR_RESTARTED,
     MONITOR_UP,
     GuiView,
 )
 from agentclip.shell.webview.bridge import Bridge
 
-from .conftest import Recorder
+from .conftest import HARNESS_SERVICE, FakeLauncher, Recorder
 
 TARGET = ("box", 7777)
 PEER = "box:7777"
@@ -57,6 +60,13 @@ class ScriptedLink(FakeUIMonitor):
         super().__init__(clipboard=select_provider("manual"))
         self.server_id = server_id
         self.peer = PEER
+        # A real service for both windows: since §10.5 the brain reads its whole
+        # preset off what ``watch`` answers, so a link running the double's
+        # zero-budget default would be a link no monitor can be.
+        preset = load_config(Path("."), global_config_path=Path("no-such")).services[
+            HARNESS_SERVICE
+        ]
+        self.specs_for = {slot: spec_from_preset(preset) for slot in AgentSlot}
         self.disconnect_hooks: list[Callable[[], None]] = []
 
     def on_disconnect(self, hook: Callable[[], None]) -> Callable[[], None]:
@@ -101,7 +111,6 @@ class Split:
         self.recorder = recorder
         self.bridge = bridge
         self.dial = dial
-        self.calibrations = 0
 
     def flush(self) -> Recorder:
         self.bridge.drain_pending()
@@ -139,9 +148,10 @@ def build(project: Path, app_config: Config, tmp_path: Path, dial: Dialler) -> S
         schedule=lambda coro: asyncio.ensure_future(coro),
         monitor_target=TARGET,
         dial=dial,
-        open_calibration=lambda *_a: holder["s"].__setattr__(
-            "calibrations", holder["s"].calibrations + 1
-        ),
+        # Never used: this suite's views always name an address. It is here so
+        # that a view built without one cannot silently reach the real
+        # ``SubprocessLauncher`` and spawn a monitor on the developer's desktop.
+        launcher=FakeLauncher(),
     )
     holder["s"] = Split(view, recorder, bridge, dial)
     return holder["s"]
@@ -328,15 +338,125 @@ async def test_the_redial_stops_when_the_window_goes_away(
     assert len(split.dial.dialled) == dialled
 
 
-# == what split mode takes away ================================================
+# == the local child (§10.1/§10.2) =============================================
+# "Local" is not a different kind of monitor any more - it is a monitor PROCESS
+# this window started on this machine, dialled through exactly the same socket,
+# token and ``watched()`` stream a remote one is. So everything above applies to
+# it unchanged, and what is left to pin here is the two ends only a child has: a
+# launch that happens before the first dial, and an exit that a redial can see.
 
 
-async def test_calibration_is_refused_and_points_at_the_other_machine(
+def build_local(
+    project: Path, app_config: Config, tmp_path: Path, dial: Dialler, launcher: FakeLauncher
+) -> Split:
+    """A view launched the way ``agentclip`` with no flags launches (§10.1)."""
+    recorder = Recorder()
+    bridge = Bridge(recorder)
+    holder: dict[str, Split] = {}
+    view = GuiView(
+        bridge,
+        config=app_config,
+        provider=select_provider("manual"),
+        engine_factory=make_engine_factory(lambda: app_config, project),
+        project_root=project,
+        profile_root=tmp_path / "profiles",
+        global_config_path=tmp_path / "no-such-global.toml",
+        schedule=lambda coro: asyncio.ensure_future(coro),
+        monitor_target=LaunchLocal(),
+        launcher=launcher,
+        dial=dial,
+    )
+    holder["s"] = Split(view, recorder, bridge, dial)
+    return holder["s"]
+
+
+async def test_an_absent_monitor_flag_launches_one_here_and_dials_it(
     project: Path, app_config: Config, tmp_path: Path
 ) -> None:
-    """The calibration window captures THIS screen (§6.4), and in split mode
-    the browser is on another one - so opening it here would save a picture of
-    the operator's desktop as the chat service's appearance."""
+    """The default launch, end to end: spawn a child, then dial the port it
+    chose - the same dial a remote target gets, which is the whole point."""
+    launcher = FakeLauncher()
+    split = build_local(project, app_config, tmp_path, Dialler(ScriptedLink()), launcher)
+    split.view.start()
+    await settle()
+
+    assert launcher.starts == 1
+    assert split.dial.dialled == [("127.0.0.1", 45678)]
+    assert split.view.automation.loop_state is LoopState.IDLE
+    badge = split.flush().last("monitor_link")
+    assert (badge["state"], badge["peer"]) == ("up", "local")
+
+
+async def test_the_dial_failures_while_a_child_is_starting_are_quiet(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """A child needs a moment to bind its port, so the first dials refusing is
+    NORMAL rather than news. The loop is parked with "starting a monitor on this
+    PC" before the spawn, which spends the once-per-outage toast on the sentence
+    that is actually true - the backoff underneath says nothing."""
+    launcher = FakeLauncher()
+    dial = Dialler(ConnectionRefusedError("nothing listening yet"), ScriptedLink())
+    split = build_local(project, app_config, tmp_path, dial, launcher)
+    split.view.start()
+    await settle(120)
+
+    toasts = split.toasts()
+    assert any(MONITOR_LOCAL_STARTING in toast for toast in toasts)
+    assert not any("cannot reach the monitor" in toast for toast in toasts)
+
+
+async def test_a_child_that_died_is_named_in_the_disconnected_reason(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """The transport says the socket refused; only the launcher knows why.
+
+    A monitor WE started that is not running any more is the one failure the
+    backoff cannot fix on the user's behalf - relaunching is a button on the
+    Monitor tab - so the reason names the exit code and says so.
+    """
+    launcher = FakeLauncher()
+    link = ScriptedLink()
+    dial = Dialler(link, ConnectionRefusedError("connection refused"))
+    split = build_local(project, app_config, tmp_path, dial, launcher)
+    split.view.start()
+    await settle()
+    split.flush().clear()
+
+    launcher.died(code=3)
+    link.drop()
+    await settle(120)
+
+    assert LOCAL_MONITOR_EXITED.format(code=3) in split.flush().last("monitor_link")["reason"]
+    assert any("exited (code 3)" in toast for toast in split.toasts())
+
+
+async def test_a_child_still_running_gets_no_exit_sentence(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """The other side of it: a refused dial against a LIVE child is an ordinary
+    retry, and saying it exited would be inventing a fact."""
+    launcher = FakeLauncher()
+    link = ScriptedLink()
+    dial = Dialler(link, ConnectionRefusedError("connection refused"))
+    split = build_local(project, app_config, tmp_path, dial, launcher)
+    split.view.start()
+    await settle()
+
+    link.drop()
+    await settle(120)
+
+    assert "exited (code" not in split.flush().last("monitor_link")["reason"]
+
+
+# == what this window does not own =============================================
+
+
+async def test_calibration_points_at_the_monitor_ui_window(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """Every surface made of pixels is the monitor PROCESS's (§10.2), so the
+    door is one sentence rather than a window - and the sentence names both
+    places that window can be, because the answer does not depend on which."""
     split = build(project, app_config, tmp_path, Dialler(ScriptedLink()))
     split.view.start()
     await settle()
@@ -344,5 +464,4 @@ async def test_calibration_is_refused_and_points_at_the_other_machine(
 
     split.view.open_calibration()
 
-    assert split.calibrations == 0
-    assert CALIBRATION_REMOTE in split.toasts()
+    assert CALIBRATION_ELSEWHERE in split.toasts()

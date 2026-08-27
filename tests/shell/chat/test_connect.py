@@ -36,6 +36,7 @@ from agentclip.executor.hosts.connect import (
     ConnectError,
     StepEvent,
 )
+from agentclip.shell.app.monitor_launch import LaunchLocal
 from agentclip.shell.chat.remote import (
     APPROVAL_POLICY,
     MISSING_ROOT,
@@ -47,7 +48,14 @@ from agentclip.shell.chat.remote import (
 )
 from agentclip.shell.chat.view import GuiView
 from agentclip.shell.webview.bridge import Bridge
-from tests.shell.chat.conftest import Harness, Recorder, settle
+from tests.shell.chat.conftest import (
+    FakeLauncher,
+    Harness,
+    Recorder,
+    attach,
+    fake_monitor,
+    settle,
+)
 
 REMOTE_ROOT = "/home/dev/app"
 SECRET = "hunter2-never-written"
@@ -98,9 +106,14 @@ class RemoteHarness(Harness):
     """
 
     def __init__(
-        self, view: GuiView, bridge: Bridge, recorder: Recorder, monitor: FakeUIMonitor
+        self,
+        view: GuiView,
+        bridge: Bridge,
+        recorder: Recorder,
+        monitor: FakeUIMonitor,
+        launcher: FakeLauncher,
     ) -> None:
-        super().__init__(view, bridge, recorder, monitor)
+        super().__init__(view, bridge, recorder, monitor, launcher)
         self.tasks: list[asyncio.Task[Any]] = []
 
     def schedule(self, coro: Coroutine[Any, Any, Any]) -> None:
@@ -199,7 +212,8 @@ def harness(
         return runtime
 
     provider = select_provider("manual")
-    monitor = FakeUIMonitor(clipboard=provider)
+    monitor = fake_monitor(config, provider)
+    launcher = FakeLauncher()
     view = GuiView(
         bridge,
         config=config,
@@ -208,7 +222,11 @@ def harness(
         project_root=project,
         profile_root=tmp_path / "profiles",
         global_config_path=global_config,
-        monitor=monitor,
+        # A local child, attached: the conftest harness's own default, and the
+        # state every Executor-tab story here starts from (§10.2). The attach
+        # itself is by hand below, for the reason the conftest gives.
+        monitor_target=LaunchLocal(),
+        launcher=launcher,
         schedule=lambda coro: holder["h"].schedule(coro),
         on_exit=lambda: holder["h"].on_exit(),
         remote=RemoteConnect(
@@ -218,7 +236,8 @@ def harness(
             ssh_config_path=ssh_config,
         ),
     )
-    holder["h"] = RemoteHarness(view, bridge, recorder, monitor)
+    attach(view, monitor, launcher)
+    holder["h"] = RemoteHarness(view, bridge, recorder, monitor, launcher)
     holder["h"].built = built  # type: ignore[attr-defined]
     holder["h"].remote_mcp = remote_mcp  # type: ignore[attr-defined]
     holder["h"].launch_error = launch_error  # type: ignore[attr-defined]

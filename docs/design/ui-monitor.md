@@ -1988,7 +1988,7 @@ above that lives under `driver/monitor/` and `shell/monitor_ui/`.
 
 ## 11. Wave 4 — the brain knows no pixels; the GUI starts idle (2026-08-27)
 
-> **Status:** PLANNED. Each sub-section gets an "as built" note when it lands.
+> **Status:** BUILT 2026-08-27 (0896c63, ca1355c, 4bd7c1f, bddcab8); each sub-section carries its "as built" note.
 
 ### 11.0 Why
 

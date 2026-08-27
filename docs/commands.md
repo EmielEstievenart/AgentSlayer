@@ -14,7 +14,7 @@ Slash commands are typed in the chat box: Enter sends, and a newline is `shift+e
 | `/skills` | List loaded skills grouped by the folder they came from — name, description, and a `[hidden from the model]` mark on the ones only you can reach |
 | `/armed [on\|off]` | May AgentClip touch the screen at all (click/paste/scroll). Same as F5. A machine property — survives `/new` |
 | `/mode [build\|plan]` | Set the permission mode; bare `/mode` reports it. Same dial as `shift+tab` |
-| `/theme [name]` | Set the theme; bare `/theme` lists them |
+| `/theme [name]` | Set the theme; bare `/theme` lists them. A connected monitor follows |
 | `/config [global\|local]` | Bare: report where both permissions.json files live. With a layer: create that file (defaults) if missing and copy its path to the clipboard |
 | `/config global\|local reset` | Overwrite that file's permission rules with the shipped defaults, **preserving its `mcp` block**. Rules are read at launch — restart to run under them |
 | `/unattended [on\|off]` | Auto-**deny** everything that would ask you (you're away). Bare toggles. Amber `⚠ UNATTENDED` badge; survives `/new` |
@@ -54,7 +54,7 @@ exception: a printable character never fires a shortcut mid-sentence.)
 | `F1` / `?` | This help sheet (`Esc` or `F1` closes it) |
 | `F2` | Hide/show **MONITOR SEES** in the sidebar: which appearances the monitor holds for this service, which of them are on screen right now, and the settings it sent this window to drive from (auto-submit, delivery, paste budget, hover scan, snap back). Read-only — the captures and the settings are made in the Monitor UI |
 | `F3` | Hide/show the sidebar |
-| `F4` | Appearance (theme) |
+| `F4` | Appearance (theme) — a connected monitor follows: the Monitor UI on the other machine wears the same palette, on attach and whenever you change it |
 | `F5` | ARM / DISARM the tool (same as `/armed`). Disarmed it still watches and shows everything, but never clicks, pastes or reads your clipboard |
 | `F6` | Select the next window tab — view only, it never moves what the automation drives |
 | `F8` | Hide/show the harness decision log (same as `/log`) |

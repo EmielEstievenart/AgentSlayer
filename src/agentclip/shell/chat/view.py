@@ -669,18 +669,24 @@ class DialledMonitor(UIMonitor, Protocol):
 # seam in this shell is: the real one opens a TCP connection, and a suite must
 # be able to run the whole connect/disconnect/redial story without one - and,
 # since §10.2, the whole LAUNCH story too (``launcher``, its sibling).
-MonitorDial = Callable[[str, int, str], Awaitable[DialledMonitor]]
+MonitorDial = Callable[[str, int, str, str], Awaitable[DialledMonitor]]
 
 
-async def _dial_remote_monitor(host: str, port: int, token: str) -> DialledMonitor:
+async def _dial_remote_monitor(host: str, port: int, token: str, theme: str) -> DialledMonitor:
     """The real dial: one TCP connection and the monitor handshake (§6.5).
 
     ``token`` is §9.1's shared secret and "" is a real value - the right one for
     a monitor started with ``--no-token``. It becomes ``None`` on the wire,
     because the hello's field is optional and an empty string is a token that is
     simply wrong.
+
+    ``theme`` is §11.7's palette - this shell's ``[gui] theme``, so that the
+    Monitor UI on the other machine comes up wearing what this user picked
+    rather than correcting itself a round trip later. "" is a real value the
+    same way, and means the same thing: say nothing, let that window keep its
+    own default.
     """
-    return await RemoteUIMonitor.connect(host, port, token=token or None)
+    return await RemoteUIMonitor.connect(host, port, token=token or None, theme=theme or None)
 
 
 #: What ``--monitor`` can hand this view: a saved/typed address, the "start one
@@ -2264,7 +2270,31 @@ class GuiView:
         else:
             saved = True
         self._push_settings()
+        self._tell_monitor_theme(theme)
         return saved
+
+    def _tell_monitor_theme(self, theme: str) -> None:
+        """Let a connected monitor follow the palette (§11.7).
+
+        Guarded on the LINK rather than on the target: with nobody on the line
+        the switch is still holding whichever monitor died, and a ``set_theme``
+        into a dead socket is an exception raised for a preference. The check is
+        ``_push_link``'s own - a link is up exactly when the loop is not parked
+        in DISCONNECTED.
+
+        Nothing is awaited and nothing is reported. A theme that did not cross
+        is a window on another machine that is still the colour it was, which is
+        not a thing to interrupt somebody's F4 with - and a monitor a release
+        behind has never heard of the verb (wire.py), which is the same
+        non-event.
+        """
+        if self._automation.loop_state is LoopState.DISCONNECTED:
+            return
+        self._schedule(self._push_monitor_theme(theme))
+
+    async def _push_monitor_theme(self, theme: str) -> None:
+        with contextlib.suppress(Exception):
+            await self._switch.set_theme(theme)
 
     # == quitting ==============================================================
 
@@ -3705,7 +3735,7 @@ class GuiView:
         peer = target.describe()
         try:
             host, port = await self._dial_address(target)
-            link = await self._dial(host, port, target.token)
+            link = await self._dial(host, port, target.token, self._config.gui.theme)
         except Exception as exc:  # noqa: BLE001 - a dial fails in the transport's own ways
             self._close_tunnel()
             self._park_disconnected(self._dial_failure(peer, exc))

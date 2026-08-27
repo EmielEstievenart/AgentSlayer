@@ -299,6 +299,7 @@ CALLS: dict[str, dict[str, Any]] = {
     "suspend": {},
     "resume": {},
     "close": {},
+    "set_theme": {"theme": "claude-dark"},
     "focus_window": {"handle": 12345},
     "foreground_window": {},
     "click": {"region": REGION, "settle_s": 0.25},
@@ -323,6 +324,7 @@ RETURNS: dict[str, Any] = {
     "suspend": None,
     "resume": None,
     "close": None,
+    "set_theme": None,
     "focus_window": True,
     "foreground_window": 99887,
     "click": False,
@@ -425,6 +427,28 @@ def test_the_hello_carries_the_token_and_null_is_a_value() -> None:
     assert read_hello(hello_frame()).token is None
 
 
+def test_the_hello_carries_the_theme_and_leaving_it_out_is_a_value() -> None:
+    """§11.7. The one OPTIONAL field on this wire, both ways.
+
+    Written only when there is one (a hello with no palette to name carries no
+    ``theme`` key at all) and read with a default (a hello from a brain that
+    never heard of themes decodes to ``None``), which together are why adding
+    it did not take the version to 5.
+    """
+    assert read_hello(decode_line(encode_line(hello_frame(None, "claude-warm")))).theme == (
+        "claude-warm"
+    )
+    assert "theme" not in hello_frame()
+    assert read_hello(hello_frame()).theme is None
+    assert read_hello({**hello_frame(), "theme": None}).theme is None
+
+
+def test_a_hello_with_a_non_string_theme_is_refused() -> None:
+    """A tolerant READ is not a tolerant decode: absent is a value, 7 is not."""
+    with pytest.raises(WireError):
+        read_hello({**hello_frame(), "theme": 7})
+
+
 def test_a_hello_with_a_non_string_token_is_refused() -> None:
     with pytest.raises(WireError):
         read_hello({**hello_frame(), "token": 7})
@@ -438,7 +462,14 @@ def test_the_wire_version_is_the_monitors_own_and_is_four() -> None:
     stopped holding templates and ``captured`` and ``target`` became the
     monitor's answers (§11.3). Asserted as a NUMBER on purpose: the two installs
     gate on it, and a silent bump is a silent refusal of every monitor that was
-    not upgraded with the brain."""
+    not upgraded with the brain.
+
+    §11.7 did NOT make it 5, and that is the exception worth stating: the
+    hello's ``theme`` and the ``set_theme`` verb are both additive and both
+    tolerated by an end that has neither - an old monitor ignores an unknown
+    field and refuses an unknown verb with one ``bad_request`` the Chat UI
+    swallows, and no frame about a click, a capture or a clipboard changed
+    shape."""
     assert MONITOR_WIRE_VERSION == 4
     assert OURS.wire == 4
     assert hello_frame()["version"] == 4

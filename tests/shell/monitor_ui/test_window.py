@@ -143,6 +143,41 @@ def test_the_stylesheet_names_no_colour_outside_its_palette() -> None:
     assert offenders == [], offenders
 
 
+def test_the_palettes_are_the_chat_windows_own_copied_verbatim() -> None:
+    """§11.7: this window wears the palette the attached Chat UI picked, and the
+    four palettes are one set of colours in two files.
+
+    A COPY with a named source of truth rather than a shared stylesheet: each
+    page is loaded from its own package's ``assets/`` over a file:// URL and
+    each spec collects exactly that directory. So the guard is this test - the
+    three blocks have to be there character for character, and the comment has
+    to say where they came from.
+    """
+    monitor_css = asset("app.css")
+    chat_css = files("agentclip.shell.chat").joinpath(ASSET_DIR, "app.css").read_text("utf-8")
+    for name in ("light", "claude-warm", "claude-dark"):
+        block = _palette(chat_css, name)
+        assert block in monitor_css, name
+    assert "shell/chat/assets/app.css" in monitor_css, "the source of truth is not named"
+
+
+def _palette(css: str, name: str) -> str:
+    """One ``body.theme-<name>`` block, opening line to closing brace."""
+    start = css.index(f"body.theme-{name} {{")
+    end = css.index(chr(10) + "}" + chr(10), start)
+    return css[start : end + 3]
+
+
+def test_the_page_wears_the_theme_the_serve_event_carries() -> None:
+    """One class on <body> per palette, and the default wears none at all -
+    ``:root`` is already that palette. Painted from the ``serve`` event, because
+    that is the event that knows a Chat UI is on the line."""
+    js = asset("app.js")
+    assert "applyTheme(event.theme);" in js
+    assert 'document.body.classList.add("theme-" + theme)' in js
+    assert 'var THEME_DEFAULT = "dark";' in js
+
+
 def test_the_entry_url_is_a_local_file_carrying_the_version(tmp_path: Path) -> None:
     """A ``file://`` URL, not a bare path: pywebview spins up a local Bottle HTTP
     server for a plain local path, and this window has nothing to serve."""
@@ -350,6 +385,11 @@ class _NullMonitor:
         raise AssertionError("nothing here captures")
 
     def on_frame(self, hook: Any) -> Any:
+        return lambda: None
+
+    def on_theme(self, hook: Any) -> Any:
+        """§11.7's palette hook. Subscribed at construction like ``spec_for``,
+        so the smallest possible monitor has to answer it too."""
         return lambda: None
 
 

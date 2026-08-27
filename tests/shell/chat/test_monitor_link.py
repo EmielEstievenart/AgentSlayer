@@ -92,10 +92,13 @@ class Dialler:
         # Every token the view offered, in order. "" is a real value and the
         # right one for a monitor started with --no-token (ui-monitor.md §9.1).
         self.tokens: list[str] = []
+        # ...and every palette, which rides in the same hello (§11.7).
+        self.themes: list[str] = []
 
-    async def __call__(self, host: str, port: int, token: str = "") -> Any:
+    async def __call__(self, host: str, port: int, token: str = "", theme: str = "") -> Any:
         self.dialled.append((host, port))
         self.tokens.append(token)
+        self.themes.append(theme)
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
         if isinstance(outcome, Exception):
             raise outcome
@@ -443,6 +446,64 @@ async def test_a_child_still_running_gets_no_exit_sentence(
     await settle(120)
 
     assert "exited (code" not in split.flush().last("monitor_link")["reason"]
+
+
+# == the theme the monitor follows (§11.7) =====================================
+
+
+async def test_the_dial_tells_the_monitor_which_palette_to_wear(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """``[gui] theme`` rides the hello, so the far window is right on its first
+    paint rather than one round trip later."""
+    split = build(project, app_config, tmp_path, Dialler(ScriptedLink()))
+
+    split.view.start()
+    await settle()
+
+    assert split.dial.themes == ["dark"], "the dial carried no palette"
+
+
+async def test_changing_the_theme_while_connected_dresses_the_monitor(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """F4 and ``/theme`` are one door here (``_persist_theme``): the palette is
+    saved, the page repaints, and the monitor on the other machine follows
+    without anything being pressed over there."""
+    link = ScriptedLink()
+    split = build(project, app_config, tmp_path, Dialler(link))
+    split.view.start()
+    await settle()
+
+    split.view.set_theme("claude-warm")
+    await settle()
+
+    assert link.theme == "claude-warm"
+    assert ("set_theme", ("claude-warm",)) in link.calls
+
+
+async def test_a_theme_picked_with_no_link_up_is_not_sent_anywhere(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """The switch still holds the monitor that died, so an unguarded
+    ``set_theme`` would be an exception raised for a preference. The guard is
+    the LINK, not the target."""
+    link = ScriptedLink()
+    # One good dial and then nothing: the redial the drop starts must not put
+    # the link back up under the assertion below.
+    split = build(project, app_config, tmp_path, Dialler(link, ConnectionRefusedError("gone")))
+    split.view.start()
+    await settle()
+    link.drop()
+    await settle()
+    assert split.view.automation.loop_state is LoopState.DISCONNECTED
+    link.calls.clear()
+
+    split.view.set_theme("light")
+    await settle()
+
+    assert link.theme != "light"
+    assert [call for call in link.calls if call[0] == "set_theme"] == []
 
 
 # == what this window does not own =============================================

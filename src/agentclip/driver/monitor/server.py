@@ -104,6 +104,10 @@ class _Session:
         self._reader = reader
         self._writer = writer
         self.peer = peer
+        # The palette the attached brain asked for, or None. Read by the
+        # server (and through it by the Serve panel) so "who is attached" and
+        # "what they wear" are one answer from one place.
+        self.theme: str | None = None
         self._server_id = server_id
         # The secret this session's hello has to carry, or None for the
         # no-token mode. Held per session rather than read off the server on
@@ -179,6 +183,14 @@ class _Session:
             )
             return False
         await self._send(hello_ack_frame(self._server_id, self._monitor.clipboard_kind))
+        # ...and the LAST gate is not a gate at all: §11.7's theme, applied
+        # after the ack because it is not a condition of admission. A brain
+        # that named one has said what its user picked, and the window on this
+        # machine wears it from the first paint after the attach rather than
+        # from the first time the user changes it.
+        self.theme = hello.theme
+        if hello.theme is not None:
+            await self._monitor.set_theme(hello.theme)
         return True
 
     def _attach(self) -> None:
@@ -463,6 +475,17 @@ class MonitorServer:
     def attached(self) -> bool:
         """Is a brain on the line right now? The status line's first word."""
         return self._session is not None
+
+    @property
+    def peer_theme(self) -> str | None:
+        """The palette the attached brain named in its ``hello``, or None.
+
+        A DIAGNOSTIC, not the channel: what actually paints this machine's
+        window is ``UIMonitor.set_theme`` - the handshake calls it and so does
+        the verb, so the Monitor UI has one hook to subscribe to and no reason
+        to ask a server whether anybody is on the line (§11.7).
+        """
+        return None if self._session is None else self._session.theme
 
     @property
     def address(self) -> str:

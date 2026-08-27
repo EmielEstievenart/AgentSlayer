@@ -9,12 +9,23 @@
    across as-is and the two surfaces cannot drift apart visually while they
    both exist (phase 4B deletes the chat window's copy).
 
-   One palette. The chat window wears a theme the user picks (`[gui] theme`);
-   this window has no settings surface and no `settings` event, so it wears the
-   dark ground the window is created with (window.py:WINDOW_BACKGROUND) and
-   nothing here decides anything. Every colour is still a variable, so the day
-   this window grows a theme picker is a day of adding blocks, not of hunting
-   hexes. */
+   FOUR palettes, and they are the chat window's (ui-monitor.md §11.7). This
+   window still has no theme PICKER - it has no settings surface and no
+   `settings` event - but it is no longer a window that decides: the attached
+   Chat UI names the palette its user picked (the `hello`'s `theme`, then the
+   `set_theme` verb), it arrives on the `serve` event, and app.js puts the
+   class on <body>. With nobody ever attached this wears `:root`, which is the
+   dark ground the window is created with (window.py:WINDOW_BACKGROUND).
+
+   THE SOURCE OF TRUTH IS `shell/chat/assets/app.css`. The blocks below are a
+   verbatim copy of its three `body.theme-*` regions, comments included, and a
+   change to a colour is a change made THERE and copied here. Not a shared
+   stylesheet: each window's page is loaded from its own package's `assets/`
+   directory over a file:// URL, and both PyInstaller specs collect exactly the
+   files under that one directory (packaging/agentclip.spec's `page_datas`,
+   agentclip-monitor.spec's `MONITOR_UI_ASSETS`) - so a shared file would be a
+   fourth asset in two bundles reached by a `../../` link across two package
+   trees, which is a bigger thing to keep true than four colour blocks. */
 
 :root {
   --bg: #14161a;
@@ -37,6 +48,86 @@
   --shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   --radius: 8px;
   --mono: "Cascadia Mono", "Consolas", ui-monospace, monospace;
+}
+
+/* The light theme. Written honestly rather than by inverting: the accents are
+   darkened until they carry text on a white field (the same colours at dark-
+   theme brightness are unreadable on paper), and --on-solid becomes the light
+   ground so a warning chip still reads as filled. The rgba tints further down
+   (diff rows, the armed banner) are alpha over whatever the surface is, so they
+   need no override - that is what makes them tints rather than colours. */
+body.theme-light {
+  --bg: #f6f7f9;
+  --bg-sunken: #e9ecf1;
+  --bg-raised: #ffffff;
+  --line: #d3d8e0;
+  --text: #1c2027;
+  --text-dim: #5c6470;
+  --accent: #2563c9;
+  --ok: #1f8a4c;
+  --warn: #a97400;
+  --warn-deep: #7d5600;
+  --err: #c0362c;
+  --magenta: #9333a8;
+  --on-solid: #ffffff;
+  --scrim: rgba(28, 32, 39, 0.4);
+  --scrim-deep: rgba(28, 32, 39, 0.45);
+  --shadow: 0 6px 18px rgba(28, 32, 39, 0.18);
+}
+
+/* The two Claude themes, which are the TUI's own (shell/tui/app.py registers
+   them as Textual themes with these exact names) rendered in this shell's
+   variable set. Same command, same name, two mediums: `/theme claude-dark`
+   means one thing whichever shell it is typed in, and the values below are the
+   Textual theme's role-by-role - background/surface/panel/foreground and the
+   five semantic colours - with the four this shell has and Textual does not
+   (--bg-sunken, --line, --warn-deep, --magenta) DERIVED from them rather than
+   invented, so a change to the Textual theme has an obvious answer here.
+
+   Warm is the paper one. Its "raised" is the Textual `surface`, which is a
+   shade DARKER than the page rather than a whiter white - that is what a warm
+   light palette does, and inverting it to #fff would put a cold rectangle in
+   the middle of it. */
+body.theme-claude-warm {
+  --bg: #faf9f5; /* Textual background */
+  --bg-sunken: #e8e4d8; /* Textual panel: the deepest of the three grounds */
+  --bg-raised: #f0eee6; /* Textual surface */
+  --line: #d6d0be; /* panel, pushed until an edge reads as an edge */
+  --text: #3d3929; /* Textual foreground */
+  --text-dim: #6f6a56; /* foreground muted - NOT `secondary`, which is an accent */
+  --accent: #c96442; /* Textual primary */
+  --ok: #3f7d4f;
+  --warn: #b8720f;
+  --warn-deep: #8a5409; /* the flash's off beat, one step down from --warn */
+  --err: #b3261e;
+  --magenta: #8e4b9c; /* SUB-AGENT: plum, so it cannot be read as the terracotta accent */
+  --on-solid: #faf9f5; /* Textual button-color-foreground */
+  --scrim: rgba(61, 57, 41, 0.4); /* the foreground, as the light theme does it */
+  --scrim-deep: rgba(61, 57, 41, 0.45);
+  --shadow: 0 6px 18px rgba(61, 57, 41, 0.18);
+}
+
+/* ...and the dark one, where "raised" and "sunken" mean what they usually do
+   again: surface sits above the page, and the status bar's ground is dug a step
+   below it. The scrims are black here for the same reason :root's are - over a
+   dark page, a tinted scrim is a smear rather than a dimming. */
+body.theme-claude-dark {
+  --bg: #262624; /* Textual background */
+  --bg-sunken: #1c1c1a; /* under the shell: the status bar */
+  --bg-raised: #30302e; /* Textual surface */
+  --line: #4a4844; /* Textual panel, pushed up until it separates */
+  --text: #f0eee6; /* Textual foreground */
+  --text-dim: #a8a49a; /* foreground muted - NOT `secondary`, which is an accent */
+  --accent: #d97757; /* Textual primary */
+  --ok: #7fb069;
+  --warn: #e0a548;
+  --warn-deep: #a8792f; /* the flash's off beat */
+  --err: #e0605a;
+  --magenta: #c68fd6; /* SUB-AGENT: a violet the warm accent cannot be confused with */
+  --on-solid: #262624; /* Textual button-color-foreground */
+  --scrim: rgba(0, 0, 0, 0.55);
+  --scrim-deep: rgba(0, 0, 0, 0.6);
+  --shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
 }
 
 

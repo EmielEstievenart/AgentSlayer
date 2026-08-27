@@ -645,6 +645,81 @@ async def test_closing_the_client_leaves_the_monitor_running(
     assert (await targeted(wiring, again, region=None)).generation == 2
 
 
+# == the theme (§11.7) =========================================================
+
+
+async def test_the_hello_dresses_the_monitor_before_the_first_call(
+    wire: Callable[..., Wiring], listen: Listen
+) -> None:
+    """The palette rides the handshake, so a window is right on the first paint.
+
+    Dialled by hand rather than through the ``dial`` fixture, because the theme
+    is exactly what that fixture does not pass - and the point of the field is
+    that it is settled by the time the connection is usable.
+    """
+    wiring = wire()
+    monitor: LocalUIMonitor = wiring.monitor
+    server = await listen(monitor)
+
+    client = await RemoteUIMonitor.connect("127.0.0.1", server.port, theme="claude-warm")
+    try:
+        assert monitor.theme == "claude-warm"
+        assert server.peer_theme == "claude-warm"
+    finally:
+        await client.close()
+
+
+async def test_a_hello_with_no_theme_leaves_the_monitor_its_own_default(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """A brain that names no palette says nothing, rather than saying "dark"."""
+    wiring = wire()
+    monitor: LocalUIMonitor = wiring.monitor
+    server, _client = await linked(wiring, listen, dial)
+
+    assert monitor.theme is None
+    assert server.peer_theme is None
+
+
+async def test_set_theme_crosses_and_fires_the_monitors_hook(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """The user changed it mid-link (F4, ``/theme``): the far window follows.
+
+    And the same palette twice is not an event - the hook is a page repaint,
+    and a redial under an unchanged theme would repaint for nothing.
+    """
+    wiring = wire()
+    monitor: LocalUIMonitor = wiring.monitor
+    _server, client = await linked(wiring, listen, dial)
+    worn: list[str] = []
+    monitor.on_theme(worn.append)
+
+    await client.set_theme("light")
+    await client.set_theme("light")
+    await client.set_theme("claude-dark")
+
+    assert worn == ["light", "claude-dark"]
+    assert monitor.theme == "claude-dark"
+
+
+async def test_the_theme_outlives_the_brain_that_asked_for_it(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """A detach must not flash the monitor's window back to dark (§2.8: the
+    monitor is the standing half, and what it wears is its own now)."""
+    wiring = wire()
+    monitor: LocalUIMonitor = wiring.monitor
+    server, client = await linked(wiring, listen, dial)
+    await client.set_theme("light")
+
+    await client.close()
+    await await_until(lambda: server.peer is None, "the link to be forgotten")
+
+    assert server.peer_theme is None, "a theme cannot be read off a connection that is gone"
+    assert monitor.theme == "light", "the monitor forgot the palette when the brain left"
+
+
 # == the handshake and the bind ================================================
 
 

@@ -240,6 +240,71 @@ async def test_stop_stops_listening_and_says_so(serving: ServeHarness) -> None:
         )
 
 
+# == the attached brain's palette (§11.7) ====================================
+
+
+async def test_a_window_nobody_has_attached_to_wears_its_own_default(
+    serving: ServeHarness,
+) -> None:
+    """"" is the panel's whole answer for "nobody has told me what to wear" -
+    not "dark", which would be this window deciding something it does not get
+    to decide."""
+    serving.panel.push()
+    assert serving.last["theme"] == ""
+    assert serving.panel.theme is None
+
+
+async def test_a_dial_that_names_a_theme_dresses_the_page_on_attach(
+    serving: ServeHarness,
+) -> None:
+    """The palette rides the hello, so the page is painted right by the time
+    the operator has read "attached"."""
+    await serving.start()
+    brain = await asyncio.wait_for(
+        RemoteUIMonitor.connect(
+            "127.0.0.1", serving.port, token=serving.panel.token, theme="claude-warm"
+        ),
+        TIMEOUT_S,
+    )
+    try:
+        await serving.pump()
+        assert serving.last["theme"] == "claude-warm"
+    finally:
+        await brain.close()
+
+
+async def test_the_page_follows_the_theme_changing_mid_link(
+    serving: ServeHarness,
+) -> None:
+    """F4 on the other machine: one ``set_theme`` verb, one repaint here."""
+    await serving.start()
+    brain = await serving.dial(serving.panel.token)
+    try:
+        await brain.set_theme("light")
+        await serving.pump()
+        assert serving.last["theme"] == "light"
+        await brain.set_theme("claude-dark")
+        await serving.pump()
+        assert serving.last["theme"] == "claude-dark"
+    finally:
+        await brain.close()
+
+
+async def test_the_theme_survives_the_brain_going_away(serving: ServeHarness) -> None:
+    """A detach is not a reason to flash back to dark: the monitor is the
+    standing half (§2.8) and what it wears is the last thing it was told."""
+    await serving.start()
+    brain = await serving.dial(serving.panel.token)
+    await brain.set_theme("light")
+    await serving.pump()
+
+    await brain.close()
+    await asyncio.wait_for(_until(serving, "no Chat UI attached"), TIMEOUT_S)
+
+    assert serving.last["theme"] == "light"
+    assert serving.panel.theme == "light"
+
+
 # == the token ===============================================================
 
 

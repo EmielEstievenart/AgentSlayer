@@ -110,6 +110,10 @@ class IdleMonitor:
     async def close(self) -> None:
         return None
 
+    async def set_theme(self, theme: str) -> None:
+        """Heard and dropped. There is no window on the other end of nothing."""
+        return None
+
     @property
     def generation(self) -> int:
         return 0
@@ -302,6 +306,16 @@ class SwitchableMonitor:
 
     async def suspend(self) -> None:
         await self._inner.suspend()
+
+    async def set_theme(self, theme: str) -> None:
+        """Straight through, and nothing remembered.
+
+        Unlike ``spec``, which this handle keeps because a reconnect has to
+        re-send it: a theme is re-sent by the DIAL itself (it rides in the
+        ``hello``, remote.py), so a copy here would be a second answer to a
+        question the handshake already answers.
+        """
+        await self._inner.set_theme(theme)
 
     async def resume(self) -> None:
         await self._inner.resume()

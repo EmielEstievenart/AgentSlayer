@@ -236,7 +236,7 @@ def attach(view: GuiView, monitor: FakeUIMonitor, launcher: FakeLauncher) -> Non
     asyncio.run(view._retarget_monitor())
 
 
-async def _never_dialled(host: str, port: int, token: str) -> Any:
+async def _never_dialled(host: str, port: int, token: str, theme: str = "") -> Any:
     """The dial this harness never reaches: it attaches by hand (see :func:`attach`).
 
     A raise rather than a stub, so a test that started expecting the real

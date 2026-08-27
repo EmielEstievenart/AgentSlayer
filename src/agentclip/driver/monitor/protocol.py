@@ -442,6 +442,12 @@ SpecFor = Callable[[AgentSlot], MonitorSpec]
 
 TickHook = Callable[[Tick], None]
 ClipHook = Callable[[str], None]
+#: What the Monitor UI's page wears, as the Chat UI's ``[gui] theme`` names it.
+#: Registered on the LOCAL tier only (``LocalUIMonitor.on_theme``), for
+#: ``on_frame``'s reason: a theme travels brain -> monitor and nothing ever
+#: arrives on the brain's side, so a hook on the wire-facing Protocol would be a
+#: registration that can never fire.
+ThemeHook = Callable[[str], None]
 
 
 class UIMonitor(Protocol):
@@ -519,6 +525,23 @@ class UIMonitor(Protocol):
 
     async def close(self) -> None:
         """Stop every thread/task for good. Idempotent."""
+        ...
+
+    async def set_theme(self, theme: str) -> None:
+        """Wear the attached brain's palette (§11.7).
+
+        The one verb on this Protocol that is about NOTHING on the screen being
+        watched: it is the Chat UI telling the machine it is driving which
+        appearance the user picked, so the Monitor UI's window stops being the
+        one dark rectangle in a light desktop. A monitor with no window of its
+        own (the ``--headless`` door) stores it and paints nothing, which is why
+        this returns nothing and cannot fail: a theme that did not land is not a
+        thing a brain may act on.
+
+        Sent twice by design - in the ``hello`` at connect time, so a window is
+        already right the moment somebody attaches, and as this verb whenever
+        the user changes it while the link is up.
+        """
         ...
 
     # -- observation (local reads; no round trip) --------------------------

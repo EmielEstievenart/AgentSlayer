@@ -171,6 +171,10 @@ class CalibrationMonitor(Protocol):
     where this machine last saw a service's chat window. It answers ``None`` for
     a monitor that remembers nothing.
 
+    ``on_theme`` is §11.7's, and it is local-only for ``on_frame``'s reason
+    backwards: a palette travels brain -> monitor, so the only process that
+    ever hears one is the one with a window to paint it on.
+
     ``set_spec_for`` is §10.5's seam and the reason this window is not merely a
     reader: what a brain gets back from ``watch(slot)`` is composed by the
     callable installed here, so the service picked and the box drawn in THIS
@@ -189,6 +193,7 @@ class CalibrationMonitor(Protocol):
         self,
         hook: Callable[[RegionImage, Mapping[TemplateKind, Sighting | None]], None],
     ) -> Callable[[], None]: ...
+    def on_theme(self, hook: Callable[[str], None]) -> Callable[[], None]: ...
 
 
 class CalibrationView:
@@ -282,6 +287,7 @@ class CalibrationView:
         self._elements_open = True
         self._element_pngs: dict[TemplateKind, tuple[RegionImage, str]] = {}
         self._drop_frames: Callable[[], None] | None = None
+        self._drop_theme: Callable[[], None] | None = None
 
         # -- the one fullscreen child process at a time -------------------------
         # The region picker, ``/identify`` and the editor's capture buttons all
@@ -301,6 +307,13 @@ class CalibrationView:
         # LAST in this method, because the callable it hands over reads every
         # field above it and a ``watch`` can land on the next line.
         monitor.set_spec_for(self.spec_for)
+        # §11.7's palette, subscribed HERE rather than in ``start``: the Serve
+        # panel is bound above and can be listening before the page has loaded
+        # (``--port`` auto-starts it), and a brain that attaches with a theme in
+        # its hello must not arrive to find nobody subscribed. Nothing paints
+        # off this before there is a page - the panel holds the palette and its
+        # first push carries it.
+        self._drop_theme = monitor.on_theme(self._theme_picked)
 
     # == reading (for tests and for the hosting shell) =========================
 
@@ -371,9 +384,11 @@ class CalibrationView:
         """
         if self._serve is not None:
             await self._serve.close()
-        drop, self._drop_frames = self._drop_frames, None
-        if drop is not None:
-            drop()
+        for attribute in ("_drop_frames", "_drop_theme"):
+            drop = getattr(self, attribute)
+            setattr(self, attribute, None)
+            if drop is not None:
+                drop()
         await self._monitor.close()
 
     # == the Serve panel =======================================================
@@ -397,6 +412,21 @@ class CalibrationView:
     def token_regenerate(self) -> None:
         if self._serve is not None:
             self._serve.regenerate()
+
+    def _theme_picked(self, theme: str) -> None:
+        """The attached Chat UI's palette, from the monitor's ``on_theme``.
+
+        Straight into the Serve panel, which is where the whole page's theme
+        rides: the panel is already the surface that knows somebody is on the
+        line, its event is already pushed on every attach and detach, and one
+        event carrying "who is attached and what they wear" is one repaint
+        rather than two (§11.7).
+
+        A window with nothing to serve has nobody to hear from, so there is no
+        else-branch: this hook can only fire because a server admitted a brain.
+        """
+        if self._serve is not None:
+            self._serve.set_theme(theme)
 
     # == the window's chrome ===================================================
 

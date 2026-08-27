@@ -140,6 +140,11 @@ class ServePanel:
         # would be a file read a second, and the file is the only writer.
         self._token = load_or_create_token(self._config_dir)
         self._server: MonitorServer | None = None
+        # §11.7: the palette the attached Chat UI asked for, and the reason it
+        # is HERE rather than read off the server per paint - a monitor keeps
+        # the last theme a brain named after that brain has gone, so a detach
+        # must not flash the window back to dark.
+        self._theme: str | None = None
         self._error = ""
         self._ticking = False
         self._schedule: ScheduleFn = _no_schedule
@@ -176,6 +181,22 @@ class ServePanel:
         return self._token
 
     @property
+    def theme(self) -> str | None:
+        """The palette the page is wearing, or None for the window's own default."""
+        return self._theme
+
+    def set_theme(self, theme: str) -> None:
+        """The attached Chat UI picked a palette (§11.7): wear it and repaint.
+
+        Called from the view's ``on_theme`` subscription, which is fed by the
+        monitor - the handshake's ``hello`` and the ``set_theme`` verb both land
+        there, so this method has no idea which of the two happened and does not
+        need one.
+        """
+        self._theme = theme
+        self.push()
+
+    @property
     def status(self) -> str:
         """The one sentence: not serving, listening alone, or attached."""
         server = self._server
@@ -201,6 +222,11 @@ class ServePanel:
             # seeing from across the room.
             "link": "off" if server is None else ("attached" if peer else "waiting"),
             "peer": peer or "",
+            # What the WHOLE PAGE wears, riding on the panel's own event
+            # because the panel is the surface that knows a brain is on the
+            # line at all (§11.7). "" is "this window's own default" - which is
+            # what a monitor nobody has ever attached to paints.
+            "theme": self._theme or "",
             # Which SERVICE this monitor is watching - the key its last
             # ``watch``/``configure`` named, resolved against THIS machine's
             # profiles and region store. Shown on the badge next to the peer, so

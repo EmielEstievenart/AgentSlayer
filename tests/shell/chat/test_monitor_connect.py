@@ -82,16 +82,19 @@ class ScriptedLink(FakeUIMonitor):
 
 
 class Dialler:
-    """The scripted dial, recording every address and token it was offered."""
+    """The scripted dial, recording every address, token and theme it was offered."""
 
     def __init__(self, *outcomes: ScriptedLink | Exception) -> None:
         self.outcomes = list(outcomes)
         self.dialled: list[tuple[str, int]] = []
         self.tokens: list[str] = []
+        # Every palette the hello carried, in order (ui-monitor.md §11.7).
+        self.themes: list[str] = []
 
-    async def __call__(self, host: str, port: int, token: str = "") -> Any:
+    async def __call__(self, host: str, port: int, token: str = "", theme: str = "") -> Any:
         self.dialled.append((host, port))
         self.tokens.append(token)
+        self.themes.append(theme)
         outcome = self.outcomes.pop(0) if len(self.outcomes) > 1 else self.outcomes[0]
         if isinstance(outcome, Exception):
             raise outcome

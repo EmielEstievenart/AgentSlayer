@@ -2369,3 +2369,81 @@ window the tab strip is showing. The config file is where that selection
   only the initial value; an unwritable config still switches the watched
   service; the same key again is not a retarget), and the two mismatch
   assertions in `test_serve.py` / `test_window.py` are gone.
+
+### 11.7 The monitor wears the Chat UI's theme — **AS BUILT** (2026-08-27)
+
+**The ask.** "The monitor takes over the theme of the GUI once it's connected."
+Two windows on two machines, one user, one palette — and until this the Monitor
+UI was permanently dark while the Chat UI beside it could be light, warm or
+Claude-dark.
+
+**The plan, in one line.** The Chat UI names its `[gui] theme` in the `hello`,
+names it again through a `set_theme` verb whenever the user changes it while a
+link is up, and the Monitor UI paints it on `<body>` exactly as the chat page
+does — keeping the last one it was told after the brain has gone.
+
+* **The palettes.** `shell/monitor_ui/assets/app.css` now carries the three
+  `body.theme-*` blocks of `shell/chat/assets/app.css`, comments included, under
+  a header naming that file as the source of truth. **A copy, not a shared
+  asset**: each window's page is loaded from its own package's `assets/`
+  directory over a `file://` URL, and each PyInstaller spec collects exactly the
+  files under that one directory (`packaging/agentclip.spec`'s `page_datas`,
+  `agentclip-monitor.spec`'s `MONITOR_UI_ASSETS`), so a shared stylesheet would
+  be a fourth asset in two bundles reached by a `../../` link across two package
+  trees. `tests/shell/monitor_ui/test_window.py` asserts the three blocks match
+  character for character and that the comment names where they came from.
+  `:root` is the dark palette in both files, which is why "no class" and
+  `theme-dark` are one thing and the default wears none.
+* **The wire, and why it is still v4.** `hello` grew an OPTIONAL `theme`
+  (written only when there is one, read with `.get`, absent = `None` = "keep
+  your own default"), and the verb table grew
+  `set_theme(theme: str) -> None`. Both halves are additive and both are
+  tolerated by an end that has neither — an older monitor ignores an unknown
+  field and answers an unknown verb with one `bad_request` the Chat UI swallows
+  — and no frame about a click, a capture or a clipboard changed shape. A theme
+  that did not cross is a window on another machine that is the colour it was,
+  which is not a forced upgrade of every deployed monitor. A `theme` that is
+  present and is not a string still fails: a tolerant *read* is not a tolerant
+  *decode*.
+* **`UIMonitor.set_theme`**, on the Protocol, implemented by all four tiers
+  (`LocalUIMonitor` stores and fans out, `RemoteUIMonitor` calls,
+  `SwitchableMonitor` forwards and remembers nothing — the dial re-sends it —
+  `IdleMonitor` drops it, `FakeUIMonitor` records it). **`on_theme` is
+  local-only**, `on_frame`'s rule backwards: a palette travels brain → monitor,
+  so a hook on the wire-facing Protocol would be a registration that can never
+  fire.
+* **One path in, whichever door.** `server.py`'s handshake calls
+  `monitor.set_theme(hello.theme)` after the ack (it is not a condition of
+  admission), and the `set_theme` verb dispatches to the same method — so the
+  Monitor UI has one hook to subscribe to and no case analysis. The theme lives
+  on the **monitor**, not on the session, which is what makes "keep the last one
+  after a detach" free. `MonitorServer.peer_theme` exists as a diagnostic and is
+  `None` the moment the link is gone.
+* **The Monitor UI.** `CalibrationView` subscribes to `monitor.on_theme` at
+  construction (the Serve panel can be listening before the page has loaded, so
+  a hello with a theme must not arrive to find nobody subscribed) and forwards
+  to `ServePanel.set_theme`, which stores it and pushes. The palette rides the
+  `serve` event — the one event that already knows somebody is on the line — and
+  `paintServe` calls `applyTheme(event.theme)`. `""` is a real value and the
+  common one: a monitor nobody has ever attached to sends it and the page wears
+  `:root`. The `--headless` door has no view and no panel, so it stores the
+  theme and paints nothing.
+* **The Chat UI.** `MonitorDial` takes a fourth argument and
+  `_dial_remote_monitor` passes it to `RemoteUIMonitor.connect(theme=...)`; the
+  view dials with `self._config.gui.theme`. `_persist_theme` — F4 and `/theme`
+  are one door — ends in `_tell_monitor_theme`, which is guarded on the LINK
+  (`loop_state is not DISCONNECTED`, `_push_link`'s own test) rather than on the
+  target, because the switch still holds whichever monitor died. Nothing is
+  awaited and nothing is reported: a theme that did not cross is not worth
+  interrupting an F4 with.
+* **Tests (15).** Wire: the hello with and without a theme, a non-string theme
+  refused, `set_theme` in the round-trip table. RPC: the hello dresses the
+  monitor before the first call, no theme leaves it its own default, `set_theme`
+  crosses and fires the hook (and the same palette twice is not an event), the
+  theme outlives the brain. Monitor UI: the default is `""`, a dial that names a
+  theme paints on attach, the page follows a mid-link change, the palette
+  survives a detach, the CSS blocks are the chat window's verbatim, the page
+  applies `event.theme`. Chat UI: the dial carries `[gui] theme`, F4 while
+  connected sends `set_theme`, F4 with the link down sends nothing.
+* **Docs.** `docs/commands.md`'s `F4` and `/theme` rows say a connected monitor
+  follows.

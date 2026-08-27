@@ -171,13 +171,26 @@ class RemoteUIMonitor:
     # == connecting ============================================================
 
     @classmethod
-    async def connect(cls, host: str, port: int, *, token: str | None = None) -> RemoteUIMonitor:
+    async def connect(
+        cls,
+        host: str,
+        port: int,
+        *,
+        token: str | None = None,
+        theme: str | None = None,
+    ) -> RemoteUIMonitor:
         """Dial a monitor and complete the handshake.
 
         ``token`` is §5's shared secret, as the monitor printed it on the machine
         with the screen. ``None`` is a real value and the right one for a monitor
         started with ``--no-token``; a monitor that HAS a token refuses ``None``
         the same way it refuses a wrong one.
+
+        ``theme`` is §11.7's palette, and it rides in the ``hello`` rather than
+        in a call after it for one reason: the Monitor UI is a window somebody
+        is LOOKING at while this dial happens, and a theme sent one round trip
+        later is a window that flashes dark and then corrects itself. ``None``
+        says nothing and leaves that machine wearing its own default.
 
         Raises :class:`MonitorRefused` when the monitor already has a brain
         (``kind="busy"``) or the token did not authorise us
@@ -190,7 +203,7 @@ class RemoteUIMonitor:
         reader, writer = await asyncio.open_connection(host, port, limit=LINE_LIMIT)
         peer = f"{host}:{port}"
         try:
-            writer.write(encode_line(hello_frame(token)).encode("utf-8"))
+            writer.write(encode_line(hello_frame(token, theme)).encode("utf-8"))
             await writer.drain()
             raw = await reader.readline()
             if not raw:
@@ -281,6 +294,17 @@ class RemoteUIMonitor:
 
     async def suspend(self) -> None:
         await self._call("suspend")
+
+    async def set_theme(self, theme: str) -> None:
+        """Tell the far monitor which palette its own window should wear.
+
+        The one verb here whose answer nobody reads and whose failure nobody
+        acts on: a monitor a release behind has never heard of it and refuses
+        with ``bad_request``, which is a window that stays dark, not a brain
+        that has lost its screen. The caller swallows it (chat/view.py's
+        ``_tell_monitor_theme``); this stays honest and raises.
+        """
+        await self._call("set_theme", theme=theme)
 
     async def resume(self) -> None:
         await self._call("resume")

@@ -55,6 +55,7 @@ from agentclip.driver.monitor.protocol import (
     Located,
     MonitorSpec,
     SpecFor,
+    ThemeHook,
     Tick,
     TickHook,
     UIMonitor,
@@ -186,6 +187,11 @@ class FakeUIMonitor:
         self.suspends = 0
         self.resumes = 0
         self.closed = False
+        # §11.7: the palette the attached brain asked for, last one wins, and
+        # the hooks a Monitor UI hangs off it. Public because a test asserts on
+        # it directly ("the window is wearing what the Chat UI picked").
+        self.theme: str | None = None
+        self._theme_hooks: list[ThemeHook] = []
         # -- the local-only tier (§3) ------------------------------------------
         self.frames: list[RegionImage] = []
         self.detector: ScreenDetector | None = None
@@ -293,6 +299,29 @@ class FakeUIMonitor:
         self.closed = True
         self.watching = False
         self.calls.append(("close", ()))
+
+    async def set_theme(self, theme: str) -> None:
+        """Wear it and tell the hooks - ``LocalUIMonitor.set_theme``, whole.
+
+        Including the "same theme twice is not an event" guard, because that is
+        the half a Monitor UI test is actually asserting on: a redial under an
+        unchanged palette must not repaint the page.
+        """
+        self.calls.append(("set_theme", (theme,)))
+        if theme == self.theme:
+            return
+        self.theme = theme
+        for hook in list(self._theme_hooks):
+            hook(theme)
+
+    def on_theme(self, hook: ThemeHook) -> Callable[[], None]:
+        self._theme_hooks.append(hook)
+
+        def drop() -> None:
+            if hook in self._theme_hooks:
+                self._theme_hooks.remove(hook)
+
+        return drop
 
     # == observation ==========================================================
 

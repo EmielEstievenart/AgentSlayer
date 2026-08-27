@@ -27,7 +27,8 @@ a forced upgrade of the other.
 
 Frame vocabulary (v4)
 ---------------------
-``{"type":"hello","version":4,"package":"0.1.0","token":"<32 hex>"|null}``
+``{"type":"hello","version":4,"package":"0.1.0","token":"<32 hex>"|null,
+"theme":"<name>"|null (optional)}``
     The client's first line. Nothing else may precede it. ``token`` is §5's
     shared secret (:mod:`agentclip.driver.monitor.auth`) and **null is a real
     value**: a monitor started with ``--no-token`` accepts it, and one started
@@ -48,6 +49,16 @@ Frame vocabulary (v4)
     gives neither - a brain that took its silence for "nothing is calibrated"
     would refuse every click on a perfectly calibrated desktop, which is
     exactly the failure this wave was opened by.
+
+    ``theme`` is §11.7 and is the ONE field on this wire read with ``.get``
+    rather than demanded: absent is None, and None is "the monitor keeps its
+    own default". It is also why the version did NOT go to 5. Both halves of
+    the pair it belongs to are additive and both tolerate the other end not
+    having them - a monitor that ignores the field paints its own palette, and
+    a ``set_theme`` an older monitor has never heard of comes back as one
+    ``bad_request`` the Chat UI swallows (chat/view.py's
+    ``_tell_monitor_theme``). Nothing about a click, a capture or a clipboard
+    changes shape, which is what a version gate is for.
 ``{"type":"hello_ack","version":4,"package":"0.1.0","server_id":"<uuid4>",
 "clipboard_kind":"copykitten"|null}``
     The server's reply. ``server_id`` identifies the PROCESS (a monitor is
@@ -729,6 +740,11 @@ WATCH = "watch"
 SUSPEND = "suspend"
 RESUME = "resume"
 CLOSE = "close"
+#: The palette the attached brain wears, pushed onto the monitor's own window
+#: (§11.7). The only verb here that touches no pixel of the watched screen, and
+#: the only one whose failure is a no-op: it is answered ``null`` and the Chat
+#: UI does not look.
+SET_THEME = "set_theme"
 
 _PARAMS: dict[str, tuple[_Param, ...]] = {
     WATCH: (_Param("slot", encode_slot, decode_slot),),
@@ -740,6 +756,7 @@ _PARAMS: dict[str, tuple[_Param, ...]] = {
     # monitor outlives every brain that dials it (§2.8), so the client's own
     # ``close()`` tears down the LINK and sends nothing.
     CLOSE: (),
+    SET_THEME: (_Param("theme", *_STR),),
     "focus_window": (_Param("handle", *_INT),),
     "foreground_window": (),
     "click": (
@@ -776,6 +793,7 @@ _RESULTS: dict[str, _Value] = {
     SUSPEND: _Value(_encode_none, _decode_none),
     RESUME: _Value(_encode_none, _decode_none),
     CLOSE: _Value(_encode_none, _decode_none),
+    SET_THEME: _Value(_encode_none, _decode_none),
     "focus_window": _Value(_identity, _as_bool),
     "foreground_window": _Value(_identity, _as_opt_int),
     "click": _Value(_identity, _as_bool),
@@ -888,14 +906,20 @@ class ErrorFrame:
 class Hello:
     """The client's first line, once it has been checked.
 
-    Two fields rather than one, because the two are answered by different parts
+    Three fields rather than one, because each is answered by a different part
     of the server: the versions are a WIRE question the decoder has already
-    settled by the time this exists, and the token is a POLICY question only the
-    server that owns the secret can answer.
+    settled by the time this exists, the token is a POLICY question only the
+    server that owns the secret can answer, and the theme is a message for the
+    monitor's WINDOW that the connection itself has no opinion about.
+
+    ``theme`` is optional in both senses - a hello may omit the field, and a
+    hello may carry ``null`` - and both mean the same thing: this brain is not
+    telling the monitor what to wear.
     """
 
     versions: Versions
     token: str | None
+    theme: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -938,16 +962,26 @@ def _read_versions(frame: dict[str, Any], what: str) -> Versions:
     return peer
 
 
-def hello_frame(token: str | None = None) -> dict[str, Any]:
+def hello_frame(token: str | None = None, theme: str | None = None) -> dict[str, Any]:
     """The dial. ``token`` is always written, ``null`` included: the far side
     reads one field either way, so "this build has no auth" cannot be confused
-    with "this build sent nothing"."""
-    return {
+    with "this build sent nothing".
+
+    ``theme`` is written only when there is one, which is the opposite choice
+    and the right one for the opposite reason: the field is OPTIONAL (§11.7),
+    its absence reads as "keep your own default", and writing ``null`` into
+    every hello would put a field on the wire that no monitor ever has to look
+    at.
+    """
+    frame: dict[str, Any] = {
         "type": "hello",
         "version": OURS.wire,
         "package": OURS.package,
         "token": token,
     }
+    if theme is not None:
+        frame["theme"] = theme
+    return frame
 
 
 def read_hello(frame: dict[str, Any]) -> Hello:
@@ -964,6 +998,11 @@ def read_hello(frame: dict[str, Any]) -> Hello:
     return Hello(
         versions=versions,
         token=_as_opt_str(_field(data, "token", "hello"), "hello.token"),
+        # ``.get``, not ``_field``: an absent theme is a hello from a brain that
+        # is not telling this monitor what to wear, which is a perfectly good
+        # hello. A theme that is PRESENT and is not a string still fails - a
+        # tolerant read is not a tolerant decode.
+        theme=_as_opt_str(data.get("theme"), "hello.theme"),
     )
 
 

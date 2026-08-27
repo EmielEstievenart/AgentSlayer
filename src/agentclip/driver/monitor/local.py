@@ -57,6 +57,7 @@ from agentclip.driver.monitor.protocol import (
     Located,
     MonitorSpec,
     SpecFor,
+    ThemeHook,
     Tick,
     TickHook,
     UIMonitor,
@@ -233,6 +234,14 @@ class LocalUIMonitor:
         self._hooks: list[TickHook] = []
         self._frame_hooks: list[FrameHook] = []
         self._clip_hooks: list[ClipHook] = []
+        # §11.7: what the attached brain wears, and who is told when it moves.
+        # Kept on the monitor rather than on the server so it OUTLIVES the
+        # connection that named it - the window this process opens keeps the
+        # last palette a brain asked for after that brain has gone, which is
+        # the difference between "a monitor remembers who was here" and "a
+        # monitor flashes back to dark on every detach".
+        self._theme: str | None = None
+        self._theme_hooks: list[ThemeHook] = []
         # -- the poller ---------------------------------------------------------
         self._spec: MonitorSpec | None = None
         self._watched = EMPTY_WATCHED
@@ -432,6 +441,54 @@ class LocalUIMonitor:
 
     async def watched(self) -> Watched:
         return self._watched
+
+    # -- the attached brain's palette (§11.7) ---------------------------------
+
+    @property
+    def theme(self) -> str | None:
+        """The last palette a brain asked for, or None if none ever did.
+
+        LOCAL-ONLY, like ``on_frame`` and for the same reason: a theme travels
+        brain -> monitor, so the only process that can answer this is the one
+        with the window in it.
+        """
+        return self._theme
+
+    async def set_theme(self, theme: str) -> None:
+        """Wear ``theme`` and tell whoever is listening. Never fails.
+
+        Called from the server's handshake (the ``hello`` carried one) and from
+        the ``set_theme`` verb (the user changed it mid-link), and it does the
+        same thing either way, which is the whole reason there is one method:
+        the Monitor UI has one hook to subscribe to and no case analysis about
+        which door a palette came through.
+
+        The same theme twice is not an event: the hooks are a page repaint, and
+        a redial under an unchanged palette would repaint for nothing.
+        """
+        with self._tick_lock:
+            if theme == self._theme:
+                return
+            self._theme = theme
+            hooks = list(self._theme_hooks)
+        for hook in hooks:
+            hook(theme)
+
+    def on_theme(self, hook: ThemeHook) -> Callable[[], None]:
+        """Every palette a brain asks for, as it lands; returns the unsubscribe.
+
+        Called on whichever task the server's session runs on - never a poller
+        thread - and, like every hook here, it must not block.
+        """
+        with self._tick_lock:
+            self._theme_hooks.append(hook)
+
+        def unsubscribe() -> None:
+            with self._tick_lock:
+                if hook in self._theme_hooks:
+                    self._theme_hooks.remove(hook)
+
+        return unsubscribe
 
     async def suspend(self) -> None:
         """Stop polling without bumping the generation.

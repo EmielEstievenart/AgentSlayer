@@ -2245,6 +2245,52 @@ scan on/off · snap back on/off`. Pushed only when the rendered text changes
 (a tick a second must not repaint an unchanged block). Help/palette entry:
 `F2 — what the monitor sees (and the settings it sent)`.
 
+**As built (2026-08-27).** The block, the key and the change filter, with every
+word in it composed on the Python side and none of it composed twice.
+
+* `GuiView._monitor_sees()` is the whole answer: `sees_rows(watched, tick)` and
+  `sees_settings(watched)` (module functions in `chat/view.py`, so a suite reads
+  them without a window), against `self._watched[slot]` of the SELECTED window -
+  the same pointer every other per-window block in that column follows. Rows are
+  `TICK_KINDS` first and then anything in `Watched.captured` the tick list does
+  not name, each one `{kind, state, text}` with `text` = `f"{kind.label} · …"`
+  and the state one of `✓ on screen` / `captured, not on screen` /
+  `✗ not captured`. The two sources answer different questions and are asked in
+  that order: `Watched.captured` is the authority on whether a picture exists,
+  the tick's `sightings` on whether it is on screen, so a sighting can never
+  promote a kind the monitor never captured (the disagreement cannot happen -
+  what is captured is what gets searched - and the row says which side wins if
+  it does).
+* The settings line is the five fields a user can watch NOT happen:
+  `auto-submit on/off · delivery <mode> · paste ≤ N chars · hover scan on/off ·
+  snap back on/off`. All five are `Watched`'s, i.e. the monitor's to configure
+  (§10.5), and until this block there was nowhere on this machine to read them.
+* `_push_monitor_sees()` compares the assembled payload with the last one sent
+  (`_sees_sent`) and returns without a `send` when they are equal. It is called
+  from the end of `_push_sidebar` (the loop: a tab click, a retarget, an attach,
+  a detach) and from `_on_monitor_tick` (the monitor's thread, ~1 Hz) - two
+  threads, but the only thing either mutates is that one field, so the worst a
+  race can do is send one identical payload twice.
+* With nothing attached (`_monitor_peer()` is `""`) the payload is no rows, no
+  settings, and the note `no monitor attached`. A column of "✗ not captured"
+  would blame the far machine for a link that was never made.
+* Page side: one event `monitor_sees`, one `paintSees` that writes only what the
+  event carried, and `toggleSees` - `el.sees.hidden = !el.sees.hidden`, F3's
+  sidebar toggle spelled again. The block is hidden in `index.html` (`#sees`),
+  painted whether open or closed so that opening it is a reveal rather than a
+  wait for the next tick, and remembered exactly as F3 and F8 are: page-local,
+  no round trip and nothing written to config. `F2`'s `KEYS` row has no `foot`,
+  so it stays off the one-row key strip like F4 and F6-F8; the sidebar's
+  key-hint line names it (`F2 monitor`), which is where `F2 calibrate` used to
+  be.
+* Tests: `tests/shell/chat/test_monitor_sees.py` (16) stages the kinds on the
+  fake monitor and asserts the rows, the three states, the selected-window rule,
+  each of the five settings, both directions of the change filter and the
+  no-monitor note; `test_keys.py`'s `test_f2_is_bound_to_nothing` is replaced by
+  three - the row exists and runs `toggleSees()` with no `api(` call in it, the
+  toggle and the paint are page-local with every string coming off the event,
+  and the key-hint line names F2 again.
+
 ### 11.5 Docs, tests, memory
 
 `commands.md`, `configuration.md`, README, AGENTS.md vocabulary row,

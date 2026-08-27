@@ -245,8 +245,22 @@
           <div class="side-status" id="det-STALE"></div>
           <div class="side-status" id="det-COPY"></div>
 
+          <!-- MONITOR SEES (F2, ui-monitor.md 11.4). Hidden until asked for,
+               because it answers a question you only have when something did
+               not happen: since 11.3 this window holds no templates and no
+               click points, so every "it refused / it never fired / it pasted
+               but did not send" is a fact about the OTHER machine - which
+               appearances it holds, which are on screen this second, and which
+               settings it sent us to drive from. -->
+          <div id="sees" hidden>
+            <div class="side-title">MONITOR SEES</div>
+            <div id="sees-rows"></div>
+            <div class="side-status" id="sees-settings"></div>
+            <div class="side-status" id="sees-note"></div>
+          </div>
+
           <div class="side-hint">
-            F1 help · F3 hides this column · F5 armed · F8 log ·
+            F1 help · F3 hides this column · F5 armed · F2 monitor · F8 log ·
             F6 next window · e summary
           </div>
         </aside>

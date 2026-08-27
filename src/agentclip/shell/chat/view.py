@@ -86,7 +86,13 @@ from agentclip.driver.automation.loop_state import (
 )
 from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
-from agentclip.driver.monitor.protocol import EMPTY_WATCHED, Tick, UIMonitor, Watched
+from agentclip.driver.monitor.protocol import (
+    EMPTY_WATCHED,
+    TICK_KINDS,
+    Tick,
+    UIMonitor,
+    Watched,
+)
 from agentclip.driver.monitor.remote import RemoteUIMonitor
 from agentclip.driver.monitor.switchable import IdleMonitor, SwitchableMonitor
 from agentclip.driver.screen.capture import RegionImage
@@ -258,6 +264,23 @@ SERVICE_FROM_MONITOR = " · from the monitor"
 # monitor with nothing configured for this window.
 SERVICE_UNWATCHED = "no service - the monitor has not answered for this window"
 
+# == MONITOR SEES (F2) ========================================================
+# The sidebar block ui-monitor.md §11.4 gives the key §11.2 freed. Everything in
+# it is the monitor's answer read back - which appearances that machine holds,
+# which of them are on screen this second, and the behavioural settings it sent
+# for the brain to drive from - because since §11.3 those are the only answers
+# there are: this window holds no templates, no click points and no service
+# table, so "why did it refuse?" cannot be answered by looking at anything here.
+# The three states of a row. The middot the middle one would start with is the
+# separator the row already has (``label · state``), so it is not repeated.
+SEES_ON = "✓ on screen"
+SEES_CAPTURED = "captured, not on screen"
+SEES_MISSING = "✗ not captured"
+# ...and what stands where the rows would be when there is no monitor at all.
+# Not an empty block: with nothing attached, every row would read "not captured"
+# and blame the far machine for a link that was never made.
+SEES_NO_MONITOR = "no monitor attached"
+
 # == settings (F4) ============================================================
 # The TUI's SettingsScreen is a theme picker and nothing else - one "Appearance"
 # tab over four Textual themes (``shell/tui/screens/settings.py``), and it does NOT
@@ -427,6 +450,57 @@ def _short_root(project_root: Path) -> str:
         # A root with no drive letter on Windows is a REMOTE, POSIX one: str()
         # would spell /home/dev/app with backslashes, which is not its name.
         return str(project_root) if project_root.drive else project_root.as_posix()
+
+
+def _on_off(flag: bool) -> str:
+    return "on" if flag else "off"
+
+
+def sees_rows(watched: Watched, tick: Tick | None) -> list[dict[str, str]]:
+    """One row per kind in ``TICK_KINDS ∪ Watched.captured`` (§11.4).
+
+    Two sources and one each: :attr:`Watched.captured` is the authority on what
+    the monitor HAS a picture of, and the latest tick is the authority on what
+    is on screen right now. They are asked in that order because they answer
+    different questions - a kind the monitor never captured is never searched,
+    so a tick has nothing to say about it, and "✗ not captured" is the sentence
+    that names the fix (capture it in the Monitor UI).
+
+    The tick is the LIVE window's, which is the only observation there is: the
+    monitor watches one window at a time. For the whole of a delegation the rows
+    therefore describe the selected window's captures against the live window's
+    screen, exactly as the DETECTION block above them does.
+    """
+    kinds = list(TICK_KINDS) + [kind for kind in watched.captured if kind not in TICK_KINDS]
+    rows: list[dict[str, str]] = []
+    for kind in kinds:
+        if tick is not None and tick.present(kind):
+            state, words = "on", SEES_ON
+        elif kind in watched.captured:
+            state, words = "captured", SEES_CAPTURED
+        else:
+            state, words = "missing", SEES_MISSING
+        rows.append({"kind": kind.name, "state": state, "text": f"{kind.label} · {words}"})
+    return rows
+
+
+def sees_settings(watched: Watched) -> str:
+    """The five settings the brain DRIVES from, in the monitor's words (§11.4).
+
+    Not every field of :class:`Watched` - the five whose value explains a
+    behaviour the user can see happen or not happen: a prompt that was pasted
+    but not sent, a paste that arrived in pieces, a copy click that walked the
+    window first, a scroll position that came back. Each of those is a support
+    question whose answer is one of these words, and until this block they were
+    on a machine the user was not looking at.
+    """
+    return (
+        f"auto-submit {_on_off(watched.auto_submit)}"
+        f" · delivery {watched.delivery}"
+        f" · paste ≤ {watched.max_paste_chars:,} chars"
+        f" · hover scan {_on_off(watched.hover_scan)}"
+        f" · snap back {_on_off(watched.snap_back)}"
+    )
 
 
 def preset_from_watched(watched: Watched, *, alerts: ServicePreset) -> ServicePreset:
@@ -931,6 +1005,13 @@ class GuiView:
         # different one means the monitor retargeted itself - a service picked
         # or a region redrawn in ITS window - so the brain re-reads (§10.5).
         self._watched_generation = -1
+        # The last MONITOR SEES payload the page was sent (§11.4). Ticks arrive
+        # about once a second and almost all of them say exactly what the one
+        # before said, so the block is pushed on CHANGE and not on arrival:
+        # without this the sidebar would repaint every second for the whole of a
+        # session. ``None`` = nothing sent yet, which no payload compares equal
+        # to, so the first tick always paints.
+        self._sees_sent: dict[str, Any] | None = None
         self._automation = AutomationController(
             view=self,
             monitor=self._monitor,
@@ -3433,8 +3514,8 @@ class GuiView:
     def _on_monitor_tick(self, tick: Tick) -> None:
         """Every tick, on the monitor's thread. Readout only, and non-blocking.
 
-        Two jobs, and both are things this shell used to get from an object it
-        owned. The active-detector list is the DETECTION block's "is anything
+        Three jobs, and the first two are things this shell used to get from an
+        object it owned. The active-detector list is the DETECTION block's "is anything
         even watching" line, and it rides every tick (§10.2: there is no
         detector up here to ask). And the GENERATION is how a service picked or
         a region redrawn in the MONITOR's own window reaches this one: the
@@ -3442,6 +3523,10 @@ class GuiView:
         means "ask again" (§10.5).
         """
         self._automation.active_detectors = tick.active_detectors
+        # ...and a third since §11.4: the sightings on this tick are the whole
+        # of what "on screen" means in the F2 block. Filtered by change, so a
+        # screen that has not moved costs one dict comparison per second.
+        self._push_monitor_sees()
         if tick.generation != self._watched_generation:
             # Claimed here, on the tick thread, so the next tick down the wire
             # does not queue a second read of the same answer.
@@ -4104,6 +4189,43 @@ class GuiView:
             slot_note=self._slot_note(slot),
             detection_title=f"DETECTION · {live_window}",
         )
+        # The F2 block reads the same two things this one does - the selected
+        # window and what the monitor last said about it - so it is repainted by
+        # the same moments, and its own change filter makes the extra call free.
+        self._push_monitor_sees()
+
+    def _push_monitor_sees(self) -> None:
+        """The MONITOR SEES block (F2), pushed only when its text changed (§11.4).
+
+        Called from two places and they are two different threads: every
+        :meth:`_push_sidebar` (the loop - a tab click, a retarget, an attach)
+        and every tick (the monitor's thread). Nothing is mutated but
+        :attr:`_sees_sent`, and the worst a race between them can do is send one
+        identical payload twice, which the page paints idempotently.
+        """
+        payload = self._monitor_sees()
+        if payload == self._sees_sent:
+            return
+        self._sees_sent = payload
+        self._bridge.send("monitor_sees", **payload)
+
+    def _monitor_sees(self) -> dict[str, Any]:
+        """What F2's block would say right now: rows, settings, or the note.
+
+        The SELECTED window, like every other per-window block in the sidebar -
+        which appearances the monitor holds for the service THAT tab is pointed
+        at. With no monitor attached there is nothing to report and one sentence
+        saying so, because a column of "not captured" would be the wrong
+        accusation entirely.
+        """
+        if not self._monitor_peer():
+            return {"rows": [], "settings": "", "note": SEES_NO_MONITOR}
+        watched = self._watched[_WINDOW_SLOTS[self._selected_window]]
+        return {
+            "rows": sees_rows(watched, self._monitor.latest),
+            "settings": sees_settings(watched),
+            "note": "",
+        }
 
     def _slot_note(self, slot: AgentSlot) -> str:
         """The CHAT WINDOW block's readiness line for the selected window.

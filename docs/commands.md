@@ -52,6 +52,7 @@ exception: a printable character never fires a shortcut mid-sentence.)
 | Key | Does |
 |---|---|
 | `F1` / `?` | This help sheet (`Esc` or `F1` closes it) |
+| `F2` | Hide/show **MONITOR SEES** in the sidebar: which appearances the monitor holds for this service, which of them are on screen right now, and the settings it sent this window to drive from (auto-submit, delivery, paste budget, hover scan, snap back). Read-only — the captures and the settings are made in the Monitor UI |
 | `F3` | Hide/show the sidebar |
 | `F4` | Appearance (theme) |
 | `F5` | ARM / DISARM the tool (same as `/armed`). Disarmed it still watches and shows everything, but never clicks, pastes or reads your clipboard |

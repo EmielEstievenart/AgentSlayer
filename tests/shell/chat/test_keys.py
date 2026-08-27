@@ -43,6 +43,9 @@ from tests.shell.chat.test_view import ControllerSpy, session_view, snapshot
 
 ASSETS = Path(__file__).resolve().parents[3] / "src" / "agentclip" / "shell" / "chat" / "assets"
 APP_JS = (ASSETS / "app.js").read_text(encoding="utf-8")
+#: Where a top-level function in ``app.js`` ends: its closing brace at the
+#: file's one level of indentation. Spelled once because two suites slice by it.
+END_OF_FN = "\n  }\n"
 
 
 def api_of(harness: Harness) -> JsApi:
@@ -153,13 +156,55 @@ def test_the_table_carries_every_binding_the_brief_lists(key: str) -> None:
     assert any(f'"{key}"' in entry["keys"] for entry in key_entries())
 
 
-def test_f2_is_bound_to_nothing() -> None:
-    """ui-monitor.md §11.2 deleted the calibration doors, F2 among them.
+def test_f2_shows_what_the_monitor_sees_and_opens_no_window() -> None:
+    """ui-monitor.md §11.4 gives F2 the key §11.2 freed - as a READOUT.
 
-    Left UNBOUND rather than re-used in the same breath: the key is spoken for
-    (§11.4 gives it the MONITOR SEES block), and a key that quietly kept doing
-    its old job would be the door §11.2 is about."""
-    assert not any('"F2"' in entry["keys"] for entry in key_entries())
+    Two halves, and the second is the point of the wave: the row exists (the
+    key is spoken for again, and its description is the sentence §11.4 wrote),
+    and what it runs is a page-local toggle rather than any call across the
+    bridge. A Chat UI that could open a calibration surface is exactly what
+    §11.2 deleted; a Chat UI that can SHOW what the other machine reported is
+    the only honest thing left, so the run body is asserted, not just the key.
+    """
+    rows = [entry for entry in key_entries() if '"F2"' in entry["keys"]]
+    assert len(rows) == 1
+    assert rows[0]["what"].startswith("what the monitor sees (and the settings it sent)")
+    assert rows[0]["section"] == "App"
+    assert '{ keys: ["F2"], on: ["F2"], mods: "", hot: true, section: "App",' in APP_JS
+    body = APP_JS[APP_JS.index('{ keys: ["F2"]') :]
+    body = body[: body.index('{ keys: ["F3"]')]
+    assert "run: function () { toggleSees(); } }" in body
+    assert "api(" not in body
+
+
+def test_the_sees_block_is_page_local_show_hide_like_the_sidebar() -> None:
+    """F2's toggle is F3's, spelled again: one `hidden` flip on one element, no
+    round trip and nothing persisted anywhere else. What is NOT local is every
+    word inside the block - `paintSees` writes only what the `monitor_sees`
+    event carried, because the whole of §11.4 is that this window has no answer
+    of its own about the machine with the pixels."""
+    toggle = APP_JS[APP_JS.index("function toggleSees()") :]
+    toggle = toggle[: toggle.index(END_OF_FN)]
+    assert "el.sees.hidden = !el.sees.hidden;" in toggle
+    assert "api(" not in toggle
+    paint = APP_JS[APP_JS.index("function paintSees(event)") :]
+    paint = paint[: paint.index(END_OF_FN)]
+    for source in ("event.rows", "event.settings", "event.note"):
+        assert source in paint
+    # No sentence is composed here: every string that reaches the user came off
+    # the event. (The one literal left is a CSS class, which is a style.)
+    written = re.findall(r"textContent = ([^;]+);", paint)
+    assert written and all(
+        text.startswith("event.") or text.startswith("row.") for text in written
+    ), written
+
+
+def test_the_key_hint_line_names_f2_again() -> None:
+    """The sidebar's F-key strip lost `F2 calibrate` with the door (§11.2). A
+    key that is bound and named nowhere is a key nobody presses."""
+    index = (ASSETS / "index.html").read_text(encoding="utf-8")
+    hint = index[index.index('class="side-hint"') :]
+    assert "F2 monitor" in hint[: hint.index("</div>")]
 
 
 def test_every_row_is_described_and_filed_under_a_section() -> None:

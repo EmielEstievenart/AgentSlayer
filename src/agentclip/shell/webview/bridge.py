@@ -110,6 +110,10 @@ The sidebar's remaining blocks and the log::
      remote_lines: [str],     # target, link state, reconnect count, ruleset
      can_connect: bool}       # is there a way to go remote in this build?
     {type: "detection", kind: str, label: str, text: str}   # kind "STALE" too
+    {type: "monitor_sees",                                  # the F2 block, 11.4
+     rows: [{kind: str, state: "on"|"captured"|"missing", text: str}, ...],
+     settings: str,          # the five the brain drives from, one line
+     note: str}              # "no monitor attached"; "" whenever rows apply
     {type: "mcp", rows: [{name: str, state: str, line: str}, ...]}
     {type: "harness", kind: str, time: str, text: str, line: str}
     {type: "toggle", what: "log"}                           # /log, from Python

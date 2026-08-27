@@ -1460,6 +1460,35 @@ button:not(:disabled) {
   color: var(--warn);
 }
 
+/* -- MONITOR SEES (F2, ui-monitor.md 11.4) --------------------------------
+   Three states, three weights, and the middle one is the DEFAULT dim: a
+   captured appearance that is simply not on screen this second is the normal
+   resting state of most of these rows and must not read as a problem. Green is
+   "the monitor is looking at it right now"; the warning colour is reserved for
+   the one state the user can act on, which is a picture nobody ever took. */
+
+.sees-row {
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.sees-row.on {
+  color: var(--ok);
+}
+
+.sees-row.missing {
+  color: var(--warn);
+}
+
+/* The settings the block ends with are a different KIND of fact from the rows
+   above them - what the monitor told this window to do, not what it can see -
+   so they are separated by space rather than by a second heading. */
+#sees-settings {
+  margin-top: 8px;
+}
+
 /* -- harness log pane (F8, /log) ------------------------------------------ */
 
 .logpane {

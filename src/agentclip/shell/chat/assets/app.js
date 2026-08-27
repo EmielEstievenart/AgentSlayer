@@ -11,10 +11,11 @@
    pure show/hide of a page element. /log comes back the other way as a `toggle`
    event, so the command and the key stay one implementation. F1 (help) and `t`
    (put the caret back in the chat box) are wholly local; F4's theme picker
-   paints locally and tells Python, which is what persists it. F2 is UNBOUND
-   since ui-monitor.md 11.2 deleted the calibration doors: everything it used
-   to reach lives in the Monitor UI, which is another process's window with its
-   own page, its own bridge and its own vocabulary (monitor_ui/).
+   paints locally and tells Python, which is what persists it. F2 (MONITOR
+   SEES) is a third one of those: the show/hide is this file's, and every word
+   inside the block is composed on the Python side and pushed as `monitor_sees`
+   - which is ui-monitor.md 11.4's whole point, that the answer belongs to the
+   machine with the pixels and this window only reads it back.
 
    Two tables are the spine of the key surface, and both exist so that a thing
    cannot be done without being documented: KEYS below drives BOTH the keydown
@@ -1658,6 +1659,37 @@
     line.textContent = event.label ? event.label + " · " + event.text : event.text;
   }
 
+  /* == MONITOR SEES (F2) ====================================================
+     Python decides every word (chat/view.py: sees_rows, sees_settings) and
+     pushes only when they CHANGE - ticks arrive about once a second and this
+     block would otherwise repaint for the whole of a session. So there is no
+     diffing here: what arrives is different from what is up, always.
+
+     Shown/hidden exactly like F3's sidebar and F8's log pane: a page-local
+     flag, no round trip, and the paint runs whether the block is open or not
+     so that opening it is a reveal rather than a wait for the next tick. */
+
+  function paintSees(event) {
+    var rows = event.rows || [];
+    el.seesRows.innerHTML = "";
+    rows.forEach(function (row) {
+      var node = document.createElement("div");
+      node.className = "sees-row " + (row.state || "");
+      node.textContent = row.text;
+      el.seesRows.appendChild(node);
+    });
+    el.seesSettings.textContent = event.settings || "";
+    el.seesSettings.hidden = !event.settings;
+    // The note and the rows are alternatives, never both: it says why there
+    // are no rows.
+    el.seesNote.textContent = event.note || "";
+    el.seesNote.hidden = !event.note;
+  }
+
+  function toggleSees() {
+    el.sees.hidden = !el.sees.hidden;
+  }
+
   function paintStatus(event) {
     // The provider is here and nowhere else, and it is half of `w`'s "never, in
     // this mode": in manual-clipboard mode nothing polls the clipboard at all.
@@ -2226,6 +2258,9 @@
       case "detection":
         paintDetection(event);
         return;
+      case "monitor_sees":
+        paintSees(event);
+        return;
       case "harness":
         appendLog(event);
         return;
@@ -2278,7 +2313,7 @@
        foot    the KEY HINT FOOTER's short label, and its presence is what puts
                the row in the strip at all - the TUI's `show=` on a Binding,
                with the Binding's own wording. Absent on every key the TUI's
-               footer hides for the same reason it does (x, F4, F6-F8,
+               footer hides for the same reason it does (x, F2, F4, F6-F8,
                ctrl+o, ctrl+q, ctrl+enter, shift+tab): the strip is one row and
                the loop's one-key answers are what belongs on it.
        avail   the footer's three-way state - "on" | "dim" | "off" - which is
@@ -2293,8 +2328,12 @@
     { keys: ["F1", "?"], on: ["F1", "?"], mods: "", hot: true, section: "App",
       foot: "help",
       what: "this help", run: function () { openHelp(); } },
-    // F2 is deliberately absent (ui-monitor.md 11.2): it used to say where
-    // calibration lives, and calibration lives in another window entirely.
+    // F2 used to open the calibration window and was left bound to nothing by
+    // ui-monitor.md 11.2. It is a READOUT now (11.4), which is the only thing
+    // this window can honestly offer about the machine with the pixels.
+    { keys: ["F2"], on: ["F2"], mods: "", hot: true, section: "App",
+      what: "what the monitor sees (and the settings it sent): which appearances that machine holds for this service, which of them are on screen right now, and the behaviour it told this window to drive - captures are made in the Monitor UI",
+      run: function () { toggleSees(); } },
     { keys: ["F3"], on: ["F3"], mods: "", hot: true, section: "App",
       foot: "sidebar",
       what: "hide/show the sidebar", run: function () { toggleSidebar(); } },
@@ -2923,6 +2962,10 @@
       sideRegion: id("side-region"),
       sideSlotNote: id("side-slot-note"),
       sideDetectionTitle: id("side-detection-title"),
+      sees: id("sees"),
+      seesRows: id("sees-rows"),
+      seesSettings: id("sees-settings"),
+      seesNote: id("sees-note"),
       logpane: id("logpane"),
       logLines: id("log-lines"),
       keyhints: id("keyhints"),

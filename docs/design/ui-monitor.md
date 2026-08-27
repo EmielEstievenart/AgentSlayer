@@ -2025,7 +2025,7 @@ tab. `--monitor local|HOST:PORT|@NAME` remain terminal opt-ins.
 * Docs (`commands.md` `--monitor` table, `configuration.md`, README quick-start)
   say: double-click = idle; attach from the Monitor tab.
 
-**As built (2026-08-27).** `resolve_monitor_target` now answers `None` for an
+**As built (2026-08-27, `0896c63`).** `resolve_monitor_target` now answers `None` for an
 absent flag and for `none`, and `LaunchLocal` for `local` alone — three
 spellings, three answers, one line each. Nothing downstream changed: `main`
 already handed all three values through unflattened (§10.2), so an idle start is
@@ -2057,7 +2057,8 @@ that say "F2" (`STALE_UNTICKED`, `STALE_OFF`, `PROFILE_HINT`) say "in the
 Monitor UI" instead. `/identify` stays a Monitor UI feature only
 (`docs/commands.md` moves the row to that section).
 
-**As built (2026-08-27).** Deleted, in one pass, with nothing left pointing:
+**As built (2026-08-27, `0896c63`).** Deleted, in one pass, with nothing left
+pointing:
 
 * Chat UI page: `#calibrate-open` (titlebar), `#edit-services` and `#set-region`
   (sidebar), their three `api("calibrate")` listeners, their `el` lookups, the

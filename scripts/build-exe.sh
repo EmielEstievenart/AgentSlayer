@@ -2,7 +2,8 @@
 #
 # Freeze AgentClip's THREE executables and drop them on your PATH.
 #
-#   agentclip          the full app - GUI shell, OpenCV backend
+#   agentclip          the full app - the Chat UI window (a brain: it carries
+#                      no screen half since ui-monitor.md 10)
 #   agentclip-engine   the engine half, the binary an SSH target runs
 #                      (docs/design/remote-executor.md section 2.6)
 #   agentclip-monitor  the monitor half, the standing binary that runs on the
@@ -153,9 +154,10 @@ fi
 # not have, and the engine binary imports neither
 # (packaging/agentclip-engine.spec excludes them).
 #
-# `cv` covers the app AND the monitor - the monitor binary is where every
-# template search actually RUNS (ui-monitor.md 2.5), so if anything it needs the
-# backend more than the app does. `gui` covers them both too, since 9.1: the
+# `cv` covers the MONITOR alone - that binary is where every template search
+# actually RUNS (ui-monitor.md 2.5), and since 10 the app binary carries no
+# matcher backend at all (packaging/agentclip.spec excludes cv2/numpy, along
+# with tkinter and Xlib). `gui` covers the app AND the monitor, since 9.1: the
 # Monitor UI is a shell package and it ships in the MONITOR binary now, because
 # it runs where the pixels are. Only that binary's --headless door opens no
 # window, and it is one delegation inside the same entry point.
@@ -172,7 +174,7 @@ fi
 # `set -e` a trailing && list that evaluates false IS a failed command, so the
 # terse form would abort the script on exactly the runs that need fewest extras.
 extras=()
-if [ "$build_app" -eq 1 ] || [ "$build_monitor" -eq 1 ]; then
+if [ "$build_monitor" -eq 1 ]; then
     extras+=(--extra cv)
 fi
 if [ "$build_app" -eq 1 ] || [ "$build_monitor" -eq 1 ]; then
@@ -188,11 +190,11 @@ uv sync --group build "${extras[@]}" || die "uv sync failed."
 # of these extras is reached by a LAZY, try/except-guarded import, so its absence
 # produces no build error at all - just a binary that is quietly missing a
 # feature and blames the user's install for it.
-if [ "$build_app" -eq 1 ] || [ "$build_monitor" -eq 1 ]; then
+if [ "$build_monitor" -eq 1 ]; then
     step 'Verifying the cv extra is importable'
     uv run --group build python -c \
         "import cv2, numpy; print(f'cv2 {cv2.__version__}, numpy {numpy.__version__}')" ||
-        die "The cv extra is not importable, so the binaries would be built without the OpenCV matcher backend and every service would silently fall back to the anchor search. Fix the environment and re-run."
+        die "The cv extra is not importable, so agentclip-monitor would be built without the OpenCV matcher backend and every service would silently fall back to the anchor search. Fix the environment and re-run."
 fi
 
 if [ "$build_app" -eq 1 ] || [ "$build_monitor" -eq 1 ]; then
@@ -219,9 +221,9 @@ fi
 # buried in the log, and the failure lands on the monitor machine, which is the
 # one machine where the region a user drags is actually drawn.
 #
-# Checked only when the monitor is built: the app carries the same picker, but
-# adding a new fatal preflight to the long-standing app build is a bigger change
-# than this is worth - a desktop that runs the GUI shell has tk anyway.
+# Checked only when the monitor is built, and since ui-monitor.md 10 that is the
+# only binary it could matter for: the app exe draws no overlay at all and
+# excludes tkinter outright (packaging/agentclip.spec).
 if [ "$build_monitor" -eq 1 ]; then
     step 'Verifying tkinter is importable (the --pick-region overlay)'
     if ! uv run --group build python -c "import tkinter; print('tkinter ' + str(tkinter.TkVersion))"; then
@@ -252,27 +254,18 @@ if [ "$build_app" -eq 1 ]; then
     [ -n "${version_out// /}" ] || die "agentclip --version printed nothing."
     ok "$version_out"
 
-    # --version proves the app imports; it says nothing about a backend only
-    # ever imported inside a function on a poll tick. --list-matchers actually
-    # imports each one and reports what happened, run against the binary just
-    # built - so this catches both halves: cv2 not collected at all, and cv2
-    # collected but unable to load its shared objects out of a onefile
-    # extraction directory.
-    step 'Verifying the OpenCV backend is bundled AND loads'
-    matchers_out="$("$app_bin" --list-matchers 2>&1)" ||
-        { printf '%s\n' "$matchers_out"; die "agentclip --list-matchers failed."; }
-    case "$matchers_out" in
-        *"NOT AVAILABLE"*)
-            printf '%s\n' "$matchers_out"
-            die "The frozen agentclip cannot run the OpenCV matcher, so every service would silently fall back to the anchor search. Check that the cv extra is installed and packaging/agentclip.spec's hiddenimports still name cv2/numpy."
-            ;;
-    esac
-    printf '%s\n' "$matchers_out" | while IFS= read -r line; do ok "$line"; done
+    # No --list-matchers here, and it is not an omission: since
+    # docs/design/ui-monitor.md 10 the Chat UI hosts no monitor and runs no
+    # matcher - packaging/agentclip.spec EXCLUDES cv2/numpy, and the CLI has no
+    # such flag any more. The backend is checked against agentclip-monitor
+    # below, on the binary that actually does the matching.
 
-    # The same argument one shell over. --gui-smoke imports pywebview, reads all
-    # three page assets back through importlib.resources (the classic frozen-app
-    # failure: the files are IN the archive but the resource reader cannot find
-    # them under _MEIPASS) and prints the renderer it would get.
+    # What IS checked here is the shell, and it is the sharper half: --version
+    # proves only what is imported at module level, and none of the window is.
+    # --gui-smoke imports pywebview, reads all three page assets back through
+    # importlib.resources (the classic frozen-app failure: the files are IN the
+    # archive but the resource reader cannot find them under _MEIPASS) and
+    # prints the renderer it would get.
     #
     # It needs no display. cli.py's _gui_smoke imports `webview` - whose
     # __init__ does NOT call guilib.initialize(), so no toolkit is loaded - and

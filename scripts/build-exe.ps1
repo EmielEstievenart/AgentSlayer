@@ -6,7 +6,8 @@
     Builds PyInstaller onefile binaries, smoke-tests each frozen artifact, then
     copies them into a folder that is already on PATH:
 
-      agentclip.exe          the full app - GUI shell, OpenCV backend
+      agentclip.exe          the full app - the Chat UI window (a brain: it
+                             carries no screen half since ui-monitor.md 10)
       agentclip-engine.exe   the engine half, the binary an SSH target runs
                              (docs/design/remote-executor.md section 2.6)
       agentclip-monitor.exe  the standing monitor, the binary that runs on the
@@ -131,17 +132,18 @@ try {
     # this run builds, and that is the whole point of the two "Only" switches:
     # the engine exe imports neither pywebview nor OpenCV
     # (packaging/agentclip-engine.spec excludes both), while the app and the
-    # monitor each open a pywebview window and each bundle the matcher backend.
+    # monitor each open a pywebview window and the monitor alone bundles the
+    # matcher backend.
     #
     # Not --no-default-groups: that would uninstall pytest/ruff/mypy and break
     # the dev loop. Dev deps are kept out of the binaries by the specs' excludes.
     #
     # None of the three is optional HERE even though all three are extras
-    # everywhere else. `cv` covers the app AND the monitor: both bundle the
-    # OpenCV matcher backend (architecture.md 6; the monitor exe is where every
-    # template search actually RUNS). `gui` covers them both too, since
-    # ui-monitor.md 9.1: the monitor binary IS the Monitor UI, and only
-    # --headless runs without a toolkit. `mcp` covers the app AND the engine: the
+    # everywhere else. `cv` covers the MONITOR alone: the monitor exe is where
+    # every template search runs, and since ui-monitor.md 10 the app exe carries
+    # no matcher backend at all (packaging/agentclip.spec excludes cv2/numpy).
+    # `gui` covers the app AND the monitor, since ui-monitor.md 9.1: the monitor
+    # binary IS the Monitor UI, and only --headless runs without a toolkit. `mcp` covers the app AND the engine: the
     # engine exe exists to run MCP servers on the target
     # (docs/design/remote-executor.md 2.7). And PyInstaller can only collect a
     # package that is present in the environment it is pointed at. Worse,
@@ -150,7 +152,7 @@ try {
     # opencv/numpy/pywebview/mcp from the shared .venv and then build lean exes
     # without a word.
     $extras = @()
-    if ($BuildApp -or $BuildMonitor) { $extras += @('--extra', 'cv') }
+    if ($BuildMonitor)               { $extras += @('--extra', 'cv') }
     if ($BuildApp -or $BuildMonitor) { $extras += @('--extra', 'gui') }
     if ($BuildApp -or $BuildEngine)  { $extras += @('--extra', 'mcp') }
     Write-Step "Syncing dependencies (uv sync --group build $($extras -join ' '))"
@@ -158,17 +160,16 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "uv sync failed with exit code $LASTEXITCODE." }
 
     # And prove it before spending two minutes on a build that cannot be right.
-    # A missing cv2 produces no build error at all: the exe starts, runs, and
-    # silently gives every service the anchor search while the editor tells the
-    # user their build does not include OpenCV. A missing pywebview is the same
-    # shape one shell over: the exe starts, runs, and answers a plain launch -
-    # the GUI is the default shell now - with an "install the gui extra" line a
-    # frozen user cannot act on.
-    if ($BuildApp -or $BuildMonitor) {
+    # A missing cv2 produces no build error at all: the monitor exe starts, runs,
+    # and silently gives every service the anchor search while the editor tells
+    # the user their build does not include OpenCV. A missing pywebview is the
+    # same shape one shell over: the exe starts, runs, and answers a plain launch
+    # with an "install the gui extra" line a frozen user cannot act on.
+    if ($BuildMonitor) {
         Write-Step 'Verifying the cv extra is importable'
         uv run --group build python -c "import cv2, numpy; print(f'cv2 {cv2.__version__}, numpy {numpy.__version__}')"
         if ($LASTEXITCODE -ne 0) {
-            throw "The cv extra is not importable, so the exe would be built without the OpenCV matcher backend. Fix the environment and re-run."
+            throw "The cv extra is not importable, so agentclip-monitor would be built without the OpenCV matcher backend. Fix the environment and re-run."
         }
     }
     if ($BuildApp -or $BuildMonitor) {
@@ -219,24 +220,12 @@ try {
         }
         Write-Host "    $($version.Trim())" -ForegroundColor Green
 
-        # --- bundled-backend check -------------------------------------------
-
-        # --version proves the app imports; it says nothing about a backend that
-        # is only ever imported inside a function on a poll tick. --list-matchers
-        # actually imports each one and reports what happened, run against the
-        # exe that was just built - so this catches both halves of the failure:
-        # cv2 not collected at all, and cv2 collected but unable to load its DLLs
-        # out of a onefile extraction directory. Neither is visible at runtime
-        # until somebody opens the service editor and is told their build does
-        # not include OpenCV, which is exactly the report this check exists to
-        # stop shipping.
-        Write-Step 'Verifying the OpenCV backend is bundled AND loads'
-        $matchers = & $DistExe --list-matchers 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0 -or $matchers -match 'NOT AVAILABLE') {
-            Write-Host $matchers
-            throw "The frozen exe cannot run the OpenCV matcher, so every service would silently fall back to the anchor search. Check that the cv extra is installed and packaging/agentclip.spec's hiddenimports still name cv2/numpy."
-        }
-        $matchers.Trim() -split "`n" | ForEach-Object { Write-Host "    $($_.Trim())" -ForegroundColor Green }
+        # No --list-matchers here, and it is not an omission: since
+        # docs/design/ui-monitor.md 10 the Chat UI hosts no monitor and runs no
+        # matcher - packaging/agentclip.spec EXCLUDES cv2/numpy, and the CLI has
+        # no such flag any more. The backend is checked against
+        # agentclip-monitor.exe below, on the binary that actually does the
+        # matching.
 
         # --- bundled-shell check ---------------------------------------------
 

@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller onefile spec for AgentClip.
+"""PyInstaller onefile spec for AgentClip - the CHAT UI, ``agentclip``.
 
 Build via ``scripts/build-exe.ps1``, or by hand from the repo root::
 
@@ -8,26 +8,33 @@ Build via ``scripts/build-exe.ps1``, or by hand from the repo root::
 The app itself is deliberately freeze-friendly (architecture.md S7): third-party
 assets live in Python source, the protocol templates are string constants, and
 nothing resolves paths relative to ``__file__``. Two things are deliberate
-exceptions and are the only ``datas`` of our own here: the two windows' pages
+exceptions and are the only ``datas`` of our own here: the Chat UI's page
 (hand-written files that a browser engine loads over a ``file://`` URL cannot
 be string constants - see ``page_datas``) and the user guide the Chat UI's
 "docs" button shows (``doc_datas``: the markdown IS the source of truth and is
 read, never compiled in). Everything else exists to work around *dependency*
 dynamism that PyInstaller's static analysis cannot see.
 
-The build environment must have the ``cv`` AND ``gui`` extras installed: the exe
-bundles the OpenCV matcher backend and the UI shell, and PyInstaller can only
-collect a package that is there. ``scripts/build-exe.ps1`` syncs both and then
-refuses to build without either, because both failures are otherwise silent - an
-exe missing cv2 starts, runs, and quietly gives every service the anchor search,
-and an exe missing pywebview starts, runs, and answers a launch with an
-"install the gui extra" line a frozen user cannot act on.
+**This binary hosts no monitor.** Since docs/design/ui-monitor.md S10 the Chat
+UI is a brain and reaches pixels only over the wire: in local mode it launches
+an ``agentclip-monitor`` process beside itself and dials it on 127.0.0.1,
+exactly as it dials a remote one. So the screen half - the OpenCV matcher
+backend, the ``--pick-region`` overlay's tkinter, the X11 bindings - and the
+Monitor UI's own page belong to ``packaging/agentclip-monitor.spec`` and are
+EXCLUDED here, so that a transitive import cannot quietly drag forty megabytes
+of them back in.
+
+The build environment must have the ``gui`` extra installed: the exe bundles
+the Chat UI's pywebview window, and PyInstaller can only collect a package that
+is there. ``scripts/build-exe.ps1`` syncs it and then refuses to build without
+it, because the failure is otherwise silent - an exe missing pywebview starts,
+runs, and answers a launch with an "install the gui extra" line a frozen user
+cannot act on. (That same sync also installs the ``cv`` extra, which the
+monitor spec needs and this one no longer does.)
 """
 
 import os
 import sys
-
-from PyInstaller.utils.hooks import collect_submodules
 
 # SPECPATH is injected by PyInstaller. Relative paths in Analysis() resolve
 # against the invoking CWD, which would make the build directory-sensitive;
@@ -44,7 +51,7 @@ SRC = os.path.join(ROOT, "src")
 # The CHAT UI's page (docs/design/gui.md S2 and S5). These three files are
 # package data under src/agentclip/shell/chat/assets - hatchling puts everything
 # below src/agentclip into the wheel, but PyInstaller collects only what a spec
-# names, so without this the frozen `--gui` opens a window on nothing.
+# names, so without this the frozen app opens a window on nothing.
 #
 # The destination keeps the PACKAGE-RELATIVE path, which is the whole point:
 # shell/chat/shell.py resolves the directory with ``importlib.resources``
@@ -57,26 +64,16 @@ SRC = os.path.join(ROOT, "src")
 # Globbed rather than listed: webview/assets.py's ASSET_NAMES is the contract for what
 # must be there, and a spec holding a second copy of that list is a fourth asset
 # away from silently shipping three.
+#
+# It is the ONLY page this binary carries. The Monitor UI's assets were
+# collected right below this block until ui-monitor.md S10: that window opens in
+# the agentclip-monitor process now, on the machine whose pixels it calibrates,
+# and packaging/agentclip-monitor.spec is where its bundle lives.
 CHAT_ASSETS = os.path.join(SRC, "agentclip", "shell", "chat", "assets")
 page_datas = [
     (os.path.join(CHAT_ASSETS, name), "agentclip/shell/chat/assets")
     for name in sorted(os.listdir(CHAT_ASSETS))
     if os.path.isfile(os.path.join(CHAT_ASSETS, name))
-]
-
-# The MONITOR UI's page (docs/design/ui-monitor.md 6.4). A SECOND bundle
-# rather than more files in the one above: it is a second pywebview window with
-# its own file:// URL, its own bridge and its own js_api, and
-# shell/monitor_ui/window.py resolves it through
-# ``files("agentclip.shell.monitor_ui") / "assets"`` - so the destination
-# has to be that package's own relative path, exactly as the chat page's is.
-# Without this, `agentclip --calibrate` in a frozen build opens a window on
-# nothing (and neither shell would notice until somebody pressed the button).
-MONITOR_UI_ASSETS = os.path.join(SRC, "agentclip", "shell", "monitor_ui", "assets")
-page_datas += [
-    (os.path.join(MONITOR_UI_ASSETS, name), "agentclip/shell/monitor_ui/assets")
-    for name in sorted(os.listdir(MONITOR_UI_ASSETS))
-    if os.path.isfile(os.path.join(MONITOR_UI_ASSETS, name))
 ]
 
 # The USER GUIDE - docs/commands.md and docs/configuration.md, which the Chat
@@ -106,7 +103,7 @@ doc_datas = [
 # `initialize()` picks the backend off `platform.system()` and imports it by
 # name, so the module the frozen app needs is decided by the OS the build ran
 # on - and a spec that hardcodes one OS's answer produces a Linux binary whose
-# --gui fails with "You must have either QT or GTK with Python extensions
+# window fails with "You must have either QT or GTK with Python extensions
 # installed", which is a lie about the user's machine.
 #
 # The choice below deliberately mirrors guilib.py rather than the build box:
@@ -145,7 +142,7 @@ else:
     # Windows: both backends bind to SYSTEM libraries through PyGObject / a Qt
     # binding, neither of which is a dependency of the `gui` extra, so on a
     # build box without them PyInstaller simply records a missing module and
-    # the exe's --gui still needs those packages present on the target. That is
+    # the exe's window still needs those packages present on the target. That is
     # the per-distro system-dependency question docs/design/remote-executor.md
     # section 5 still lists as open; what this branch guarantees is that
     # whatever the build box HAS gets collected instead of silently skipped in
@@ -157,26 +154,11 @@ hiddenimports = (
     # copykitten is imported lazily inside a function and guarded by
     # try/except, so a missed collection would not error - it would silently
     # fall back to pyperclip and lose the Windows sequence-number polling.
+    # The clipboard is a MONITOR resource (ui-monitor.md 2.11) and the polling
+    # that matters happens in agentclip-monitor, whose spec names both backends
+    # too; these are here for the paths that still reach a clipboard directly.
     ["copykitten", "pyperclip"]
-    # The --pick-region overlay imports tkinter lazily (inside a function) so a
-    # tk-less Linux still runs the rest of the app; name it explicitly so the
-    # frozen build can never silently lose the picker.
-    + ["tkinter"]
-    # The OpenCV matcher backend (driver/screen/matchers.py, tui.md S3.4g). Same lazy,
-    # try/except-guarded shape as copykitten and for the same reason - a
-    # from-source install without the `cv` extra has to keep working - and the
-    # same consequence if it is missed: no error, just a service configured for
-    # the exhaustive sweep silently getting the anchors, with the editor
-    # blaming the build. The exe BUNDLES it (architecture.md S6), so the build
-    # environment needs `uv sync --group build --extra cv`; scripts/build-exe.ps1
-    # does that and fails loudly if cv2 is not importable.
-    #
-    # Collection itself needs no help: PyInstaller ships hook-numpy and
-    # pyinstaller-hooks-contrib ships hook-cv2, and both pull their own binary
-    # extensions once the module is reachable. Naming them is about
-    # REACHABILITY, which is exactly what a lazy import makes fragile.
-    + ["cv2", "numpy"]
-    # The Chat UI (docs/design/gui.md). Same lazy shape again, twice over:
+    # The Chat UI (docs/design/gui.md). A lazy shape, twice over:
     # cli.py imports agentclip.shell.chat.shell inside the function that opens
     # the window, and that module imports `webview` inside its own functions, so
     # nothing static reaches any of this. And pywebview is itself dynamic below that line -
@@ -207,14 +189,6 @@ hiddenimports = (
     + ["webview"]
     + webview_platforms
     + webview_runtime
-    # The X11 backend (driver/screen/x11.py): capture, XTest input and EWMH
-    # focus on Linux, which is what `agentclip --calibrate` and the in-process
-    # monitor use there. Lazy inside functions like every other OS binding, so
-    # nothing static reaches it; guarded by platform because python-xlib is a
-    # Linux-only dependency (pyproject's marker). Submodules, not the bare
-    # package: Xlib/__init__.py imports none of Xlib.display, Xlib.X, Xlib.XK,
-    # Xlib.ext.xtest or Xlib.protocol.event.
-    + (collect_submodules("Xlib") if sys.platform.startswith("linux") else [])
 )
 
 # The dev group shares the same .venv. None of this is reachable from our
@@ -225,8 +199,15 @@ excludes = [
     "pytest",
     "_pytest",
     "mypy",
-    # NB: tkinter is NOT excluded - the --pick-region overlay (driver/screen/overlay.py)
-    # needs it, and PyInstaller's tkinter hook bundles Tcl/Tk once it's reachable.
+    # The SCREEN half, which this binary stopped hosting at ui-monitor.md S10:
+    # cv2/numpy (the matcher backend), tkinter (the --pick-region overlay) and
+    # Xlib (Linux capture, XTest input) all run in agentclip-monitor now, and
+    # naming them here is what stops one transitive import from quietly
+    # dragging OpenCV and Tcl/Tk back into the Chat UI's exe.
+    "cv2",
+    "numpy",
+    "tkinter",
+    "Xlib",
 ]
 
 a = Analysis(
@@ -243,16 +224,6 @@ a = Analysis(
     optimize=0,
 )
 
-# OpenCV's hook collects the whole wheel, including the 29 MB FFmpeg video-I/O
-# plugin. AgentClip decodes no video: the matcher backend calls exactly
-# ``matchTemplate`` and ``dilate`` (screen/matchers.py), both core imgproc, and
-# the plugin is loaded lazily by cv2 the first time something opens a
-# VideoCapture - which nothing here ever does. Verified rather than assumed:
-# with this DLL removed from the environment, cv2 still imports and both calls
-# return the same answers. Dropping it is a third of the cost of bundling
-# OpenCV at all, so it is worth the four lines.
-a.binaries = [entry for entry in a.binaries if "opencv_videoio_ffmpeg" not in entry[0]]
-
 pyz = PYZ(a.pure)
 
 exe = EXE(
@@ -268,7 +239,8 @@ exe = EXE(
     # UPX trips AV heuristics and has a history of corrupting Windows DLLs.
     upx=False,
     runtime_tmpdir=None,
-    # It is a TUI: it needs the console. Never --windowed.
+    # It is started from a terminal and writes its startup and error lines
+    # there: it needs the console. Never --windowed.
     console=True,
     disable_windowed_traceback=False,
     argv_emulation=False,

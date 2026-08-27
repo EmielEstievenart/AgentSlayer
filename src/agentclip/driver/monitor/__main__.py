@@ -52,6 +52,7 @@ from agentclip.driver.monitor.auth import default_monitor_dir, load_or_create_to
 from agentclip.driver.monitor.local import LocalUIMonitor
 from agentclip.driver.monitor.server import LOOPBACK, BindRefused, serve
 from agentclip.driver.screen.matchers import MATCHERS, select_matcher
+from agentclip.driver.screen.picker import add_overlay_flags, overlay_child
 from agentclip.driver.screen.profile_store import load_profile
 
 
@@ -122,6 +123,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # and a BUILD asking it of the frozen binary as a smoke test - it walks the
     # whole import tree and exits 0 without opening a socket.
     parser.add_argument("--version", action="version", version=f"agentclip-monitor {__version__}")
+    # The region picker and the identify overlay run as a CHILD of this same
+    # binary (screen.picker re-invokes ``sys.executable``), so the Monitor UI's
+    # Capture button lands here with --pick-region, exactly as the Chat UI's
+    # lands in cli.py. Hidden, and answered before any door (``main`` below).
+    add_overlay_flags(parser)
     # --version proves the import tree; it says nothing about a backend that is
     # only ever imported inside a function on a poll tick. Its twin, and the
     # other half of what the build scripts ask of the frozen binary.
@@ -378,6 +384,9 @@ async def _run(args: argparse.Namespace, monitor: LocalUIMonitor) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    child = overlay_child(args)
+    if child is not None:
+        return child
     if args.port is None:
         # The windowless door has nowhere to ask. ``parser.error`` rather than a
         # bare return, so the refusal carries the usage line the person typing

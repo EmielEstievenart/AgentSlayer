@@ -1052,47 +1052,16 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _pick_region_child(prompt: str | None = None) -> int:
-    """The --pick-region child: overlay up, region wire format out, exit.
+    """The --pick-region child. The body lives with the picker (screen.picker),
+    because the MONITOR binary re-invokes itself with the same flag and may not
+    import this module."""
+    from agentclip.driver.screen.picker import pick_region_child
 
-    Cancel is exit 0 with no output (the parent's parse_region yields None);
-    a broken environment (no tkinter, no display) is exit 1 with the reason on
-    stderr, which screen.picker surfaces as a ScreenPickError.
-    """
-    from agentclip.driver.screen.region import format_region
-
-    try:
-        from agentclip.driver.screen.overlay import run_overlay
-
-        region = run_overlay(prompt)
-    except Exception as exc:  # anything here means "picker unavailable"
-        print(f"region picker unavailable: {exc}", file=sys.stderr)
-        return 1
-    if region is not None:
-        print(format_region(region))
-    return 0
+    return pick_region_child(prompt)
 
 
 def _show_identify_child(payload: str) -> int:
-    """The --show-identify child: boxes up, wait for a dismissal, exit.
+    """The --show-identify child; same home as above, same reason."""
+    from agentclip.driver.screen.picker import show_identify_child
 
-    Prints nothing on success - the overlay IS the result. A malformed payload
-    or a broken environment (no tkinter, no display) is exit 1 with the reason
-    on stderr, which screen.picker surfaces as a ScreenPickError; the parent
-    toasts that instead of leaving the user staring at a screen where nothing
-    happened.
-    """
-    from agentclip.driver.screen.identify import parse_payload
-
-    try:
-        elements = parse_payload(payload)
-    except ValueError as exc:
-        print(f"identify overlay got a bad payload: {exc}", file=sys.stderr)
-        return 1
-    try:
-        from agentclip.driver.screen.overlay import run_identify_overlay
-
-        run_identify_overlay(elements)
-    except Exception as exc:  # anything here means "overlay unavailable"
-        print(f"identify overlay unavailable: {exc}", file=sys.stderr)
-        return 1
-    return 0
+    return show_identify_child(payload)

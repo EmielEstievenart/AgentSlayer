@@ -17,6 +17,7 @@ Two children, same shape - arguments in, one line of result out:
 
 from __future__ import annotations
 
+import argparse
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -99,3 +100,77 @@ def _detail(stderr: str | None, returncode: int, what: str) -> str:
     """The child's last stderr line, or a bare exit code when it said nothing."""
     lines = (stderr or "").strip().splitlines()
     return lines[-1] if lines else f"{what} exited with code {returncode}"
+
+
+# == the child side ============================================================
+# Both overlays run in a CHILD of whichever program asked (tkinter cannot share
+# a webview's process), and the child is ``sys.executable`` again - which in a
+# frozen build is the Chat UI's exe OR the Monitor's, depending on who is
+# capturing. So both binaries must answer the same two hidden flags, and the
+# only place both may import is here, one layer under either entry point
+# (tests/test_layering.py: driver/monitor may reach driver/screen; cli.py it
+# may not). The parsers add the flags with :func:`add_overlay_flags` and hand
+# the namespace to :func:`overlay_child` before choosing any other door.
+
+
+def add_overlay_flags(parser: argparse.ArgumentParser) -> None:
+    """The two hidden re-invocation flags, spelled once for every entry point."""
+    parser.add_argument("--pick-region", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--pick-prompt", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--show-identify", action="store_true", help=argparse.SUPPRESS)
+
+
+def overlay_child(args: argparse.Namespace) -> int | None:
+    """Run the overlay this invocation asked for; ``None`` when it asked for none."""
+    if getattr(args, "pick_region", False):
+        return pick_region_child(args.pick_prompt)
+    if getattr(args, "show_identify", False):
+        return show_identify_child(sys.stdin.read())
+    return None
+
+
+def pick_region_child(prompt: str | None = None) -> int:
+    """The --pick-region child: overlay up, region wire format out, exit.
+
+    Cancel is exit 0 with no output (the parent's parse_region yields None);
+    a broken environment (no tkinter, no display) is exit 1 with the reason on
+    stderr, which :func:`pick_region` surfaces as a ScreenPickError.
+    """
+    from agentclip.driver.screen.region import format_region
+
+    try:
+        from agentclip.driver.screen.overlay import run_overlay
+
+        region = run_overlay(prompt)
+    except Exception as exc:  # anything here means "picker unavailable"
+        print(f"region picker unavailable: {exc}", file=sys.stderr)
+        return 1
+    if region is not None:
+        print(format_region(region))
+    return 0
+
+
+def show_identify_child(payload: str) -> int:
+    """The --show-identify child: boxes up, wait for a dismissal, exit.
+
+    Prints nothing on success - the overlay IS the result. A malformed payload
+    or a broken environment (no tkinter, no display) is exit 1 with the reason
+    on stderr, which :func:`draw_identify_overlay` surfaces as a
+    ScreenPickError; the parent toasts that instead of leaving the user staring
+    at a screen where nothing happened.
+    """
+    from agentclip.driver.screen.identify import parse_payload
+
+    try:
+        elements = parse_payload(payload)
+    except ValueError as exc:
+        print(f"identify overlay got a bad payload: {exc}", file=sys.stderr)
+        return 1
+    try:
+        from agentclip.driver.screen.overlay import run_identify_overlay
+
+        run_identify_overlay(elements)
+    except Exception as exc:  # anything here means "overlay unavailable"
+        print(f"identify overlay unavailable: {exc}", file=sys.stderr)
+        return 1
+    return 0

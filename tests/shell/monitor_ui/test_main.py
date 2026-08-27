@@ -289,3 +289,25 @@ def test_the_entry_point_imports_no_toolkit(
 def test_the_default_port_is_the_one_the_docs_write() -> None:
     """One number, in the panel and in every sentence about it."""
     assert DEFAULT_PORT == 7777
+
+
+def test_the_picker_child_flags_are_answered_before_any_door(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Monitor UI's Capture button re-invokes THIS binary with
+    --pick-region (screen.picker uses sys.executable). Before this the
+    monitor's parser did not know the flag, so every Capture toasted
+    "unrecognized arguments: --pick-region --pick-prompt"."""
+    seen: list[str | None] = []
+    monkeypatch.setattr(
+        "agentclip.driver.screen.picker.pick_region_child",
+        lambda prompt=None: (seen.append(prompt), 0)[1],
+    )
+    monkeypatch.setattr(
+        entry, "run_monitor_ui", lambda *a, **k: pytest.fail("the child opened a window")
+    )
+    assert entry.main(["--pick-region", "--pick-prompt", "draw the chat"]) == 0
+    assert seen == ["draw the chat"]
+    # The headless door answers it too: the same parser, the same flag.
+    assert driver_main.main(["--pick-region"]) == 0
+    assert seen == ["draw the chat", None]

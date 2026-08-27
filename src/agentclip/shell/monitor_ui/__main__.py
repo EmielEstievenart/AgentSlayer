@@ -42,6 +42,7 @@ from agentclip.driver.monitor.__main__ import (
     profile_root,
 )
 from agentclip.driver.monitor.__main__ import main as headless_main
+from agentclip.driver.screen.picker import overlay_child
 from agentclip.shell.monitor_ui.window import run_monitor_ui
 
 #: Said once, on stderr, when a run asks for a secret the panel does not read.
@@ -60,6 +61,11 @@ TOKEN_FLAG_IGNORED = (
 def main(argv: list[str] | None = None) -> int:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
+    # The Capture button's child: this binary again with --pick-region. It
+    # must not open a second Monitor UI, and it must not need --headless.
+    child = overlay_child(args)
+    if child is not None:
+        return child
     if args.headless:
         # Verbatim, with the ORIGINAL argv rather than the namespace: the
         # windowless door owns its own validation (``--port`` is required there)

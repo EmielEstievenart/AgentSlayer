@@ -133,9 +133,12 @@ class Watched:
     the Monitor UI, so a brain that read its own host's copy would be composing
     turns against a service somebody else is running. These are the fields a
     brain ACTS on - what a paste may weigh, whether it may press Enter, whether
-    a reply has to arrive fenced, what extra sentence this host needs - and
-    nothing about how pixels are searched (a tolerance or a matcher is the
-    monitor's business and never leaves it).
+    a reply has to arrive fenced, what extra sentence this host needs, whether
+    this chat gets the ranged-edit tools (``edit_by_lines``, which decides a
+    CATALOG the bootstrap is built from and is therefore as much the monitor's
+    answer as the paste budget beside it) - and nothing about how pixels are
+    searched (a tolerance or a matcher is the monitor's business and never
+    leaves it).
     """
 
     service: str | None
@@ -155,6 +158,7 @@ class Watched:
     attachment_note: bool = True
     require_fenced_reply: bool = False
     extra_instructions: str = ""
+    edit_by_lines: bool = False
 
 
 #: What a monitor that has not been pointed at anything answers, and what an
@@ -322,6 +326,7 @@ class MonitorSpec:
     attachment_note: bool = True
     require_fenced_reply: bool = False
     extra_instructions: str = ""
+    edit_by_lines: bool = False
 
 
 def spec_from_preset(
@@ -365,6 +370,7 @@ def spec_from_preset(
         attachment_note=preset.attachment_note,
         require_fenced_reply=preset.require_fenced_reply,
         extra_instructions=preset.extra_instructions,
+        edit_by_lines=preset.edit_by_lines,
     )
 
 
@@ -392,6 +398,7 @@ def watched_from(spec: MonitorSpec, *, profiled: bool, generation: int) -> Watch
         attachment_note=spec.attachment_note,
         require_fenced_reply=spec.require_fenced_reply,
         extra_instructions=spec.extra_instructions,
+        edit_by_lines=spec.edit_by_lines,
     )
 
 

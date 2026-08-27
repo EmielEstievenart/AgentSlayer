@@ -530,6 +530,7 @@ def encode_watched(value: Watched) -> dict[str, Any]:
         "attachment_note": value.attachment_note,
         "require_fenced_reply": value.require_fenced_reply,
         "extra_instructions": value.extra_instructions,
+        "edit_by_lines": value.edit_by_lines,
     }
 
 
@@ -552,6 +553,7 @@ def decode_watched(value: Any, what: str = "watched") -> Watched:
         attachment_note=_bool_at(data, "attachment_note", what),
         require_fenced_reply=_bool_at(data, "require_fenced_reply", what),
         extra_instructions=_str_at(data, "extra_instructions", what),
+        edit_by_lines=_bool_at(data, "edit_by_lines", what),
     )
 
 

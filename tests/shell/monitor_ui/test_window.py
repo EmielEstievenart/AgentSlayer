@@ -379,3 +379,12 @@ def test_importing_the_window_does_not_import_pywebview() -> None:
     source = Path(str(module.__file__)).read_text(encoding="utf-8")
     assert "\nimport webview" not in source
     assert "\nfrom webview" not in source
+
+
+def test_hidden_beats_every_author_display_rule() -> None:
+    """The scrim is `display: flex` and starts `hidden`. Without an !important
+    [hidden] rule the UA's display:none loses and the empty confirm modal
+    covers the page from the first paint - the monitor is unusable."""
+    css = asset("app.css")
+    assert "[hidden] {" + chr(10) + "  display: none !important;" + chr(10) + "}" in css
+    assert css.index("[hidden] {") < css.index(".scrim {")

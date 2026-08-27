@@ -315,6 +315,14 @@ button:not(:disabled) {
   border-left-color: var(--err);
 }
 
+/* The `hidden` attribute must beat every author `display` below it - the
+   scrim is `display: flex`, the serve panel is a grid - or the empty confirm
+   modal sits over the whole page from the first paint. The UA's `display:
+   none` for [hidden] loses to any author rule, so this one is !important. */
+[hidden] {
+  display: none !important;
+}
+
 /* -- modals --------------------------------------------------------------- */
 
 .scrim {

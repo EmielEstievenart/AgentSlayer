@@ -1721,10 +1721,10 @@ docs button renders the amended `commands.md` without a broken anchor.
 
 ## 10. Wave 3 — the Chat UI never hosts a monitor (2026-08-27)
 
-> **Status:** PLANNED. Each sub-section gets an "as built" note when it lands,
-> exactly as §9 did. This supersedes §9.0's "in local mode the Chat UI keeps
-> its in-app doors opening the Monitor UI over its own in-process
-> `LocalUIMonitor`" — that embedded case is removed here.
+> **Status:** BUILT (2026-08-27). Every sub-section carries its own "as built"
+> note below, exactly as §9 did. This supersedes §9.0's "in local mode the Chat
+> UI keeps its in-app doors opening the Monitor UI over its own in-process
+> `LocalUIMonitor`" — that embedded case is gone.
 
 ### 10.0 Why
 
@@ -1763,6 +1763,12 @@ calibration.
   dataclass. `--pick-region` / `--show-identify` and `_list_matchers` leave
   `cli.py`: the Chat UI draws no overlay and runs no matcher.
 
+**As built (2026-08-27, `2aa840e`).** All of the above, unchanged. One thing the
+plan did not say and the code does: `SubprocessLauncher` takes its spawn, its
+port picker and its token read as constructor seams, so the suite drives the
+whole class — the command line, the port, the stop ladder — without a process, a
+socket or a config directory.
+
 ### 10.2 The Chat UI, always over the wire
 
 * `GuiView` no longer imports `driver.monitor.local`, `driver.screen`, or
@@ -1790,6 +1796,36 @@ calibration.
   `up` (green, `MONITOR CONNECTED · local` or `· <peer>`), `down` (red,
   `MONITOR DOWN · <peer> · <reason>`). `state="local"` is retired.
 
+**As built (2026-08-27, this wave's Chat-UI commit).** Everything above landed.
+The deviations and the things the plan left unsaid:
+
+* **`monitor_target` became two fields**, not one. `_launch_local` (a bool) and
+  `_monitor_target` (`MonitorTarget | None`), because they are two facts with
+  two lifetimes: a local launch does not know WHERE to dial until the child has
+  a port. A third, `_launching`, covers the moment between the two so the badge
+  says `MONITOR DOWN · local` rather than `NO MONITOR` while a child comes up.
+* **The first dial failures are quiet.** `_launch_local_monitor` parks the loop
+  in DISCONNECTED with `starting a monitor on this PC - the link comes up when
+  it is listening` BEFORE the spawn, which spends `_park_disconnected`'s
+  once-per-outage toast on the sentence that is true. A child needs a moment to
+  bind, and "cannot reach the monitor" on every launch would be noise.
+* **`LOCAL_MONITOR_EXITED` is appended to the dial's own reason** rather than
+  replacing it (`_dial_failure`), and it toasts once per dead child rather than
+  once per outage — a link that was already down and whose child has now died is
+  a NEW fact, and the one the user has to act on.
+* **`_NoLauncher`** is the default for a view nobody wired a launcher into: it
+  starts nothing and reports through the ordinary failed-launch path. Neither a
+  real `SubprocessLauncher` (which would let a test spawn a monitor onto the
+  developer's desktop) nor a raise at construction (which would make the seam
+  mandatory for the dozen suites that never go near a monitor).
+* **`copy_seen_note` returns `""`** rather than being deleted: `AutomationHost`
+  still asks, and the auto-copy recipe's sentence simply ends earlier. §10.4.
+* **The busy/idle DETECTION rows lost `PROBE_UNCAPTURED`.** That line took the
+  service's finish CHECKLIST and the machine's captures, and both are the
+  monitor's since §10.5 with no field on `Watched` between them. The STALE row
+  keeps the half that matters: an empty `active_detectors` still says "nothing
+  here will ever produce a verdict".
+
 ### 10.3 Build, layering, docs
 
 * `packaging/agentclip.spec` drops `cv2`, `numpy`, `tkinter`, `Xlib`, and the
@@ -1806,12 +1842,52 @@ calibration.
   (the embedded case is gone), `elements-panel.md` / `service-editor.md`
   headers, README's local-mode sentence, architecture.md if it names the door.
 
+**As built — packaging (2026-08-27, `446a3a8`) and docs (`9b65647`).** Both as
+planned.
+
+**As built — layering (2026-08-27, this wave).** `shell.chat` lost
+`agentclip.shell.monitor_ui` outright, and its two blanket allowances became
+LISTS, which is a stronger rule than the plan asked for:
+
+* `driver.monitor` → `protocol`, `remote`, `switchable`, `auth`. `local` is off
+  it, and that one line is what §10.0 comes down to: there is no second way to
+  reach a screen.
+* `driver.screen` → `slot`, `region`, `capture`, `profile` (the value types the
+  automation ports speak), plus `focus` and `profile_store`.
+
+**The one unpaid bill.** `profile_store` is still reached, and it should not be.
+`AutomationHost.profile_for` and the delegation readiness rules
+(`can_delegate` / `missing`) want a per-KIND answer — "has this service a
+captured copy button?" — and the monitor's only answer is `Watched.profiled`,
+one boolean. So the Chat UI still reads THIS machine's profile store, which is
+right for a local child and stale for a remote monitor. It is named explicitly
+in `tests/test_layering.py` so that the day it moves, that line is what changes.
+The obvious shape for the fix is already on the wire: `Tick.sightings` holds an
+entry per kind SEARCHED, which is exactly "the monitor has a capture of it".
+
+`shell.chat` stays in `CLIP_SCREEN_IMPORTERS`, because the clipboard PROVIDER is
+still handed to it as a launch decision (`[clipboard] provider`) and read for
+its name in the status bar and for the manual-mode ingest. `provider` therefore
+stayed on `GuiView` / `GuiRunner` / `run_gui`.
+
+`open_calibration_window` / `CalibrationRunner` were NOT deleted: `run_monitor_ui`
+— the standalone `agentclip-monitor` door — still uses both. Their prose stopped
+claiming the Chat UI is the other caller.
+
 ### 10.4 Open after this wave
 
 * Presets edited in a local child's service editor reach the Chat UI only on
   its next config reload — there is no wire event for "config changed".
 * `copy_seen_note` (the "poller last saw the copy button" line) is gone with
   the local tier; if it is missed, it comes back as a tick field.
+* `AutomationHost.profile_for` still reads the Chat UI's own machine (§10.3's
+  "unpaid bill"), so the sidebar's `appearance:` line and the delegation
+  readiness rules describe THIS desktop rather than the monitor's.
+* The sub-agent window's sidebar reads `no service - the monitor has not
+  answered for this window` until a delegation makes that slot live, because
+  `watch(slot)` is the retarget and selecting a tab is not one. Asking the
+  monitor about a window it is not watching would need a read that does not
+  retarget — a `watched(slot)`, which the wire does not have.
 
 ### 10.5 The service is the monitor's (added 2026-08-27, after the §9.1 mismatch)
 
@@ -1850,11 +1926,8 @@ preset field — and the brain reads back what it needs.
 * Send-gate tick budgets (`SEND_ARM_*`, `SEND_GATE_*`) become the monitor's
   constants; the spec no longer carries them.
 
-**As built — the MONITOR side (2026-08-27).** Everything above that lives under
-`driver/monitor/` and `shell/monitor_ui/` has landed; the Chat UI half (the
-bullets about `live_preset()`, the read-only sidebar picker and the brain
-calling `watch(live_slot)`) is §10.2's work and is still to come, so
-`shell/chat/view.py` does not compile against this API yet.
+**As built — the MONITOR side (2026-08-27, `d5e6a58`…`d91f151`).** Everything
+above that lives under `driver/monitor/` and `shell/monitor_ui/`.
 
 * `Watched` is `service`, `region`, `profiled`, `label`, `generation` and the
   eleven preset fields, all defaulted after the first three so
@@ -1879,3 +1952,36 @@ calling `watch(live_slot)`) is §10.2's work and is still to come, so
   `driver/automation/finish.py` re-exports them at the address its suites
   already name. The Monitor UI imports no `driver/automation` module at all any
   more, and `tests/test_layering.py` dropped that allowance.
+
+**As built — the BRAIN side (2026-08-27, this wave).**
+
+* `Watched` grew a twelfth preset field the plan's list missed: `edit_by_lines`.
+  It decides a CATALOG — whether the bootstrap offers `replace_lines` and a
+  numbered `read_file` — so a brain reading its own host's copy would build a
+  turn for a service somebody else is running, which is what the rest of
+  `Watched` exists to stop. `MonitorSpec`, `spec_from_preset`, `watched_from`
+  and wire v3's `encode_watched` / `decode_watched` carry it (`7175b5e`).
+* `preset_from_watched(watched, *, alerts)` is the adapter, in `chat/view.py`.
+  It builds a real `ServicePreset`, so the recipes and the narration are
+  untouched. Two kinds of field are deliberately not taken from `Watched`: the
+  pixel knobs (`stable_seconds` / `tolerance` / `matcher` / `finish_signals`),
+  which never leave the monitor and are left at their defaults because nothing
+  above this line reads them; and `alert_sound` / `alert_repeat_seconds`, which
+  come from `alerts` — the HOST's `config.preset()` — because the uh-oh alarm
+  plays on the machine the user is sitting at.
+* `GuiView._watched` is a `dict[AgentSlot, Watched]`, not one value: the sidebar
+  describes the SELECTED window while the recipes drive the LIVE one, and the
+  two part company for the whole of a delegation. `_adopt_watched(slot, w)` is
+  the single writer; `_service_for`, `_preset_for`, `live_preset`, the tab
+  labels, the sidebar line and `SessionSpec.service` all derive from it.
+  `_initial_services`, `_service_options`, `set_service`, `_persist_services`
+  and `save_active_services`'s call site are gone, along with the
+  `AutomationController(services=…)` argument — `service_of` / `set_service`
+  stay on the controller and this shell no longer calls them.
+* The generation back-channel is `_on_monitor_tick`, a `subscribe` the view
+  takes out on its own `SwitchableMonitor` at construction. It sets
+  `active_detectors` from every tick (§10.2's replacement for the detector
+  object) and, on a stamp it has not seen, schedules `_reread_watched` — which
+  is `watched()`, never `watch()`, because a second retarget would bump the
+  generation again and the two would chase each other. The stamp is claimed on
+  the tick thread, so several ticks do not queue several reads.

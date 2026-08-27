@@ -50,7 +50,7 @@ TOML merge order: **built-in defaults → global config.toml → project .agentc
 
 `--bind` and the token answer different questions: `--bind` says who can *reach* the port, the token says who may *use* it. The only way out is `--no-token` (or the SERVE band's `no token (loopback only)` box), which is loopback-only and refused off it. The intended deployment is a VM on a private host-only network, or an SSH forward: `ssh -N -L 7777:127.0.0.1:7777 you@the-vm` — or, easier, the Monitor tab's **Via SSH** mode, which opens that forward over the connection the Executor already holds.
 
-**The chat region is remembered on the monitor**, in `monitor/regions.json`, keyed by service. The rule is one line: a Chat UI that names a region wins and its box is written to the store; one that does not is served from it. So a restarted monitor keeps the box somebody drew over there, a standalone Monitor UI has somewhere to put one at all, and a Chat UI that knows better still overrides. Both files live in the monitor's own config dir — `%APPDATA%\agentclip\monitor\` / `~/.config/agentclip/monitor/`, or wherever `--config-dir` points.
+**The chat region is remembered on the monitor**, in `monitor/regions.json`, keyed by service — and it is remembered *only* there. The Chat UI never sends a box: it names a window (master or sub-agent) and the monitor answers with the one it has, which the Chat UI then adopts. So the box you draw in the Monitor UI survives a restart of either process, and there is no second copy anywhere to disagree with it. Both files live in the monitor's own config dir — `%APPDATA%\agentclip\monitor\` / `~/.config/agentclip/monitor/`, or wherever `--config-dir` points.
 
 If the link drops, the Chat UI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. Disconnecting from the Monitor tab is different: it is deliberate, so nothing redials, a local monitor this window started is ended with the link, and the badge stays red `NO MONITOR` until you attach or launch one from that tab.
 
@@ -81,10 +81,20 @@ A server with no desktop at all cannot open the Monitor UI, and does not need to
 
 | Key | Default | Meaning |
 |---|---|---|
-| `service` | `"chatgpt-attach"` | Active service preset for the master window |
-| `subagent_service` | `""` | Preset for the sub-agent window (`""` = same as master) |
+| `service` | `"chatgpt-attach"` | Active service preset for the master window. Read by the **monitor**, not by the Chat UI — see below |
+| `subagent_service` | `""` | Preset for the sub-agent window (`""` = same as master). Also the monitor's |
 | `chars_per_token` | `3` | Token-estimate divisor, 1–10. Sizes in the UI are shown as `~N tokens` — this is what they are divided by |
 | `theme` | `"textual-dark"` | Legacy theme name, kept so an existing config file still loads: `textual-light`, `textual-dark`, `claude-warm`, `claude-dark`. The window reads `[gui] theme`; this one named the terminal shell's theme, and that shell is gone |
+
+**Who reads `service` and `subagent_service`:** the process that can see the
+screen. Which service each chat window is, what it looks like and where its box
+is drawn are all facts about the machine the browser is on, so the **monitor**
+resolves them out of *its* config, and the Chat UI reads back what it settled on
+— which is why the sidebar's SERVICE block is a line rather than a picker, and
+why it says `· from the monitor`. In local mode both processes read the same
+file and nothing changes for you. Attached to a monitor somewhere else, these
+two keys in *your* config say nothing at all: change the service in that
+machine's **Monitor UI**.
 
 ### [clipboard]
 
@@ -188,7 +198,13 @@ config file at all.
 
 ### [services.\<key\>] — service presets
 
-A preset describes one chat service: its paste budget and how AgentClip drives it. Built-ins (key · paste budget · context estimate):
+A preset describes one chat service: its paste budget and how AgentClip drives
+it. Like `[general] service` above, these are read by the **monitor** — the
+process that can see the screen owns its whole service configuration, and the
+Chat UI reads back the budgets, fences and instructions it needs. Edit them in
+the **Monitor UI**'s service editor, which writes them to the global config.toml
+of the machine it is running on. Built-ins (key · paste budget · context
+estimate):
 
 | Key | Budget | Context | | Key | Budget | Context |
 |---|---|---|---|---|---|---|

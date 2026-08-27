@@ -26,12 +26,13 @@ AgentClip reads two kinds of files: **TOML app config** (settings) and **JSON pe
 > the box you draw around a chat window, the live ELEMENTS column showing what
 > the tool is recognising right now, and — standalone only — the **SERVE** band
 > that decides who may drive this machine. It is a **window of its own**, not a
-> panel: open it from the Chat UI with `F2`, the titlebar's **calibrate** button,
-> or the sidebar's **Edit services...** / **Set chat region...**, and run it
-> alone as `agentclip-monitor` on the machine the browser is on. One at a time: a
-> second press says it is already open. While it is up the Chat UI stops polling
-> the screen, because its capture overlays land on the very browser the detectors
-> watch. See `docs/design/ui-monitor.md` §2.6, §6.4 and §9.1, and
+> panel — it is the **`agentclip-monitor` window**, and it opens nowhere else.
+> In local mode the Chat UI launches that process beside itself and connects to
+> it on `127.0.0.1`, so the window is already on your screen; on the machine the
+> browser is on, you run `agentclip-monitor` there. The Chat UI's `F2`, the
+> titlebar's **monitor UI** button and the sidebar's **Edit services...** /
+> **Set chat region...** all say where it is; none of them opens a window of its
+> own. See `docs/design/ui-monitor.md` §2.6, §6.4, §9.1 and §10, and
 > `docs/design/ui-briefs/monitor-ui.md` for the window itself.
 
 TOML merge order: **built-in defaults → global config.toml → project .agentclip.toml → CLI flags.** Tables merge per key; scalars *and lists* replace (a project can tighten a list, never extend it by accident). A broken file never crashes startup — problems become warnings and the default wins.
@@ -51,7 +52,7 @@ TOML merge order: **built-in defaults → global config.toml → project .agentc
 
 **The chat region is remembered on the monitor**, in `monitor/regions.json`, keyed by service. The rule is one line: a Chat UI that names a region wins and its box is written to the store; one that does not is served from it. So a restarted monitor keeps the box somebody drew over there, a standalone Monitor UI has somewhere to put one at all, and a Chat UI that knows better still overrides. Both files live in the monitor's own config dir — `%APPDATA%\agentclip\monitor\` / `~/.config/agentclip/monitor/`, or wherever `--config-dir` points.
 
-If the link drops, the Chat UI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. While a monitor is attached, the Chat UI's `F2` is closed: the Monitor UI runs on the monitor's machine. Disconnecting from the Monitor tab opens it again.
+If the link drops, the Chat UI parks on `disconnected`, says so, and redials on its own (1s, 2s, 4s… up to 10s) until it is back — nothing is buffered or replayed, and everything is re-derived from the screen on reconnect. Disconnecting from the Monitor tab is different: it is deliberate, so nothing redials, a local monitor this window started is ended with the link, and the badge stays red `NO MONITOR` until you attach or launch one from that tab.
 
 In-app changes (the Monitor UI, theme pickers, saved remote targets, saved monitors) are persisted to the **global** config.toml — except the token and the regions, which belong to the machine that can see the screen and stay there.
 
@@ -198,7 +199,7 @@ A preset describes one chat service: its paste budget and how AgentClip drives i
 | `copilot-free` | 6k | 128k | | `unknown` | 6k | 100k |
 | `claude` | 24k | 700k | | `paranoid` | 4k | 50k |
 
-Built-ins can be edited but not deleted. Fields (all editable in the **Monitor UI** — `F2`, the titlebar's **calibrate** button, or `agentclip-monitor` on the machine the browser is on):
+Built-ins can be edited but not deleted. Fields (all editable in the **Monitor UI** — the `agentclip-monitor` window, on this machine in local mode or on the machine the browser is on in split mode):
 
 | Key | Default | Meaning |
 |---|---|---|

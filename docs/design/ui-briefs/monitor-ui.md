@@ -7,6 +7,13 @@
 > this specifies the one implementation there is. It **specifies the surface**
 > and re-decides nothing — where a rule here has a reason, the reason is
 > ui-monitor.md's and is cited.
+>
+> **2026-08-27, ui-monitor.md §10:** the *embedded* case this brief describes
+> beside the standalone one — the Chat UI opening this same page in-process on
+> `F2` — was **removed**. There is one Monitor UI and it is the
+> `agentclip-monitor` window; the Chat UI only says where it is. Everything
+> below about the standalone window stands; the paragraphs about the embedded
+> one are history, marked where they sit rather than deleted.
 
 Audience: whoever changes this window next, and whoever has to know what the
 Monitor UI promises before changing something underneath it.
@@ -308,6 +315,11 @@ The `svc_*` family — `svc_select`, `svc_form`, `svc_detection`,
 
 ### 6.1 The embedded window has no Serve band
 
+> **Removed 2026-08-27 (ui-monitor.md §10).** There is no embedded window any
+> more: the Chat UI launches an `agentclip-monitor` process instead, and that
+> process is standalone, so the Serve band is always present. The comparison
+> below records what the embedded case was.
+
 The Chat UI opens this same page beside itself (`F2`, the titlebar's
 **calibrate** button, either sidebar door) and **never** passes a `ServePanel`.
 No `serve` event is ever sent, and the band stays `hidden` — its visibility is
@@ -332,6 +344,10 @@ The other differences, standalone vs embedded:
 
 ### 6.2 The suspend bracket is per capture here, per visit there
 
+> **Half removed 2026-08-27 (ui-monitor.md §10).** The per-operation bracket in
+> this window stands. The Chat UI's own per-visit bracket does not: it has no
+> monitor of its own to suspend, so there is one monitor and one bracket now.
+
 ui-monitor.md §9.1 planned for a standalone Monitor UI to simply stay suspended.
 It cannot: the ELEMENTS column is the surface you calibrate *against*, and
 suspending the poller for the whole visit freezes exactly the thing you came to
@@ -341,6 +357,10 @@ while the **Chat UI** keeps §6.4's per-visit bracket on its *own* monitor. Two
 monitors, two brackets, and the embedded case has both.
 
 ### 6.3 One window at a time, one picker at a time
+
+> **Half removed 2026-08-27 (ui-monitor.md §10).** `F2` opens nothing now — it
+> says where the Monitor UI is — so the first sentence is history. The picker
+> rule below is unchanged.
 
 A second `F2` in the Chat UI toasts `the calibration window is already open`
 rather than opening a second window. A second fullscreen surface while one is up

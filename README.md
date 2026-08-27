@@ -47,7 +47,7 @@ uv run agentclip            # in the project you want the agent to work on
 | `agentclip-monitor` | the **Monitor** and its **Monitor UI**: watches the **Browser**, clicks it, owns the clipboard — and a window to configure and serve it from | the machine whose *screen* shows the chat |
 | `agentclip-engine` | the **Executor**: permission-gated files and commands on behalf of the agent | the machine whose *files* you are working on |
 
-In the ordinary case all three are this PC and you only ever type the first. ("GUI" is not a term any more; older design docs still say it and mean the Chat UI.)
+In the ordinary case all three are this PC and you only ever type the first: plain `agentclip` launches an `agentclip-monitor` beside itself and drives this machine's screen over `127.0.0.1` — the same wire a remote monitor is reached on, because there is only one way to reach a screen (`docs/design/ui-monitor.md` §10). ("GUI" is not a term any more; older design docs still say it and mean the Chat UI.)
 
 Linux clipboard: the bundled backend works on X11 and Wayland-with-XWayland out of the box. On a pure-Wayland system install `wl-clipboard` (and `xclip` for X11 fallback).
 
@@ -92,7 +92,7 @@ Then, on your PC, open the **Connect** dialog's **Monitor** tab (or the sidebar'
 - **Direct** — host, port and token; or
 - **Via SSH** — pick a saved SSH target and give the port as seen from *that* machine. AgentClip forwards it over the SSH connection it already holds: no second login, no `ssh -L` to leave running.
 
-Attaching does **not** restart your session — the transcript, the engine and your files stay exactly where they are while the browser automation moves. **Disconnect** hands the window back to this machine's screen.
+Attaching does **not** restart your session — the transcript, the engine and your files stay exactly where they are while the browser automation moves. **Disconnect** drops the link (and ends a local monitor this window started); you are left with no monitor until you attach or launch one from the same tab.
 
 The scriptable spelling still works: `agentclip --monitor 10.0.0.5:7777`, or `agentclip --monitor @vm` for a monitor you saved as `[monitor.vm]` in your global config. See [docs/configuration.md](docs/configuration.md) for the saved-target format and [docs/design/ui-monitor.md](docs/design/ui-monitor.md) for why any of this exists.
 
@@ -109,15 +109,15 @@ To use `agentclip` from any directory without the checkout, freeze it into self-
 
 This builds **three** artifacts (PyInstaller onefile, no Python needed to run them), smoke-tests each, and copies them to a folder on your `PATH` — `%AGENTCLIP_INSTALL_DIR%` if set, otherwise `%USERPROFILE%\Documents\PATH`:
 
-- `dist\agentclip.exe` (~78 MB) — the full app.
+- `dist\agentclip.exe` — the full app (smaller since it stopped carrying OpenCV and Tcl/Tk).
 - `dist\agentclip-engine.exe` — the *engine* half alone, the binary an SSH target runs (`docs/design/remote-executor.md` §2.6). It carries the MCP SDK and nothing shell- or driver-shaped: no pywebview, no OpenCV, no region picker. Copy it onto a Windows target's `PATH` and remote sessions work there without a Python install.
 - `dist\agentclip-monitor.exe` — the *monitor* half alone, the standing process that runs on the machine whose **screen** shows the chat: a VM on a host-only network, or this PC in split mode (`docs/design/ui-monitor.md` §2.5, §6.5, §9.1). It serves that machine's pixels, mouse, keyboard and clipboard to a brain over a TCP wire and keeps polling whether or not one is attached. It carries the OpenCV backend, the region picker **and the Monitor UI's own pywebview window** — and nothing engine-shaped: no MCP, no session, no transcript. Its `--headless` door imports no window toolkit at all, which is what keeps it honest on a server with no desktop.
 
 Re-run to update after changing the source. Useful flags: `-Clean` (fresh build), `-EngineOnly` (skip the app, and its `cv`/`gui` extras), `-MonitorOnly` (skip the app and the `mcp` extra — the monitor keeps `gui`, because it opens a window), `-NoInstall` (build only), `-InstallDir <path>`. Naming both "only" switches builds those two halves and skips the full app.
 
-The exe carries **the shell and every optional extra the desktop needs**: the Chat UI (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships) and the OpenCV matcher backend. It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the Chat UI's **docs** button opens — so the manual travels with the binary. Nothing extra to install, which is most of the 78 MB. The build script proves all three of those against the app exe it just produced (`--version`, `--list-matchers`, `--gui-smoke`, the last of which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
+The exe carries **the shell**: the Chat UI (plain `agentclip.exe`, rendering in the WebView2 runtime Windows already ships). It carries no screen half at all — the OpenCV matcher backend, the region picker's tkinter and the X11 bindings are `agentclip-monitor.exe`'s, and this exe *excludes* them, because the Chat UI reaches pixels only over the wire (§10). It also carries this user guide — `docs/commands.md` and `docs/configuration.md`, which the Chat UI's **docs** button opens — so the manual travels with the binary. Nothing extra to install. The build script proves that against the app exe it just produced (`--version`, and `--gui-smoke`, which reads the page assets *and* the guide back out of the freeze) and refuses to install one that fails.
 
-The monitor exe is proved by `--version` (which walks its whole import tree, the Monitor UI dispatcher included) and `--list-matchers` (which imports the OpenCV backend for real — it matters more there than in the app, because the monitor machine is where every template search actually runs). It gets no `--gui-smoke` of its own: that check lives in `cli.py`, which is off this binary's layering allowance, so its pywebview collection is proved by the app exe's `--gui-smoke` over the same `webview` out of the same environment.
+The monitor exe is proved by `--version` (which walks its whole import tree, the Monitor UI dispatcher included) and `--list-matchers` (which imports the OpenCV backend for real — the only binary asked that question, because the monitor machine is where every template search runs). It gets no `--gui-smoke` of its own: that check lives in `cli.py`, which is off this binary's layering allowance, so its pywebview collection is proved by the app exe's `--gui-smoke` over the same `webview` out of the same environment.
 
 The engine exe is proved by `--version` alone, which walks its whole module-level import tree — config, the session factory, the server loop, the executor's tool registry — and is checked for the exact `agentclip-engine <version>` answer, because on a target that stdout stream *is* the wire protocol.
 
@@ -140,7 +140,7 @@ The same three artifacts as the Windows script above, which matters because a PO
 - `dist/agentclip-engine` (~21 MB) — the engine half alone, the binary an SSH target runs (`docs/design/remote-executor.md` §2.6). It carries the MCP SDK and nothing shell- or driver-shaped: no textual, no pywebview, no OpenCV. Copy it onto a target's `PATH` and remote sessions work there without a Python install.
 - `dist/agentclip-monitor` — the monitor half alone, as under Windows above: the standing process for the machine whose screen shows the chat, Monitor UI included. Copy it onto a VM's `PATH` and that VM can serve its screen without a Python install.
 
-`--engine-only` builds just the engine and skips the `cv`/`gui` extras, whose Linux wheels want system libraries a headless target need not have; `--monitor-only` builds just the monitor and skips `mcp` alone (it keeps `gui` — the monitor opens a window). Naming both builds those two halves and skips the full app. Every binary is smoke-tested before install (`--version` and `--list-matchers`, plus `--gui-smoke` for the full app), then copied to `$AGENTCLIP_INSTALL_DIR` or `~/.local/bin`. Other flags mirror the PowerShell script: `--clean`, `--no-install`, `--install-dir <path>`.
+`--engine-only` builds just the engine and skips the `cv`/`gui` extras, whose Linux wheels want system libraries a headless target need not have; `--monitor-only` builds just the monitor and skips `mcp` alone (it keeps `gui` — the monitor opens a window). Naming both builds those two halves and skips the full app. Every binary is smoke-tested before install (`--version` for all three, `--list-matchers` for the monitor, `--gui-smoke` for the full app), then copied to `$AGENTCLIP_INSTALL_DIR` or `~/.local/bin`. Other flags mirror the PowerShell script: `--clean`, `--no-install`, `--install-dir <path>`.
 
 > The monitor's region picker draws with tkinter, which many distributions ship apart from the interpreter, so the script checks for it before freezing that binary: `sudo apt install python3-tk` (Debian/Ubuntu) or `sudo dnf install python3-tkinter` (Fedora).
 

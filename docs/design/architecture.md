@@ -18,7 +18,7 @@ where it says **Monitor UI**; "GUI" is not a term any more.
 |---|---|---|---|
 | **Chat UI** | what the user looks at and types into | `shell/chat/` | `agentclip` |
 | **Monitor** | the process that watches the Browser, clicks it and owns the clipboard | `driver/monitor/` | `agentclip-monitor` |
-| **Monitor UI** | the Monitor's own window: Serve panel, service editor, ELEMENTS, region picker, `/identify` | `shell/monitor_ui/` | `agentclip-monitor` (the Chat UI opens the same window in-process in local mode; `agentclip --calibrate` is a stub naming the binary) |
+| **Monitor UI** | the Monitor's own window: Serve panel, service editor, ELEMENTS, region picker, `/identify` | `shell/monitor_ui/` | `agentclip-monitor` (the Chat UI opens no window of its own — ui-monitor.md §10; `agentclip --calibrate` is a stub naming the binary) |
 | **Browser** | the desktop chat app AgentClip operates — the thing being watched | not ours | — |
 | **Executor** | permission-gated execution on behalf of the agent, through the Host seam | `executor/` | `agentclip-engine` (with the engine) |
 
@@ -73,7 +73,7 @@ Four seams carry the split, and they are deliberately not one object (docs/desig
 |---|---|---|
 | `driver/automation/view.py:AutomationView` | controller → shell | paint-only, callable from the poller/watcher threads, must be non-blocking and thread-safe (the Chat UI enqueues to its JS bridge). Only the **Chat UI** implements it: the Monitor UI has no automation loop to paint for |
 | `driver/automation/host.py:AutomationHost` | controller → shell | the handful of answers only a shell has (live preset/profile, `find_all`, the verified copy click, prose ingest, detector rebuild, the OSC-52 park-off-clipboard). Event-loop thread only — which is exactly why it is not folded into `AutomationView` |
-| `driver/monitor/protocol.py:UIMonitor` | controller → the machine that can see the chat | the whole machine behind one object: `configure`/`suspend`/`resume`, the `Tick` stream (`latest`, `observe`, `subscribe`), the clipboard (`watch_clipboard`, `on_clip`, read/write) and every OS action, each a coroutine. In-process today (`driver/monitor/local.py:LocalUIMonitor`, which owns the poll thread); a TCP client tomorrow (docs/design/ui-monitor.md §3, §6.5). Awaited from the event-loop thread; the `subscribe`/`on_clip` hooks fire on the monitor's own thread and must not block |
+| `driver/monitor/protocol.py:UIMonitor` | controller → the machine that can see the chat | the whole machine behind one object: `configure`/`suspend`/`resume`, the `Tick` stream (`latest`, `observe`, `subscribe`), the clipboard (`watch_clipboard`, `on_clip`, read/write) and every OS action, each a coroutine. `driver/monitor/local.py:LocalUIMonitor` (which owns the poll thread) inside `agentclip-monitor`; a TCP client in the Chat UI, always, even in local mode — where the Chat UI launches that monitor process beside itself and dials `127.0.0.1` (docs/design/ui-monitor.md §3, §6.5, §10). Awaited from the event-loop thread; the `subscribe`/`on_clip` hooks fire on the monitor's own thread and must not block |
 | `driver/monitor/ops.py:ScreenOps` | monitor → OS | `agentclip.driver.screen` behind one substitutable object, so the OS primitives stay off the paint port and a shell's test suite can patch them at its own module scope. It is a tier *inside* the monitor now (reached as `monitor.ops`), not a seam a shell wires up — it moved out of `driver/automation` in ui-monitor.md phase 1 |
 
 The `ScreenOps` seam **deepens** into `UIMonitor` (docs/design/ui-monitor.md §3): the OS adapter is one tier inside the object that also owns the poll loop, the trackers, the ghost stamp and the clipboard watcher, and the controller reaches the machine only through it. `AutomationView` and `AutomationHost` are untouched by that split.
@@ -249,8 +249,9 @@ src/agentclip/
     │   ├── __main__.py    # agentclip-monitor's entry: the Driver's OWN build_arg_parser, then
     │   │                  #   either open the window or delegate --headless to
     │   │                  #   driver/monitor/__main__.py verbatim (which imports no toolkit)
-    │   ├── window.py      # CalibrationRunner/Bridge/JsApi + run_monitor_ui (owns the pump,
-    │   │                  #   standalone) and open_calibration_window (borrows the Chat UI's)
+    │   ├── window.py      # Bridge/JsApi + run_monitor_ui (owns the pump). It had a second
+    │   │                  #   door, open_calibration_window, that borrowed the Chat UI's pump;
+    │   │                  #   ui-monitor.md §10 removed the in-process case and it went with it
     │   ├── view.py        # CalibrationView: the service editor, the ELEMENTS column, the
     │   │                  #   region picker and /identify, over a CalibrationMonitor
     │   ├── serve.py       # the SERVE panel's model: interfaces, port, start/stop, the token
@@ -684,8 +685,8 @@ keep_sessions = 5              # prune older session dirs (incl. their backups) 
 #   attached pasted-text file it must read fully. Cheap; on everywhere.
 #
 # The three detection knobs below are per service because they describe that
-# chat's UI, not AgentClip. All three are edited in the service editor (F2,
-# tui.md §1.4) and written back here only when they differ from the built-in, so
+# chat's UI, not AgentClip. All three are edited in the service editor (in the
+# Monitor UI — the agentclip-monitor window; tui.md §1.4) and written back here only when they differ from the built-in, so
 # a file whose user never touched them stays byte-for-byte what it was.
 #
 # stable_seconds: how long the drawn chat region must sit UNCHANGED before the
@@ -888,6 +889,8 @@ Config is loaded into frozen dataclasses with manual validation (type + range ch
 | `cv` | `opencv-python-headless>=4.10`, `numpy>=2` | the OpenCV matcher backend (tui.md §3.4g), opt in per service in the editor's MATCHING block. **Optional from source; BUNDLED in the shipped exe** |
 
 It earns its place because the alternative is worse than its weight: an exhaustive correlation sweep is the only thing that covers the anchors' residual quantisation blind spot, and that blind spot is a real, reproduced failure on a real chat UI. It is an *extra* rather than a hard runtime dependency because a from-source install must not be taxed ~40 MB for a feature most users leave off, and the built-in anchor search needs nothing at all. Three properties make it safe to be absent: `cv2`/`numpy` are imported **inside the function** (`driver/screen/matchers.py`), so §0's stdlib-only rule for the screen layer still holds at module level and `tests/test_layering.py` passes unchanged (its AST checker explicitly permits function-body imports, the same allowance `driver/clip/copykitten_provider.py` uses); selecting the backend without it installed **falls back to anchors and says so** in the editor rather than crashing or silently searching nothing; and the tests that exercise it skip cleanly. Install with `pip install agentclip[cv]` (or `uv sync --extra cv`).
+
+> **2026-08-27, ui-monitor.md §10:** "the exe" below is `agentclip-monitor` now, not `agentclip`. The Chat UI hosts no monitor and runs no matcher, so `packaging/agentclip.spec` *excludes* `cv2`/`numpy` (with `tkinter` and `Xlib`) and its build step drops the `--list-matchers` check; every bullet below — the extra in the build environment, the named reachability, the FFmpeg-plugin filter, the frozen `--list-matchers` proof, the size cost — now describes `packaging/agentclip-monitor.spec` and the monitor binary, which is where every template search runs. The argument is unchanged; the binary it applies to moved.
 
 **The frozen exe bundles it, and this supersedes the earlier "keep the exe lean" reasoning.** That argument was made in the abstract and lost on contact with a user: the editor correctly reported *"OpenCV is not installed — install it with `pip install agentclip[cv]`"* inside `agentclip.exe`, where there is no environment to install into and the advice is unactionable. A knob that cannot be turned is not a lean build, it is a broken one — so the exe now carries the extra and the whole feature works out of the box. Consequences, all of them enforced rather than remembered:
 

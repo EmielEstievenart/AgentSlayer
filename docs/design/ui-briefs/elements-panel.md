@@ -18,6 +18,12 @@
 > otherwise unchanged and still binding; §7's "do not carry over" list applies
 > to the Monitor UI's page exactly as written. ("GUI" further down is the older
 > name for the Chat UI; the prose below is not rewritten.)
+>
+> **2026-08-27, ui-monitor.md §10:** the second entry point above is gone.
+> The Chat UI no longer opens this beside itself — `F2`, the titlebar button,
+> the sidebar doors and `/identify` all just say where the Monitor UI is, and in
+> local mode that is an `agentclip-monitor` process the Chat UI launched. One
+> window, one `LocalUIMonitor`, one entry point.
 
 
 Audience: engineers building a second frontend (pywebview/HTML/JS) that must reach

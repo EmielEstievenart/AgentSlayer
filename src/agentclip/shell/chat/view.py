@@ -237,11 +237,12 @@ DETECTOR_LABEL: dict[TemplateKind, str] = {
 }
 PROBE_RESTING = "no verdict yet"
 COPY_RESTING = "no click yet"
-# The one combination that will never produce a verdict at all: the checklist
-# ticks this signal and the service has no appearance to match it against, so
-# the detector is silently skipped and "no verdict yet" would be a lie of
-# omission for the rest of the run.
-PROBE_UNCAPTURED = "ticked but not captured - F2"
+# ``PROBE_UNCAPTURED`` ("ticked but not captured") lived here. It needed the
+# service's finish CHECKLIST and the machine's captures, and both are the
+# monitor's since §10.5 with no field on ``Watched`` between them - so the two
+# probe rows rest plainly now, and the half of that warning worth keeping moved
+# onto the STALE row, where an empty ``active_detectors`` says "nothing here
+# will ever produce a verdict" (``_adopt_watched``).
 STALE_UNSET = "no chat region - staleness check disabled"
 STALE_CALIBRATED = "watching the chat region"
 STALE_UNTICKED = "stillness not watched for this service - F2"
@@ -423,10 +424,6 @@ _STATE_GLYPHS = "●○■✓✗"
 
 def _strip_glyph(text: str) -> str:
     return text.lstrip(_STATE_GLYPHS).lstrip()
-
-
-def _budget(chars: int) -> str:
-    return f"{chars // 1000}k" if chars >= 1000 else str(chars)
 
 
 def _short_root(project_root: Path) -> str:
@@ -3391,7 +3388,8 @@ class GuiView:
         both halves before it can act on anything, and a retarget that got only
         the generation would be driving a service it had not been told about.
         """
-        self._adopt_watched(self._automation.live_slot, await self._monitor.watch(self._automation.live_slot))
+        slot = self._automation.live_slot
+        self._adopt_watched(slot, await self._monitor.watch(slot))
 
     def _adopt_watched(self, slot: AgentSlot, watched: Watched) -> None:
         """Make the monitor's answer this shell's picture of ``slot``.

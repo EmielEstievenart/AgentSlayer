@@ -1,4 +1,4 @@
-"""The wire vocabulary of the brain<->monitor link - monitor protocol version 2.
+"""The wire vocabulary of the brain<->monitor link - monitor protocol version 3.
 
 The one place the two halves of docs/design/ui-monitor.md §6.5 agree on what a
 message looks like. Both ends import it: :mod:`agentclip.driver.monitor.server`,
@@ -25,17 +25,23 @@ schedules: a monitor VM is redeployed when the calibration surface changes, an
 SSH target when the engine does, and a shared integer would make each of those
 a forced upgrade of the other.
 
-Frame vocabulary (v2)
+Frame vocabulary (v3)
 ---------------------
-``{"type":"hello","version":2,"package":"0.1.0","token":"<32 hex>"|null}``
+``{"type":"hello","version":3,"package":"0.1.0","token":"<32 hex>"|null}``
     The client's first line. Nothing else may precede it. ``token`` is §5's
     shared secret (:mod:`agentclip.driver.monitor.auth`) and **null is a real
     value**: a monitor started with ``--no-token`` accepts it, and one started
     with a token refuses it exactly as it refuses a wrong one. Adding the field
     is what took this wire from 1 to 2 - the handshake had "room for a secret"
     from the start, and filling that room changes the shape of the first line,
-    which is precisely what a version gate is for.
-``{"type":"hello_ack","version":2,"package":"0.1.0","server_id":"<uuid4>",
+    which is precisely what a version gate is for. **3 is §10.5**: ``configure``
+    left this table (a brain may not name a service on somebody else's desktop)
+    and ``watch`` took its place. A verb removed is a breaking change by
+    definition - a v2 brain's first act after the handshake would be a call the
+    v3 server has never heard of - so the two halves have to be upgraded
+    together, and the version gate is what says so in one sentence instead of
+    with a ``bad_request`` on the first retarget.
+``{"type":"hello_ack","version":3,"package":"0.1.0","server_id":"<uuid4>",
 "clipboard_kind":"copykitten"|null}``
     The server's reply. ``server_id`` identifies the PROCESS (a monitor is
     long-lived and survives every brain that dials it, §2.8, so a redial wants
@@ -81,13 +87,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from agentclip import __version__
-from agentclip.driver.monitor.protocol import ElementClick, Located, MonitorSpec, Tick, Watched
+from agentclip.driver.monitor.protocol import ElementClick, Located, Tick, Watched
 from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
-MONITOR_WIRE_VERSION = 2
+MONITOR_WIRE_VERSION = 3
 
 #: Per-line ceiling for both ends' stream readers. asyncio's default is 64 KiB,
 #: and a ``write_clipboard`` carrying a long reply is bigger than that on a
@@ -97,7 +104,7 @@ LINE_LIMIT = 16 * 1024 * 1024
 
 
 class WireError(Exception):
-    """A line, frame or value that is not valid monitor protocol v2.
+    """A line, frame or value that is not valid monitor protocol v3.
 
     Raised by every decoder here and by nothing else. Both ends treat it as
     fatal for the frame it was raised on: the server answers the offending call
@@ -130,7 +137,7 @@ class WireVersionError(WireError):
 
     Both numbers, because the one a HUMAN can act on is the package: the user
     installed a release on the VM and another on this PC, and "monitor wire
-    version 2 is not 1" tells them nothing about which of the two to upgrade.
+    version 3 is not 2" tells them nothing about which of the two to upgrade.
     """
 
     def __init__(self, what: str, peer: Versions, ours: Versions = OURS) -> None:
@@ -143,7 +150,7 @@ class WireVersionError(WireError):
         self.ours = ours
 
 
-# The frame types of v2, and the error kinds an ``error`` frame may carry.
+# The frame types of v3, and the error kinds an ``error`` frame may carry.
 FRAME_TYPES: tuple[str, ...] = (
     "hello",
     "hello_ack",
@@ -366,6 +373,25 @@ def decode_element_click(value: Any, what: str = "element_click") -> ElementClic
         raise WireError(f"{what}: {name!r} is not an ElementClick") from None
 
 
+def encode_slot(value: AgentSlot) -> str:
+    """Which of the monitor's two windows, as its own persisted word.
+
+    By VALUE like ``TemplateKind`` and unlike the three state enums: ``master``
+    / ``subagent`` are what a slot IS everywhere else in the codebase (a
+    ``StrEnum``, written into prompts and read out of them), so the wire and the
+    rest of the program say the same word.
+    """
+    return value.value
+
+
+def decode_slot(value: Any, what: str = "slot") -> AgentSlot:
+    text = _as_str(value, what)
+    try:
+        return AgentSlot(text)
+    except ValueError:
+        raise WireError(f"{what}: {text!r} is not an AgentSlot") from None
+
+
 def encode_kind(value: TemplateKind) -> str:
     return value.value
 
@@ -478,59 +504,32 @@ def decode_opt_stale_probe(value: Any, what: str = "stale") -> StaleProbe | None
     return None if value is None else decode_stale_probe(value, what)
 
 
-def encode_spec(value: MonitorSpec) -> dict[str, Any]:
-    """§2.10's payload, field for field.
+def encode_watched(value: Watched) -> dict[str, Any]:
+    """The monitor's whole effective service, field for field (§10.5).
 
-    Every field is a scalar or a tuple of scalars, which is the whole design:
-    ``service`` is the profile KEY and the template PNGs behind it never cross
-    (they live on the monitor's machine and are edited there), so this object is
-    the entire "what to watch" message.
+    The biggest value on this wire and deliberately so: it replaced
+    ``MonitorSpec`` in the opposite direction. What used to go OUT as "watch
+    this" comes back as "this is what I watch", minus everything about how
+    pixels are searched - a tolerance and a matcher are the monitor's own
+    business and a brain has nothing to do with them.
     """
     return {
         "service": value.service,
-        "region": encode_opt_region(value.region),
-        "finish_signals": list(value.finish_signals),
-        "stable_seconds": value.stable_seconds,
-        "tolerance": value.tolerance,
-        "matcher": value.matcher,
-        "hover_scan": value.hover_scan,
-        "scroll_action": value.scroll_action,
-        "snap_back": value.snap_back,
-        "delivery": value.delivery,
-        "auto_submit": value.auto_submit,
-        "send_arm_min_diff": value.send_arm_min_diff,
-        "send_arm_ticks": value.send_arm_ticks,
-        "send_gate_timeout_ticks": value.send_gate_timeout_ticks,
-        "send_gate_seen_timeout_ticks": value.send_gate_seen_timeout_ticks,
-    }
-
-
-def decode_spec(value: Any, what: str = "spec") -> MonitorSpec:
-    data = _mapping(value, what)
-    return MonitorSpec(
-        service=_str_at(data, "service", what),
-        region=decode_opt_region(_field(data, "region", what), f"{what}.region"),
-        finish_signals=_strs_at(data, "finish_signals", what),
-        stable_seconds=_float_at(data, "stable_seconds", what),
-        tolerance=_int_at(data, "tolerance", what),
-        matcher=_str_at(data, "matcher", what),
-        hover_scan=_bool_at(data, "hover_scan", what),
-        scroll_action=_str_at(data, "scroll_action", what),
-        snap_back=_bool_at(data, "snap_back", what),
-        delivery=_str_at(data, "delivery", what),
-        auto_submit=_bool_at(data, "auto_submit", what),
-        send_arm_min_diff=_float_at(data, "send_arm_min_diff", what),
-        send_arm_ticks=_int_at(data, "send_arm_ticks", what),
-        send_gate_timeout_ticks=_int_at(data, "send_gate_timeout_ticks", what),
-        send_gate_seen_timeout_ticks=_int_at(data, "send_gate_seen_timeout_ticks", what),
-    )
-
-
-def encode_watched(value: Watched) -> dict[str, Any]:
-    return {
-        "service": value.service,
+        "label": value.label,
         "region": encode_opt_region(value.region),
         "profiled": value.profiled,
+        "generation": value.generation,
+        "delivery": value.delivery,
+        "auto_submit": value.auto_submit,
+        "scroll_action": value.scroll_action,
+        "snap_back": value.snap_back,
+        "hover_scan": value.hover_scan,
+        "max_paste_chars": value.max_paste_chars,
+        "total_context_chars": value.total_context_chars,
+        "wrap_blocks_in_fence": value.wrap_blocks_in_fence,
+        "attachment_note": value.attachment_note,
+        "require_fenced_reply": value.require_fenced_reply,
+        "extra_instructions": value.extra_instructions,
     }
 
 
@@ -540,6 +539,19 @@ def decode_watched(value: Any, what: str = "watched") -> Watched:
         service=_opt_str_at(data, "service", what),
         region=decode_opt_region(_field(data, "region", what), f"{what}.region"),
         profiled=_bool_at(data, "profiled", what),
+        label=_str_at(data, "label", what),
+        generation=_int_at(data, "generation", what),
+        delivery=_str_at(data, "delivery", what),
+        auto_submit=_bool_at(data, "auto_submit", what),
+        scroll_action=_str_at(data, "scroll_action", what),
+        snap_back=_bool_at(data, "snap_back", what),
+        hover_scan=_bool_at(data, "hover_scan", what),
+        max_paste_chars=_int_at(data, "max_paste_chars", what),
+        total_context_chars=_int_at(data, "total_context_chars", what),
+        wrap_blocks_in_fence=_bool_at(data, "wrap_blocks_in_fence", what),
+        attachment_note=_bool_at(data, "attachment_note", what),
+        require_fenced_reply=_bool_at(data, "require_fenced_reply", what),
+        extra_instructions=_str_at(data, "extra_instructions", what),
     )
 
 
@@ -668,13 +680,18 @@ _INT = (_identity, _as_int)
 _BOOL = (_identity, _as_bool)
 _OPT_FLOAT = (_identity, _as_opt_float)
 
-CONFIGURE = "configure"
+#: The retarget, and the only one on this wire. ``configure`` is deliberately
+#: NOT here (§10.5): a brain that could send a spec would be naming a service, a
+#: rectangle and a search tolerance on a desktop it cannot see, which is the
+#: disagreement wave 3 exists to end. The monitor runs its own configuration for
+#: the window it is asked about and answers with the whole of it.
+WATCH = "watch"
 SUSPEND = "suspend"
 RESUME = "resume"
 CLOSE = "close"
 
 _PARAMS: dict[str, tuple[_Param, ...]] = {
-    CONFIGURE: (_Param("spec", encode_spec, decode_spec),),
+    WATCH: (_Param("slot", encode_slot, decode_slot),),
     "watched": (),
     SUSPEND: (),
     RESUME: (),
@@ -714,7 +731,7 @@ _PARAMS: dict[str, tuple[_Param, ...]] = {
 }
 
 _RESULTS: dict[str, _Value] = {
-    CONFIGURE: _Value(_identity, _as_int),
+    WATCH: _Value(encode_watched, decode_watched),
     "watched": _Value(encode_watched, decode_watched),
     SUSPEND: _Value(_encode_none, _decode_none),
     RESUME: _Value(_encode_none, _decode_none),
@@ -851,7 +868,7 @@ class HelloAck:
 
 
 def frame_type(frame: dict[str, Any]) -> str:
-    """The frame's ``type``, checked against the v2 vocabulary."""
+    """The frame's ``type``, checked against the v3 vocabulary."""
     kind = _str_at(frame, "type", "frame")
     if kind not in FRAME_TYPES:
         raise WireError(f"unknown frame type {kind!r}")

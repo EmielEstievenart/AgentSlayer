@@ -49,14 +49,17 @@ from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.driver.clip.watcher import SelfWriteSet, write_via
 from agentclip.driver.monitor.ops import ScreenOps
 from agentclip.driver.monitor.protocol import (
+    EMPTY_WATCHED,
     ClipHook,
     ElementClick,
     Located,
     MonitorSpec,
+    SpecFor,
     Tick,
     TickHook,
     UIMonitor,
     Watched,
+    watched_from,
 )
 from agentclip.driver.screen.busy import BusyProbe
 from agentclip.driver.screen.capture import CaptureError, RegionImage
@@ -64,6 +67,7 @@ from agentclip.driver.screen.detector import ScreenDetector, Sighting
 from agentclip.driver.screen.presence import PresenceTracker
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleProbe, StaleTracker
 
 # One frame and what was recognised in it, for the panel that draws crops. The
@@ -73,6 +77,29 @@ from agentclip.driver.screen.stale import StaleProbe, StaleTracker
 FrameHook = Callable[[RegionImage, Mapping[TemplateKind, Sighting | None]], None]
 
 T = TypeVar("T")
+
+
+def default_specs() -> dict[AgentSlot, MonitorSpec]:
+    """What the double watches per window until a suite says otherwise.
+
+    One service called ``fake``, both windows, no region drawn - the double IS
+    configured for both slots by default, for :attr:`FakeUIMonitor.profiled`'s
+    reason: a story that cares says so, and one that does not should not have
+    to. No region because "nothing is calibrated" is the branch a brain most
+    needs a double to be able to take.
+    """
+    return {
+        slot: MonitorSpec(
+            service="fake",
+            region=None,
+            finish_signals=("stale",),
+            stable_seconds=1.0,
+            tolerance=24,
+            matcher="anchors",
+            label=f"fake ({slot.label})",
+        )
+        for slot in AgentSlot
+    }
 
 
 class FakeUIMonitor:
@@ -110,6 +137,17 @@ class FakeUIMonitor:
         # What ``watching`` says about this machine's appearances. True by
         # default - a double is calibrated unless a story says otherwise.
         self.profiled = True
+        # -- the monitor's own targets (§10.5) ---------------------------------
+        # What ``watch(slot)`` runs. A dict a suite may edit in place ("and the
+        # sub-agent window is a different service"), rather than a callable,
+        # because that is how a test states the fact: two windows, two rows.
+        self.specs_for: dict[AgentSlot, MonitorSpec] = default_specs()
+        # ...unless something installed a live one. The Monitor UI does exactly
+        # that (its view's ``spec_for`` IS the window's selection), so the double
+        # has to accept it or the window's own wiring cannot be tested at all.
+        self.spec_for: SpecFor | None = None
+        # Every slot ``watch`` was called with, in order.
+        self.watches: list[AgentSlot] = []
         # THE generation: bumped by every ``configure``, stamped into ticks,
         # and what makes one a ghost. Public because a test writes scenarios in
         # terms of it ("...and now a delegation starts").
@@ -171,12 +209,34 @@ class FakeUIMonitor:
         """The local tier's region-store read, answered from :attr:`saved_regions`."""
         return self.saved_regions.get(service)
 
+    def set_spec_for(self, spec_for: SpecFor | None) -> None:
+        """Install (or forget) a live source of targets, as the real one takes
+        one - this is the seam the Monitor UI's window hangs its ``_spec`` on."""
+        self.spec_for = spec_for
+
+    async def watch(self, slot: AgentSlot) -> Watched:
+        """Retarget onto whatever this double is configured to watch for ``slot``.
+
+        The real one's shape exactly (``local.py``): resolve the spec on THIS
+        side, configure with it, answer with the whole of what was settled on.
+        An installed :attr:`spec_for` wins over :attr:`specs_for`, because a
+        window that is driving the monitor is the live answer and the dict is
+        the resting one.
+        """
+        self.calls.append(("watch", (slot,)))
+        self.watches.append(slot)
+        spec = self.spec_for(slot) if self.spec_for is not None else self.specs_for.get(slot)
+        if spec is None:
+            return await self.watched()
+        self.retarget(spec)
+        return await self.watched()
+
     async def watched(self) -> Watched:
         self.calls.append(("watched", ()))
         spec = self.spec
         if spec is None:
-            return Watched(None, None, False)
-        return Watched(spec.service, spec.region, self.profiled)
+            return EMPTY_WATCHED
+        return watched_from(spec, profiled=self.profiled, generation=self.generations)
 
     async def suspend(self) -> None:
         self.suspends += 1

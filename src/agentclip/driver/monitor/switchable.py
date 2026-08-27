@@ -43,6 +43,7 @@ from typing import Any
 from agentclip.driver.clip.base import ClipboardUnavailable
 from agentclip.driver.clip.watcher import SelfWriteSet
 from agentclip.driver.monitor.protocol import (
+    EMPTY_WATCHED,
     ClipHook,
     ElementClick,
     Located,
@@ -57,6 +58,7 @@ from agentclip.driver.screen.detector import ScreenDetector, Sighting
 from agentclip.driver.screen.presence import PresenceTracker
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleTracker
 
 _log = logging.getLogger(__name__)
@@ -89,8 +91,15 @@ class IdleMonitor:
         watched, so there is no run for a tick to be a ghost of."""
         return 0
 
+    async def watch(self, slot: AgentSlot) -> Watched:
+        """The empty answer, exactly as an uncalibrated monitor gives it: no
+        service, no box, no profile. A brain that has not dialled yet reads
+        "there is nothing over there" off the same fields it would read a
+        monitor with an empty service table off."""
+        return EMPTY_WATCHED
+
     async def watched(self) -> Watched:
-        return Watched(None, None, False)
+        return EMPTY_WATCHED
 
     async def suspend(self) -> None:
         return None
@@ -280,6 +289,13 @@ class SwitchableMonitor:
     async def configure(self, spec: MonitorSpec) -> int:
         self._spec = spec
         return await self._inner.configure(spec)
+
+    async def watch(self, slot: AgentSlot) -> Watched:
+        """Straight through. Nothing is remembered here, deliberately: what
+        ``watch`` settles on is the INNER monitor's own configuration (§10.5),
+        and a copy kept on this side would be a second answer to the question
+        this handle exists to forward."""
+        return await self._inner.watch(slot)
 
     async def watched(self) -> Watched:
         return await self._inner.watched()

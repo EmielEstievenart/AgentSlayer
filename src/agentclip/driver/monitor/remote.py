@@ -64,6 +64,7 @@ from agentclip.driver.monitor.wire import (
 )
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 
 _log = logging.getLogger(__name__)
 
@@ -111,6 +112,14 @@ class MonitorCallError(MonitorLinkError):
         super().__init__(f"{kind}: {message}")
         self.kind = kind
         self.message = message
+
+
+#: What a remote ``configure`` says instead of doing anything.
+CONFIGURE_IS_LOCAL = (
+    "configure() is the monitor's own door: the service, its preset and its chat"
+    " region are facts about the monitor's machine and are edited in its Monitor"
+    " UI - call watch(slot) and read the answer (ui-monitor.md §10.5)"
+)
 
 
 class _Waiter:
@@ -237,17 +246,33 @@ class RemoteUIMonitor:
 
     # == lifecycle / configuration =============================================
 
-    async def configure(self, spec: MonitorSpec) -> int:
-        """Retarget the far monitor; returns ITS generation, which is now ours.
+    async def watch(self, slot: AgentSlot) -> Watched:
+        """Ask the far monitor to run ITS configuration for ``slot`` (§10.5).
 
-        The number is the monitor's own counter, not a local one: after a redial
-        the brain must call this before it can tell a live tick from a ghost,
-        because the monitor kept polling and kept counting while nobody was
-        attached (§2.8).
+        The brain's only retarget, and the one place the service reaches this
+        side: the far machine resolves the key, the preset and the chat region
+        out of its own config and its own store, and hands the lot back.
+
+        The generation on the answer is the monitor's own counter, not a local
+        one, and adopting it is not bookkeeping: after a redial the brain cannot
+        tell a live tick from a ghost until it has one, because the monitor kept
+        polling and kept counting while nobody was attached (§2.8).
         """
-        generation = int(await self._call("configure", spec=spec))
-        self._generation = generation
-        return generation
+        answer = await self._call("watch", slot=slot)
+        assert isinstance(answer, Watched)
+        self._generation = answer.generation
+        return answer
+
+    async def configure(self, spec: MonitorSpec) -> int:
+        """Refused, always: configuration is the MONITOR's (§10.5).
+
+        Here to satisfy the Protocol and to fail with a sentence rather than an
+        ``AttributeError``. The verb left the wire in v3 - a brain that could
+        send a spec would be naming a service, a rectangle and a search
+        tolerance on a desktop it cannot see - and the door that replaced it is
+        :meth:`watch`.
+        """
+        raise MonitorCallError("bad_request", CONFIGURE_IS_LOCAL)
 
     async def watched(self) -> Watched:
         answer = await self._call("watched")

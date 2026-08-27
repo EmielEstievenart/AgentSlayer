@@ -46,18 +46,22 @@ from agentclip.driver.clip.watcher import SelfWriteSet, watch, write_via
 from agentclip.driver.monitor.beats import (
     ELEMENT_CLICK_SETTLE_S,
     PAGE_DOWN_TAPS,
+    SEND_ARM_MIN_DIFF,
     SNAP_WHEEL_DETENTS,
 )
 from agentclip.driver.monitor.ops import ScreenOps
 from agentclip.driver.monitor.protocol import (
+    EMPTY_WATCHED,
     ClipHook,
     ElementClick,
     Located,
     MonitorSpec,
+    SpecFor,
     Tick,
     TickHook,
     UIMonitor,
     Watched,
+    watched_from,
 )
 from agentclip.driver.monitor.regions import load_region, save_region
 from agentclip.driver.monitor.search import element_rects, lowest_match, lowest_match_scored
@@ -75,6 +79,7 @@ from agentclip.driver.screen.matchers import select_matcher
 from agentclip.driver.screen.presence import PresenceTracker
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion, click_point_region
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleProbe, StaleTracker
 from agentclip.driver.screen.template import CandidateSource, Template, match_rect, same_element
 
@@ -180,6 +185,7 @@ class LocalUIMonitor:
         poll_seconds: float = POLL_SECONDS,
         clock: Callable[[], float] = time.monotonic,
         regions_dir: Path | None = None,
+        spec_for: SpecFor | None = None,
     ) -> None:
         # What a service KEY looks like on this machine. Profiles are template
         # PNGs and never cross the wire (§2.10): the spec names a service, and
@@ -193,6 +199,14 @@ class LocalUIMonitor:
         # persistence gets, and what an embedded monitor inside the app binary
         # gets until somebody hands it a directory.
         self._regions_dir = regions_dir
+        # What this monitor watches for each of its two windows (§10.5). The
+        # whole of wave 3's inversion lives behind this one callable: a brain
+        # names a slot and the answer is composed HERE, out of this process's
+        # config, this machine's region store and - when there is a window - the
+        # Monitor UI's own live selection. ``None`` is a monitor nobody has told
+        # what to watch, which is every suite that drives ``configure`` directly
+        # and every embedded monitor that has no service table behind it.
+        self._spec_for = spec_for
         self._ops = ops if ops is not None else ScreenOps()
         # Injected rather than reached for, because the suites stub the capture
         # at their own call site and because the calibration window will want to
@@ -221,7 +235,7 @@ class LocalUIMonitor:
         self._clip_hooks: list[ClipHook] = []
         # -- the poller ---------------------------------------------------------
         self._spec: MonitorSpec | None = None
-        self._watched = Watched(None, None, False)
+        self._watched = EMPTY_WATCHED
         # The current run's stop flag - replaced per run rather than cleared, so
         # a cancelled loop's flag stays set forever and that loop can only end.
         self._stop = threading.Event()
@@ -308,7 +322,7 @@ class LocalUIMonitor:
         # Resolved before the region check, so ``watching`` can say "no
         # appearance for this key here" even for a spec with no box.
         profile = self._profile_for(spec.service)
-        self._watched = Watched(spec.service, region, profile is not None)
+        self._watched = watched_from(spec, profiled=profile is not None, generation=generation)
         if region is None:
             return generation
         if profile is None:
@@ -377,6 +391,36 @@ class LocalUIMonitor:
                 _log.warning("could not remember the chat region for %s", spec.service)
         return spec
 
+    def set_spec_for(self, spec_for: SpecFor | None) -> None:
+        """Say (or forget) where this monitor's own targets come from.
+
+        A setter rather than a constructor-only argument because of the order
+        the Monitor UI is built in: the window's view is constructed OVER this
+        monitor, and it is the view's ``spec_for`` we want - so the monitor has
+        to exist first and be told second. Headless there is no such knot and
+        the constructor argument is used.
+        """
+        self._spec_for = spec_for
+
+    async def watch(self, slot: AgentSlot) -> Watched:
+        """Run this monitor's own configuration for ``slot`` (§10.5).
+
+        ``configure(spec_for(slot))`` and the resulting :class:`Watched`, in one
+        call - which is the whole verb: the brain names a window and gets back
+        the service, the box, the preset and the generation its ticks will
+        carry. What it CANNOT do is say what any of those should be.
+
+        With no ``spec_for`` there is nothing over here to run, so nothing is
+        retargeted and the current answer is handed back unchanged - a monitor
+        with no service table is exactly as uncalibrated as one whose service
+        has no profile, and both are read off the answer rather than raised.
+        """
+        spec_for = self._spec_for
+        if spec_for is None:
+            return self._watched
+        await self.configure(spec_for(slot))
+        return self._watched
+
     async def watched(self) -> Watched:
         return self._watched
 
@@ -438,8 +482,10 @@ class LocalUIMonitor:
 
     @property
     def spec(self) -> MonitorSpec | None:
-        """What this monitor was last configured with - the send-gate budgets a
-        consumer measures its own gates in, and the service behind the window."""
+        """What this monitor was last configured with - the local-only read the
+        Serve panel names the driven service off (``serve.py:_driving``). A
+        brain asks :meth:`watched` instead: a spec carries a tolerance and a
+        matcher, which are this machine's business and nobody else's."""
         with self._tick_lock:
             return self._spec
 
@@ -634,9 +680,8 @@ class LocalUIMonitor:
         with self._tick_lock:
             if generation != self._generation:
                 return self._stale_arm_streak, self._changed_streak
-            min_diff = self._spec.send_arm_min_diff if self._spec is not None else 0.0
             self._stale_arm_streak = roll_arm_streak(
-                self._stale_arm_streak, snapshot.stale, min_diff=min_diff
+                self._stale_arm_streak, snapshot.stale, min_diff=SEND_ARM_MIN_DIFF
             )
             self._changed_streak = roll_changed_streak(
                 self._changed_streak,

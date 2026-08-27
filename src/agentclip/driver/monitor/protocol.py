@@ -16,7 +16,12 @@ docs/design/ui-monitor.md §2–§3 is binding here. The rules in one place:
   nothing in this package imports ``driver/automation``.
 * **Ghost ticks are dropped** (§4.2). Every tick carries the ``generation`` it
   was captured under; :meth:`UIMonitor.observe` never hands out one that
-  predates the last :meth:`UIMonitor.configure`.
+  predates the last retarget.
+* **The service is the monitor's** (§10.5). The brain never sends a service
+  key, a preset or a spec: it names a WINDOW (:meth:`UIMonitor.watch`) and
+  reads back the monitor's whole effective service as a :class:`Watched`.
+  :meth:`UIMonitor.configure` stays as the in-process door the Monitor UI and
+  the suites drive, and does not cross the wire.
 
 Phase 1 (§6.1) carries exactly what the controller's five ``consume_*`` methods
 read today: the three debounced probes, the per-kind sighting map (as screen
@@ -32,9 +37,15 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Protocol
 
+from agentclip.config import (
+    DEFAULT_DELIVERY,
+    DEFAULT_SCROLL_ACTION,
+    ServicePreset,
+)
 from agentclip.driver.screen.busy import BusyProbe
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleProbe
 
 # Kinds the monitor searches every frame it captures, in the order the ELEMENTS
@@ -90,20 +101,67 @@ class ElementClick(Enum):
 
 @dataclass(frozen=True, slots=True)
 class Watched:
-    """What the monitor settled on after its last ``configure`` (§9.1).
+    """The monitor's whole effective service for the window it is watching (§10.5).
 
-    * ``service`` - the profile KEY the spec named; None before any configure.
+    The answer to ``watch(slot)``, and the ONLY door the brain has onto which
+    service is being driven: the Chat UI never sends a service key, a preset or
+    a spec, so everything it needs in order to compose a turn for this chat has
+    to come back out of here (docs/design/ui-monitor.md §10.5). The monitor
+    resolves all of it on its own machine, out of its own config, its own region
+    store and its own captured appearances.
+
+    The identity half:
+
+    * ``service`` - the profile KEY the monitor settled on; None before it has
+      been pointed at anything.
+    * ``label`` - that preset's human name, for a read-only picker to show.
     * ``region`` - the box actually watched: the spec's, or the one this
       monitor's machine remembered for the service. None when neither exists.
     * ``profiled`` - whether THIS machine has a captured appearance for that
       key. False is the split-mode trap made visible: a brain driving
       ``claude`` against a monitor calibrated for ``zai`` gets every element
       verdict as NOT_CALIBRATED and nothing else says why.
+    * ``generation`` - the run this answer describes, i.e. the stamp its ticks
+      carry. It is what makes ``watched()`` re-readable without a round trip
+      per tick: a brain compares the generation on an arriving tick with the one
+      it last read, and asks again only when the two differ - which is how a
+      service picked or a region redrawn in the Monitor UI reaches the Chat UI
+      with no new frame from the brain at all.
+
+    The PRESET half is the rest, and it is here for the same reason the region
+    is: the ``[services.*]`` table lives on the monitor's disk and is edited in
+    the Monitor UI, so a brain that read its own host's copy would be composing
+    turns against a service somebody else is running. These are the fields a
+    brain ACTS on - what a paste may weigh, whether it may press Enter, whether
+    a reply has to arrive fenced, what extra sentence this host needs - and
+    nothing about how pixels are searched (a tolerance or a matcher is the
+    monitor's business and never leaves it).
     """
 
     service: str | None
     region: ScreenRegion | None
     profiled: bool
+    label: str = ""
+    generation: int = 0
+    # -- the preset the brain acts on (§10.5) ------------------------------
+    delivery: str = DEFAULT_DELIVERY
+    auto_submit: bool = False
+    scroll_action: str = DEFAULT_SCROLL_ACTION
+    snap_back: bool = True
+    hover_scan: bool = False
+    max_paste_chars: int = 0
+    total_context_chars: int = 0
+    wrap_blocks_in_fence: bool = True
+    attachment_note: bool = True
+    require_fenced_reply: bool = False
+    extra_instructions: str = ""
+
+
+#: What a monitor that has not been pointed at anything answers, and what an
+#: idle handle answers for ever. One object rather than three
+#: ``Watched(None, None, False)`` literals, so "nothing is being watched" reads
+#: the same at every site that has to say it.
+EMPTY_WATCHED = Watched(service=None, region=None, profiled=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,15 +274,31 @@ class Tick:
 class MonitorSpec:
     """Everything the monitor needs to watch one chat window - §2.10's payload.
 
-    Plain data, every field a scalar or a tuple of scalars, so it rides over
-    the wire in phase 5 unchanged. The template PNGs never do: ``service`` is
-    the profile KEY, and the monitor resolves it on its own machine.
+    Plain data, every field a scalar or a tuple of scalars. The template PNGs
+    never appear: ``service`` is the profile KEY, and the monitor resolves it on
+    its own machine.
 
-    ``stable_seconds`` is raw seconds - the monitor converts it against its own
-    tick rate (§2.10 "cadence moves to the monitor"); no caller computes ticks.
-    The four ``send_*`` fields are the send gate's tick budgets from
-    ``driver/automation/finish.py``, handed over here so the monitor's tick
-    count is the one they are measured in.
+    **It no longer crosses the wire.** Until wave 3 the brain composed one of
+    these and sent it; §10.5 turned that round - the monitor owns its own
+    service configuration and a remote brain calls :meth:`UIMonitor.watch`
+    instead. So this is the MONITOR-SIDE payload now: what its own config, its
+    own region store and (when it has a window) its own Monitor UI hand to
+    :meth:`UIMonitor.configure`. :func:`spec_from_preset` is how one is built
+    from a ``[services.*]`` row.
+
+    Three groups. The first is what to WATCH and how to search it -
+    ``service``, ``region``, the finish checklist, the debounce and the
+    matcher's two knobs - and none of it ever leaves the monitor.
+    ``stable_seconds`` is raw seconds; the monitor converts it against its own
+    tick rate (§2.10 "cadence moves to the monitor"), so no caller computes
+    ticks.
+
+    The second is ``label`` plus the preset fields a BRAIN acts on. They are
+    carried here rather than beside here so that one callable
+    (``LocalUIMonitor``'s ``spec_for``) answers the whole of "what is this
+    window", and :class:`Watched` can be built from one object: a second
+    ``preset_for`` seam would be two answers free to name two different
+    services.
     """
 
     service: str
@@ -233,15 +307,87 @@ class MonitorSpec:
     stable_seconds: float
     tolerance: int
     matcher: str
-    hover_scan: bool
-    scroll_action: str
-    snap_back: bool
-    delivery: str
-    auto_submit: bool
-    send_arm_min_diff: float
-    send_arm_ticks: int
-    send_gate_timeout_ticks: int
-    send_gate_seen_timeout_ticks: int
+    # -- what the brain gets to see (§10.5) --------------------------------
+    # Defaulted to ``ServicePreset``'s own defaults, so a spec written by hand
+    # in a suite stays one line and still says what the real one would.
+    label: str = ""
+    hover_scan: bool = False
+    scroll_action: str = DEFAULT_SCROLL_ACTION
+    snap_back: bool = True
+    delivery: str = DEFAULT_DELIVERY
+    auto_submit: bool = False
+    max_paste_chars: int = 0
+    total_context_chars: int = 0
+    wrap_blocks_in_fence: bool = True
+    attachment_note: bool = True
+    require_fenced_reply: bool = False
+    extra_instructions: str = ""
+
+
+def spec_from_preset(preset: ServicePreset, region: ScreenRegion | None = None) -> MonitorSpec:
+    """One ``[services.*]`` row, as the monitor's target for a window.
+
+    The single place a config preset becomes a spec, so the headless monitor
+    (``driver/monitor/__main__.build_monitor``) and the Monitor UI's own
+    ``_spec()`` cannot come to two different answers about the same row. The
+    region is separate because it is not in the preset at all: it is a fact
+    about this desktop, kept in the monitor's region store, and ``None`` here
+    is the honest "let the store fill it" that ``configure`` already handles.
+    """
+    return MonitorSpec(
+        service=preset.key,
+        region=region,
+        finish_signals=tuple(preset.finish_signals),
+        stable_seconds=preset.stable_seconds,
+        tolerance=preset.tolerance,
+        matcher=preset.matcher,
+        label=preset.label,
+        hover_scan=preset.hover_scan,
+        scroll_action=preset.scroll_action,
+        snap_back=preset.snap_back,
+        delivery=preset.delivery,
+        auto_submit=preset.auto_submit,
+        max_paste_chars=preset.max_paste_chars,
+        total_context_chars=preset.total_context_chars,
+        wrap_blocks_in_fence=preset.wrap_blocks_in_fence,
+        attachment_note=preset.attachment_note,
+        require_fenced_reply=preset.require_fenced_reply,
+        extra_instructions=preset.extra_instructions,
+    )
+
+
+def watched_from(spec: MonitorSpec, *, profiled: bool, generation: int) -> Watched:
+    """The answer a monitor gives for the spec it just settled on.
+
+    Written once because two monitors build it - the real one and the double -
+    and a double whose ``watched()`` dropped a preset field would be a suite
+    passing against nothing.
+    """
+    return Watched(
+        service=spec.service,
+        region=spec.region,
+        profiled=profiled,
+        label=spec.label,
+        generation=generation,
+        delivery=spec.delivery,
+        auto_submit=spec.auto_submit,
+        scroll_action=spec.scroll_action,
+        snap_back=spec.snap_back,
+        hover_scan=spec.hover_scan,
+        max_paste_chars=spec.max_paste_chars,
+        total_context_chars=spec.total_context_chars,
+        wrap_blocks_in_fence=spec.wrap_blocks_in_fence,
+        attachment_note=spec.attachment_note,
+        require_fenced_reply=spec.require_fenced_reply,
+        extra_instructions=spec.extra_instructions,
+    )
+
+
+#: How a monitor answers "what am I watching for this window": its own config,
+#: its own region store, and - where there is one - its own Monitor UI. The
+#: whole of §10.5's inversion in one type. The slot enum is ``driver/screen``'s,
+#: because a slot IS a drawn box and that is squarely below this layer.
+SpecFor = Callable[[AgentSlot], MonitorSpec]
 
 
 TickHook = Callable[[Tick], None]
@@ -261,15 +407,46 @@ class UIMonitor(Protocol):
 
     # -- lifecycle / configuration ----------------------------------------
     async def configure(self, spec: MonitorSpec) -> int:
-        """Retarget onto ``spec``. Rebuilds trackers fresh (never mutates the
+        """Retarget onto ``spec`` - the IN-PROCESS door, and only that (§10.5).
+
+        What the Monitor UI and the suites drive, on the machine where the spec
+        was composed. Deliberately NOT on the wire any more: a remote brain has
+        no business naming a service, a region or a tolerance on somebody
+        else's desktop, and calls :meth:`watch` instead.
+
+        Rebuilds trackers fresh (never mutates the
         old ones), bumps and returns the generation; ticks captured under an
         older generation are ghosts from this instant. A ``spec`` with no
         region, or one whose profile has nothing to watch, leaves the monitor
         configured but idle (``latest`` stops advancing)."""
         ...
 
+    async def watch(self, slot: AgentSlot) -> Watched:
+        """Point the monitor at the window it keeps for ``slot``, and say what
+        it settled on - the ONLY retarget a remote brain has (§10.5).
+
+        The inversion wave 3 made: the brain no longer composes a spec and sends
+        it, because the service, its preset and its chat region are all facts
+        about the monitor's machine and the monitor is where they are edited. So
+        the brain names a WINDOW - master or sub-agent - and the monitor runs
+        its own configuration for it, bumps its generation, and hands the whole
+        effective service back as a :class:`Watched`.
+
+        Equivalent to ``configure(its own spec for slot)`` followed by
+        ``watched()``, and that is exactly what ``LocalUIMonitor`` does - but
+        ONE round trip, because the brain needs both halves before it can act
+        and a redial that got only the generation would be driving a service it
+        had not been told about.
+
+        A monitor with no configuration for ``slot`` answers its current
+        :class:`Watched` unchanged and bumps nothing: "there is nothing over
+        here to watch" is an answer, not a failure, and the brain reads it off
+        ``service`` / ``region`` exactly as it reads an uncalibrated one.
+        """
+        ...
+
     async def watched(self) -> Watched:
-        """What the last ``configure`` settled on: the service key, the box
+        """What the last retarget settled on: the service key, the box
         actually watched (the spec's, or the store's - §9.1), and whether this
         machine has a profile for that key.
 

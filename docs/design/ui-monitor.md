@@ -1812,3 +1812,40 @@ calibration.
   its next config reload — there is no wire event for "config changed".
 * `copy_seen_note` (the "poller last saw the copy button" line) is gone with
   the local tier; if it is missed, it comes back as a tick field.
+
+### 10.5 The service is the monitor's (added 2026-08-27, after the §9.1 mismatch)
+
+**Rule.** The Chat UI never sends a service key, a preset or a spec. The
+monitor process owns its service configuration entirely — which service each
+window (MASTER / SUB-AGENT) is, its captures, its chat region, and every
+preset field — and the brain reads back what it needs.
+
+* `Watched` grows into the monitor's whole effective service: `service`,
+  `label`, `region`, `profiled`, `generation`, and the preset fields the brain
+  acts on — `delivery`, `auto_submit`, `scroll_action`, `snap_back`,
+  `hover_scan`, `max_paste_chars`, `total_context_chars`,
+  `wrap_blocks_in_fence`, `attachment_note`, `require_fenced_reply`,
+  `extra_instructions`. `ServicePreset` stays the config-side record; the
+  brain's `live_preset()` is built FROM `Watched` (a small adapter), never
+  from the host's `[services.*]` tables.
+* `configure(spec)` leaves the wire. In its place: `watch(slot: "master" |
+  "subagent") -> Watched` — the monitor runs ITS OWN spec for that slot and
+  bumps its generation. `LocalUIMonitor` gets a `spec_for: Callable[[AgentSlot],
+  MonitorSpec]` from the monitor process (headless: straight from its config +
+  region store; with a window: the Monitor UI view's `_spec()`, so a tab
+  switch or a redraw there and a `watch()` from the brain drive the same
+  state). `configure(spec)` remains the in-process door the Monitor UI and
+  the tests use; a remote brain cannot call it.
+* The brain calls `watch(live_slot)` where it called `configure(_live_spec())`
+  (attach, redial, slot switch) and re-reads `watched()` whenever a tick
+  arrives with a generation it has not seen — that is how a service picked or
+  a region redrawn in the Monitor UI reaches the Chat UI without a new frame.
+* The Chat UI's sidebar service picker becomes read-only: it shows the
+  monitor's answer (`label (key) · from the monitor`) and its
+  **Edit services...** door says the §10.2 sentence. `general.service` /
+  `subagent_service` and `[services.*]` in the HOST config are no longer read
+  by the Chat UI (they stay in `config.py` because a locally launched monitor
+  reads the same file). The paste/context budgets, fences and instructions the
+  session builder needs come from `Watched` too.
+* Send-gate tick budgets (`SEND_ARM_*`, `SEND_GATE_*`) become the monitor's
+  constants; the spec no longer carries them.

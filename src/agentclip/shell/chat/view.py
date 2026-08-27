@@ -890,9 +890,7 @@ class GuiView:
         self._monitor_target: MonitorTarget | None = (
             None if isinstance(launch, LaunchLocal) else launch
         )
-        self._launcher: LocalMonitorLauncher = (
-            launcher if launcher is not None else _NoLauncher()
-        )
+        self._launcher: LocalMonitorLauncher = launcher if launcher is not None else _NoLauncher()
         # Is the link we hold (or are redialling) the child WE started? It
         # changes three things and nothing else: the badge says "local", a
         # deliberate Disconnect stops the process, and a redial that keeps
@@ -1859,10 +1857,20 @@ class GuiView:
                 if restarted
                 else " Nothing on the tool side to renew - open a new browser chat yourself"
             )
-            self.notify(
-                f"the new-chat click did not land ({outcome.name.lower()}).{tail}",
-                severity="warning",
+            # NOT_CALIBRATED gets its own sentence, and it names the MONITOR
+            # (§11.3). "did not land (not_calibrated)" was the report this whole
+            # wave opened on: the button was on screen, the link was green, and
+            # the advice was unactionable because the missing half is a picture
+            # on the OTHER machine.
+            watched = self._watched[slot]
+            head = (
+                f"the monitor has no {TemplateKind.NEW_CHAT.label} captured for "
+                f"{watched.label or self._service_for(slot) or 'this chat'} - "
+                "capture one in the Monitor UI."
+                if outcome is ElementClick.NOT_CALIBRATED
+                else f"the new-chat click did not land ({outcome.name.lower()})."
             )
+            self.notify(f"{head}{tail}", severity="warning")
             # No snap back on this branch, deliberately, and for the reason the
             # TUI gives: the browser is where the user has to finish the job, so
             # it keeps whatever focus it already has.
@@ -2410,7 +2418,7 @@ class GuiView:
         self._monitor_dialog.set_fields(mode, host, port, token, via)
 
     def monitor_start(self) -> None:
-        """"Attach", "Retry" and **Launch a local monitor** - one press.
+        """ "Attach", "Retry" and **Launch a local monitor** - one press.
 
         A retry IS a fresh dial, and so is a launch: the local mode differs only
         in where the address comes from (a child we spawn, rather than a form
@@ -3685,9 +3693,10 @@ class GuiView:
         # ...and one exception to "once per outage": the child we started has
         # DIED, which is a new fact about a link that was already down and the
         # only one the user has to act on. Once per child, never per attempt.
-        exited = self._local_launched and LOCAL_MONITOR_EXITED.format(
-            code=self._launcher.exit_code()
-        ) in reason
+        exited = (
+            self._local_launched
+            and LOCAL_MONITOR_EXITED.format(code=self._launcher.exit_code()) in reason
+        )
         if fresh or (exited and not self._exited_said):
             self._exited_said = bool(exited)
             self.notify(reason, severity="warning", timeout=8)

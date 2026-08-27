@@ -146,6 +146,17 @@ class TemplateKind(StrEnum):
         return _MAX_DIFFS[self.value]
 
 
+def describe_captured(captured: tuple[TemplateKind, ...]) -> str:
+    """ "3/7 captured" - how many of the kinds a service has pictures of.
+
+    Module-level rather than only a method because the Chat UI holds no profile
+    any more (docs/design/ui-monitor.md §11.3): what reaches it is the KIND LIST
+    the monitor sent, and the sidebar's line about it must read the same either
+    way.
+    """
+    return f"{len(captured)}/{len(TemplateKind)} captured"
+
+
 @dataclass(slots=True)
 class ServiceProfile:
     """One service's captured appearances: a STACK of images per kind.
@@ -237,4 +248,4 @@ class ServiceProfile:
         return tuple(kind for kind in TemplateKind if self.has(kind))
 
     def describe(self) -> str:
-        return f"{len(self.captured)}/{len(TemplateKind)} captured"
+        return describe_captured(self.captured)

@@ -30,7 +30,6 @@ def build(project: Path, config: Config, tmp_path: Path, **kwargs: object) -> Gu
         provider=select_provider("manual"),
         engine_factory=make_engine_factory(lambda: config, project),
         project_root=project,
-        profile_root=tmp_path / "profiles",
         **kwargs,  # type: ignore[arg-type]
     )
 
@@ -236,8 +235,9 @@ def test_the_js_api_reaches_the_view_through_the_loop(
     runner.view.submit_text = lambda text: seen.append(("submit", text))  # type: ignore[method-assign]
     runner.view.cancel_execution = lambda: seen.append(("cancel", ""))  # type: ignore[method-assign]
     try:
-        caller = threading.Thread(target=lambda: (runner.js_api.submit("hello"),
-                                                  runner.js_api.cancel()))
+        caller = threading.Thread(
+            target=lambda: (runner.js_api.submit("hello"), runner.js_api.cancel())
+        )
         caller.start()
         caller.join()
         wait_for(lambda: len(seen) == 2, "both js_api calls to land")

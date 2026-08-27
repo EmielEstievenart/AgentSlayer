@@ -34,7 +34,7 @@ from agentclip.driver.automation.recipes import acts, chatbox
 from agentclip.driver.automation.recipes.context import RecipeContext
 from agentclip.driver.automation.recipes.outcomes import Outcome
 from agentclip.driver.screen.profile import TemplateKind
-from agentclip.driver.screen.region import ScreenRegion, click_point_region
+from agentclip.driver.screen.region import ScreenRegion
 
 # The two layouts one service's chat box can be drawn in, as one tuple: handed to
 # ``locate`` as the appearances a copy icon may NOT turn out to be.
@@ -86,11 +86,12 @@ async def harvest(ctx: RecipeContext) -> Outcome:
     at all".
     """
     region = ctx.live.chat_region
-    templates = ctx.live_profile().variants(TemplateKind.COPY)
-    if region is None or not templates:
-        missing_part = (
-            "no chat window is drawn" if region is None else "no copy button is captured"
-        )
+    # The MONITOR's answer about the live service, not a read of this machine's
+    # disk (§11.3): the pictures are over there, and so is the fact that there
+    # are any.
+    has_copy = TemplateKind.COPY in ctx.captured(ctx.live.slot)
+    if region is None or not has_copy:
+        missing_part = "no chat window is drawn" if region is None else "no copy button is captured"
         ctx.log_harness(KIND_COPY, f"auto-copy flow could not start: {missing_part}")
         ctx.say("there is nothing for the auto-copy flow to search")
         return Outcome.NOT_HARVESTED
@@ -124,6 +125,11 @@ async def harvest(ctx: RecipeContext) -> Outcome:
     await ctx.monitor.move_cursor(*region.center)
     await asyncio.sleep(0.1)  # let the page's hover tracking register it
 
+    # What the hunt is after is the one PIXEL to press, not the rectangle: the
+    # click point is part of an appearance and appearances live on the monitor
+    # (§11.3), so ``Located.target`` arrives already aimed and this side never
+    # reduces a rectangle itself. It is None exactly when ``region`` is, which is
+    # what makes it the "found it?" flag as well as the target.
     found: ScreenRegion | None = None
     best_miss: float | None = None
     for attempt in range(1, COPY_SNAP_ROUNDS + 1):
@@ -140,7 +146,7 @@ async def harvest(ctx: RecipeContext) -> Outcome:
         # whose copy capture also matches a corner of its input box would have the
         # harvest click into the chat box and copy nothing.
         located = await ctx.monitor.locate(TemplateKind.COPY, exclude_kinds=CHATBOX_KINDS)
-        found = located.region
+        found = located.target
         # The closest ANY round came, not the last one's: see the docstring.
         if located.best_miss is not None and (best_miss is None or located.best_miss < best_miss):
             best_miss = located.best_miss
@@ -166,7 +172,9 @@ async def harvest(ctx: RecipeContext) -> Outcome:
         # region. Opt-in per service because the scan drives the user's real mouse
         # across the screen.
         ctx.copy_status("hover-scanning")
-        found = await ctx.monitor.hover_scan(TemplateKind.COPY)
+        # A ``Located`` too, so the click after a hover walk is aimed by the same
+        # click point as the one after a static search.
+        found = (await ctx.monitor.hover_scan(TemplateKind.COPY)).target
     if found is None:
         ctx.view.notify("copy button not found on screen", severity="warning")
         ctx.copy_status("not found")
@@ -181,19 +189,16 @@ async def harvest(ctx: RecipeContext) -> Outcome:
         ctx.say("the copy button was not found on screen")
         return Outcome.NOT_HARVESTED
 
-    # The rectangle the search came back with, reduced to the one pixel this
-    # service aims its copy click at (the centre unless the user moved it).
-    # Reduced HERE rather than inside the click, so the small retry offsets
+    # The pixel the monitor aimed for us. The small retry offsets
     # ``verified_copy_click`` walks through stay around the point the user chose -
     # which is also why this click does not go through ``UIMonitor.click_element``:
     # the copy click is CLIPBOARD-verified, and that verification is policy.
-    target = click_point_region(found, *ctx.live_profile().click_point(TemplateKind.COPY))
     # Arm the prose window for THIS click and nothing else: whatever the clipboard
     # holds when the click verifies is the model's reply, so the harvest may show
     # it even with no CLIP blocks in it. Disarmed the moment the harvest returns -
     # and by ``end_flow`` on every other way out of here.
     ctx.prose_window = True
-    clicked = await ctx.host.verified_copy_click(target)
+    clicked = await ctx.host.verified_copy_click(found)
     if not clicked:
         # Every attempt clicked but the clipboard never changed - leave the
         # browser focused so the user can click the copy button themselves.

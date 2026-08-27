@@ -48,9 +48,7 @@ STDLIB = frozenset(sys.stdlib_module_names)
 # else. Listing them here is what lets the bare-layer RULES entries at the
 # bottom pin those four files import-free without swallowing everything
 # underneath them.
-EXACT_ONLY = frozenset(
-    {"agentclip", "agentclip.driver", "agentclip.executor", "agentclip.shell"}
-)
+EXACT_ONLY = frozenset({"agentclip", "agentclip.driver", "agentclip.executor", "agentclip.shell"})
 
 # Per-layer allowed import roots beyond the stdlib. An entry matches the
 # imported module name exactly or as a package prefix, except for the EXACT_ONLY
@@ -231,7 +229,20 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.driver.automation",
                 "agentclip.driver.clip",
                 "agentclip.driver.monitor",
-                "agentclip.driver.screen",
+                # ``driver.screen`` is a LIST here, exactly as it is for
+                # ``shell.chat`` below and for the same reason (ui-monitor.md
+                # §11.3): everything on it is a VALUE TYPE this layer's ports
+                # speak - a slot, a rectangle, an appearance KIND, a captured
+                # frame, one recognition. ``profile_store`` is deliberately not
+                # on it: the sequences here decide what to click, and the
+                # pictures they would be clicking are on the monitor's machine,
+                # so a template read from this side is by definition the wrong
+                # machine's.
+                "agentclip.driver.screen.capture",
+                "agentclip.driver.screen.detector",
+                "agentclip.driver.screen.profile",
+                "agentclip.driver.screen.region",
+                "agentclip.driver.screen.slot",
             }
         ),
     ),
@@ -289,15 +300,15 @@ RULES: list[tuple[str, frozenset[str]]] = [
                 "agentclip.driver.screen.region",
                 "agentclip.driver.screen.capture",
                 "agentclip.driver.screen.profile",
-                # The two that are still a REACH rather than a value, and the
-                # only ones: this window's own handle (which is where a snap
-                # back after an auto-send lands) and the profile store behind
-                # ``AutomationHost.profile_for``. The second is §10.3's one
-                # unpaid bill - the port wants a per-KIND answer and the
-                # monitor's is one boolean (``Watched.profiled``) - and it is
-                # named here so the day it moves, this line is what changes.
+                # The ONE that is still a REACH rather than a value: this
+                # window's own handle, which is where a snap back after an
+                # auto-send lands. ``profile_store`` used to sit beside it -
+                # §10.3's unpaid bill, the port wanting a per-KIND answer the
+                # monitor could not give - and §11.3 paid it: the answer is
+                # ``Watched.captured`` now, so this window reads no template,
+                # holds no ``ServiceProfile`` and knows what a new-chat button
+                # looks like only in the sense that it can be TOLD one exists.
                 "agentclip.driver.screen.focus",
-                "agentclip.driver.screen.profile_store",
                 # The engine's VALUE types, and only ever as values: `Decision`
                 # is what an approval answer IS,
                 # `PendingAction` is what a gate is handed, and `Engine` is the
@@ -479,6 +490,38 @@ def test_layer_rules() -> None:
     assert not violations, "layering violations:\n" + "\n".join(violations)
 
 
+# The brain's two packages: the window the user types into and the sequences it
+# drives the monitor with. Since ui-monitor.md §11.3 neither of them may read a
+# template off a disk.
+BRAIN_PACKAGES = ("agentclip.shell.chat", "agentclip.driver.automation")
+
+
+def test_the_brain_reads_no_templates() -> None:
+    """``driver.screen.profile_store`` is the MONITOR's store, and only the
+    monitor's (ui-monitor.md §11.3).
+
+    The rules above already refuse it - both packages list the ``driver.screen``
+    modules they may name, and this is not one of them - but the refusal is
+    worth spelling out, because the bug it exists for looked like nothing at
+    all: the Chat UI loaded a profile off ITS machine, found it empty (the
+    pictures were captured on the monitor's), and answered NOT_CALIBRATED to
+    every click on a perfectly calibrated desktop. Which appearances exist is
+    the monitor's answer now (``Watched.captured``), and an import of this
+    module from over here would be the whole failure returning.
+    """
+    store = "agentclip.driver.screen.profile_store"
+    violations = [
+        f"{module_name(path)} imports {store}"
+        for path in all_modules()
+        if any(_matches(module_name(path), pkg) for pkg in BRAIN_PACKAGES)
+        for imported in module_level_imports(path)
+        if imported == store
+    ]
+    assert not violations, "the brain holds no templates (ui-monitor.md §11.3):\n" + "\n".join(
+        violations
+    )
+
+
 def test_only_the_shell_and_the_driver_import_clip_or_screen() -> None:
     """``driver.clip``/``driver.screen`` are the OS seams the Driver's core is
     MADE of, so it may reach them alongside the shell and the launcher - and
@@ -570,12 +613,12 @@ def test_monitor_ui_never_imports_chat_or_app() -> None:
     assert monitor_files
     for path in monitor_files:
         for imported in module_level_imports(path):
-            assert not _matches(
-                imported, "agentclip.shell.chat"
-            ), f"{path.name} imports the Chat UI ({imported})"
-            assert not _matches(
-                imported, "agentclip.shell.app"
-            ), f"{path.name} imports shell.app ({imported})"
+            assert not _matches(imported, "agentclip.shell.chat"), (
+                f"{path.name} imports the Chat UI ({imported})"
+            )
+            assert not _matches(imported, "agentclip.shell.app"), (
+                f"{path.name} imports shell.app ({imported})"
+            )
 
 
 def test_engine_never_imports_ui_or_clipboard() -> None:
@@ -586,12 +629,12 @@ def test_engine_never_imports_ui_or_clipboard() -> None:
     assert engine_files
     for path in engine_files:
         for imported in module_level_imports(path):
-            assert not _matches(
-                imported, "agentclip.driver.clip"
-            ), f"{path.name} imports agentclip.driver.clip"
-            assert not _matches(
-                imported, "agentclip.shell"
-            ), f"{path.name} imports the shell ({imported})"
+            assert not _matches(imported, "agentclip.driver.clip"), (
+                f"{path.name} imports agentclip.driver.clip"
+            )
+            assert not _matches(imported, "agentclip.shell"), (
+                f"{path.name} imports the shell ({imported})"
+            )
 
 
 def test_automation_never_imports_a_shell() -> None:
@@ -605,9 +648,9 @@ def test_automation_never_imports_a_shell() -> None:
     assert automation_files
     for path in automation_files:
         for imported in module_level_imports(path):
-            assert not _matches(
-                imported, "agentclip.shell"
-            ), f"{path.name} imports the shell ({imported})"
+            assert not _matches(imported, "agentclip.shell"), (
+                f"{path.name} imports the shell ({imported})"
+            )
 
 
 def test_app_never_imports_the_clipboard_or_the_window() -> None:
@@ -617,9 +660,9 @@ def test_app_never_imports_the_clipboard_or_the_window() -> None:
     assert app_files
     for path in app_files:
         for imported in module_level_imports(path):
-            assert not _matches(
-                imported, "agentclip.driver.clip"
-            ), f"{path.name} imports agentclip.driver.clip"
-            assert not _matches(
-                imported, "agentclip.shell.chat"
-            ), f"{path.name} imports agentclip.shell.chat"
+            assert not _matches(imported, "agentclip.driver.clip"), (
+                f"{path.name} imports agentclip.driver.clip"
+            )
+            assert not _matches(imported, "agentclip.shell.chat"), (
+                f"{path.name} imports agentclip.shell.chat"
+            )

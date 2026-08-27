@@ -26,9 +26,14 @@ slot the automation (paste click, finish detector, auto-copy) is driving right
 now. They are deliberately independent: the user must be able to draw the
 sub-agent window while the master chat is mid-turn.
 
-Readiness is therefore a function of the *pair* (slot, profile) rather than a
-property of either, which is why :func:`can_delegate` and friends are
-module-level functions. ``can_delegate`` is the single source of truth for
+Readiness is therefore a function of the *pair* (drawn box, captured kinds)
+rather than a property of either, which is why :func:`can_delegate` and friends
+are module-level functions. The second half is a tuple of
+:class:`~agentclip.driver.screen.profile.TemplateKind` rather than a whole
+profile, and since docs/design/ui-monitor.md §11.3 that is a rule and not a
+convenience: the pictures live on the MONITOR, the brain is told only WHICH
+appearances exist (``Watched.captured``), and a readiness rule that took a
+``ServiceProfile`` could only ever be handed an empty one over there. ``can_delegate`` is the single source of truth for
 "delegation is available" and it is strict on purpose: without a new-chat
 button we cannot open a fresh chat, without a copy button we cannot harvest the
 reply, and without a drawn window we can neither paste nor tell when the reply
@@ -44,7 +49,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 
 
@@ -98,19 +103,19 @@ class SlotCalibration:
         return self.chat_region is not None
 
 
-def can_paste(cal: SlotCalibration, profile: ServiceProfile) -> bool:
+def can_paste(cal: SlotCalibration, captured: tuple[TemplateKind, ...]) -> bool:
     """Is there anywhere to click before sending Ctrl+V?
 
     The drawn window, and nothing else: the input box is found by searching the
     service's captured appearance inside it, and failing that the window itself
-    is a perfectly good click target. ``profile`` is unused and deliberately
+    is a perfectly good click target. ``captured`` is unused and deliberately
     still in the signature - every readiness rule takes the same pair, so a
     caller never has to remember which of them needs what.
     """
     return cal.is_set
 
 
-def can_finish(cal: SlotCalibration, profile: ServiceProfile) -> bool:
+def can_finish(cal: SlotCalibration, captured: tuple[TemplateKind, ...]) -> bool:
     """Can we tell when the model stopped?
 
     Also the drawn window alone: the staleness detector needs no captured cue,
@@ -120,16 +125,16 @@ def can_finish(cal: SlotCalibration, profile: ServiceProfile) -> bool:
     return cal.is_set
 
 
-def can_copy(cal: SlotCalibration, profile: ServiceProfile) -> bool:
+def can_copy(cal: SlotCalibration, captured: tuple[TemplateKind, ...]) -> bool:
     """Can the reply be harvested without the user clicking anything?
 
     The first rule that needs both halves: a window to search, and a captured
     icon to search for.
     """
-    return cal.is_set and profile.has(TemplateKind.COPY)
+    return cal.is_set and TemplateKind.COPY in captured
 
 
-def can_delegate(cal: SlotCalibration, profile: ServiceProfile) -> bool:
+def can_delegate(cal: SlotCalibration, captured: tuple[TemplateKind, ...]) -> bool:
     """Is this slot ready to host a full unattended sub-agent run?
 
     All of it, deliberately: a fresh chat to run in, somewhere to paste, a way
@@ -137,14 +142,14 @@ def can_delegate(cal: SlotCalibration, profile: ServiceProfile) -> bool:
     """
     return (
         cal.is_set
-        and profile.has(TemplateKind.NEW_CHAT)
-        and can_paste(cal, profile)
-        and can_finish(cal, profile)
-        and can_copy(cal, profile)
+        and TemplateKind.NEW_CHAT in captured
+        and can_paste(cal, captured)
+        and can_finish(cal, captured)
+        and can_copy(cal, captured)
     )
 
 
-def missing(cal: SlotCalibration, profile: ServiceProfile) -> tuple[str, ...]:
+def missing(cal: SlotCalibration, captured: tuple[TemplateKind, ...]) -> tuple[str, ...]:
     """The gaps between this slot and ``can_delegate``, in calibration order.
 
     Empty exactly when ``can_delegate`` is True. Losing the window takes the
@@ -154,9 +159,9 @@ def missing(cal: SlotCalibration, profile: ServiceProfile) -> tuple[str, ...]:
     gaps: list[str] = []
     if not cal.is_set:
         gaps.append(MISSING_CHAT_REGION)
-    if not can_copy(cal, profile):
+    if not can_copy(cal, captured):
         gaps.append(MISSING_COPY)
-    if not (cal.is_set and profile.has(TemplateKind.NEW_CHAT)):
+    if not (cal.is_set and TemplateKind.NEW_CHAT in captured):
         gaps.append(MISSING_NEWCHAT)
     return tuple(gaps)
 

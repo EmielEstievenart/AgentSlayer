@@ -2181,6 +2181,58 @@ change, which land with the `shell.chat` / `driver.automation` half.
 `driver/automation/machine.py`'s `MonitorLike.hover_scan` still declares
 `ScreenRegion | None` and is the one seam mypy flags until that half lands.
 
+**AS BUILT — the brain side** (2026-08-27). The other half. Nothing under
+`shell/chat` or `driver/automation` reads a template, holds a `ServiceProfile`
+or computes a click point any more; the two questions it used to answer off its
+own disk are answered by the monitor, and the layering test refuses the import
+that made them answerable here.
+
+* The port: `AutomationHost.captured_for(slot) -> tuple[TemplateKind, ...]`
+  replaces `profile_for` (`NullHost` answers `()`, which reads as "nothing is
+  captured" and refuses every element click, as it always did).
+  `AutomationController.captured(slot)` / `live_captured()` replace
+  `live_profile()`, and `RecipeContext.captured(slot)` is what the recipes ask.
+  `GuiView.captured_for` is one line - `self._watched[slot].captured` - and
+  `_profile`, `_profiles`, `_profile_root`, the `load_profile` import and the
+  `profile_root` constructor argument (down through `GuiRunner`) are gone.
+* The refusals: `acts.click_profile_element` answers NOT_CALIBRATED when
+  `cal.chat_region is None or kind not in ctx.captured(slot)`. Its sentence
+  names the machine that can fix it, in `recipes/windows.py` and in
+  `GuiView._new_browser_chat`: *the monitor has no new-chat button captured for
+  {service} — capture one in the Monitor UI*. The Chat UI's copy comes from the
+  monitor's own `Watched.label`, because a service key this window picked would
+  be naming the wrong config.
+* The aims: `auto_copy` gates on `TemplateKind.COPY in ctx.captured(...)` and
+  clicks `located.target` - the hover-scan branch included, since `hover_scan`
+  answers a `Located` now. `chatbox.match` returns `(box, aim, kind)` with the
+  aim taken from `Located.target`; a search that answered a rectangle with no
+  aim reads as a miss, so the paste path stays total without clicking a guess.
+  The whole-drawn-window fallback aims at ITSELF, which is the old rule said
+  once instead of at two call sites. `click_point_region` is imported by no
+  recipe.
+* `ctx.copy_status` is the status text alone. The `24×24 · ` prefix in front of
+  it was a read of the first COPY template's size, and the sizes are shown where
+  the pictures are (the Monitor UI's ELEMENTS column).
+* Readiness moved with it: `screen/slot.py`'s `can_paste` / `can_finish` /
+  `can_copy` / `can_delegate` / `missing` take
+  `captured: tuple[TemplateKind, ...]` instead of a `ServiceProfile`. Not a
+  convenience - a rule that took a profile could only ever be handed an empty
+  one on the brain's side. `profile.describe_captured(captured)` is
+  `ServiceProfile.describe` as a function, for the sidebar's `N/7 captured`.
+* Layering: `driver.automation`'s `driver.screen` allowance is a module list now
+  (`capture`, `detector`, `profile`, `region`, `slot`), and `shell.chat`'s list
+  loses `profile_store` - §10.3's named unpaid bill, paid. A second test,
+  `test_the_brain_reads_no_templates`, says the same thing in one line so the
+  reason survives a future edit of the allowlists.
+* Tests: the two automation suites' fakes stage kinds and click points where
+  they now live (`FakeHost.captured`, `FakeUIMonitor.click_points`, and a
+  `ScriptedMonitor` that aims every hit it hands back), and
+  `tests/shell/chat/test_no_pixels.py` stages §11.0's three reports end to end -
+  a new-chat button captured on the monitor and nothing on this machine
+  (`/new` reaches `click_element`), a copy click that lands on the monitor's
+  `target` (static and after a hover scan), and a paste that taps Enter exactly
+  when `Watched.auto_submit` says to.
+
 ### 11.4 F2 — what the monitor sees
 
 A sidebar block **MONITOR SEES**, hidden by default, toggled by `F2` (the key

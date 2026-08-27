@@ -262,7 +262,6 @@ def harness(project: Path, app_config: Config, tmp_path: Path) -> Harness:
         provider=provider,
         engine_factory=make_engine_factory(lambda: app_config, project),
         project_root=project,
-        profile_root=tmp_path / "profiles",
         monitor_target=LaunchLocal(),
         launcher=launcher,
         dial=_never_dialled,

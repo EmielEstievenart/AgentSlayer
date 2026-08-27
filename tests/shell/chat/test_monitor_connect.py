@@ -203,7 +203,6 @@ def build(
         provider=select_provider("manual"),
         engine_factory=make_engine_factory(lambda: config, project),
         project_root=project,
-        profile_root=tmp_path / "profiles",
         global_config_path=(
             global_path if global_path is not None else tmp_path / "no-such-global.toml"
         ),
@@ -640,12 +639,10 @@ async def test_disconnect_closes_the_ssh_tunnel_under_the_link(
 async def test_a_successful_dial_offers_a_save_that_round_trips_through_the_config(
     project: Path, app_config: Config, tmp_path: Path, global_path: Path
 ) -> None:
-    """"Save this monitor as..." writes one ``[monitor.<name>]`` table in the
+    """ "Save this monitor as..." writes one ``[monitor.<name>]`` table in the
     GLOBAL file - token included, stated rather than hidden - and the picker
     offers it on the next visit without the file being re-read."""
-    tab = build(
-        project, app_config, tmp_path, Dialler(ScriptedLink()), global_path=global_path
-    )
+    tab = build(project, app_config, tmp_path, Dialler(ScriptedLink()), global_path=global_path)
     tab.view.start()
     await settle()
     tab.view.monitor_open()
@@ -671,9 +668,7 @@ async def test_a_monitor_this_pc_already_has_is_not_offered_for_saving_again(
 ) -> None:
     """The offer is about the ADDRESS, not the name: nothing in this form is a
     name, so "already saved" can only mean "the same machine and port"."""
-    tab = build(
-        project, saved_config, tmp_path, Dialler(ScriptedLink()), global_path=global_path
-    )
+    tab = build(project, saved_config, tmp_path, Dialler(ScriptedLink()), global_path=global_path)
     tab.view.start()
     await settle()
     tab.view.monitor_open()

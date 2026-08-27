@@ -50,7 +50,7 @@ from agentclip.driver.monitor import beats
 from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.monitor.protocol import Located
 from agentclip.driver.screen.capture import RegionImage
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot
 
@@ -61,8 +61,9 @@ CHAT_REGION = ScreenRegion(1050, 340, 812, 540)
 # here needs one: since the blind-click fallback went, a payload is only ever
 # pasted into a chat box that a captured appearance really MATCHED, so a suite
 # with nothing on screen would assert the banner and never the paste. The aim is
-# the service's own click point (the middle of the picture until a test moves
-# it), which is what ``AIMED`` spells out.
+# the service's own click point, applied by the MONITOR and handed back on
+# ``Located.target`` (§11.3) - the middle of the picture until a test moves it,
+# which is what ``AIMED`` spells out.
 CHAT_BOX = ScreenRegion(1100, 800, 601, 41)
 AIMED = click_point_region(CHAT_BOX, 50, 50)
 PAYLOAD = "===CLIP:BEGIN=== the outbound ===CLIP:END==="
@@ -163,14 +164,20 @@ class ScriptedMonitor(FakeUIMonitor):
         self, kind: TemplateKind, *, exclude_kinds: tuple[TemplateKind, ...] = ()
     ) -> Located:
         """The host's screen as the monitor would answer about it: the LOWEST of
-        the rectangles, whether there were several, and - on a miss - how close
-        the search came."""
+        the rectangles, whether there were several, on a miss how close the
+        search came - and, on a hit, the ONE pixel to press.
+
+        The aim is filled in HERE because that is the side it lives on since
+        §11.3: the click point belongs to the picture, and the pictures are the
+        monitor's. ``click_points`` is what a test moves to move it.
+        """
         if self.blind:
             return Located(None, False, None)
         found = self.host.on_screen.get(kind, [])
         if not found:
             return Located(None, False, 0.21)
-        return Located(max(found, key=lambda rect: rect.top), len(found) > 1, None)
+        lowest = max(found, key=lambda rect: rect.top)
+        return Located(lowest, len(found) > 1, None, self.aim(kind, lowest))
 
 
 class FakeHost:
@@ -180,7 +187,10 @@ class FakeHost:
 
     def __init__(self, preset: ServicePreset) -> None:
         self.preset = preset
-        self.profile = ServiceProfile(key="fake")
+        # WHICH appearances the monitor holds for the live service (§11.3). Every
+        # kind by default: what this suite gates a paste on is whether a capture
+        # MATCHED, which is ``on_screen``.
+        self.captured: tuple[TemplateKind, ...] = tuple(TemplateKind)
         self.on_screen: dict[TemplateKind, list[ScreenRegion]] = {}
         # Every payload handed to the shell's own fallback channel (the TUI's
         # OSC-52 escape), in order.
@@ -189,8 +199,8 @@ class FakeHost:
     def live_preset(self) -> ServicePreset:
         return self.preset
 
-    def profile_for(self, slot: AgentSlot) -> ServiceProfile:
-        return self.profile
+    def captured_for(self, slot: AgentSlot) -> tuple[TemplateKind, ...]:
+        return self.captured
 
     async def find_all(
         self,
@@ -450,7 +460,7 @@ async def test_a_service_with_no_chat_box_captured_lands_on_the_same_banner(
     """The pre-calibration degraded mode - one drawn window and no appearance
     behind it - is not a licence to click either: a rectangle the user drew
     around a whole chat says where the CHAT is, never where its input box is."""
-    host.profile = ServiceProfile(key="fake")  # nothing captured at all
+    host.captured = ()  # the monitor has no pictures of this service at all
     host.on_screen.clear()
 
     await delivery.copy_outbound(PAYLOAD)
@@ -461,7 +471,10 @@ async def test_a_service_with_no_chat_box_captured_lands_on_the_same_banner(
 
 
 async def test_two_boxes_of_one_layout_refuse_the_paste_rather_than_guess(
-    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, view: FakeAutomationView
+    delivery: AutomationController,
+    host: FakeHost,
+    machine: ScriptedMonitor,
+    view: FakeAutomationView,
 ) -> None:
     """Two windows of one service under a single drawn region resolve the same
     appearance twice, and picking one is a coin toss between two conversations -
@@ -492,7 +505,10 @@ async def test_a_screen_that_cannot_be_read_is_not_a_licence_to_click(
 
 
 async def test_a_stream_service_streams_nothing_without_a_box_to_stream_into(
-    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, clipboard: FakeClipboard
+    delivery: AutomationController,
+    host: FakeHost,
+    machine: ScriptedMonitor,
+    clipboard: FakeClipboard,
 ) -> None:
     """The chunked path rides the same focus click, so it refuses with it - and
     the clipboard is left holding the WHOLE payload rather than a chunk."""
@@ -553,7 +569,9 @@ async def test_a_paste_that_did_not_go_through_says_so_in_its_own_words(
 
 
 async def test_disarmed_parks_the_payload_and_touches_nothing(
-    delivery: AutomationController, machine: ScriptedMonitor, clipboard: FakeClipboard,
+    delivery: AutomationController,
+    machine: ScriptedMonitor,
+    clipboard: FakeClipboard,
     view: FakeAutomationView,
 ) -> None:
     """DISARMED stops one line below the clipboard write and above every OS call:
@@ -636,7 +654,10 @@ async def test_a_click_that_never_landed_never_waits_for_an_activation(
 
 
 async def test_auto_submit_taps_enter_after_a_paste_that_landed(
-    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, view: FakeAutomationView
+    delivery: AutomationController,
+    host: FakeHost,
+    machine: ScriptedMonitor,
+    view: FakeAutomationView,
 ) -> None:
     host.preset = _preset(auto_submit=True)
 
@@ -672,7 +693,10 @@ async def test_no_tap_when_the_paste_never_landed(
 
 
 async def test_a_refused_tap_falls_back_to_asking_for_enter(
-    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, view: FakeAutomationView
+    delivery: AutomationController,
+    host: FakeHost,
+    machine: ScriptedMonitor,
+    view: FakeAutomationView,
 ) -> None:
     """Nothing was typed, so the banner must keep asking rather than claim the
     send happened - and the log says whose Enter it is now."""
@@ -739,7 +763,7 @@ async def test_a_streamed_delivery_that_auto_sent_hands_it_back_too(
 async def test_a_paste_still_waiting_on_the_users_enter_leaves_the_browser_focused(
     delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
 ) -> None:
-    """">>> PRESS ENTER <<<" is an instruction to act over THERE, and stealing
+    """ ">>> PRESS ENTER <<<" is an instruction to act over THERE, and stealing
     the foreground would make the user click back into the browser to obey a
     banner that has already stopped being true."""
     delivery.set_own_window(OUR_WINDOW)
@@ -788,11 +812,11 @@ async def test_both_focus_clicks_land_where_the_service_aims_them(
     delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
 ) -> None:
     """A chat box that is clickable end to end takes its click where the
-    service says (screen.profile's click points) - and the reinforcing second
-    click has to land in the same place, or it would undo the first."""
+    service says (the click point the monitor applied) - and the reinforcing
+    second click has to land in the same place, or it would undo the first."""
     box = ScreenRegion(1100, 800, 601, 41)
     host.on_screen[TemplateKind.CHATBOX_ONGOING] = [box]
-    host.profile.set_click_point(TemplateKind.CHATBOX_ONGOING, 25, 0)
+    machine.click_points[TemplateKind.CHATBOX_ONGOING] = (25, 0)
 
     await delivery.copy_outbound(PAYLOAD)
 
@@ -939,7 +963,10 @@ async def test_a_stream_service_walks_a_long_payload_in_chunk_by_chunk(
 
 
 async def test_the_banner_counts_the_chunks_while_they_go_in(
-    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, view: FakeAutomationView
+    delivery: AutomationController,
+    host: FakeHost,
+    machine: ScriptedMonitor,
+    view: FakeAutomationView,
 ) -> None:
     """The user is looking at the browser, so the count is the only thing saying
     a big payload is still going in rather than stuck."""
@@ -953,7 +980,10 @@ async def test_the_banner_counts_the_chunks_while_they_go_in(
 
 
 async def test_a_short_payload_in_stream_mode_is_a_single_burst(
-    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, clipboard: FakeClipboard
+    delivery: AutomationController,
+    host: FakeHost,
+    machine: ScriptedMonitor,
+    clipboard: FakeClipboard,
 ) -> None:
     """Nothing to show progress about, so the stream costs one extra clipboard
     write and nothing else."""

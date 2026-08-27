@@ -139,7 +139,6 @@ def build(project: Path, app_config: Config, tmp_path: Path, dial: Dialler) -> S
         provider=select_provider("manual"),
         engine_factory=make_engine_factory(lambda: app_config, project),
         project_root=project,
-        profile_root=tmp_path / "profiles",
         global_config_path=tmp_path / "no-such-global.toml",
         # The loop is real here, unlike the local harness's: the dial, the
         # configure and the backoff are all coroutines the view puts on it, and
@@ -358,7 +357,6 @@ def build_local(
         provider=select_provider("manual"),
         engine_factory=make_engine_factory(lambda: app_config, project),
         project_root=project,
-        profile_root=tmp_path / "profiles",
         global_config_path=tmp_path / "no-such-global.toml",
         schedule=lambda coro: asyncio.ensure_future(coro),
         monitor_target=LaunchLocal(),

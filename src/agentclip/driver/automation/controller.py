@@ -74,7 +74,7 @@ from agentclip.driver.clip.watcher import SelfWriteSet
 from agentclip.driver.monitor.protocol import Tick
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.detector import Sighting
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot, SlotCalibration, new_slots
 
@@ -436,9 +436,18 @@ class AutomationController:
         """The preset of the window the automation is driving."""
         return self._host.live_preset()
 
-    def live_profile(self) -> ServiceProfile:
-        """What the window the automation is driving looks like."""
-        return self._host.profile_for(self._live)
+    def captured(self, slot: AgentSlot) -> tuple[TemplateKind, ...]:
+        """Which appearances the MONITOR holds for ``slot``'s service (§11.3).
+
+        The kinds and nothing else: this side owns no pictures, so "may I click
+        the new-chat button?" is answered out of the monitor's ``Watched``
+        rather than out of a profile store on this machine.
+        """
+        return self._host.captured_for(slot)
+
+    def live_captured(self) -> tuple[TemplateKind, ...]:
+        """The same question about the window the automation is driving."""
+        return self._host.captured_for(self._live)
 
     # == the OS-acting primitives (``recipes/acts.py``) =======================
     # The doors a shell still reaches them through, and the handle they aim at.

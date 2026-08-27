@@ -46,7 +46,7 @@ from agentclip.driver.monitor.beats import (
     SEND_GATE_SEEN_TIMEOUT_TICKS,
     SEND_GATE_TIMEOUT_TICKS,
 )
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.slot import AgentSlot, SlotCalibration
 
 if TYPE_CHECKING:
@@ -139,12 +139,17 @@ class RecipeContext:
     def live_preset(self) -> ServicePreset:
         return self._controller.live_preset()
 
-    def live_profile(self) -> ServiceProfile:
-        return self._controller.live_profile()
+    def captured(self, slot: AgentSlot) -> tuple[TemplateKind, ...]:
+        """Which appearances the MONITOR holds for ``slot``'s service (§11.3).
+
+        The one pixel question this layer may ask about a service it is not
+        looking at: a kind list, never a picture.
+        """
+        return self._controller.captured(slot)
 
     def has_appearance(self, kind: TemplateKind) -> bool:
         """Has the LIVE window's service a capture of ``kind``? The shell's own
-        answer (its profile cache is keyed off its Config)."""
+        answer, read off the monitor's ``Watched.captured`` (§11.3)."""
         return self._controller.has_appearance(kind)
 
     def log_harness(self, kind: str, text: str) -> None:
@@ -158,19 +163,14 @@ class RecipeContext:
         )
 
     def copy_status(self, text: str) -> None:
-        """Repaint the copy button's status line, keeping its captured size in
-        front of whatever the harvest has to report.
+        """Repaint the copy button's status line - the status text alone.
 
-        The first image's size, plus how many more are being ORed with it: a line
-        that named one size while three pictures were being searched for would
-        misreport the calibration.
+        It used to carry the captured image's size in front of the status
+        ("24×24 · clicked"), which was a read of this machine's own profile
+        store; since §11.3 there is none, and the sizes are shown where the
+        pictures live (the Monitor UI's ELEMENTS column).
         """
-        templates = self.live_profile().variants(TemplateKind.COPY)
-        size = ""
-        if templates:
-            extra = f" +{len(templates) - 1}" if len(templates) > 1 else ""
-            size = f"{templates[0].width}×{templates[0].height}{extra} · "
-        self.view.paint_detection(TemplateKind.COPY, f"{size}{text}")
+        self.view.paint_detection(TemplateKind.COPY, text)
 
     def select_live_slot(self, slot: AgentSlot) -> None:
         """Point the automation at another chat window."""

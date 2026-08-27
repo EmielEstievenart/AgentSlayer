@@ -5,10 +5,13 @@ opposite half. ``AutomationView`` is what the automation TELLS a shell (paint
 this); this is the short list of things it still has to ASK one, because the
 answers are made of state a shell owns and this layer does not:
 
-* what the live window's service IS (a ``ServicePreset`` resolved out of the
-  shell's ``Config``) and what it LOOKS like (a ``ServiceProfile`` read off disk
-  into the shell's own cache) - the same reason ``has_appearance`` has always
-  been a callback;
+* what the live window's service IS (a ``ServicePreset`` the shell got from the
+  monitor) and WHICH appearances the monitor holds for it
+  (``captured_for`` - ``Watched.captured``, the kinds and nothing else). Never
+  a ``ServiceProfile``: since ui-monitor.md §11.3 no template, no click point
+  and no image reaches this side of the wire, so the only pixel question this
+  port may ask is the yes/no one - the same reason ``has_appearance`` has
+  always been a callback;
 * where an appearance is on screen right now (``find_all``). Phase 2 of
   docs/design/ui-monitor.md took the last sequence that asked through it: the
   chat-box hunt and the find-then-click primitive are ``UIMonitor.locate`` and
@@ -51,7 +54,7 @@ from typing import Protocol
 
 from agentclip.config import ServicePreset
 from agentclip.driver.screen.capture import RegionImage
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 
@@ -60,7 +63,13 @@ class AutomationHost(Protocol):
     # -- what a service is, and what it looks like ----------------------------
     def live_preset(self) -> ServicePreset: ...
 
-    def profile_for(self, slot: AgentSlot) -> ServiceProfile: ...
+    # Which appearances the MONITOR has captured for the service in ``slot``
+    # (``Watched.captured``), in declaration order. Empty means "that machine
+    # has no pictures of this chat", which is the refusal every element click
+    # makes before it asks - and the whole of §11.3: the brain reads the
+    # monitor's answer rather than its own disk, so a perfectly calibrated
+    # desktop is never refused by a shell that holds no templates.
+    def captured_for(self, slot: AgentSlot) -> tuple[TemplateKind, ...]: ...
 
     # -- where an appearance is on screen -------------------------------------
     # Every place ``kind`` is inside a slot's drawn chat region, in absolute
@@ -98,8 +107,8 @@ class NullHost:
     def live_preset(self) -> ServicePreset:
         return ServicePreset(key="", label="", max_paste_chars=0, total_context_chars=0)
 
-    def profile_for(self, slot: AgentSlot) -> ServiceProfile:
-        return ServiceProfile(key="")
+    def captured_for(self, slot: AgentSlot) -> tuple[TemplateKind, ...]:
+        return ()
 
     async def find_all(
         self,

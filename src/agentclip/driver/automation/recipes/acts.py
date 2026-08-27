@@ -126,10 +126,14 @@ async def click_profile_element(
     **Two of the six verdicts are decided HERE and four over there** (§2.3).
     DISARMED and NOT_CALIBRATED are refusals the brain makes before it asks
     anything - the armed switch is policy, and "there is nothing captured to look
-    for" is answered against calibration this layer is holding anyway. DISARMED
-    comes first, above even the calibration check: this is the only programmatic
-    click on an appearance in the app, and a refusal that had already captured the
-    screen would be answering a question nobody may act on.
+    for" is answered against the drawn region this layer holds and the kind list
+    the MONITOR sent (``Watched.captured``, reached through ``ctx.captured``).
+    That second half is §11.3: it used to be a read of this machine's own profile
+    store, which on any desktop but the one the pictures were taken on answered
+    "nothing captured" and refused every click on a perfectly calibrated screen.
+    DISARMED comes first, above even the calibration check: this is the only
+    programmatic click on an appearance in the app, and a refusal that had already
+    captured the screen would be answering a question nobody may act on.
 
     ``slot`` names which calibration the refusal is judged against - the
     sub-agent's new-chat button is not the master's - but it cannot aim the
@@ -138,7 +142,7 @@ async def click_profile_element(
     if not ctx.os_armed:
         return ElementClick.DISARMED
     cal = ctx.calibration(slot)
-    if cal.chat_region is None or not ctx.host.profile_for(slot).has(kind):
+    if cal.chat_region is None or kind not in ctx.captured(slot):
         return ElementClick.NOT_CALIBRATED
     return await ctx.monitor.click_element(kind, settle_s=settle_s)
 

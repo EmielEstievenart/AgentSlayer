@@ -41,8 +41,13 @@ async def start_browser_chat(ctx: RecipeContext, slot: AgentSlot) -> bool:
         )
         return False
     if outcome is ElementClick.NOT_CALIBRATED:
+        # Which half is missing is not this side's to say beyond the two facts it
+        # holds: the drawn region is ours, the pictures are the monitor's. Naming
+        # the monitor is §11.3's point - the button may be plainly on screen and
+        # still unclickable, because the machine watching it has no capture of it.
         ctx.view.notify(
-            f"the {slot.label} chat's new-chat button is not calibrated - nothing was clicked",
+            f"the monitor has no {TemplateKind.NEW_CHAT.label} captured for the "
+            f"{slot.label} chat's service - capture one in the Monitor UI",
             severity="error",
         )
         return False

@@ -18,12 +18,20 @@ from __future__ import annotations
 
 from agentclip.driver.automation.recipes.context import RecipeContext
 from agentclip.driver.screen.profile import TemplateKind
-from agentclip.driver.screen.region import ScreenRegion, click_point_region
+from agentclip.driver.screen.region import ScreenRegion
 
 
-async def match(ctx: RecipeContext) -> tuple[ScreenRegion, TemplateKind | None] | None:
-    """The chat box and WHICH appearance found it - ``None`` kind for the
-    fallback, and ``None`` outright when nothing at all is drawn.
+async def match(
+    ctx: RecipeContext,
+) -> tuple[ScreenRegion, ScreenRegion, TemplateKind | None] | None:
+    """The chat box, the one pixel to click in it, and WHICH appearance found it
+    - ``None`` kind for the fallback, and ``None`` outright when nothing at all
+    is drawn.
+
+    The pixel comes back from the SEARCH (``Located.target``, §11.3) rather than
+    being computed here: the click point belongs to the appearance, and
+    appearances live on the monitor. A search that answered a rectangle with no
+    aim reads as a miss, which keeps this total without a click into a guess.
 
     A fresh chat centres its input box and an ongoing one docks it at the bottom,
     so both layouts are asked about, ongoing first: mid-session it is the common
@@ -47,6 +55,9 @@ async def match(ctx: RecipeContext) -> tuple[ScreenRegion, TemplateKind | None] 
     region = ctx.live.chat_region
     if region is None:
         return None
+    # The fallback below is the whole drawn window aimed at ITSELF, deliberately:
+    # a per-image click point describes where inside THAT PICTURE to click, and a
+    # window the user drew round their whole chat is not that picture.
     for kind in (TemplateKind.CHATBOX_ONGOING, TemplateKind.CHATBOX_INITIAL):
         found = await ctx.monitor.locate(kind)
         if found.ambiguous:
@@ -56,10 +67,10 @@ async def match(ctx: RecipeContext) -> tuple[ScreenRegion, TemplateKind | None] 
                 "window so it contains only this chat",
                 severity="warning",
             )
-            return region, None
-        if found.region is not None:
-            return found.region, kind
-    return region, None
+            return region, region, None
+        if found.region is not None and found.target is not None:
+            return found.region, found.target, kind
+    return region, region, None
 
 
 async def target(ctx: RecipeContext) -> tuple[ScreenRegion, ScreenRegion] | None:
@@ -69,18 +80,16 @@ async def target(ctx: RecipeContext) -> tuple[ScreenRegion, ScreenRegion] | None
     the rectangle is what a keyboard scroll measures its "just above the box"
     from (``flow.above_chatbox``).
 
-    The point is the service's own (``ServiceProfile.click_point``) only when a
-    capture actually matched. The whole-drawn-window fallback keeps its centre: a
-    per-image click point describes where inside THAT PICTURE to click, and a
-    window the user drew round their whole chat is not that picture.
+    The point is the service's own click point (applied on the monitor, where
+    the pictures are) only when a capture actually matched. The
+    whole-drawn-window fallback keeps its centre, which is what :func:`match`
+    hands back for it.
     """
     found = await match(ctx)
     if found is None:
         return None
-    box, kind = found
-    if kind is None:
-        return box, box
-    return box, click_point_region(box, *ctx.live_profile().click_point(kind))
+    box, aim, _kind = found
+    return box, aim
 
 
 async def verified_target(ctx: RecipeContext) -> ScreenRegion | None:
@@ -102,7 +111,7 @@ async def verified_target(ctx: RecipeContext) -> ScreenRegion | None:
     found = await match(ctx)
     if found is None:
         return None
-    box, kind = found
+    _box, aim, kind = found
     if kind is None:
         return None
-    return click_point_region(box, *ctx.live_profile().click_point(kind))
+    return aim

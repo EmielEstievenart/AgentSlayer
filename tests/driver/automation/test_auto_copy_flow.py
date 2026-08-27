@@ -14,8 +14,11 @@ hover scan are monitor VERBS (``locate``, ``snap_to_bottom``, ``hover_scan``,
 ui-monitor.md 2.3), so the double below answers those rather than a template
 search somebody stubbed underneath them. Everything the sequences still have to
 ASK a shell is :class:`~agentclip.driver.automation.host.AutomationHost`, and
-``FakeHost`` is a scripted one: what the live service looks like, where its
-appearances are, and whether the copy click took.
+``FakeHost`` is a scripted one: what the live service IS, WHICH appearances the
+monitor holds for it (kinds, never pictures - ui-monitor.md §11.3), where they
+are, and whether the copy click took. Where inside one of them a click lands is
+staged on the MONITOR (``FakeUIMonitor.click_points``), because that is the side
+the click point lives on.
 
 What is left in this file is therefore the POLICY around those verbs, which is
 what stayed on this side of the seam: how many rounds a hunt is worth, when the
@@ -43,7 +46,7 @@ from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.monitor.protocol import Located
 from agentclip.driver.screen.capture import RegionImage
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot
 
@@ -56,11 +59,14 @@ ICON = (24, 24)
 # side of the seam (ui-monitor.md 2.2).
 MATCH_RECT = ScreenRegion(CHAT_REGION.left + 120, CHAT_REGION.top + 300, *ICON)
 # What is actually clicked: ONE pixel of that rectangle, the middle of it while
-# the service has not moved its click point (screen.profile).
+# the service has not moved its click point - which the MONITOR applies and hands
+# back on ``Located.target``.
 CLICK_TARGET = click_point_region(MATCH_RECT, 50, 50)
 # The two answers a copy-icon hunt gets. A miss carries how close the closest
 # rejected candidate came, which is the number the failure report is built out
-# of; a hit needs no diagnosis and carries none.
+# of; a hit needs no diagnosis and carries none. Neither names a target: the
+# double aims every hit it hands back (``ScriptedMonitor.locate``) exactly as the
+# real monitor does, so a test that moves the click point moves the answer.
 HIT = Located(MATCH_RECT, False, None)
 MISS = Located(None, False, 0.21)
 OUR_WINDOW = 4242
@@ -99,7 +105,8 @@ class ScriptedMonitor(FakeUIMonitor):
         # time; the last entry repeats for ever, so a test scripts only what it
         # cares about. A miss by default.
         self.looks: list[Located] = [MISS]
-        # What the hover scan finds, when one is asked for at all.
+        # What the hover scan finds, when one is asked for at all - a rectangle,
+        # aimed on the way out like any other hit.
         self.hover: ScreenRegion | None = None
 
     def nothing(self) -> bool:
@@ -128,16 +135,25 @@ class ScriptedMonitor(FakeUIMonitor):
         self, kind: TemplateKind, *, exclude_kinds: tuple[TemplateKind, ...] = ()
     ) -> Located:
         if kind is TemplateKind.COPY:
-            return self.looks.pop(0) if len(self.looks) > 1 else self.looks[0]
+            scripted = self.looks.pop(0) if len(self.looks) > 1 else self.looks[0]
+            return self._aimed(kind, scripted)
         found = self.host.on_screen.get(kind, [])
         if not found:
             return Located(None, False, 0.21)
-        return Located(max(found, key=lambda rect: rect.top), len(found) > 1, None)
+        lowest = max(found, key=lambda rect: rect.top)
+        return self._aimed(kind, Located(lowest, len(found) > 1, None))
 
-    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None:
+    async def hover_scan(self, kind: TemplateKind) -> Located:
         self.hover_scans.append(kind)
         self.order.append("hover")
-        return self.hover
+        return self._aimed(kind, Located(self.hover, False, None))
+
+    def _aimed(self, kind: TemplateKind, answer: Located) -> Located:
+        """Fill in ``target`` the way the real monitor does: the service's click
+        point applied where the pictures are, so this side never computes one."""
+        if answer.region is None or answer.target is not None:
+            return answer
+        return replace(answer, target=self.aim(kind, answer.region))
 
     async def click_element(
         self, kind: TemplateKind, *, settle_s: float | None = None
@@ -150,9 +166,12 @@ class ScriptedMonitor(FakeUIMonitor):
 class FakeHost:
     """A scripted ``AutomationHost``: what the shell would answer, as data."""
 
-    def __init__(self, preset: ServicePreset, profile: ServiceProfile) -> None:
+    def __init__(self, preset: ServicePreset, captured: tuple[TemplateKind, ...]) -> None:
         self.preset = preset
-        self.profile = profile
+        # WHICH appearances the monitor holds for the live service. A list rather
+        # than a profile: §11.3 leaves this side no pictures, and a test that
+        # wants one "captured" appends its kind.
+        self.captured: list[TemplateKind] = list(captured)
         # What ``find_all`` answers, per kind. Absent = nothing on screen, which
         # is what sends ``chatbox_region`` to its whole-window fallback.
         self.on_screen: dict[TemplateKind, list[ScreenRegion]] = {}
@@ -174,8 +193,8 @@ class FakeHost:
     def live_preset(self) -> ServicePreset:
         return self.preset
 
-    def profile_for(self, slot: AgentSlot) -> ServiceProfile:
-        return self.profile
+    def captured_for(self, slot: AgentSlot) -> tuple[TemplateKind, ...]:
+        return tuple(self.captured)
 
     async def find_all(
         self,
@@ -223,9 +242,7 @@ def machine(host: FakeHost) -> ScriptedMonitor:
 
 @pytest.fixture
 def host() -> FakeHost:
-    profile = ServiceProfile(key="fake")
-    profile.put(TemplateKind.COPY, _image(*ICON))
-    return FakeHost(_preset(), profile)
+    return FakeHost(_preset(), (TemplateKind.COPY,))
 
 
 @pytest.fixture
@@ -266,8 +283,9 @@ async def test_the_harvest_snaps_hunts_clicks_and_comes_home(
     assert machine.focuses == [OUR_WINDOW]
     assert machine.order[-1] == "focus"
     assert host.harvests == 1
-    # And the readout says what happened, with the captured size in front of it.
-    assert (TemplateKind.COPY, "24×24 · clicked") in view.detection_lines
+    # And the readout says what happened. The status text alone since §11.3: the
+    # size in front of it was a read of a template this side no longer holds.
+    assert (TemplateKind.COPY, "clicked") in view.detection_lines
     assert flow.loop_state is not LoopState.MANUAL_COPY
 
 
@@ -360,7 +378,7 @@ async def test_a_screen_that_could_not_be_read_reports_as_a_miss(
     await flow.auto_copy_flow()
 
     assert flow.loop_state is LoopState.MANUAL_COPY
-    assert (TemplateKind.COPY, "24×24 · not found") in view.detection_lines
+    assert (TemplateKind.COPY, "not found") in view.detection_lines
     assert view.logged("no candidate cleared the first-stage sniff test")
 
 
@@ -409,7 +427,7 @@ async def test_the_hover_scan_runs_after_the_last_static_miss(
     )
     assert machine.moves == [CHAT_REGION.center]  # only the pre-snap park is ours
     assert host.copy_clicks == [CLICK_TARGET]
-    assert (TemplateKind.COPY, "24×24 · hover-scanning") in view.detection_lines
+    assert (TemplateKind.COPY, "hover-scanning") in view.detection_lines
 
 
 async def test_a_static_hit_never_starts_a_scan(
@@ -457,7 +475,7 @@ async def test_a_copy_click_that_never_takes_hands_it_back(
     assert machine.focuses == []  # no snap-back on failure
     assert host.harvests == 0
     assert flow.loop_state is LoopState.MANUAL_COPY
-    assert (TemplateKind.COPY, "24×24 · click did not take") in view.detection_lines
+    assert (TemplateKind.COPY, "click did not take") in view.detection_lines
 
 
 # -- the prose window -------------------------------------------------------------
@@ -520,7 +538,7 @@ async def test_a_failed_capture_leaves_no_window_open(
 
 
 async def test_the_bracket_shuts_the_window_a_raising_harvest_left_open(
-    flow: AutomationController
+    flow: AutomationController,
 ) -> None:
     """``end_flow``'s defensive close, from the one direction the flow's own
     path cannot cover: a body that dies mid-flight. A window left armed would
@@ -589,7 +607,7 @@ async def test_the_copy_click_goes_where_the_service_aims_it(
     copies. The point is a percentage of the matched picture, so it survives the
     icon turning up anywhere on screen."""
     machine.looks = [HIT]
-    host.profile.set_click_point(TemplateKind.COPY, 0, 100)
+    machine.click_points[TemplateKind.COPY] = (0, 100)
 
     await flow.auto_copy_flow()
 
@@ -603,7 +621,7 @@ async def test_the_chat_box_click_goes_where_the_service_aims_it(
     focus click before the snap lands on the point, not on the middle."""
     box = ScreenRegion(1100, 800, 601, 41)
     host.on_screen[TemplateKind.CHATBOX_ONGOING] = [box]
-    host.profile.set_click_point(TemplateKind.CHATBOX_ONGOING, 10, 50)
+    machine.click_points[TemplateKind.CHATBOX_ONGOING] = (10, 50)
 
     await flow.auto_copy_flow()
 
@@ -616,7 +634,7 @@ async def test_the_whole_window_fallback_is_still_clicked_in_its_middle(
     """No chat box found means the target is the region the USER drew, which is
     not the picture any click point describes - aiming a tenth into it would
     land in the transcript."""
-    host.profile.set_click_point(TemplateKind.CHATBOX_ONGOING, 10, 50)
+    machine.click_points[TemplateKind.CHATBOX_ONGOING] = (10, 50)
 
     await flow.auto_copy_flow()
 
@@ -635,7 +653,7 @@ async def test_a_clicked_element_is_named_and_never_aimed_from_up_here(
     is no rectangle here to assert on: a template, a tolerance and a click point
     are things that could not cross the wire (ui-monitor.md 2.3).
     """
-    host.profile.put(TemplateKind.NEW_CHAT, _image(24, 24))
+    host.captured.append(TemplateKind.NEW_CHAT)
 
     assert await flow.click_profile_element(AgentSlot.MASTER, TemplateKind.NEW_CHAT) is (
         ElementClick.CLICKED
@@ -649,13 +667,14 @@ async def test_the_two_refusals_the_brain_makes_never_reach_the_screen(
 ) -> None:
     """DISARMED and NOT_CALIBRATED are decided HERE, above the search: the armed
     switch is policy, and "nothing is captured to look for" is answered against
-    calibration this object is already holding. Either way the monitor is never
-    asked, which is the point - a refusal that had already searched the screen
-    would be answering a question nobody may act on."""
+    the drawn region this object holds and the kind list the MONITOR sent
+    (§11.3). Either way the monitor is never asked to search, which is the point -
+    a refusal that had already searched the screen would be answering a question
+    nobody may act on."""
     assert await flow.click_profile_element(AgentSlot.MASTER, TemplateKind.NEW_CHAT) is (
-        ElementClick.NOT_CALIBRATED  # the service has no new-chat button captured
+        ElementClick.NOT_CALIBRATED  # the monitor has no new-chat button captured
     )
-    host.profile.put(TemplateKind.NEW_CHAT, _image(24, 24))
+    host.captured.append(TemplateKind.NEW_CHAT)
     flow.set_os_armed(False)
     assert await flow.click_profile_element(AgentSlot.MASTER, TemplateKind.NEW_CHAT) is (
         ElementClick.DISARMED

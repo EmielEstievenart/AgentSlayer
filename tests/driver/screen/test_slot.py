@@ -2,8 +2,10 @@
 
 Pure data, no Textual and no screen. The interesting thing here is the shape of
 the answer rather than any one rule: readiness is a function of a *pair* - the
-box drawn for this window, and what the service it is pointed at looks like -
-so the table below is the whole contract. ``can_delegate`` is deliberately
+box drawn for this window, and WHICH appearances the monitor has captured for
+the service it is pointed at (a tuple of kinds since ui-monitor.md §11.3: the
+pictures live on the monitor and the brain is told only that they exist) - so
+the table below is the whole contract. ``can_delegate`` is deliberately
 strict, because a half-calibrated sub-agent slot must read as unavailable
 rather than strand a sub-run halfway through.
 """
@@ -12,8 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from agentclip.driver.screen.capture import RegionImage
-from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
+from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import (
     MISSING_CHAT_REGION,
@@ -32,16 +33,7 @@ from agentclip.driver.screen.slot import (
 REGION = ScreenRegion(10, 20, 40, 30)
 
 
-def _image() -> RegionImage:
-    return RegionImage(REGION.width, REGION.height, b"\x00" * (REGION.width * REGION.height * 4))
-
-
-def _profile(*kinds: TemplateKind) -> ServiceProfile:
-    """A service profile holding exactly ``kinds``."""
-    profile = ServiceProfile("chatgpt")
-    for kind in kinds:
-        profile.put(kind, _image())
-    return profile
+NOTHING: tuple[TemplateKind, ...] = ()
 
 
 def _slot(*, drawn: bool, slot: AgentSlot = AgentSlot.SUBAGENT) -> SlotCalibration:
@@ -68,15 +60,15 @@ TABLE = [
 
 
 @pytest.mark.parametrize(("drawn", "kinds", "expected"), TABLE)
-def test_readiness_is_composed_from_the_slot_and_the_profile(
+def test_readiness_is_composed_from_the_slot_and_the_captured_kinds(
     drawn: bool, kinds: tuple[TemplateKind, ...], expected: tuple[bool, bool, bool, bool]
 ) -> None:
-    cal, profile = _slot(drawn=drawn), _profile(*kinds)
+    cal = _slot(drawn=drawn)
     actual = (
-        can_paste(cal, profile),
-        can_finish(cal, profile),
-        can_copy(cal, profile),
-        can_delegate(cal, profile),
+        can_paste(cal, kinds),
+        can_finish(cal, kinds),
+        can_copy(cal, kinds),
+        can_delegate(cal, kinds),
     )
     assert actual == expected
 
@@ -84,50 +76,46 @@ def test_readiness_is_composed_from_the_slot_and_the_profile(
 def test_the_drawn_window_alone_is_a_finish_detector() -> None:
     """The staleness detector needs no captured cue at all - only a rectangle
     to watch stop changing - so every slot can finish from its first drag."""
-    empty = ServiceProfile("chatgpt")
-    assert can_finish(_slot(drawn=True), empty)
-    assert not can_finish(_slot(drawn=False), empty)
+    assert can_finish(_slot(drawn=True), NOTHING)
+    assert not can_finish(_slot(drawn=False), NOTHING)
 
 
 def test_a_second_slot_inherits_the_service_appearances() -> None:
-    """The point of the whole model: one profile, two windows. A sub-agent slot
-    costs exactly one drag once the master's service has been captured."""
-    profile = _profile(*BOTH)
+    """The point of the whole model: one service's appearances, two windows. A
+    sub-agent slot costs exactly one drag once the master's service has been
+    captured."""
     master = _slot(drawn=True, slot=AgentSlot.MASTER)
     subagent = SlotCalibration(AgentSlot.SUBAGENT)
-    assert can_delegate(master, profile)
-    assert not can_delegate(subagent, profile)
+    assert can_delegate(master, BOTH)
+    assert not can_delegate(subagent, BOTH)
 
     subagent.chat_region = ScreenRegion(900, 20, 300, 400)
-    assert can_delegate(subagent, profile)
+    assert can_delegate(subagent, BOTH)
 
 
 def test_missing_names_every_gap_in_calibration_order() -> None:
-    empty = ServiceProfile("chatgpt")
-    assert missing(_slot(drawn=False), empty) == (
+    assert missing(_slot(drawn=False), NOTHING) == (
         MISSING_CHAT_REGION,
         MISSING_COPY,
         MISSING_NEWCHAT,
     )
-    assert missing(_slot(drawn=True), empty) == (MISSING_COPY, MISSING_NEWCHAT)
-    assert missing(_slot(drawn=True), _profile(TemplateKind.COPY)) == (MISSING_NEWCHAT,)
-    assert missing(_slot(drawn=True), _profile(*BOTH)) == ()
+    assert missing(_slot(drawn=True), NOTHING) == (MISSING_COPY, MISSING_NEWCHAT)
+    assert missing(_slot(drawn=True), (TemplateKind.COPY,)) == (MISSING_NEWCHAT,)
+    assert missing(_slot(drawn=True), BOTH) == ()
 
 
 def test_losing_the_window_takes_the_buttons_with_it() -> None:
     """Honest rather than noisy: with nowhere to search, neither button can be
     found - and all three gaps close again on one drag."""
-    profile = _profile(*BOTH)
     cal = _slot(drawn=True)
-    assert missing(cal, profile) == ()
+    assert missing(cal, BOTH) == ()
     cal.clear()
-    assert missing(cal, profile) == (MISSING_CHAT_REGION, MISSING_COPY, MISSING_NEWCHAT)
+    assert missing(cal, BOTH) == (MISSING_CHAT_REGION, MISSING_COPY, MISSING_NEWCHAT)
 
 
 def test_missing_is_empty_exactly_when_delegation_is_available() -> None:
     for drawn, kinds, expected in TABLE:
-        cal, profile = _slot(drawn=drawn), _profile(*kinds)
-        assert (missing(cal, profile) == ()) is expected[3]
+        assert (missing(_slot(drawn=drawn), kinds) == ()) is expected[3]
 
 
 def test_new_slots_gives_one_empty_slot_per_window() -> None:

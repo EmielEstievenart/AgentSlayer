@@ -220,7 +220,6 @@ def harness(
         provider=provider,
         engine_factory=make_engine_factory(lambda: config, project),
         project_root=project,
-        profile_root=tmp_path / "profiles",
         global_config_path=global_config,
         # A local child, attached: the conftest harness's own default, and the
         # state every Executor-tab story here starts from (§10.2). The attach
@@ -263,8 +262,10 @@ def script(connected: ConnectedRemote, *, fail: str = "", asks: str = "") -> Any
                 for _ in range(3):
                     if prompts.password(f"password for {target}: ") == SECRET:
                         break
-            refused = step == STEP_CONNECT and asks == "hostkey" and not prompts.host_key(
-                target, "ssh-ed25519", "SHA256:abc123"
+            refused = (
+                step == STEP_CONNECT
+                and asks == "hostkey"
+                and not prompts.host_key(target, "ssh-ed25519", "SHA256:abc123")
             )
             if refused:
                 note = f"the host key for {target} was not accepted"
@@ -548,9 +549,7 @@ async def test_a_failure_offers_edit_back_to_the_form_with_the_values_in_it(
     assert event["failed_step"] == STEP_ROOT  # what went wrong is still on screen
 
 
-async def test_retry_re_runs_the_whole_sequence_in_place(
-    harness: RemoteHarness, dial: Any
-) -> None:
+async def test_retry_re_runs_the_whole_sequence_in_place(harness: RemoteHarness, dial: Any) -> None:
     """The whole point of the surface: no relaunch (brief §1)."""
     dial(fail=STEP_CONNECT)
     harness.view.open_connect()
@@ -600,9 +599,7 @@ async def test_a_password_prompt_is_a_modal_and_says_which_attempt_it_is(
     assert last_connect(harness)["phase"] == "done"
 
 
-async def test_no_event_ever_carries_the_password(
-    harness: RemoteHarness, dial: Any
-) -> None:
+async def test_no_event_ever_carries_the_password(harness: RemoteHarness, dial: Any) -> None:
     """gui.md §4 ruling 2, asserted rather than asserted-to: the secret goes one
     way, into ``SshHost._password``, and nothing paints it back."""
     dial(asks="password")
@@ -636,9 +633,7 @@ async def test_the_host_key_question_is_openssh_s_own_words(
     assert last_connect(harness)["phase"] == "done"
 
 
-async def test_declining_a_host_key_fails_the_attempt(
-    harness: RemoteHarness, dial: Any
-) -> None:
+async def test_declining_a_host_key_fails_the_attempt(harness: RemoteHarness, dial: Any) -> None:
     """Never a silent downgrade to unauthenticated browsing (brief §3.6)."""
     dial(asks="hostkey")
     harness.view.open_connect()
@@ -652,9 +647,7 @@ async def test_declining_a_host_key_fails_the_attempt(
     assert "not accepted" in event["failure"]
 
 
-async def test_the_2fa_prompt_is_one_field_per_challenge(
-    harness: RemoteHarness, dial: Any
-) -> None:
+async def test_the_2fa_prompt_is_one_field_per_challenge(harness: RemoteHarness, dial: Any) -> None:
     """gui.md §4 ruling 4's dialog. Not reachable from a real dial yet - the
     paramiko wiring is a TODO in ``SshHost._authenticate`` - so what is pinned
     is the CONTRACT the day it is: paramiko's handler shape, answers in order."""
@@ -961,9 +954,7 @@ async def test_cancelling_a_pending_launch_leaves_a_usable_local_session(
 # == the model on its own ======================================================
 
 
-def test_the_dialog_model_needs_no_view_at_all(
-    project: Path, global_config: Path
-) -> None:
+def test_the_dialog_model_needs_no_view_at_all(project: Path, global_config: Path) -> None:
     """The service editor's bargain, one surface over: every decision is here,
     so the assertions cost neither a window nor a loop."""
     config = load_config(project, global_config_path=global_config)

@@ -1718,3 +1718,97 @@ This phase writes no product code.
 noun for a surface; `monitor-ui.md` exists and covers every control §9.1 built;
 every path and flag named in the docs resolves against the code; the Chat UI's
 docs button renders the amended `commands.md` without a broken anchor.
+
+## 10. Wave 3 — the Chat UI never hosts a monitor (2026-08-27)
+
+> **Status:** PLANNED. Each sub-section gets an "as built" note when it lands,
+> exactly as §9 did. This supersedes §9.0's "in local mode the Chat UI keeps
+> its in-app doors opening the Monitor UI over its own in-process
+> `LocalUIMonitor`" — that embedded case is removed here.
+
+### 10.0 Why
+
+Two bugs on 2026-08-27 came from one shape: the Chat UI had **two** ways to
+reach a screen — an in-process `LocalUIMonitor` with an embedded calibration
+window, and the wire — and the two disagreed about where the chat region and
+the service key lived. Every "it works locally but not split" report is that
+disagreement. The fix is to have **one** way: the Chat UI is a brain, and a
+brain reaches pixels only over the wire (§2.9). "Local" becomes "a monitor
+process this Chat UI launched on this machine", reached exactly like a remote
+one — same dial, same token, same `watched()`, same Monitor UI window for
+calibration.
+
+### 10.1 The local monitor is a child process
+
+* New module `shell/app/monitor_launch.py`:
+  * `class LocalMonitorLauncher(Protocol)`: `start(project_root, *, global_config_path) -> LaunchedMonitor`, `stop()`, `alive() -> bool`, `exit_code() -> int | None`.
+  * `LaunchedMonitor(target: MonitorTarget, process_id: int)`; the target is
+    `MonitorTarget(name="local", host="127.0.0.1", port=<chosen>, token=<from the shared file>)`.
+  * `SubprocessLauncher`: picks a free loopback port (bind-then-release), runs
+    `agentclip-monitor --port N --bind 127.0.0.1 --project <root> [--global-config <path>]`
+    **with its window** (no `--headless`) so calibration has a surface. Frozen:
+    the sibling executable next to `sys.executable` (`agentclip-monitor`,
+    `.exe` on Windows); checkout: `[sys.executable, "-m", "agentclip.shell.monitor_ui", ...]`.
+    The token is `driver/monitor/auth.load_or_create_token(default_monitor_dir())` —
+    the same file the child reads, so no token is ever passed on a command line.
+    `stop()` terminates the child (and waits briefly); it is called from
+    `GuiRunner.stop()` after the wire link is closed and before the loop ends.
+    Nothing here polls the child: readiness is the dial itself (`_redial_loop`'s
+    backoff already handles "not listening yet"), and a child that dies is a
+    link that drops, which the existing DISCONNECTED path reports — with one
+    extra sentence when `alive()` is False: `the local monitor exited (code N) - relaunch it from the Monitor tab`.
+* `cli.py`: `--monitor` accepts `local` (default when the flag is absent),
+  `none`, `HOST:PORT`, `@NAME`. `resolve_monitor_target` returns
+  `MonitorTarget | LaunchLocal | None | str`, where `LaunchLocal` is a sentinel
+  dataclass. `--pick-region` / `--show-identify` and `_list_matchers` leave
+  `cli.py`: the Chat UI draws no overlay and runs no matcher.
+
+### 10.2 The Chat UI, always over the wire
+
+* `GuiView` no longer imports `driver.monitor.local`, `driver.screen`, or
+  `shell.monitor_ui`. Its `SwitchableMonitor` starts idle; `start()` either
+  launches the local monitor and dials it, dials the given target, or (`none`)
+  parks the loop in DISCONNECTED with `no monitor attached - attach or launch one from the Monitor tab`.
+* Gone: `_build_local_monitor`, `_local_monitor`, `open_calibration` and its
+  runner/closed/`_calibrated` callbacks, `_open_calibration_window`,
+  `OpenCalibration`, `ShellMonitor.detector`, `copy_seen_note`'s detector
+  read, the `monitor=` constructor seam. Tests inject a `FakeUIMonitor` through
+  a fake `dial` plus a fake launcher, never as an inner.
+* `ShellMonitor` keeps `close()` and `watched()`; DETECTION's active-detector
+  readout comes off `Tick.active_detectors` (it already rides every tick).
+* F2, the titlebar **calibrate** button, **Edit services...**, **Set chat
+  region...**, `/identify`: one door, one sentence —
+  `calibration lives in the Monitor UI: the agentclip-monitor window (local), or that window on the monitor's machine (remote)` —
+  and the button is relabelled **monitor UI**. No in-process window ever opens.
+* Disconnect (Monitor tab) drops the link and stops a local child; the loop
+  parks in DISCONNECTED, the badge goes red `NO MONITOR`. Nothing redials on
+  its own after a deliberate disconnect.
+* Monitor tab: a third mode **Local** (radio `local`) with one button
+  **Launch a local monitor** — no host/port/token fields. Its saved-target
+  story is unchanged for Direct / Via SSH.
+* `_push_link` states: `none` (red, `NO MONITOR · attach or launch one`),
+  `up` (green, `MONITOR CONNECTED · local` or `· <peer>`), `down` (red,
+  `MONITOR DOWN · <peer> · <reason>`). `state="local"` is retired.
+
+### 10.3 Build, layering, docs
+
+* `packaging/agentclip.spec` drops `cv2`, `numpy`, `tkinter`, `Xlib`, and the
+  `MONITOR_UI_ASSETS` block; `build-exe.ps1`/`.sh` stop running
+  `--list-matchers` against the app binary (the monitor's own check stays).
+* `tests/test_layering.py`: `shell.chat` may no longer import `driver.screen`,
+  `driver.monitor.local`, or `shell.monitor_ui`; it leaves
+  `CLIP_SCREEN_IMPORTERS`. `shell/monitor_ui/window.py`'s
+  `open_calibration_window` / `CalibrationRunner` are deleted if nothing else
+  calls them.
+* Docs: `commands.md` (F2 row, `--monitor` values, "while a link is up"
+  paragraph), `configuration.md` (§ the Monitor UI, the attached-monitor
+  paragraph), AGENTS.md vocabulary row, `ui-briefs/monitor-ui.md` §6.1–6.3
+  (the embedded case is gone), `elements-panel.md` / `service-editor.md`
+  headers, README's local-mode sentence, architecture.md if it names the door.
+
+### 10.4 Open after this wave
+
+* Presets edited in a local child's service editor reach the Chat UI only on
+  its next config reload — there is no wire event for "config changed".
+* `copy_seen_note` (the "poller last saw the copy button" line) is gone with
+  the local tier; if it is missed, it comes back as a tick field.

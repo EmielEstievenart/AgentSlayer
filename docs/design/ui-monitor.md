@@ -1796,7 +1796,7 @@ socket or a config directory.
   `up` (green, `MONITOR CONNECTED · local` or `· <peer>`), `down` (red,
   `MONITOR DOWN · <peer> · <reason>`). `state="local"` is retired.
 
-**As built (2026-08-27, this wave's Chat-UI commit).** Everything above landed.
+**As built (2026-08-27, `e10e434`, tests `44c8b83`).** Everything above landed.
 The deviations and the things the plan left unsaid:
 
 * **`monitor_target` became two fields**, not one. `_launch_local` (a bool) and
@@ -1845,7 +1845,7 @@ The deviations and the things the plan left unsaid:
 **As built — packaging (2026-08-27, `446a3a8`) and docs (`9b65647`).** Both as
 planned.
 
-**As built — layering (2026-08-27, this wave).** `shell.chat` lost
+**As built — layering (2026-08-27, `6694e05`).** `shell.chat` lost
 `agentclip.shell.monitor_ui` outright, and its two blanket allowances became
 LISTS, which is a stronger rule than the plan asked for:
 
@@ -1953,7 +1953,7 @@ above that lives under `driver/monitor/` and `shell/monitor_ui/`.
   already name. The Monitor UI imports no `driver/automation` module at all any
   more, and `tests/test_layering.py` dropped that allowance.
 
-**As built — the BRAIN side (2026-08-27, this wave).**
+**As built — the BRAIN side (2026-08-27, `7175b5e` + `e10e434`).**
 
 * `Watched` grew a twelfth preset field the plan's list missed: `edit_by_lines`.
   It decides a CATALOG — whether the bootstrap offers `replace_lines` and a

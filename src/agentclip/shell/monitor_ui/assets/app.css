@@ -125,6 +125,33 @@ button,
   color: var(--on-solid);
 }
 
+/* The link badge. Solid fills, not outlines: a grey outline pill and a green
+   outline pill look the same at a glance, and "is a Chat UI on the line" is
+   the one thing this window must answer at a glance. */
+.link-badge {
+  padding: 3px 12px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.link-badge.waiting {
+  border-color: var(--warn);
+  background: var(--warn);
+  color: var(--on-solid);
+}
+
+.link-badge.attached {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: var(--on-solid);
+}
+
 .calib-region {
   color: var(--text-dim);
   font-family: var(--mono);
@@ -278,6 +305,9 @@ button:not(:disabled) {
 
 /* The one string on this page somebody has to reproduce by hand if the copy
    button cannot: monospace, and wide enough that it never wraps mid-token. */
+.serve-status.waiting { color: var(--warn); }
+.serve-status.attached { color: var(--ok); font-weight: 700; }
+
 .serve-token {
   color: var(--accent);
   font-family: var(--mono);

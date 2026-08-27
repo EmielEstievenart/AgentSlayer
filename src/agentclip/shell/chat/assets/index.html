@@ -22,6 +22,11 @@
         <span class="pill" id="phase">no session</span>
         <span class="pill" id="loop">IDLE</span>
         <span class="pill" id="service"></span>
+        <!-- Whose SCREEN this window drives, and whether the line to it is up
+             (ui-monitor.md 9.2). Painted from the monitor_link event: dim for
+             this PC, solid green for a remote monitor on the line, solid red
+             for one that is not - dialling, redialling or refused. -->
+        <span class="pill" id="monitor-link" hidden></span>
         <span class="spacer"></span>
         <span class="version" id="version"></span>
 

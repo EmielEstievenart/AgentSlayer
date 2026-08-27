@@ -34,6 +34,12 @@
            is recognisable INSIDE it. -->
       <header class="calib-head">
         <span class="calib-title">CALIBRATION</span>
+        <!-- THE LINK BADGE: whether a Chat UI is driving this screen, painted
+             from the serve event's `link` (off / waiting / attached) in a
+             colour that reads from across the room. Hidden until a serve
+             event arrives - the window the Chat UI opens beside itself in
+             local mode has nothing to serve and no link to show. -->
+        <span class="link-badge" id="link-badge" hidden></span>
         <div class="calib-tabs" id="calib-tabs"></div>
         <span class="side-status" id="calib-service"></span>
         <span class="calib-region" id="calib-region"></span>

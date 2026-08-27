@@ -189,9 +189,18 @@ class ServePanel:
     def state(self) -> dict[str, Any]:
         """The whole panel, as the page's ``serve`` event carries it."""
         loopback = is_loopback(self._address)
+        server = self._server
+        peer = server.peer if server is not None else None
         return {
-            "serving": self._server is not None,
+            "serving": server is not None,
             "status": self.status,
+            # The same fact as ``status``, as an enum the page can COLOUR by:
+            # off (nothing listening), waiting (listening, nobody on the line),
+            # attached (a Chat UI is driving this screen). The header badge is
+            # painted from this; the sentence is for reading, this is for
+            # seeing from across the room.
+            "link": "off" if server is None else ("attached" if peer else "waiting"),
+            "peer": peer or "",
             "address": self._address,
             "port": self._port,
             "interfaces": [

@@ -1563,6 +1563,24 @@
      keeps the two shells from growing two ideas of what any of them mean
      (docs/design/ui-briefs/sidebar-status-log.md section 3). */
 
+  /* The titlebar's MONITOR badge. Three states from Python (view.py:
+     _push_link); the words are the big ones and the fill is the state, so
+     "connected or not" is answered before the address is read. */
+  function paintMonitorLink(event) {
+    var state = event.state || "local";
+    el.monitorLink.hidden = false;
+    el.monitorLink.className = "pill" + (state === "up" ? " ok" : state === "down" ? " warn" : "");
+    if (state === "local") {
+      el.monitorLink.textContent = "MONITOR: this PC";
+    } else if (state === "up") {
+      el.monitorLink.textContent = "MONITOR CONNECTED \u00b7 " + event.peer;
+    } else {
+      el.monitorLink.textContent =
+        "MONITOR DOWN \u00b7 " + event.peer + " \u00b7 " + (event.reason || "");
+    }
+    el.monitorLink.title = event.reason || "";
+  }
+
   function paintRail(event) {
     el.loop.textContent = event.loop;
     el.rail.innerHTML = "";
@@ -2211,6 +2229,9 @@
       case "monitor":
         paintMonitor(event);
         break;
+      case "monitor_link":
+        paintMonitorLink(event);
+        break;
       case "connect":
         paintConnect(event);
         break;
@@ -2823,6 +2844,7 @@
       phase: id("phase"),
       loop: id("loop"),
       service: id("service"),
+      monitorLink: id("monitor-link"),
       flash: id("flash"),
       flashText: id("flash-text"),
       retryInsert: id("retry-insert"),

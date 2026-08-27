@@ -100,6 +100,7 @@ def test_the_page_draws_the_serve_panel_and_can_reach_all_four_of_its_verbs() ->
         "serve-port",
         "serve-toggle",
         "serve-status",
+        "link-badge",
         "serve-warning",
         "serve-error",
         "serve-token",
@@ -388,3 +389,14 @@ def test_hidden_beats_every_author_display_rule() -> None:
     css = asset("app.css")
     assert "[hidden] {" + chr(10) + "  display: none !important;" + chr(10) + "}" in css
     assert css.index("[hidden] {") < css.index(".scrim {")
+
+
+def test_the_link_badge_is_painted_from_the_serve_event_in_three_colours() -> None:
+    """Whether a Chat UI is on the line must be visible from across the room:
+    a header badge whose FILL is the state, painted off the event's `link`."""
+    js = asset("app.js")
+    css = asset("app.css")
+    assert 'paintLink(event.link || "off", event.peer || "")' in js
+    for state in ("off", "waiting", "attached"):
+        assert f"{state}:" in js, state
+    assert ".link-badge.waiting" in css and ".link-badge.attached" in css

@@ -335,6 +335,7 @@ CALIBRATION_REMOTE = (
 # themselves: the screen the app is watching is on another machine, so a link
 # that came up, dropped, refused a dial or came back as a DIFFERENT process is
 # invisible unless it is said out loud.
+MONITOR_DIALLING = "dialling"
 MONITOR_UP = "monitor link up: {peer}"
 MONITOR_LOST = "monitor link lost - redialling {peer}"
 MONITOR_RETRY = "cannot reach the monitor at {peer}: {reason}"
@@ -966,6 +967,7 @@ class GuiView:
         self._push_rail()
         self._push_tabs()
         self._push_sidebar()
+        self._push_link()
         self._push_commands()
         self._push_settings()
         self._push_docs()
@@ -2426,6 +2428,7 @@ class GuiView:
             self.notify(f"could not watch this screen: {exc}", severity="warning")
         self._switch.watch_clipboard(self._automation.os_armed)
         self._automation.set_loop_state(LoopState.IDLE, MONITOR_LOCAL_AGAIN)
+        self._push_link()
         self.notify(MONITOR_LOCAL_AGAIN)
         if self._monitor_dialog is not None:
             self._monitor_dialog.detached()
@@ -2489,6 +2492,27 @@ class GuiView:
             ),
         )
         return self._config
+
+    def _push_link(self) -> None:
+        """The titlebar's MONITOR badge: whose screen, and is the line up.
+
+        Three states and nothing finer - local (this PC's screen), up (a remote
+        monitor is on the line) and down (there is a remote target and no live
+        link to it: dialling, redialling, refused). The toasts say the moments;
+        this is the standing fact, and it is coloured because "am I connected"
+        is the one question a split-mode user asks every time they look up.
+        """
+        target = self._monitor_target
+        if target is None:
+            self._bridge.send("monitor_link", state="local", peer="", reason="")
+            return
+        live = self._automation.loop_state is not LoopState.DISCONNECTED
+        self._bridge.send(
+            "monitor_link",
+            state="up" if live else "down",
+            peer=target.describe(),
+            reason="" if live else (self._monitor_failure or MONITOR_DIALLING),
+        )
 
     def _push_monitor(self) -> None:
         """The whole Monitor tab in one event; ``open: false`` is closed."""
@@ -3527,6 +3551,8 @@ class GuiView:
         # the two that survived the link.
         switch.watch_clipboard(self._automation.os_armed)
         self._automation.set_loop_state(LoopState.IDLE, f"monitor link up ({peer})")
+        self._monitor_failure = ""
+        self._push_link()
         self.notify(MONITOR_UP.format(peer=peer))
         if was is not None and was != link.server_id:
             self.notify(MONITOR_RESTARTED.format(peer=peer), severity="warning", timeout=8)
@@ -3557,6 +3583,7 @@ class GuiView:
         self._monitor_failure = reason
         fresh = self._automation.loop_state is not LoopState.DISCONNECTED
         self._automation.set_loop_state(LoopState.DISCONNECTED, reason)
+        self._push_link()
         if fresh:
             self.notify(reason, severity="warning", timeout=8)
 

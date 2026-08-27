@@ -155,6 +155,7 @@ async def test_the_panel_comes_up_not_serving(serving: ServeHarness) -> None:
     state = serving.last
     assert state["status"] == NOT_SERVING
     assert state["serving"] is False
+    assert (state["link"], state["peer"]) == ("off", "")
     assert state["port"] == DEFAULT_PORT
     assert state["address"] == "127.0.0.1"
 
@@ -167,6 +168,7 @@ async def test_start_says_it_is_listening_and_that_nobody_is_on_the_line(
     await serving.start()
     assert serving.status == f"listening on 127.0.0.1:{serving.port} — no Chat UI attached"
     assert serving.last["serving"] is True
+    assert serving.last["link"] == "waiting"
 
 
 async def test_a_chat_ui_that_dials_with_the_token_is_named_in_the_status_line(
@@ -181,6 +183,8 @@ async def test_a_chat_ui_that_dials_with_the_token_is_named_in_the_status_line(
         serving.panel.push()
         status = serving.status
         assert status.startswith(f"listening on 127.0.0.1:{serving.port} — attached: ")
+        assert serving.last["link"] == "attached"
+        assert serving.last["peer"] and status.endswith(serving.last["peer"])
         assert "127.0.0.1:" in status.split("attached: ")[1]
     finally:
         await brain.close()

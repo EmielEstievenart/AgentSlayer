@@ -205,6 +205,13 @@ button,
   font-weight: 700;
 }
 
+.pill.ok {
+  border-color: var(--ok);
+  background: var(--ok);
+  color: var(--on-solid);
+  font-weight: 700;
+}
+
 .spacer {
   flex: 1;
 }

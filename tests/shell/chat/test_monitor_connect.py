@@ -589,3 +589,45 @@ def test_every_monitor_element_the_page_reaches_for_is_in_the_page() -> None:
     assert wanted, "the page reaches for no monitor element at all"
     for name in sorted(wanted):
         assert f'id="{name}"' in html, f"app.js reaches for #{name}, index.html has none"
+
+
+async def test_the_titlebar_badge_says_local_then_connected_then_local_again(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """The standing fact, not the toast: the titlebar's MONITOR badge is painted
+    on mount (this PC), goes `up` with the peer on a landed dial, and back to
+    local on a deliberate detach."""
+    link = ScriptedLink()
+    tab = build(project, app_config, tmp_path, Dialler(link))
+    tab.view.start()
+    await settle()
+    assert tab.flush().last("monitor_link")["state"] == "local"
+
+    tab.view.monitor_open()
+    tab.view.monitor_fields("direct", "10.0.0.5", "7777", TOKEN, "")
+    tab.view.monitor_start()
+    await settle()
+    badge = tab.flush().last("monitor_link")
+    assert (badge["state"], badge["peer"]) == ("up", "10.0.0.5:7777")
+
+    tab.view.monitor_disconnect()
+    await settle()
+    assert tab.flush().last("monitor_link")["state"] == "local"
+
+
+async def test_a_dropped_link_paints_the_badge_down_with_the_reason(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    link = ScriptedLink()
+    tab = build(project, app_config, tmp_path, Dialler(link))
+    tab.view.start()
+    await settle()
+    tab.view.monitor_open()
+    tab.view.monitor_fields("direct", "10.0.0.5", "7777", TOKEN, "")
+    tab.view.monitor_start()
+    await settle()
+
+    tab.view._monitor_dropped("10.0.0.5:7777")
+    badge = tab.flush().last("monitor_link")
+    assert badge["state"] == "down"
+    assert "lost" in badge["reason"]

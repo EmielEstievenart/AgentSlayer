@@ -107,7 +107,7 @@ def roll_arm_streak(previous: int, stale: StaleProbe | None, *, min_diff: float)
     """How many consecutive ticks the response region has changed *a lot*.
 
     The evidence the STALE detector alone is allowed to arm an auto-copy on
-    (``finish.SEND_ARM_MIN_DIFF`` / ``SEND_ARM_TICKS``). Frame-to-frame change
+    (``beats.SEND_ARM_MIN_DIFF`` / ``SEND_ARM_TICKS``). Frame-to-frame change
     is weak evidence: after AgentClip pastes, the user still has to press Enter,
     and in that window a blinking caret or a mouse-over highlight makes the
     region "change" by a handful of pixels. So a CHANGING verdict counts only

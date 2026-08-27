@@ -33,19 +33,19 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from agentclip.config import ServicePreset
-from agentclip.driver.automation.finish import (
-    SEND_ARM_MIN_DIFF,
-    SEND_ARM_TICKS,
-    SEND_GATE_SEEN_TIMEOUT_TICKS,
-    SEND_GATE_TIMEOUT_TICKS,
-    SendGate,
-)
+from agentclip.driver.automation.finish import SendGate
 from agentclip.driver.automation.harness_log import KIND_GATE
 from agentclip.driver.automation.host import AutomationHost
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.automation.recipes.outcomes import REASONS, Outcome
 from agentclip.driver.automation.recipes.reply import ReplyWatch
 from agentclip.driver.automation.view import AutomationView
+from agentclip.driver.monitor.beats import (
+    SEND_ARM_MIN_DIFF,
+    SEND_ARM_TICKS,
+    SEND_GATE_SEEN_TIMEOUT_TICKS,
+    SEND_GATE_TIMEOUT_TICKS,
+)
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.slot import AgentSlot, SlotCalibration
 
@@ -203,32 +203,29 @@ class RecipeContext:
         return self._controller.own_window
 
     # -- the send gate's budgets ----------------------------------------------
-    # ``MonitorSpec`` fields (§2.10): they are counted in TICKS, the monitor is
-    # what a tick is, so the monitor is what carries them. Until a spec is set
-    # there is nothing to read and the module's own defaults are the honest
-    # answer - a loop nobody configured has no window to watch.
+    # The MONITOR's constants (``driver/monitor/beats.py``, §10.5): they are
+    # counted in TICKS and in frame-to-frame diff, the monitor is what a tick
+    # is, so the monitor is what owns the numbers. They used to ride on
+    # ``MonitorSpec`` - the brain handing the monitor back its own unit - and
+    # wave 3 took that field off the wire. Still read through this context
+    # rather than imported at each call site, so no recipe has to know which
+    # side of the seam a budget came from.
 
     @property
     def send_arm_ticks(self) -> int:
-        spec = self.monitor.spec
-        return SEND_ARM_TICKS if spec is None else spec.send_arm_ticks
+        return SEND_ARM_TICKS
 
     @property
     def send_arm_min_diff(self) -> float:
-        spec = self.monitor.spec
-        return SEND_ARM_MIN_DIFF if spec is None else spec.send_arm_min_diff
+        return SEND_ARM_MIN_DIFF
 
     @property
     def send_gate_timeout_ticks(self) -> int:
-        spec = self.monitor.spec
-        return SEND_GATE_TIMEOUT_TICKS if spec is None else spec.send_gate_timeout_ticks
+        return SEND_GATE_TIMEOUT_TICKS
 
     @property
     def send_gate_seen_timeout_ticks(self) -> int:
-        spec = self.monitor.spec
-        return (
-            SEND_GATE_SEEN_TIMEOUT_TICKS if spec is None else spec.send_gate_seen_timeout_ticks
-        )
+        return SEND_GATE_SEEN_TIMEOUT_TICKS
 
     # == the run's half ========================================================
 

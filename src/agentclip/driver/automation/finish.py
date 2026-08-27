@@ -25,7 +25,10 @@ Three groups, and they are three different kinds of thing:
   travelled with the verdicts they narrate; the ``SEND_READY_*`` lines are about
   a GATE rather than a probe, and stay here.
 * **The tunables.** How much change counts as change, how long a gate may wait.
-  Policy about a screen, not about a widget.
+  They are the MONITOR's now (:mod:`agentclip.driver.monitor.beats`, wave 3
+  §10.5): both are counted in the monitor's own units - a tick and a
+  frame-to-frame diff - so the machine that produces those units owns the
+  numbers. Re-exported below at the address every caller already names.
 
 ``SendGate`` is here too, for the same reason ``LoopState`` is in its own module:
 it is a state the automation is IN, and both shells will want to show it.
@@ -34,6 +37,18 @@ it is a state the automation is IN, and both shells will want to show it.
 from __future__ import annotations
 
 from enum import Enum
+
+# The send gate's four budgets MOVED to the monitor in wave 3
+# (docs/design/ui-monitor.md §10.5): they are counted in TICKS and in
+# frame-to-frame DIFF, and a tick is the monitor's unit - so they are the
+# monitor's constants and no longer ride on ``MonitorSpec``. Re-exported at this
+# address because every caller in the brain, and every suite, names them here.
+from agentclip.driver.monitor.beats import (  # noqa: F401
+    SEND_ARM_MIN_DIFF,
+    SEND_ARM_TICKS,
+    SEND_GATE_SEEN_TIMEOUT_TICKS,
+    SEND_GATE_TIMEOUT_TICKS,
+)
 
 # The verdicts and their readout MOVED to the monitor in phase 2
 # (docs/design/ui-monitor.md §6.2): the monitor is what folds a probe into a
@@ -63,49 +78,6 @@ class SendGate(Enum):
     SEEN = "seen"  # it is on screen; its disappearance is the user's Enter
 
 
-# What it takes for the STALE detector alone to arm the auto-copy trigger, i.e.
-# to claim it has watched the user's message actually get sent.
-#
-# The busy/idle detectors arm on one frame, because a reasoning icon appearing
-# is evidence nothing else produces. Frame-to-frame change is not: after
-# AgentClip pastes the outbound text the user still has to press Enter, and in
-# that window a blinking caret or a mouse-over highlight makes the region
-# "change" by a handful of pixels. Arming on that, then reading the still
-# pre-Enter screen as finished, fires the auto-copy at a chat with no reply in
-# it at all - the exact bug these two constants exist to close.
-#
-# So a CHANGING verdict must be BIG and SUSTAINED: 2% of the sampled pixels
-# (caret blink and hover tints are orders of magnitude below; a prompt landing
-# in the transcript and the reasoning UI unfolding are far above) on
-# SEND_ARM_TICKS consecutive stale probes - ~1.5 s at the 0.5 s cadence, longer
-# than any repaint and shorter than any answer.
-SEND_ARM_MIN_DIFF = 0.02
-SEND_ARM_TICKS = 3
-# How long the ready-to-send gate waits for the button to show up at all before
-# it gives up and hands finish detection back (tui.md §3.4b). Counted in poller
-# TICKS rather than seconds - ten of them are ~5 s at the 0.5 s cadence - because
-# the state machine must be deterministic and injectable: a wall clock would make
-# the same test pass or fail depending on how busy the machine was.
-SEND_GATE_TIMEOUT_TICKS = 10
-# The SAME promise for the phase AFTER the button has been seen, on its own much
-# longer clock - ~2 minutes at the 0.5 s cadence.
-#
-# The gate's release is one non-debounced template match going away, and a fresh
-# chat is exactly where that match is least reliable: the composer is centred and
-# animating rather than docked where the capture was taken, so the button can be
-# seen once and then never yield a clean not-found frame. Nothing else could
-# release the gate, and "the gate may delay a session; it may never deadlock one"
-# then held for the never-seen phase only - the user pressed Enter, the model
-# generated, and ">>> PRESS ENTER <<<" flashed for ever.
-#
-# So the SEEN phase gets a budget too, and the budget is generous rather than
-# tight because waiting out a human reading what is about to be sent is the whole
-# point of the gate: minutes, not the five seconds a never-appearing button costs.
-# Anything shorter would expire on a user who paused to think. It is the LAST
-# line of defence in any case - a model that actually starts generating releases
-# the gate on the icon evidence the moment it does (``evaluate_finish``), long
-# before this runs out.
-SEND_GATE_SEEN_TIMEOUT_TICKS = 240
 
 # The send gate's line in the DETECTION readout (tui.md 3.4b). It is not a finish
 # detector: it reports whether the ready-to-send button is holding finish

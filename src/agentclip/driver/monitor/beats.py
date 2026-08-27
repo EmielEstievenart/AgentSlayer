@@ -91,6 +91,59 @@ NEW_CHAT_SETTLE_S = 0.4
 # ``UIMonitor.click_element``'s default settle.
 ELEMENT_CLICK_SETTLE_S = 0.05
 
+# -- the send gate's budgets ------------------------------------------------
+# Counted in TICKS and in frame-to-frame DIFF, which is why they live here and
+# not in the brain (docs/design/ui-monitor.md §10.5): a tick is the monitor's
+# unit and a diff is its measurement, so the numbers a gate is measured in
+# belong to the machine that produces them. They used to ride on
+# ``MonitorSpec`` - the brain telling the monitor what its own tick meant - and
+# §10.5 took that field off the wire. ``driver/automation/finish.py`` re-exports
+# all four under the names its suites already reach for.
+
+# What it takes for the STALE detector alone to arm the auto-copy trigger, i.e.
+# to claim it has watched the user's message actually get sent.
+#
+# The busy/idle detectors arm on one frame, because a reasoning icon appearing
+# is evidence nothing else produces. Frame-to-frame change is not: after
+# AgentClip pastes the outbound text the user still has to press Enter, and in
+# that window a blinking caret or a mouse-over highlight makes the region
+# "change" by a handful of pixels. Arming on that, then reading the still
+# pre-Enter screen as finished, fires the auto-copy at a chat with no reply in
+# it at all - the exact bug these two constants exist to close.
+#
+# So a CHANGING verdict must be BIG and SUSTAINED: 2% of the sampled pixels
+# (caret blink and hover tints are orders of magnitude below; a prompt landing
+# in the transcript and the reasoning UI unfolding are far above) on
+# SEND_ARM_TICKS consecutive stale probes - ~1.5 s at the 0.5 s cadence, longer
+# than any repaint and shorter than any answer.
+SEND_ARM_MIN_DIFF = 0.02
+SEND_ARM_TICKS = 3
+# How long the ready-to-send gate waits for the button to show up at all before
+# it gives up and hands finish detection back (tui.md §3.4b). Counted in poller
+# TICKS rather than seconds - ten of them are ~5 s at the 0.5 s cadence - because
+# the state machine must be deterministic and injectable: a wall clock would make
+# the same test pass or fail depending on how busy the machine was.
+SEND_GATE_TIMEOUT_TICKS = 10
+# The SAME promise for the phase AFTER the button has been seen, on its own much
+# longer clock - ~2 minutes at the 0.5 s cadence.
+#
+# The gate's release is one non-debounced template match going away, and a fresh
+# chat is exactly where that match is least reliable: the composer is centred and
+# animating rather than docked where the capture was taken, so the button can be
+# seen once and then never yield a clean not-found frame. Nothing else could
+# release the gate, and "the gate may delay a session; it may never deadlock one"
+# then held for the never-seen phase only - the user pressed Enter, the model
+# generated, and ">>> PRESS ENTER <<<" flashed for ever.
+#
+# So the SEEN phase gets a budget too, and the budget is generous rather than
+# tight because waiting out a human reading what is about to be sent is the whole
+# point of the gate: minutes, not the five seconds a never-appearing button costs.
+# Anything shorter would expire on a user who paused to think. It is the LAST
+# line of defence in any case - a model that actually starts generating releases
+# the gate on the icon evidence the moment it does (``evaluate_finish``), long
+# before this runs out.
+SEND_GATE_SEEN_TIMEOUT_TICKS = 240
+
 # -- how far one snap to the bottom goes -----------------------------------
 # Sizes rather than beats, and here for the same reason the beats are: how far a
 # wheel detent or a Page Down tap carries is a property of the machine and the

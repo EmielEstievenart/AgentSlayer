@@ -32,8 +32,10 @@ import pytest
 
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.monitor.local import LocalUIMonitor
-from agentclip.driver.monitor.protocol import ElementClick, Located, UIMonitor
+from agentclip.driver.monitor.protocol import ElementClick, Located, UIMonitor, Watched
 from agentclip.driver.monitor.remote import (
+    CONFIGURE_IS_LOCAL,
+    MonitorCallError,
     MonitorDisconnected,
     MonitorRefused,
     RemoteUIMonitor,
@@ -43,6 +45,7 @@ from agentclip.driver.monitor.wire import decode_line, encode_line, read_error
 from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.template import RegionMatch
 
 from .conftest import TIMEOUT_S, ScriptedOps, Wiring, await_until, profile_with, spec
@@ -108,6 +111,21 @@ async def linked(
     return server, await dial(server)
 
 
+async def targeted(
+    wiring: Wiring, client: RemoteUIMonitor, slot: AgentSlot = AgentSlot.MASTER, **kwargs: object
+) -> Watched:
+    """Point the far monitor at a window, the way §10.5 says it happens.
+
+    The brain names a SLOT and nothing else; what that slot means is the far
+    monitor's own ``spec_for``, which is what a test installs here in place of
+    the config file (headless) or the Monitor UI's selection (with a window).
+    Every retarget below goes through this, because ``client.configure`` is now
+    a refusal - see ``test_configure_is_refused_over_the_wire``.
+    """
+    wiring.monitor.set_spec_for(lambda _slot: spec(**kwargs))  # type: ignore[arg-type]
+    return await client.watch(slot)
+
+
 async def quiet(wiring: Wiring, ops: ScriptedOps) -> None:
     """Suspend the poll loop and wipe the record, exactly as ``test_verbs`` does.
 
@@ -124,10 +142,10 @@ async def quiet(wiring: Wiring, ops: ScriptedOps) -> None:
     ops.forget()
 
 
-# == configure =================================================================
+# == watch =====================================================================
 
 
-async def test_configure_round_trips_the_generation(
+async def test_watch_round_trips_the_generation(
     wire: Callable[..., Wiring], listen: Listen, dial: Dial
 ) -> None:
     """The number is the FAR monitor's, and it is what makes a tick a ghost.
@@ -139,13 +157,69 @@ async def test_configure_round_trips_the_generation(
     wiring = wire()
     _server, client = await linked(wiring, listen, dial)
 
-    first = await client.configure(spec(region=None))
-    assert first == wiring.monitor.generation == 1
+    first = await targeted(wiring, client, region=None)
+    assert first.generation == wiring.monitor.generation == 1
     assert client.generation == 1
 
-    second = await client.configure(spec(region=None))
-    assert second == wiring.monitor.generation == 2
+    second = await targeted(wiring, client, region=None)
+    assert second.generation == wiring.monitor.generation == 2
     assert client.generation == 2
+
+
+async def test_watch_answers_with_the_whole_service_the_monitor_chose(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """§10.5: the brain names a WINDOW and the monitor answers with the service.
+
+    Region, key and preset in one round trip, because the brain cannot compose a
+    turn for this chat until it has all three - and it has no other way to learn
+    any of them: the ``[services.*]`` table and the region store are both on the
+    far machine.
+    """
+    wiring = wire()
+    _server, client = await linked(wiring, listen, dial)
+
+    watched = await targeted(wiring, client, region=CHAT, service="claude")
+
+    assert watched.service == "claude"
+    assert watched.region == CHAT
+    # Straight off the spec the MONITOR composed, which is the whole point: a
+    # brain that read its own host's presets would be sizing pastes for a
+    # service somebody else is running.
+    assert watched.max_paste_chars == spec().max_paste_chars
+    assert watched.delivery == spec().delivery
+    assert watched.snap_back == spec().snap_back
+
+
+async def test_watch_names_the_window_and_the_monitor_picks_the_service(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """The slot crosses; nothing else about the target does."""
+    wiring = wire()
+    _server, client = await linked(wiring, listen, dial)
+    asked: list[AgentSlot] = []
+    wiring.monitor.set_spec_for(
+        lambda slot: (asked.append(slot), spec(region=None, service=f"svc-{slot.value}"))[1]
+    )
+
+    assert (await client.watch(AgentSlot.SUBAGENT)).service == "svc-subagent"
+    assert (await client.watch(AgentSlot.MASTER)).service == "svc-master"
+    assert asked == [AgentSlot.SUBAGENT, AgentSlot.MASTER]
+
+
+async def test_configure_is_refused_over_the_wire(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """A brain may not name a service, a rectangle or a search tolerance on a
+    desktop it cannot see (§10.5) - and the refusal says which door replaced it
+    rather than being an AttributeError at the call site."""
+    wiring = wire()
+    _server, client = await linked(wiring, listen, dial)
+
+    with pytest.raises(MonitorCallError) as caught:
+        await client.configure(spec(region=None))
+    assert CONFIGURE_IS_LOCAL in str(caught.value)
+    assert wiring.monitor.generation == 0, "the refusal retargeted the far monitor anyway"
 
 
 # == the tick stream ===========================================================
@@ -163,7 +237,7 @@ async def test_a_tick_arrives_and_resolves_a_parked_observe(
     wiring = wire()
     monitor: LocalUIMonitor = wiring.monitor
     _server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=None))
+    await targeted(wiring, client, region=None)
 
     monitor.feed(monitor.stamp(busy=BusyProbe(BusyState.CHANGED, 0.5), active_detectors=("busy",)))
     await await_until(lambda: client.latest is not None, "the first tick to cross")
@@ -186,7 +260,7 @@ async def test_ticks_reach_a_subscriber(
     wiring = wire()
     monitor: LocalUIMonitor = wiring.monitor
     _server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=None))
+    await targeted(wiring, client, region=None)
     seen: list[int] = []
     client.subscribe(lambda tick: seen.append(tick.seq))
 
@@ -211,7 +285,7 @@ async def test_a_tick_backlog_is_dropped_to_the_latest(
     wiring = wire()
     monitor: LocalUIMonitor = wiring.monitor
     _server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=None))
+    await targeted(wiring, client, region=None)
     seen: list[int] = []
     client.subscribe(lambda tick: seen.append(tick.seq))
 
@@ -231,7 +305,7 @@ async def test_a_ghost_never_crosses(
     wiring = wire()
     monitor: LocalUIMonitor = wiring.monitor
     _server, client = await linked(wiring, listen, dial)
-    generation = await client.configure(spec(region=None))
+    generation = (await targeted(wiring, client, region=None)).generation
     seen: list[int] = []
     client.subscribe(lambda tick: seen.append(tick.generation))
 
@@ -253,7 +327,7 @@ async def test_find_all_crosses_with_every_match_in_screen_coordinates(
     ops = ScriptedOps(all_matches=([HIT, ELSEWHERE],))
     wiring = wire(ops=ops, profile=profile_with(COPY))
     _server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=CHAT, finish_signals=()))
+    await targeted(wiring, client, region=CHAT, finish_signals=())
     await quiet(wiring, ops)
 
     assert await client.find_all(COPY) == (HIT_RECT, ELSEWHERE_RECT)
@@ -269,7 +343,7 @@ async def test_locate_and_click_element_marshal_both_ways(
     ops = ScriptedOps(lowest=((HIT, None),), all_matches=([HIT],))
     wiring = wire(ops=ops, profile=profile_with(COPY))
     _server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=CHAT, finish_signals=()))
+    await targeted(wiring, client, region=CHAT, finish_signals=())
     await quiet(wiring, ops)
 
     assert await client.locate(COPY) == Located(region=HIT_RECT, ambiguous=False, best_miss=None)
@@ -286,7 +360,7 @@ async def test_an_ambiguous_element_is_refused_across_the_wire(
     ops = ScriptedOps(lowest=((HIT, None),), all_matches=([HIT, ELSEWHERE],))
     wiring = wire(ops=ops, profile=profile_with(COPY))
     _server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=CHAT, finish_signals=()))
+    await targeted(wiring, client, region=CHAT, finish_signals=())
     await quiet(wiring, ops)
 
     assert (await client.locate(COPY)).ambiguous is True
@@ -302,7 +376,7 @@ async def test_a_miss_crosses_as_a_miss_with_its_diagnosis(
     ops = ScriptedOps(lowest=((None, 0.31),))
     wiring = wire(ops=ops, profile=profile_with(COPY))
     _server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=CHAT, finish_signals=()))
+    await targeted(wiring, client, region=CHAT, finish_signals=())
     await quiet(wiring, ops)
 
     assert await client.locate(COPY) == Located(region=None, ambiguous=False, best_miss=0.31)
@@ -316,7 +390,7 @@ async def test_a_plain_click_carries_its_rectangle_and_settle(
     ops = ScriptedOps()
     wiring = wire(ops=ops, profile=profile_with(COPY))
     _server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=None))
+    await targeted(wiring, client, region=None)
     ops.forget()
 
     assert await client.click(CHAT, settle_s=0.25) is True
@@ -395,7 +469,8 @@ async def test_a_second_brain_is_refused_by_name_and_the_first_keeps_working(
     assert caught.value.kind == "busy"
     assert held_by in caught.value.message
 
-    assert await first.configure(spec(region=None)) == 1, "the first brain lost its link"
+    watched = await targeted(wiring, first, region=None)
+    assert watched.generation == 1, "the first brain lost its link"
     assert server.peer == held_by
 
 
@@ -409,7 +484,7 @@ async def test_a_dropped_connection_raises_out_of_observe_and_fires_the_hook(
     thing to do with a parked wait is to fail it loudly."""
     wiring = wire()
     server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=None))
+    await targeted(wiring, client, region=None)
     dropped: list[str] = []
     client.on_disconnect(lambda: dropped.append("gone"))
     parked = asyncio.ensure_future(client.observe())
@@ -422,7 +497,7 @@ async def test_a_dropped_connection_raises_out_of_observe_and_fires_the_hook(
     await await_until(lambda: dropped == ["gone"], "the disconnect hook to fire")
     assert client.connected is False
     with pytest.raises(MonitorDisconnected):
-        await client.configure(spec(region=None))
+        await client.watch(AgentSlot.MASTER)
 
 
 async def test_a_disconnect_stops_the_clipboard_watcher_it_started(
@@ -461,7 +536,7 @@ async def test_a_redial_works_and_the_monitor_never_stopped_polling(
     ops = ScriptedOps()
     wiring = wire(ops=ops, profile=profile_with(COPY))
     server, first = await linked(wiring, listen, dial)
-    generation = await first.configure(spec(region=CHAT, finish_signals=()))
+    generation = (await targeted(wiring, first, region=CHAT, finish_signals=())).generation
     await server.disconnect()
 
     second = await dial(server)
@@ -470,10 +545,11 @@ async def test_a_redial_works_and_the_monitor_never_stopped_polling(
     tick = await asyncio.wait_for(second.observe(), TIMEOUT_S)
     assert tick.generation == generation, "the monitor forgot what it was watching"
     # And the generation the new brain holds is the far side's, without a
-    # configure - though a brain that redials still configures (§2.9: it
-    # re-derives from the screen rather than trusting what it remembers).
+    # retarget - though a brain that redials still calls ``watch`` (§2.9: it
+    # re-derives from the screen rather than trusting what it remembers, and
+    # §10.5: that is also how it re-reads the service).
     assert second.generation == generation
-    assert await second.configure(spec(region=None)) == generation + 1
+    assert (await targeted(wiring, second, region=None)).generation == generation + 1
 
 
 async def test_closing_the_client_leaves_the_monitor_running(
@@ -483,14 +559,14 @@ async def test_closing_the_client_leaves_the_monitor_running(
     process that outlives every brain, and a client cannot end it."""
     wiring = wire()
     server, client = await linked(wiring, listen, dial)
-    await client.configure(spec(region=None))
+    await targeted(wiring, client, region=None)
 
     await client.close()
     await client.close()  # idempotent
 
     await await_until(lambda: server.peer is None, "the server to notice the goodbye")
     again = await dial(server)
-    assert await again.configure(spec(region=None)) == 2
+    assert (await targeted(wiring, again, region=None)).generation == 2
 
 
 # == the handshake and the bind ================================================
@@ -545,7 +621,8 @@ async def test_watched_is_the_far_monitors_answer(
     wiring = wire()
     _server, client = await linked(wiring, listen, dial)
     assert (await client.watched()).region is None
-    await client.configure(spec(region=CHAT))
+    await targeted(wiring, client, region=CHAT)
     watched = await client.watched()
     assert watched.region == CHAT
     assert watched.service == spec(region=CHAT).service
+    assert watched.generation == client.generation

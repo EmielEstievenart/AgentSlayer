@@ -20,12 +20,17 @@ goes wrong quietly rather than loudly:
 
 from __future__ import annotations
 
-from dataclasses import replace
 from typing import Any
 
 import pytest
 
-from agentclip.driver.monitor.protocol import ElementClick, Located, MonitorSpec, Tick, Watched
+from agentclip.driver.monitor.protocol import (
+    EMPTY_WATCHED,
+    ElementClick,
+    Located,
+    Tick,
+    Watched,
+)
 from agentclip.driver.monitor.wire import (
     ERROR_KINDS,
     MONITOR_WIRE_VERSION,
@@ -43,9 +48,10 @@ from agentclip.driver.monitor.wire import (
     decode_params,
     decode_region,
     decode_result,
-    decode_spec,
+    decode_slot,
     decode_stale_probe,
     decode_tick,
+    decode_watched,
     encode_busy_probe,
     encode_kind,
     encode_line,
@@ -53,9 +59,10 @@ from agentclip.driver.monitor.wire import (
     encode_params,
     encode_region,
     encode_result,
-    encode_spec,
+    encode_slot,
     encode_stale_probe,
     encode_tick,
+    encode_watched,
     error_frame,
     hello_ack_frame,
     hello_frame,
@@ -72,6 +79,7 @@ from agentclip.driver.monitor.wire import (
 from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
 COPY = TemplateKind.COPY
@@ -82,22 +90,26 @@ CHATBOX = TemplateKind.CHATBOX_ONGOING
 # carries virtual-screen coordinates.
 REGION = ScreenRegion(-1200, 40, 640, 480)
 
-SPEC = MonitorSpec(
+# What ``watch`` answers with: the monitor's whole effective service (§10.5).
+# Every field set to something OTHER than its default, so a codec that dropped
+# one fails rather than accidentally agreeing with the constructor.
+WATCHED = Watched(
     service="claude",
     region=REGION,
-    finish_signals=("busy", "stale"),
-    stable_seconds=1.5,
-    tolerance=24,
-    matcher="opencv",
+    profiled=True,
+    label="Claude web",
+    generation=9,
+    delivery="stream",
+    auto_submit=True,
+    scroll_action="end",
+    snap_back=False,
     hover_scan=True,
-    scroll_action="wheel",
-    snap_back=True,
-    delivery="paste",
-    auto_submit=False,
-    send_arm_min_diff=0.02,
-    send_arm_ticks=2,
-    send_gate_timeout_ticks=240,
-    send_gate_seen_timeout_ticks=20,
+    max_paste_chars=12_000,
+    total_context_chars=400_000,
+    wrap_blocks_in_fence=False,
+    attachment_note=False,
+    require_fenced_reply=True,
+    extra_instructions="mind the ]( sequences",
 )
 
 TICK = Tick(
@@ -157,14 +169,36 @@ def test_every_template_kind_round_trips() -> None:
         assert decode_kind(encode_kind(kind)) is kind
 
 
-def test_a_spec_round_trips_whole() -> None:
-    assert decode_spec(encode_spec(SPEC)) == SPEC
+def test_every_slot_round_trips() -> None:
+    """By VALUE, like ``TemplateKind`` and unlike the state enums: ``master`` /
+    ``subagent`` are what a slot IS everywhere else in the program."""
+    for slot in AgentSlot:
+        assert decode_slot(encode_slot(slot)) is slot
 
 
-def test_a_spec_with_no_region_round_trips() -> None:
-    """The configured-but-idle state (§2.10): a service named, nowhere to look."""
-    idle = replace(SPEC, region=None)
-    assert decode_spec(encode_spec(idle)) == idle
+def test_a_slot_that_is_not_one_is_refused() -> None:
+    with pytest.raises(WireError):
+        decode_slot("supervisor")
+
+
+def test_the_whole_effective_service_round_trips() -> None:
+    """Every field, including the eleven preset ones: this value is the ONLY
+    way a brain learns what service it is driving (§10.5), so a field lost in
+    the codec is a turn composed against the wrong budget."""
+    assert decode_watched(encode_watched(WATCHED)) == WATCHED
+
+
+def test_a_watched_with_nothing_watched_round_trips() -> None:
+    """What a monitor answers before it has been pointed at anything, and what
+    an idle handle answers for ever."""
+    assert decode_watched(encode_watched(EMPTY_WATCHED)) == EMPTY_WATCHED
+
+
+def test_the_spec_is_not_on_this_wire_at_all() -> None:
+    """§10.5's rule, as a table assertion: a brain may not name a service, a
+    rectangle or a search tolerance on a desktop it cannot see."""
+    assert "configure" not in VERBS
+    assert "watch" in VERBS
 
 
 @pytest.mark.parametrize(
@@ -220,7 +254,7 @@ def test_a_failed_capture_tick_round_trips() -> None:
 # test below fails if a verb appears in the table with no row here, which is how
 # a new verb gets noticed.
 CALLS: dict[str, dict[str, Any]] = {
-    "configure": {"spec": SPEC},
+    "watch": {"slot": AgentSlot.SUBAGENT},
     "suspend": {},
     "resume": {},
     "close": {},
@@ -244,7 +278,7 @@ CALLS: dict[str, dict[str, Any]] = {
 }
 
 RETURNS: dict[str, Any] = {
-    "configure": 4,
+    "watch": WATCHED,
     "suspend": None,
     "resume": None,
     "close": None,
@@ -264,7 +298,7 @@ RETURNS: dict[str, Any] = {
     "click_element": ElementClick.AMBIGUOUS,
     "hover_scan": REGION,
     "snap_to_bottom": None,
-    "watched": Watched(service="svc", region=REGION, profiled=True),
+    "watched": WATCHED,
 }
 
 
@@ -357,14 +391,15 @@ def test_a_hello_with_a_non_string_token_is_refused() -> None:
         read_hello({key: value for key, value in hello_frame().items() if key != "token"})
 
 
-def test_the_wire_version_is_the_monitors_own_and_is_two() -> None:
-    """Bumped from 1 when the hello grew a token (§5). Asserted as a NUMBER on
+def test_the_wire_version_is_the_monitors_own_and_is_three() -> None:
+    """1 -> 2 when the hello grew a token (§5); 2 -> 3 when ``configure`` left
+    the verb table and ``watch`` took its place (§10.5). Asserted as a NUMBER on
     purpose: the two installs gate on it, and a silent bump is a silent refusal
     of every monitor that was not upgraded with the brain."""
-    assert MONITOR_WIRE_VERSION == 2
-    assert OURS.wire == 2
-    assert hello_frame()["version"] == 2
-    assert hello_ack_frame("srv-1", None)["version"] == 2
+    assert MONITOR_WIRE_VERSION == 3
+    assert OURS.wire == 3
+    assert hello_frame()["version"] == 3
+    assert hello_ack_frame("srv-1", None)["version"] == 3
 
 
 def test_unauthorized_is_an_error_kind_that_belongs_to_the_connection() -> None:

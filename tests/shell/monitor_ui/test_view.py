@@ -876,3 +876,116 @@ def test_a_monitor_that_remembers_nothing_still_says_not_set(calib: CalibHarness
     calib.view.start()
     assert calib.view.region is None
     assert calib.flush().last("calib")["region"] == "not set"
+
+
+# == the window IS the monitor's configuration (§10.5) ========================
+# Wave 3's inversion: a brain never sends a service, a preset or a spec. It names
+# a WINDOW over the wire and the monitor answers - and on a machine with a
+# Monitor UI up, the monitor's answer has to be THIS window's selection, because
+# the config file does not know which service the operator just picked or which
+# box they just drew. That is one state behind two surfaces, which is the
+# disagreement the wave exists to end.
+
+
+def test_the_view_installs_itself_as_the_monitors_spec_source(
+    calib: CalibHarness,
+) -> None:
+    """At construction, not at ``start``: a ``watch`` can arrive over the wire
+    before the page has finished loading, and it must still be answered with
+    this window's selection rather than with the config file's."""
+    assert calib.monitor.spec_for == calib.view.spec_for
+
+
+async def test_a_watch_over_the_wire_runs_this_windows_spec(
+    calib: CalibHarness,
+) -> None:
+    """What a remote brain's ``watch(MASTER)`` actually gets: the region drawn
+    here, under the service key this window resolved."""
+    view = calib.view
+    drawn = ScreenRegion(left=5, top=6, width=70, height=80)
+    view.start()
+    view.set_region(AgentSlot.MASTER, drawn)
+
+    watched = await calib.monitor.watch(AgentSlot.MASTER)
+
+    assert watched.service == view._service_key()
+    assert watched.region == drawn
+
+
+async def test_a_watch_for_the_other_window_switches_this_one_and_repaints(
+    calib: CalibHarness,
+) -> None:
+    """A delegation starting is exactly when the sub-agent's window is worth
+    looking at - so the header, the service line and the ELEMENTS column follow
+    the brain rather than describing a window nobody is watching."""
+    view = calib.view
+    view.start()
+    assert view.slot is AgentSlot.MASTER
+    calib.flush().clear()
+
+    watched = await calib.monitor.watch(AgentSlot.SUBAGENT)
+
+    assert view.slot is AgentSlot.SUBAGENT
+    assert watched.service == view._service_key()
+    events = calib.flush()
+    assert events.last("calib")["slot"] == SUBAGENT
+    assert events.last("calib")["service"] == view._service_key()
+    # The column is blanked too: a crop cut from the master's window under the
+    # sub-agent's name is a straightforward lie.
+    assert events.last("elements")["window"] == SUBAGENT
+    rows = rows_of(events.last("elements"))
+    assert {row["state"] for row in rows.values()} == {STATE_RESTING}
+
+
+async def test_a_watch_for_the_window_already_shown_repaints_nothing(
+    calib: CalibHarness,
+) -> None:
+    """A brain re-reading its own slot on every redial must not make the window
+    flicker through a slot switch it never left."""
+    view = calib.view
+    view.start()
+    calib.flush().clear()
+
+    await calib.monitor.watch(AgentSlot.MASTER)
+
+    assert view.slot is AgentSlot.MASTER
+    assert calib.flush().of_type("calib") == []
+
+
+async def test_a_watch_configures_the_monitor_exactly_once(
+    calib: CalibHarness,
+) -> None:
+    """The slot adoption may repaint, but it may not retarget: the retarget is
+    the very call being answered, and a second one would be this window
+    configuring the monitor behind the brain's back."""
+    view = calib.view
+    view.start()
+    before = calib.monitor.generations
+    scheduled = len(calib.scheduled)
+
+    await calib.monitor.watch(AgentSlot.SUBAGENT)
+
+    assert calib.monitor.generations == before + 1
+    assert len(calib.scheduled) == scheduled, "the slot switch scheduled a second retarget"
+    assert view.slot is AgentSlot.SUBAGENT
+
+
+def test_the_spec_carries_the_whole_preset_the_brain_acts_on(
+    calib: CalibHarness,
+) -> None:
+    """§10.5: the paste budget, the fences and the instructions all reach the
+    brain through ``Watched``, so they have to be on the spec that builds it."""
+    view = calib.view
+    view.start()
+    preset = view.config.services[view._service_key()]
+    built = view.spec_for(AgentSlot.MASTER)
+
+    assert built.label == preset.label
+    assert built.max_paste_chars == preset.max_paste_chars
+    assert built.total_context_chars == preset.total_context_chars
+    assert built.wrap_blocks_in_fence == preset.wrap_blocks_in_fence
+    assert built.attachment_note == preset.attachment_note
+    assert built.require_fenced_reply == preset.require_fenced_reply
+    assert built.extra_instructions == preset.extra_instructions
+    assert built.delivery == preset.delivery
+    assert built.auto_submit == preset.auto_submit

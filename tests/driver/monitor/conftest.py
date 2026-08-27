@@ -93,15 +93,6 @@ def spec(
         stable_seconds=stable_seconds,
         tolerance=24,
         matcher="anchors",
-        hover_scan=False,
-        scroll_action="wheel",
-        snap_back=False,
-        delivery="paste",
-        auto_submit=False,
-        send_arm_min_diff=0.02,
-        send_arm_ticks=2,
-        send_gate_timeout_ticks=240,
-        send_gate_seen_timeout_ticks=20,
     )
 
 

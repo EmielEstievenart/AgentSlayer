@@ -27,10 +27,11 @@ import pytest
 
 from agentclip.driver.clip.base import ClipboardUnavailable
 from agentclip.driver.monitor.fake import FakeUIMonitor
-from agentclip.driver.monitor.protocol import ElementClick, Tick
+from agentclip.driver.monitor.protocol import EMPTY_WATCHED, ElementClick, Tick
 from agentclip.driver.monitor.switchable import IdleMonitor, SwitchableMonitor
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleTracker
 
 from .conftest import spec
@@ -86,13 +87,32 @@ async def test_a_write_with_no_monitor_raises_the_fallbacks_own_exception() -> N
 
 
 async def test_the_spec_is_remembered_even_with_nothing_attached() -> None:
-    """``configure`` before the first dial is not lost: the spec is the BRAIN's
-    (§2.10 - it is what a reconnect re-sends), and the controller reads it back
-    for the send gate's tick budgets while the link is still coming up."""
+    """``configure`` before the first dial is not lost: this handle keeps the
+    last spec it was given, so a caller can read back what the local side asked
+    for while the link is still coming up."""
     monitor = SwitchableMonitor()
     assert await monitor.configure(spec()) == 0  # an idle inner has no run to stamp
     assert monitor.spec is not None
-    assert monitor.spec.send_arm_ticks == 2
+    assert monitor.spec.service == "svc"
+
+
+async def test_watch_forwards_and_an_idle_inner_answers_the_empty_service() -> None:
+    """§10.5: ``watch`` is the brain's only retarget, and a handle attached to
+    nothing answers it the way an uncalibrated monitor does - no service, no
+    box, no profile - rather than raising at a brain that has not dialled yet."""
+    monitor = SwitchableMonitor()
+    assert await monitor.watch(AgentSlot.MASTER) == EMPTY_WATCHED
+
+    inner = FakeUIMonitor()
+    inner.specs_for[AgentSlot.SUBAGENT] = spec(service="zai")
+    monitor.swap(inner)
+
+    watched = await monitor.watch(AgentSlot.SUBAGENT)
+    assert inner.watches == [AgentSlot.SUBAGENT]
+    assert watched.service == "zai"
+    # Nothing is cached here: what ``watch`` settled on is the INNER monitor's
+    # own configuration, and a copy on this side would be a second answer.
+    assert monitor.spec is None
 
 
 # == the swap =================================================================

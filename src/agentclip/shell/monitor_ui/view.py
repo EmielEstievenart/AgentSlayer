@@ -221,10 +221,10 @@ class CalibrationView:
         )
         self._schedule = schedule if schedule is not None else _no_schedule
         self._on_exit = on_exit if on_exit is not None else _no_exit
-        # How a saved preset table reaches whoever built the engine factory. In
-        # standalone mode nobody is listening and the write to config.toml IS
-        # the whole propagation; in local mode (phase 4B) the chat GUI passes
-        # its own ``_adopt_config`` here.
+        # How a saved preset table reaches anyone else in this process. Since
+        # ui-monitor.md 10 nobody is: the write to config.toml IS the whole
+        # propagation, and a brain over the wire learns of the edit through
+        # the next ``watch``/``watched`` (10.5). The seam stays for tests.
         self._on_config_change = on_config_change if on_config_change is not None else _no_config
         # How a drawn rectangle reaches the brain. The chat regions are the one
         # piece of calibration with NO persistent home today - they live in
@@ -808,9 +808,9 @@ class CalibrationView:
     def _adopt_config(self, config: Config) -> None:
         """Take an edited config as this window's own, and hand it on.
 
-        The hand-back matters even standalone: in local mode (phase 4B) it is
-        how the chat GUI's engine factory learns about the edit, and the
-        callback is the same shape ``run_gui`` already takes.
+        The hand-back is a seam and nothing more since ui-monitor.md 10: no
+        Chat UI shares this process any more, so the config file and the wire
+        (``watched``, 10.5) are how an edit reaches a brain.
         """
         self._config = config
         self._on_config_change(config)

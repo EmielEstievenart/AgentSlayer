@@ -426,8 +426,9 @@ independent of the files question.
 
 ### 3a.3 Anatomy
 
-Header `Attach a monitor`, with a hint that reads `attached: <peer>` or
-`watching this machine's screen`.
+Header `Attach a monitor`, with a hint that reads `attached: <peer>` (or
+`attached: local` for the child this Chat UI launched) or `no monitor attached`
+(ui-monitor.md §10.2: there is no "this machine's screen" fallback any more).
 
 Left column: `SAVED MONITORS` — one row per `[monitor.<name>]` table, name over
 detail (`10.0.0.5:7777`, or `via pi -> 127.0.0.1:7777`). Beside each row, not

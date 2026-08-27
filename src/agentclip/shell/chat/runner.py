@@ -52,12 +52,13 @@ from collections.abc import Callable, Coroutine, Sequence
 from pathlib import Path
 from typing import Any
 
-from agentclip.config import Config, MonitorTarget
+from agentclip.config import Config
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.shell.app.link import Link, SkillReport
+from agentclip.shell.app.monitor_launch import LocalMonitorLauncher
 from agentclip.shell.chat.remote import RemoteConnect
-from agentclip.shell.chat.view import GuiView, McpStatusSource
+from agentclip.shell.chat.view import GuiView, McpStatusSource, MonitorLaunch
 from agentclip.shell.webview.bridge import Bridge, EmitFn, JsApi
 
 # How long the loop thread gets to unwind before the window closes anyway. The
@@ -85,7 +86,8 @@ class GuiRunner:
         remote: RemoteConnect | None = None,
         on_close: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
-        monitor_target: MonitorTarget | tuple[str, int] | None = None,
+        monitor_target: MonitorLaunch = None,
+        launcher: LocalMonitorLauncher | None = None,
     ) -> None:
         self._loop = asyncio.new_event_loop()
         self._thread: threading.Thread | None = None
@@ -116,6 +118,7 @@ class GuiRunner:
             on_exit=self.request_close,
             on_config_change=on_config_change,
             monitor_target=monitor_target,
+            launcher=launcher,
         )
         self.js_api = JsApi(self)
 
@@ -254,6 +257,12 @@ class GuiRunner:
             self._loop.call_soon_threadsafe(self._loop.stop)
             thread.join(SHUTDOWN_TIMEOUT_S)
         self._thread = None
+        # 3b. The local monitor CHILD, if this window started one (§10.1).
+        #     After the link is closed and not before: the child dies with a
+        #     terminate either way, and stopping it first would turn an orderly
+        #     close of the wire into a dropped link the teardown then reports.
+        #     A launcher that never started anything is a no-op here.
+        self.view.launcher.stop()
         # 4. Last, so anything the teardown said still reaches the page.
         self.bridge.stop()
 
@@ -354,9 +363,6 @@ class GuiRunner:
 
     def retry_insert(self) -> None:
         self.schedule_call(self.view.retry_insert)
-
-    def set_service(self, key: str) -> None:
-        self.schedule_call(self.view.set_service, key)
 
     def open_calibration(self) -> None:
         self.schedule_call(self.view.open_calibration)

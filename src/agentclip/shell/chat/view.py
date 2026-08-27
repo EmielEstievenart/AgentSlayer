@@ -27,14 +27,21 @@ definition; ``docs/design/gui.md`` §2 lists them and that list is now empty.
 Everything a *turn* passes through - the transcript, the gate, the delivery, the
 watcher, the prompts - is the real thing, and so are the sidebar, the status
 bar's ten segments and the harness log pane (increment 2), the window tabs, the
-per-window transcripts and the session summary (increment 3). Every surface
-made of PIXELS - the ELEMENTS column, the chat-region picker, ``/identify`` and
-the service editor - is a WINDOW OF ITS OWN as of ui-monitor.md 6.4
-(``monitor_ui/``), built over a local monitor rather than over this shell's
-controller; what is left here is the door onto it and the bracket around the
-visit. What is left of the parity backlog is whole SURFACES this shell does not
-have yet - the SSH connect dialog. (Help, settings, the slash popup and the
-whole key chain landed in increment 6.)
+per-window transcripts and the session summary (increment 3). What is left of
+the parity backlog is whole SURFACES this shell does not have yet - the SSH
+connect dialog. (Help, settings, the slash popup and the whole key chain landed
+in increment 6.)
+
+**This window hosts no monitor** (ui-monitor.md §10.2). Every surface made of
+PIXELS - the ELEMENTS column, the chat-region picker, ``/identify`` and the
+service editor - belongs to the Monitor UI, which is a PROCESS of its own
+(``agentclip-monitor``): either one this shell launched on this PC
+(``shell/app/monitor_launch.py``) or one already running on the machine the
+browser is on. Both are reached the same way - one dial, one token, one
+``watched()`` stream - so there is no second path to a screen for the two to
+disagree on (§10.0). What is left here is one sentence pointing at that window,
+and a brain that reads its service back off :class:`Watched` rather than out of
+this host's ``[services.*]`` tables (§10.5).
 """
 
 from __future__ import annotations
@@ -59,19 +66,12 @@ from agentclip.config import (
     default_global_config_path,
     default_profile_dir,
     drop_monitor_target,
-    save_active_services,
     save_gui_theme,
     save_monitor_target,
     save_remote_target,
 )
 from agentclip.driver.automation.controller import AutomationController, MonitorLike
 from agentclip.driver.automation.describe import describe
-from agentclip.driver.automation.finish import (
-    SEND_ARM_MIN_DIFF,
-    SEND_ARM_TICKS,
-    SEND_GATE_SEEN_TIMEOUT_TICKS,
-    SEND_GATE_TIMEOUT_TICKS,
-)
 from agentclip.driver.automation.harness_log import (
     KIND_ARMED,
     KIND_CLIPBOARD,
@@ -85,12 +85,10 @@ from agentclip.driver.automation.loop_state import (
 )
 from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
-from agentclip.driver.monitor.local import LocalUIMonitor
-from agentclip.driver.monitor.protocol import MonitorSpec, UIMonitor, Watched
+from agentclip.driver.monitor.protocol import EMPTY_WATCHED, Tick, UIMonitor, Watched
 from agentclip.driver.monitor.remote import RemoteUIMonitor
-from agentclip.driver.monitor.switchable import SwitchableMonitor
+from agentclip.driver.monitor.switchable import IdleMonitor, SwitchableMonitor
 from agentclip.driver.screen.capture import RegionImage
-from agentclip.driver.screen.detector import ScreenDetector
 from agentclip.driver.screen.focus import foreground_window
 from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.profile_store import load_profile
@@ -115,13 +113,19 @@ from agentclip.protocol.types import Outbound, ToolCall
 from agentclip.shell.app import SessionController, SessionSpec, SessionView
 from agentclip.shell.app.commands import COMMANDS
 from agentclip.shell.app.link import Link, NoSkills, SkillReport
+from agentclip.shell.app.monitor_launch import (
+    LOCAL_MONITOR_EXITED,
+    LOCAL_MONITOR_NAME,
+    LaunchLocal,
+    LocalMonitorLauncher,
+)
 from agentclip.shell.app.sizes import fmt_budget, fmt_tokens, fmt_tokens_compact
 from agentclip.shell.app.types import SessionRef
 from agentclip.shell.app.view import RunCall, Severity
 from agentclip.shell.chat.docs import load_doc_pages
 from agentclip.shell.chat.remote import (
+    MODE_LOCAL,
     MONITOR_CONNECT_FIRST,
-    MONITOR_LOCAL_AGAIN,
     ConnectDialog,
     MonitorDialog,
     RemoteConnect,
@@ -131,8 +135,6 @@ from agentclip.shell.chat.remote import (
     policy_lines,
     saved_rows,
 )
-from agentclip.shell.monitor_ui import CalibrationRunner, open_calibration_window
-from agentclip.shell.monitor_ui.window import build_monitor as build_calibration_monitor
 from agentclip.shell.webview.bridge import Bridge
 
 # Where a model's stated reason is clipped at the gate. The tools layer's own
@@ -247,6 +249,13 @@ STALE_OFF = "finish detection off - F2 to configure"
 # What the SERVICE block's appearance count is followed by: the door to the
 # captures, which is the editor this key opens (``sidebar.PROFILE_HINT``).
 PROFILE_HINT = " · F2 for captures + detection"
+# What the read-only SERVICE line says after the monitor's own words for it
+# (§10.5): the key is not a choice this window offers any more, it is a fact
+# read back off the machine that owns the screen.
+SERVICE_FROM_MONITOR = " · from the monitor"
+# ...and what it says before there is an answer at all - no link yet, or a
+# monitor with nothing configured for this window.
+SERVICE_UNWATCHED = "no service - the monitor has not answered for this window"
 
 # == settings (F4) ============================================================
 # The TUI's SettingsScreen is a theme picker and nothing else - one "Appearance"
@@ -317,16 +326,17 @@ CONNECT_MID_TURN = "a turn is running - connecting would end this session"
 CONNECT_UNAVAILABLE = "this build has no way to go remote"
 CONNECT_DONE = "connected to {target} - this session's tools now run over there"
 
-# What a second F2 says. A toast rather than silence: the window it is
-# asking for may be behind the browser the user is calibrating against, and
-# "nothing happened" and "it is already open, look behind you" are different
-# answers to the same press.
-CALIBRATION_OPEN = "the calibration window is already open"
-# What F2 says in SPLIT mode. The calibration window is a fullscreen capture
-# overlay over the browser being calibrated (ui-monitor.md §2.6), and in split
-# mode that browser is on another machine - so there is nothing here to draw a
-# box around and the door is closed rather than opened onto the wrong screen.
-CALIBRATION_REMOTE = "calibration runs on the monitor's machine: run agentclip-monitor there"
+# The ONE answer every calibration affordance gives now (ui-monitor.md §10.2):
+# F2, the titlebar's **monitor UI** button, the sidebar's two doors and
+# ``/identify``. There is no in-process calibration window any more, and there
+# is no branch on which machine the pixels are on - the Monitor UI is a window
+# of the MONITOR PROCESS, which is either the child this app launched here or
+# the one already running over there, and the sentence names both so the user
+# knows which window to go and look for.
+CALIBRATION_ELSEWHERE = (
+    "calibration lives in the Monitor UI: the agentclip-monitor window (local),"
+    " or that window on the monitor's machine (remote)"
+)
 
 # == the monitor link (--monitor host:port, ui-monitor.md §6.5) ================
 # Split mode's four sentences. Each one is a moment the user cannot see for
@@ -364,8 +374,26 @@ MONITOR_BACKOFF_CAP = 10.0
 # SSH tab there is no checklist to be busy on - there is a button that is
 # already pressed, and a second press says so.
 MONITOR_DIAL_BUSY = "a monitor dial is already running"
-MONITOR_ALREADY_LOCAL = "this window is already watching this machine's screen"
+MONITOR_ALREADY_NONE = "no monitor is attached - there is nothing to disconnect"
 MONITOR_DIAL_FAILED = "the monitor did not answer"
+
+# == no monitor, and the local child (ui-monitor.md §10.1/§10.2) ===============
+# Where the loop parks when this window has no screen at all: ``--monitor none``
+# at launch, and every deliberate Disconnect afterwards. It is a STATE to sit in
+# rather than an error - the window works, the transcript works, and the two
+# ways out are both one click away on the Monitor tab.
+MONITOR_NONE = "no monitor attached - attach or launch one from the Monitor tab"
+# The local child between "spawned" and "listening". Said as a DISCONNECTED
+# reason rather than a toast, which is also what makes the dial failures behind
+# it quiet: the loop is already parked, so ``_park_disconnected``'s once-per-
+# outage toast has already been spent on this sentence.
+MONITOR_LOCAL_STARTING = "starting a monitor on this PC - the link comes up when it is listening"
+# The launch itself refused. Distinct from a dial that failed, because nothing
+# was ever started: no exe beside this one, no permission to spawn, no port.
+MONITOR_LOCAL_FAILED = "could not start a local monitor: {reason}"
+# What a launched child is called wherever a peer is shown. The launcher's own
+# name for its target, so the badge, the toasts and the Monitor tab all agree.
+MONITOR_LOCAL_PEER = LOCAL_MONITOR_NAME
 
 REGION_UNSET = "not set - alt-tab to the chat yourself"
 # The CHAT WINDOW block's readiness line, per SELECTED window - ``tui/widgets/
@@ -410,10 +438,45 @@ def _short_root(project_root: Path) -> str:
         return str(project_root) if project_root.drive else project_root.as_posix()
 
 
-def _service_options(config: Config) -> list[list[str]]:
-    """``key · 12k`` per row, with the key as the value - the picker's options."""
-    presets = sorted(config.services.values(), key=lambda p: p.key)
-    return [[preset.key, f"{preset.key} · {_budget(preset.max_paste_chars)}"] for preset in presets]
+def preset_from_watched(watched: Watched, *, alerts: ServicePreset) -> ServicePreset:
+    """The monitor's effective service, as the recipes' ``ServicePreset`` (§10.5).
+
+    The whole of the brain's service knowledge in one adapter. Everything the
+    automation ACTS on - what a paste may weigh, whether Enter may be pressed,
+    how the auto-copy reaches the newest reply, whether a reply has to arrive
+    fenced - is a fact about the chat the MONITOR is driving, so it comes off
+    :class:`Watched` and never out of this host's ``[services.*]`` tables. That
+    inversion is the point of the wave: a Chat UI reading its own copy of a
+    preset would be composing turns for a service somebody else is running
+    (§10.0's two bugs, in one sentence).
+
+    Two kinds of field are deliberately NOT taken from ``watched``:
+
+    * ``stable_seconds`` / ``tolerance`` / ``matcher`` / ``finish_signals`` -
+      how pixels are searched, which never leaves the monitor and is left at the
+      preset defaults here because nothing above this line reads them any more.
+    * ``alert_sound`` / ``alert_repeat_seconds`` - the uh-oh alarm, which is a
+      sound played on the machine the USER is sitting at. That is this one, so
+      they come from ``alerts``: the host's own config (§10.5's "stay host-side").
+    """
+    return ServicePreset(
+        key=watched.service or "",
+        label=watched.label,
+        max_paste_chars=watched.max_paste_chars,
+        total_context_chars=watched.total_context_chars,
+        wrap_blocks_in_fence=watched.wrap_blocks_in_fence,
+        attachment_note=watched.attachment_note,
+        hover_scan=watched.hover_scan,
+        delivery=watched.delivery,
+        scroll_action=watched.scroll_action,
+        auto_submit=watched.auto_submit,
+        require_fenced_reply=watched.require_fenced_reply,
+        extra_instructions=watched.extra_instructions,
+        edit_by_lines=watched.edit_by_lines,
+        snap_back=watched.snap_back,
+        alert_sound=alerts.alert_sound,
+        alert_repeat_seconds=alerts.alert_repeat_seconds,
+    )
 
 
 def _mcp_line(status: Any) -> str:
@@ -495,24 +558,26 @@ class McpStatusSource(Protocol):
 
 class ShellMonitor(MonitorLike, Protocol):
     """The monitor as a SHELL needs it: the controller's requirement, plus the
-    one verb only the object that owns the window ever calls.
+    three verbs only the object that owns the window ever calls.
 
     ``AutomationController.MonitorLike`` is the automation's own share of the
     contract and deliberately says nothing about lifetime - the controller never
-    starts the monitor and never ends it. This shell does both: it constructs
-    the monitor, hands it down, and closes it when the window goes away, which
-    is the whole of the difference between the two protocols. ``detector`` is
-    the monitor's LOCAL-ONLY tier (ui-monitor.md 3, local.py's "three tiers"):
-    it never rides the wire, so the automation's own protocol says nothing about
-    it and the one reader up here - ``copy_seen_note`` - asks for it by name.
+    starts the monitor and never ends it. This shell does: it holds the handle,
+    swaps a link into it and closes it when the window goes away.
+
+    :meth:`watch` and :meth:`watched` are the other half, and they are the whole
+    of §10.5: the brain names a WINDOW and reads the monitor's answer back, and
+    there is nothing on this protocol for sending a service, a preset or a spec.
+    Nothing LOCAL-ONLY is on it either - the detector used to be, and with it
+    went ``copy_seen_note``'s report: a Chat UI that hosts no monitor has no
+    detector object to ask (ui-monitor.md §10.2, §10.4).
     """
 
     async def close(self) -> None: ...
 
-    async def watched(self) -> Watched: ...
+    async def watch(self, slot: AgentSlot) -> Watched: ...
 
-    @property
-    def detector(self) -> ScreenDetector | None: ...
+    async def watched(self) -> Watched: ...
 
 
 class DialledMonitor(UIMonitor, Protocol):
@@ -552,18 +617,51 @@ async def _dial_remote_monitor(host: str, port: int, token: str) -> DialledMonit
     return await RemoteUIMonitor.connect(host, port, token=token or None)
 
 
-def _as_monitor_target(given: MonitorTarget | tuple[str, int] | None) -> MonitorTarget | None:
-    """Normalise what a launch handed over into the one value type.
+#: What ``--monitor`` can hand this view: a saved/typed address, the "start one
+#: here" sentinel (§10.1), or nothing at all. Spelled once because the ctor, the
+#: runner and ``run_gui`` all name it and a three-way union is exactly the kind
+#: of thing that drifts into four.
+MonitorLaunch = MonitorTarget | LaunchLocal | tuple[str, int] | None
+
+
+def _as_monitor_target(given: MonitorLaunch) -> MonitorTarget | LaunchLocal | None:
+    """Normalise what a launch handed over into the values this object holds.
 
     ``cli.main`` sends a :class:`MonitorTarget` since §9.2 (it has a token and,
-    for ``--monitor @name``, an SSH hop to make); the bare ``(host, port)`` pair
-    is §6.5's shape and is still accepted, because it is what "the address and
-    nothing else" honestly looks like and half the suite says it that way.
+    for ``--monitor @name``, an SSH hop to make) or a :class:`LaunchLocal` since
+    §10.1; the bare ``(host, port)`` pair is §6.5's shape and is still accepted,
+    because it is what "the address and nothing else" honestly looks like and
+    half the suite says it that way.
     """
-    if given is None or isinstance(given, MonitorTarget):
+    if given is None or isinstance(given, (MonitorTarget, LaunchLocal)):
         return given
     host, port = given
     return MonitorTarget(name=f"{host}:{port}", host=host, port=port)
+
+
+class _NoLauncher:
+    """The launcher a view nobody wired one into gets: it starts nothing.
+
+    Not a raise and not a real :class:`SubprocessLauncher`, for two opposite
+    reasons. A default that could really spawn would mean any test that
+    constructed a view with ``LaunchLocal`` would put an ``agentclip-monitor``
+    on the developer's desktop; a default that raised on construction would make
+    the seam mandatory for the dozen suites that never go near a monitor. So it
+    is the honest "this build cannot launch one", reported through the ordinary
+    failed-launch path (:data:`MONITOR_LOCAL_FAILED`).
+    """
+
+    def start(self, project_root: Path, *, global_config_path: Path | None = None) -> Any:
+        raise RuntimeError("this view was built with no local monitor launcher")
+
+    def stop(self) -> None:
+        """Nothing was ever started."""
+
+    def alive(self) -> bool:
+        return False
+
+    def exit_code(self) -> int | None:
+        return None
 
 
 def _fence(body: str) -> str:
@@ -691,12 +789,11 @@ class GuiView:
         skills: Callable[[], SkillReport] | None = None,
         host: Any = None,
         remote: RemoteConnect | None = None,
-        monitor: ShellMonitor | None = None,
         schedule: Callable[[Coroutine[Any, Any, Any]], None] | None = None,
         on_exit: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
-        open_calibration: OpenCalibration | None = None,
-        monitor_target: MonitorTarget | tuple[str, int] | None = None,
+        monitor_target: MonitorLaunch = None,
+        launcher: LocalMonitorLauncher | None = None,
         dial: MonitorDial | None = None,
     ) -> None:
         self._bridge = bridge
@@ -731,12 +828,6 @@ class GuiView:
         # and drivable - without one.
         self._schedule = schedule if schedule is not None else _no_schedule
         self._on_exit = on_exit if on_exit is not None else _no_exit
-        # The one line of this shell that touches pywebview. Injected for the
-        # reason ``schedule`` is: a second window is the runner's world, not
-        # the view's, and a suite must be able to press F2 without a toolkit.
-        self._open_calibration: OpenCalibration = (
-            open_calibration if open_calibration is not None else _open_calibration_window
-        )
 
         # -- transcripts, one per WINDOW -------------------------------------
         # Three pointers, and the whole of this surface's correctness is that
@@ -789,36 +880,45 @@ class GuiView:
         # everything on the far side of the screen: the poll loop and its
         # cadence, the detector and its trackers, the generation stamp, the
         # mouse, the keyboard and the clipboard watcher
-        # (docs/design/ui-monitor.md §6.1). What is left up here is which window
-        # to point it at (``_live_spec``) and what its answers mean to the
-        # chrome.
+        # (docs/design/ui-monitor.md §6.1). What is left up here is which WINDOW
+        # to point it at (``watch``) and what its answers mean to the chrome.
         #
-        # Injected so a suite can hand in ``FakeUIMonitor`` and push ticks by
-        # hand; the default is the real local one, because a GUI nobody
-        # configured is still a GUI watching this machine's screen. ``profile_for``
-        # is the shell's own profile cache keyed by SERVICE - the monitor is
-        # handed a service KEY in its spec and resolves the template PNGs itself
-        # (§2.10), which is why it takes a lookup rather than a profile.
-        # -- split mode (``--monitor host:port``, ui-monitor.md §6.5) ---------
-        # The one launch flag that changes WHICH MACHINE the screen is on. When
-        # it is set the monitor above is not built at all: what the controller
-        # gets is a :class:`SwitchableMonitor`, inert until the first dial lands
-        # after first paint and swapped again on every redial, so neither this
-        # object nor the automation core is ever rebuilt for a link event
-        # (§2.9). A ``monitor=`` handed in alongside it is ignored - the whole
-        # point of split mode is that the machine arrives later.
-        #
-        # Since §9.2 the flag is no longer the whole entry: the Monitor tab on
-        # the connect dialog dials one mid-session, so the handle is a
-        # ``SwitchableMonitor`` in EVERY mode - local mode's inner is simply the
-        # ``LocalUIMonitor`` this machine watches its own screen with. That is
-        # what makes both directions ordinary swaps: a dial replaces the local
-        # inner with a remote one, and a disconnect puts a local one back,
-        # without the controller (or this object) being rebuilt for either.
-        self._monitor_target = _as_monitor_target(monitor_target)
+        # **It is always over the wire** (§10.2). There is no in-process tier
+        # any more and no ``monitor=`` seam: the handle is a
+        # :class:`SwitchableMonitor` that starts INERT and gets a link swapped
+        # into it after first paint - whether that link goes to a monitor this
+        # app launched on this PC (:class:`LaunchLocal`) or to one already
+        # running on the machine the browser is on. Both are the same dial, the
+        # same token and the same ``watched()`` stream, which is the whole point
+        # of the wave: two ways to reach a screen were two things to disagree
+        # (§10.0). A suite injects a fake ``dial`` and a fake ``launcher``.
+        launch = _as_monitor_target(monitor_target)
+        # Two fields out of one launch value, because they are two different
+        # facts with two different lifetimes: WHERE to dial (which a local
+        # launch does not know until the child has a port) and whether the
+        # first thing ``start`` does is spawn one.
+        self._launch_local = isinstance(launch, LaunchLocal)
+        self._monitor_target: MonitorTarget | None = (
+            None if isinstance(launch, LaunchLocal) else launch
+        )
+        self._launcher: LocalMonitorLauncher = (
+            launcher if launcher is not None else _NoLauncher()
+        )
+        # Is the link we hold (or are redialling) the child WE started? It
+        # changes three things and nothing else: the badge says "local", a
+        # deliberate Disconnect stops the process, and a redial that keeps
+        # failing can look at ``alive()`` and say the child is gone.
+        self._local_launched = False
+        # ...and the moment between "we are about to spawn one" and "it has a
+        # port": the badge must say DOWN rather than NO MONITOR, because a
+        # monitor IS on its way.
+        self._launching = False
+        # Said once per dead child, so a ten-minute backoff does not stack one
+        # "the local monitor exited" toast per attempt.
+        self._exited_said = False
         self._dial: MonitorDial = dial if dial is not None else _dial_remote_monitor
         # The tunnel under a Via-SSH link, so a redial can reopen one and a
-        # disconnect can close it. None for a direct dial and for local mode.
+        # disconnect can close it. None for a direct dial and for a local child.
         self._tunnel: Any = None
         # The far PROCESS's id from the last handshake, so a redial can tell a
         # resumed monitor from a restarted one (``DialledMonitor.server_id``).
@@ -830,40 +930,37 @@ class GuiView:
         # redial loop - a backoff that outlived its window would keep dialling
         # a machine nobody is watching any more.
         self._monitor_closing = False
-        # This machine's own screen, and what a ``monitor_disconnect`` swaps
-        # back to. Built EAGERLY in local mode (it is the inner from the first
-        # frame) and lazily in split mode, where building one at launch would
-        # mean a poll thread over the operator's desktop for a window that is
-        # only ever going to watch a VM.
-        self._injected_monitor = monitor
-        self._local_monitor: ShellMonitor | None = (
-            self._build_local_monitor() if self._monitor_target is None else None
-        )
-        self._switch = (
-            SwitchableMonitor(self._local_monitor)
-            if self._local_monitor is not None
-            else SwitchableMonitor()
-        )
+        self._switch = SwitchableMonitor()
         self._monitor: ShellMonitor = self._switch
+        # What the monitor last said it was watching, per window (§10.5). THE
+        # source of the service key, the preset the recipes act on and the box
+        # the brain believes is drawn: this object holds no service table of its
+        # own any more and reads none out of ``config``. One entry per slot
+        # rather than a single ``Watched``, because the sidebar describes the
+        # SELECTED window while the recipes drive the LIVE one, and those part
+        # company for the whole of a delegation.
+        self._watched: dict[AgentSlot, Watched] = dict.fromkeys(AgentSlot, EMPTY_WATCHED)
+        # The generation the readouts above were built from. A tick carrying a
+        # different one means the monitor retargeted itself - a service picked
+        # or a region redrawn in ITS window - so the brain re-reads (§10.5).
+        self._watched_generation = -1
         self._automation = AutomationController(
             view=self,
             monitor=self._monitor,
             host=self,
-            services=self._initial_services(config),
             accepts=looks_like_protocol,
             on_clipboard_captured=self._clipboard_captured,
             has_appearance=self._live_has,
         )
+        # Every tick, on the monitor's own thread (local inner) or reader task
+        # (remote). Two jobs, both readout: keep the DETECTION block's
+        # active-detector line truthful without a detector object to ask
+        # (§10.2), and notice a generation this view has not seen.
+        self._switch.subscribe(self._on_monitor_tick)
         # Whether the sub-agent window was ready last time anything readiness
         # depends on changed, so the "you must /new for it" toast fires once
         # rather than on every repaint (``MainScreen._delegation_ready``).
         self._delegation_ready = False
-        # The calibration window while it is open, and None the rest of
-        # the time - the GUI's equivalent of "is the calibration window
-        # up". One at a time, and the object is held because closing it is
-        # this side's job: it borrowed this shell's loop and cannot
-        # unwind itself.
-        self._calibration: CalibrationRunner | None = None
         self._logged_session_active = False
         # Is the quit-mid-turn confirm already up? ``AgentClipApp.action_quit``'s
         # ``isinstance(self.screen, ConfirmScreen)`` guard: hammering the window's
@@ -923,25 +1020,6 @@ class GuiView:
             skills=self._skill_rows,
         )
 
-    def _build_local_monitor(self) -> ShellMonitor:
-        """This machine's own :class:`LocalUIMonitor` - or the injected fake.
-
-        One constructor for both the eager (local-mode) and the lazy
-        (disconnect-from-split) build, so a shell that came back from a remote
-        monitor is watching the same kind of object it would have had all along.
-        Nothing is started here: a ``LocalUIMonitor`` polls only once it has
-        been configured, which is what makes building one cheap enough to do at
-        the moment the link is dropped.
-        """
-        if self._injected_monitor is not None:
-            return self._injected_monitor
-        return LocalUIMonitor(
-            profile_for=self._profile,
-            clipboard=self._provider,
-            clip_poll_interval_ms=self._config.clipboard.poll_interval_ms,
-            clip_accepts=looks_like_protocol,
-        )
-
     # == lifecycle =============================================================
 
     @property
@@ -957,10 +1035,15 @@ class GuiView:
     @property
     def monitor(self) -> ShellMonitor:
         """The machine the automation acts on - this shell's window onto the
-        screen, the mouse and the clipboard. Closed by the runner. NOT what the
-        calibration window runs over: that one builds its own (6.4), so nothing
-        over there can move this poller's generation or its trackers."""
+        screen, the mouse and the clipboard, always over the wire (§10.2).
+        Closed by the runner."""
         return self._monitor
+
+    @property
+    def launcher(self) -> LocalMonitorLauncher:
+        """The local monitor's launcher, so the runner can stop the child it
+        started after the wire link is closed (§10.1)."""
+        return self._launcher
 
     def start(self) -> None:
         """Mount: paint the resting chrome, then let the session flow begin.
@@ -999,12 +1082,20 @@ class GuiView:
         for warning in self._config.warnings:
             self.notify(warning, severity="warning", timeout=8)
         # ``--monitor``: same rule as the connect below, and for the same reason
-        # (gui.md §2, "everything slow happens after first paint"). The dial is
-        # a TCP connection to another machine and it is not allowed to hold the
-        # first frame - the chrome is already painted, the loop already says
-        # what it is doing, and the link arrives into a window the user can see.
-        if self._monitor_target is not None:
+        # (gui.md §2, "everything slow happens after first paint"). Neither the
+        # spawn nor the dial is allowed to hold the first frame - the chrome is
+        # already painted, the loop already says what it is doing, and the link
+        # arrives into a window the user can see.
+        #
+        # Three values, three answers (§10.2): start one here and dial it, dial
+        # the one named, or park with no screen at all. The last is a STATE, not
+        # a failure - the Monitor tab is where both other answers come from.
+        if self._launch_local:
+            self._schedule(self._launch_local_monitor())
+        elif self._monitor_target is not None:
             self._schedule(self._dial_monitor())
+        else:
+            self._park_disconnected(MONITOR_NONE)
         # ``--gui --ssh``: the window is already up (gui.md §2, "everything slow
         # happens after first paint"), so the connect that used to block the
         # launch runs HERE, in the dialog, with its fields filled from the flags.
@@ -1511,7 +1602,7 @@ class GuiView:
         around (``MainScreen._window_label``).
         """
         name = _WINDOW_NAMES[window]
-        service = self._automation.service_of(window)
+        service = self._service_for(_WINDOW_SLOTS[window])
         state = self._window_state(window)
         glyph = WINDOW_STATE_GLYPH[state]
         return {
@@ -2330,7 +2421,13 @@ class GuiView:
         self._monitor_dialog.set_fields(mode, host, port, token, via)
 
     def monitor_start(self) -> None:
-        """ "Attach", and "Retry" - one press, because a retry IS a fresh dial."""
+        """"Attach", "Retry" and **Launch a local monitor** - one press.
+
+        A retry IS a fresh dial, and so is a launch: the local mode differs only
+        in where the address comes from (a child we spawn, rather than a form
+        the user filled), which is the whole of §10.1's claim that "local" is
+        not a different kind of monitor.
+        """
         dialog = self._monitor_dialog
         if dialog is None:
             return
@@ -2342,6 +2439,9 @@ class GuiView:
             return
         self._monitor_dialling = True
         self._push_monitor()
+        if dialog.mode == MODE_LOCAL:
+            self._schedule(self._local_flow())
+            return
         self._schedule(self._monitor_flow(dialog.target()))
 
     def monitor_edit(self) -> None:
@@ -2404,37 +2504,48 @@ class GuiView:
             self._push_monitor()
 
     def monitor_disconnect(self) -> None:
-        """Let go of the remote monitor and watch this machine's screen again.
+        """Let go of the monitor. There is no screen after this, on purpose.
 
-        The swap in the other direction, and it is the same swap: a fresh
-        ``LocalUIMonitor`` becomes the inner, the loop is retargeted onto it and
-        the calibration door - closed for as long as the pixels were elsewhere
-        (6.4) - opens again. The redial loop is stopped first, because a
-        deliberate detach that a backoff undid one second later would be a
+        §10.2 removed the fallback: there is no in-process monitor left for a
+        disconnect to swap back to, and quietly launching a child instead would
+        make the button mean "attach a different one". So the link is dropped,
+        the child we started (if it is ours) is stopped, and the loop parks in
+        DISCONNECTED until the user attaches or launches one. Nothing redials -
+        a deliberate detach that a backoff undid one second later would be a
         button that does nothing.
         """
         if self._monitor_target is None:
-            self.notify(MONITOR_ALREADY_LOCAL, severity="warning")
+            self.notify(MONITOR_ALREADY_NONE, severity="warning")
             return
         self._schedule(self._detach_monitor())
 
     async def _detach_monitor(self) -> None:
-        """``monitor_disconnect``'s work, on the loop: swap local, retarget."""
+        """``monitor_disconnect``'s work, on the loop: drop everything.
+
+        The order is the teardown's, not the dial's: the handle goes inert
+        FIRST (so nothing that arrives late acts on a link we have let go of),
+        then the child is stopped, then the tunnel under it. ``_monitor_target``
+        is cleared before any of it, because that field is what the redial loop
+        and the badge read.
+        """
         self._monitor_target = None
         self._monitor_server_id = None
         self._monitor_dialling = False
-        local = self._build_local_monitor()
-        self._local_monitor = local
-        previous = self._switch.swap(local)
+        self._monitor_failure = ""
+        self._exited_said = False
+        previous = self._switch.swap(IdleMonitor())
+        # Ours to stop, and only ours: a monitor somebody else started on that
+        # machine is a standing process this window has no business ending.
+        if self._local_launched:
+            self._local_launched = False
+            self._launcher.stop()
         self._close_tunnel()
-        try:
-            await self._retarget_monitor()
-        except Exception as exc:  # noqa: BLE001 - a local retarget that refused
-            self.notify(f"could not watch this screen: {exc}", severity="warning")
-        self._switch.watch_clipboard(self._automation.os_armed)
-        self._automation.set_loop_state(LoopState.IDLE, MONITOR_LOCAL_AGAIN)
+        self._watched = dict.fromkeys(AgentSlot, EMPTY_WATCHED)
+        self._watched_generation = -1
+        self._automation.active_detectors = ()
+        self._automation.set_loop_state(LoopState.DISCONNECTED, MONITOR_NONE)
         self._push_link()
-        self.notify(MONITOR_LOCAL_AGAIN)
+        self.notify(MONITOR_NONE)
         if self._monitor_dialog is not None:
             self._monitor_dialog.detached()
             self._push_monitor()
@@ -2476,8 +2587,33 @@ class GuiView:
             self._push_monitor()
         self._push_sidebar()
 
+    async def _local_flow(self) -> None:
+        """**Launch a local monitor**, and what a landed one does to the dialog.
+
+        :meth:`_monitor_flow`'s sibling over :meth:`_launch_local_monitor`, and
+        it differs in exactly one place: there is nothing to put back on failure.
+        A form dial that fails restores the target the user was on; a launch
+        that fails leaves this window with no monitor, which is the state it was
+        already in - the button is only ever pressed from there.
+        """
+        dialog = self._monitor_dialog
+        try:
+            ok = await self._launch_local_monitor()
+        finally:
+            self._monitor_dialling = False
+        if dialog is None:
+            return
+        if ok:
+            dialog.succeeded(peer=MONITOR_LOCAL_PEER, can_save=False)
+        else:
+            dialog.failed(self._monitor_failure or MONITOR_DIAL_FAILED)
+        self._push_monitor()
+        self._push_sidebar()
+
     def _monitor_peer(self) -> str:
-        """Which monitor is attached, "" when the screen is this machine's."""
+        """Which monitor is attached, "" when there is none."""
+        if self._local_launched or self._launching:
+            return MONITOR_LOCAL_PEER
         target = self._monitor_target
         return target.describe() if target is not None else ""
 
@@ -2499,23 +2635,30 @@ class GuiView:
         return self._config
 
     def _push_link(self) -> None:
-        """The titlebar's MONITOR badge: whose screen, and is the line up.
+        """The titlebar's MONITOR badge: which monitor, and is the line up.
 
-        Three states and nothing finer - local (this PC's screen), up (a remote
-        monitor is on the line) and down (there is a remote target and no live
-        link to it: dialling, redialling, refused). The toasts say the moments;
-        this is the standing fact, and it is coloured because "am I connected"
-        is the one question a split-mode user asks every time they look up.
+        Three states and nothing finer (§10.2):
+
+        * ``none`` - no monitor at all. ``--monitor none``, or a deliberate
+          Disconnect. Red, because a Chat UI with no screen can drive nothing,
+          and the fix is one click away on the Monitor tab.
+        * ``up`` - a link is live. The peer is ``local`` for the child this app
+          started and the target's own address for anything else.
+        * ``down`` - there is a target and no live link: launching, dialling,
+          redialling, refused. Red, with the reason.
+
+        ``local`` as a STATE is gone with the in-process monitor: watching this
+        PC's screen is now a link like any other, and the badge says so.
         """
         target = self._monitor_target
-        if target is None:
-            self._bridge.send("monitor_link", state="local", peer="", reason="")
+        if target is None and not self._launching:
+            self._bridge.send("monitor_link", state="none", peer="", reason="")
             return
         live = self._automation.loop_state is not LoopState.DISCONNECTED
         self._bridge.send(
             "monitor_link",
             state="up" if live else "down",
-            peer=target.describe(),
+            peer=self._monitor_peer(),
             reason="" if live else (self._monitor_failure or MONITOR_DIALLING),
         )
 
@@ -2846,147 +2989,28 @@ class GuiView:
         """
         self._schedule(self._automation.retry_insert())
 
-    def set_service(self, key: str) -> None:
-        """The SERVICE picker: point this window at a different service.
-
-        The same path ``MainScreen._on_service_changed`` takes - the key lands
-        in the SELECTED window's slot of the automation's map, that window's tab
-        is relabelled (the service key is part of what a tab says), the pick is
-        written back to the global config so the next launch comes up on it, and
-        the detector worker is rebuilt because a different service is a
-        different set of captured appearances.
-        """
-        if key not in self._config.services:
-            return
-        if not self._awaiting_new_session:
-            # The budget is baked into the Engine at bootstrap, so the service
-            # is fixed for the life of a session. The page locks the control
-            # too; this is the door the lock cannot cover.
-            self.notify("the service is fixed while a session runs", severity="warning")
-            self._push_sidebar()
-            return
-        self._automation.set_service(self._selected_window, key)
-        self._persist_services()
-        self._start_detector_worker()
-        self._push_tabs()
-        self._push_sidebar()
-        self._push_status()
-
-    def _persist_services(self) -> None:
-        """Write both windows' services to the global config.toml.
-
-        Remembering the pick is a convenience, never the point of the press, so
-        every way the write can fail degrades to a warning and a session that
-        carries on with the switch the user actually asked for.
-        """
-        try:
-            save_active_services(
-                self._automation.service_of(MASTER_WINDOW),
-                self._automation.service_of(SUBAGENT_WINDOW),
-            )
-        except OSError as exc:
-            self.notify(
-                f"could not remember the service for next launch: {exc}", severity="warning"
-            )
-
-    # == the calibration window (F2) ===========================================
-    # Everything made of PIXELS moved out of this window and into one of its own
-    # (``monitor_ui/``, ui-monitor.md 2.6 and 6.4): the service editor, the
-    # ELEMENTS column, the chat-region picker and ``/identify``. That window runs
-    # over a ``LocalUIMonitor`` of ITS OWN - never this shell's, never the
-    # controller's - so two readers watch one screen, which is fine, and neither
-    # can move the other's generation or trackers.
+    # == the Monitor UI's door (F2) ============================================
+    # Everything made of PIXELS is the MONITOR PROCESS's now (ui-monitor.md
+    # §10.2): the service editor, the ELEMENTS column, the chat-region picker
+    # and ``/identify`` are surfaces of ``agentclip-monitor``'s own window - the
+    # child this app launched here, or the one already running on the machine
+    # the browser is on. This window opens none of them and hosts none of them.
     #
-    # What stays here is what the old in-window editor also owned: the door, the
-    # one-at-a-time rule, the suspend bracket around the visit, and the two ways
-    # an answer comes back (a config the editor saved, a chat region it drew).
+    # So what is left is ONE sentence, given by every affordance that used to
+    # open something: F2, the titlebar's **monitor UI** button, the sidebar's
+    # **Edit services...** and **Set chat region...**, and ``/identify``. One
+    # answer for all five, with no branch on where the pixels are, because the
+    # answer does not depend on it - it is the same window either way, and the
+    # sentence names both places to look for it.
 
     def open_calibration(self) -> None:
-        """F2, the titlebar's "calibrate" button and the sidebar's two doors.
+        """F2, the titlebar's **monitor UI** button and the sidebar's two doors.
 
-        One window at a time, and a second press is a toast rather than a second
-        window: both would be throwing fullscreen capture overlays at the same
-        browser, and the suspend below is a bracket, not a counter.
+        A toast, always. The alternative would be this window opening a
+        calibration surface over its OWN screen while the monitor watches
+        another one, which is precisely the disagreement §10.0 is about.
         """
-        if self._monitor_target is not None:
-            # A remote monitor is attached - by the launch flag or by the
-            # Monitor tab, which is the same state either way since §9.2. The
-            # pixels are on another machine (§2.6, §6.4), and this
-            # window's calibration runs over a LocalUIMonitor of its own, which
-            # would capture THIS screen - a picture of the operator's desktop
-            # saved as the chat service's appearance. So the door is closed and
-            # the user is pointed at the machine that has the browser on it.
-            self.notify(CALIBRATION_REMOTE, severity="warning", timeout=10)
-            return
-        if self._calibration is not None:
-            self.notify(CALIBRATION_OPEN)
-            return
-        runner = CalibrationRunner(
-            config=self._config,
-            # Its own machine (6.4). ``build_monitor`` is that package's own
-            # constructor for exactly this: a LocalUIMonitor whose profile lookup
-            # is a plain disk read rather than this shell's cache, because the
-            # window rewrites captures under it while it is open.
-            monitor=build_calibration_monitor(
-                self._config, profile_root=self._profile_root, provider=self._provider
-            ),
-            profile_root=self._profile_root,
-            global_config_path=self._global_config_path,
-            # This shell's loop, borrowed. A loop of its own would have to be
-            # shut down in the right order against this one, and both windows'
-            # work is short and non-blocking (``monitor_ui/window.py``).
-            schedule=self._schedule,
-            on_config_change=self._adopt_config,
-            on_calibration=self._calibrated,
-        )
-        try:
-            self._open_calibration(runner, self._calibration_closed)
-        except Exception as exc:  # noqa: BLE001 - a window that will not open is a toast
-            self.notify(f"the calibration window could not open: {exc}", severity="error")
-            return
-        self._calibration = runner
-        # Suspended for the WHOLE visit, exactly as the editor and the picker
-        # each bracketed themselves before: every capture in that window throws
-        # a fullscreen overlay over the very browser these detectors watch, and
-        # an overlay appearing and vanishing is precisely the sustained large
-        # delta that arms the finish trigger on staleness alone (3.4e).
-        self.suspend_detectors()
-
-    def _calibration_closed(self) -> None:
-        """The calibration window went away: unwind it and poll again.
-
-        Raised by pywebview on the WINDOW's own thread, so everything it does is
-        thread-safe by construction: the view's ``close`` goes onto this shell's
-        loop through ``schedule`` (a runner that borrowed a loop does not close
-        its own view - it has no loop of its own to close it on), and
-        ``resume_detectors`` is a schedule too.
-        """
-        runner, self._calibration = self._calibration, None
-        if runner is None:
-            return
-        self._schedule(runner.view.close())
-        runner.stop()
-        self.resume_detectors()
-
-    def _calibrated(self, slot: AgentSlot, region: ScreenRegion | None) -> None:
-        """The calibration window drew (or forgot) ``slot``'s chat window.
-
-        What the in-window picker did on its way out, minus the overlay. Three
-        things it keeps exactly: the slot is what the WINDOW answered about
-        rather than whatever is selected now (the user may have moved tabs while
-        the overlay was up); the sidebar is repainted only when the tab it
-        describes is still the one on screen; and the poller is rebuilt only
-        when the window just drawn is the one it is watching - drawing the
-        sub-agent's window mid-session is the normal way to reach delegation,
-        and rebuilding around it would re-aim a poller at a window the
-        automation is not driving.
-        """
-        self._automation.set_calibration(slot, region)
-        if slot is self._automation.calibrating_slot:
-            self._push_sidebar()
-        self._after_calibration()
-        if slot is self._automation.live_slot:
-            self._start_detector_worker()
+        self.notify(CALIBRATION_ELSEWHERE, severity="warning", timeout=10)
 
     def _after_calibration(self) -> None:
         """Tell the user ONCE when the sub-agent window becomes usable.
@@ -3003,12 +3027,12 @@ class GuiView:
         self._delegation_ready = ready
 
     def show_identify_overlay(self) -> None:
-        """``/identify``: open the window the overlay is drawn from now.
+        """``/identify``: say where the overlay is drawn from now.
 
-        Kept pointing at something rather than dropped. The overlay moved into
-        the calibration window with every other surface made of pixels (6.4),
-        and a user who types ``/identify`` wants to see what the tool
-        recognises - which is what opens, with the ELEMENTS column beside it.
+        Kept pointing at something rather than dropped. The overlay is the
+        MONITOR's - it is thrown over the browser, on the machine the browser is
+        on - so what a user who typed this wants is the Monitor UI, and the one
+        sentence names it (§10.2).
         """
         self.open_calibration()
 
@@ -3030,21 +3054,13 @@ class GuiView:
         # itself), so the per-run cache is no longer trustworthy - drop it and
         # let the next read come off disk.
         self._profiles.clear()
-        # A deleted service can also be the one a window tab is pointed at. A
-        # window left pointing at a preset that no longer exists would silently
-        # drive the automation off ``Config.preset()``'s fallback.
-        for window, key in self._automation.services().items():
-            if key not in config.services:
-                self._automation.set_service(window, self._initial_services(config)[window])
+        # Which service each window drives is NOT re-derived here any more: it
+        # is the monitor's answer (§10.5), and a config saved on this host says
+        # nothing about it. What a fresh config can still change is the alarm
+        # this machine plays, which ``live_preset`` folds in on its next read.
         self._push_tabs()
         self._push_sidebar()
         self._after_calibration()
-        # Everything the running poller was built from can have just changed:
-        # the preset's ``stable_seconds`` (baked into the stale tracker's tick
-        # count at start), its matcher/tolerance, and the busy/idle appearances
-        # behind it. Without this restart an edited stillness window would only
-        # take effect on the next unrelated recalibration.
-        self._start_detector_worker()
         self._push_status()
 
     # == ChatView: sub-agent transport =========================================
@@ -3220,6 +3236,12 @@ class GuiView:
     # == AutomationHost ========================================================
 
     def live_preset(self) -> ServicePreset:
+        """The LIVE window's service, as the monitor last described it (§10.5).
+
+        Derived on every read rather than cached: the monitor can retarget
+        itself (a service picked in ITS window) and the answer this returns has
+        to be the one the last tick's generation belongs to.
+        """
         return self._preset_for(self._automation.live_slot)
 
     def profile_for(self, slot: AgentSlot) -> ServiceProfile:
@@ -3282,15 +3304,18 @@ class GuiView:
         self._controller.submit_clipboard(text, accept_prose=True)
 
     def copy_seen_note(self) -> str:
-        """What the always-running detector remembers about the copy button -
-        the other half of a failed harvest's report."""
-        detector = self._monitor.detector
-        if detector is None or not detector.searches(TemplateKind.COPY):
-            return ""
-        ago = detector.seen_ago(TemplateKind.COPY)
-        if ago is None:
-            return "; the poller has never seen it in this window either"
-        return f"; the poller last saw one {ago:.0f}s ago"
+        """Nothing to add to a failed harvest's report, in this shell.
+
+        This used to be "the poller last saw a copy button 12s ago", read off
+        the detector object the Chat UI owned. There is no such object here any
+        more (§10.2) - the detector lives in the monitor process, and its
+        memory of a sighting has no field on the tick. Implemented rather than
+        dropped because ``AutomationHost`` still asks, and ``""`` is the honest
+        answer: the sentence the auto-copy recipe builds simply ends earlier.
+        (§10.4 lists this as the wave's one deliberate loss, and names the way
+        back: a tick field.)
+        """
+        return ""
 
     def rebuild_detectors(self) -> None:
         self._start_detector_worker()
@@ -3337,96 +3362,80 @@ class GuiView:
 
     # == the monitor's target ==================================================
 
-    def _live_spec(self) -> MonitorSpec:
-        """What the monitor has to know to watch the LIVE window - §2.10's payload.
-
-        Scalars only, and every one of them read fresh: the service KEY (never
-        the profile - the template PNGs are the monitor's own machine's
-        business), the drawn rectangle, the preset's whole finish checklist, and
-        the send gate's four tick budgets. ``stable_seconds`` goes over RAW: the
-        conversion into a tick count belongs to whatever is doing the ticking,
-        which is why this shell no longer holds a poll cadence of its own.
-        """
-        slot = self._automation.live_slot
-        preset = self._preset_for(slot)
-        return MonitorSpec(
-            service=self._service_for(slot),
-            region=self._automation.live.chat_region,
-            finish_signals=tuple(preset.finish_signals),
-            stable_seconds=preset.stable_seconds,
-            tolerance=preset.tolerance,
-            matcher=preset.matcher,
-            hover_scan=preset.hover_scan,
-            scroll_action=preset.scroll_action,
-            snap_back=preset.snap_back,
-            delivery=preset.delivery,
-            auto_submit=preset.auto_submit,
-            send_arm_min_diff=SEND_ARM_MIN_DIFF,
-            send_arm_ticks=SEND_ARM_TICKS,
-            send_gate_timeout_ticks=SEND_GATE_TIMEOUT_TICKS,
-            send_gate_seen_timeout_ticks=SEND_GATE_SEEN_TIMEOUT_TICKS,
-        )
-
     def _start_detector_worker(self) -> None:
         """Retarget the monitor onto the LIVE window - the synchronous door.
 
-        Every caller here is chrome (a service picked, a region drawn, a config
-        adopted, ``/new``) and none of them can await, while ``configure`` is a
-        coroutine by contract - a remote monitor's is a round trip. So the door
-        stays synchronous and the retarget goes on the loop, where it runs in
-        the order it was asked for: the monitor's own verbs never suspend
-        half-way, so a suspend, a retarget and a resume queued back to back land
-        in that order.
+        Every caller here is chrome (a live window moved, a config adopted,
+        ``/new``) and none of them can await, while ``watch`` is a coroutine by
+        contract - a round trip to another process. So the door stays
+        synchronous and the retarget goes on the loop, where it runs in the
+        order it was asked for: the monitor's own verbs never suspend half-way,
+        so a suspend, a retarget and a resume queued back to back land in that
+        order.
         """
         self._schedule(self._retarget_monitor())
 
     async def _retarget_monitor(self) -> None:
-        """Point the monitor at the LIVE window, then repaint what that changed.
+        """Name the LIVE window to the monitor, and adopt what it answers.
 
-        ``MainScreen._start_detector_worker`` minus everything that was
-        machinery: composing the detector, converting the stillness window into
-        ticks and starting a thread are all the monitor's now (ui-monitor.md
-        §6.1). What stays is the two questions of MEANING that were always this
-        shell's - which finish detectors this configuration ends up running, and
-        what the DETECTION block should therefore say - and they are asked of
-        the monitor's answer rather than of a detector this object built.
+        The whole of §10.5's inversion in two lines. This used to compose a
+        ``MonitorSpec`` - a service key, a rectangle, a finish checklist, a
+        matcher - and send it; it now sends a WINDOW and reads the monitor's own
+        answer back. Everything that made that spec (which service each window
+        is, what its preset says, where its box was drawn) is a fact about the
+        machine the browser is on, and the monitor is where those facts are
+        edited, so a brain that composed them was composing them for a service
+        somebody else was running (§10.0).
 
-        ``forget_verdicts`` comes after the configure and not before it: the
-        generation is bumped by then, so a probe still in flight from the run
-        that just ended is a ghost and cannot land on the state we have just
-        cleared.
+        One round trip rather than ``configure`` + ``watched``: the brain needs
+        both halves before it can act on anything, and a retarget that got only
+        the generation would be driving a service it had not been told about.
         """
-        spec = self._live_spec()
-        await self._monitor.configure(spec)
-        # What the monitor SETTLED on. A brain with no rectangle - every
-        # split-mode Chat UI, whose box was drawn on the monitor's desktop and
-        # lives in its store (§9.1) - gets the monitor's answer and adopts it,
-        # or every recipe keeps saying "no chat window is drawn" over a link
-        # whose far end can see the window perfectly well.
-        watched = await self._monitor.watched()
-        if watched.region != spec.region:
-            self._automation.set_calibration(self._automation.live_slot, watched.region)
-            spec = replace(spec, region=watched.region)
-            self._push_sidebar()
+        self._adopt_watched(self._automation.live_slot, await self._monitor.watch(self._automation.live_slot))
+
+    def _adopt_watched(self, slot: AgentSlot, watched: Watched) -> None:
+        """Make the monitor's answer this shell's picture of ``slot``.
+
+        Every readout below is derived rather than remembered - the service key,
+        the preset the recipes act on, the box, the DETECTION lines - so this is
+        the ONE writer, and it is called from both doors that can hear an
+        answer: a retarget we asked for, and a generation that changed on the
+        far side without us (:meth:`_on_monitor_tick`).
+
+        ``forget_verdicts`` comes after the answer and not before it: the
+        generation is bumped by then, so a probe still in flight from the run
+        that just ended is a ghost and cannot land on the state just cleared.
+        """
+        self._watched[slot] = watched
+        self._watched_generation = watched.generation
+        service = watched.service or ""
+        # What the monitor SETTLED on. The brain holds no rectangle of its own -
+        # the box was drawn on the monitor's desktop and lives in its store
+        # (§9.1) - so it adopts the answer, or every recipe keeps saying "no
+        # chat window is drawn" over a link whose far end can see the window
+        # perfectly well.
+        if self._automation.calibration(slot).chat_region != watched.region:
+            self._automation.set_calibration(slot, watched.region)
         self._automation.forget_verdicts()
-        detector = self._monitor.detector
-        active = detector.active_detectors if detector is not None else ()
+        tick = self._monitor.latest
+        active = tick.active_detectors if tick is not None else ()
         self._automation.active_detectors = active
+        self._push_tabs()
         peer = self._monitor_peer()
-        if peer and not watched.profiled:
-            # The split-mode trap, said where it bites: the key this window
-            # drives names no appearance on the monitor's machine, so every
-            # click over there is NOT_CALIBRATED and nothing else explains it.
-            self._paint_detection(MONITOR_UNPROFILED.format(service=spec.service))
-            said = (peer, spec.service)
+        if peer and service and not watched.profiled:
+            # The trap, said where it bites: the key that monitor is driving
+            # names no appearance on its own machine, so every element verdict
+            # over there is NOT_CALIBRATED and nothing else explains it.
+            self._paint_detection(MONITOR_UNPROFILED.format(service=service))
+            said = (peer, service)
             if self._unprofiled_said != said:
                 self._unprofiled_said = said
                 self.notify(
-                    MONITOR_UNPROFILED_TOAST.format(peer=peer, service=spec.service),
+                    MONITOR_UNPROFILED_TOAST.format(peer=peer, service=service),
                     severity="warning",
                     timeout=12,
                 )
-        elif spec.region is None:
+        elif watched.region is None:
             self._paint_detection(STALE_UNSET)
         elif not active:
             # The service's checklist is empty, or asks only for appearances it
@@ -3438,6 +3447,39 @@ class GuiView:
             # Whether the stale line is a live verdict or an explanation of its
             # own silence: it is the one detector with no appearance behind it.
             self._paint_detection(STALE_CALIBRATED if "stale" in active else STALE_UNTICKED)
+
+    def _on_monitor_tick(self, tick: Tick) -> None:
+        """Every tick, on the monitor's thread. Readout only, and non-blocking.
+
+        Two jobs, and both are things this shell used to get from an object it
+        owned. The active-detector list is the DETECTION block's "is anything
+        even watching" line, and it rides every tick (§10.2: there is no
+        detector up here to ask). And the GENERATION is how a service picked or
+        a region redrawn in the MONITOR's own window reaches this one: the
+        monitor bumped it without a frame from us, so a stamp we have not seen
+        means "ask again" (§10.5).
+        """
+        self._automation.active_detectors = tick.active_detectors
+        if tick.generation != self._watched_generation:
+            # Claimed here, on the tick thread, so the next tick down the wire
+            # does not queue a second read of the same answer.
+            self._watched_generation = tick.generation
+            self._schedule(self._reread_watched())
+
+    async def _reread_watched(self) -> None:
+        """``watched()`` after a generation we did not ask for. Never raises.
+
+        A read rather than a ``watch``: the monitor has already retargeted
+        itself and asking it to do so again would bump the generation once more,
+        which is a loop with a round trip in it.
+        """
+        try:
+            watched = await self._monitor.watched()
+        except Exception:  # noqa: BLE001 - a link that died mid-read has its own path
+            return
+        self._adopt_watched(self._automation.live_slot, watched)
+        self._push_sidebar()
+        self._push_status()
 
     # == the monitor link (split mode) =========================================
     # Everything ``--monitor host:port`` adds, and nothing else in this file
@@ -3465,13 +3507,50 @@ class GuiView:
     # Nothing is buffered and nothing is replayed - the same honesty rule the
     # remote executor keeps (remote-executor.md §2.3).
 
+    async def _launch_local_monitor(self) -> bool:
+        """Start an ``agentclip-monitor`` on this PC, then dial it (§10.1).
+
+        Two steps and no third: there is deliberately no readiness poll here.
+        The dial IS the readiness check - the child needs a moment to bind its
+        port, and the redial backoff below already handles "not listening yet",
+        so a second liveness notion would be a second thing for the link to
+        disagree with (``monitor_launch.py``).
+
+        The loop is parked in DISCONNECTED with :data:`MONITOR_LOCAL_STARTING`
+        BEFORE the spawn, and that is what makes the ordinary first-dial
+        failures quiet: ``_park_disconnected`` toasts once per outage, and this
+        sentence is that toast. A user watching a monitor come up should not be
+        told twice that it has not come up yet.
+        """
+        self._launching = True
+        self._park_disconnected(MONITOR_LOCAL_STARTING)
+        try:
+            launched = await asyncio.to_thread(
+                self._launcher.start,
+                self._project_root,
+                global_config_path=self._global_config_path,
+            )
+        except Exception as exc:  # noqa: BLE001 - a spawn fails in the OS's own ways
+            self._launching = False
+            self._local_launched = False
+            self._park_disconnected(MONITOR_LOCAL_FAILED.format(reason=exc))
+            return False
+        self._launching = False
+        self._local_launched = True
+        self._exited_said = False
+        self._monitor_target = launched.target
+        if await self._attach_monitor():
+            return True
+        self._begin_redial()
+        return False
+
     async def _dial_monitor(self) -> None:
         """The first dial. A failure is not fatal - it starts the redial loop.
 
-        Split mode is a link to a machine that is *supposed* to outlive us
-        (§2.8), so "the monitor is not up yet" is a state to sit in rather than
-        a launch error: the window stays open, the loop says DISCONNECTED, and
-        the backoff keeps trying until somebody starts the monitor.
+        A monitor is a machine that is *supposed* to outlive us (§2.8), so "the
+        monitor is not up yet" is a state to sit in rather than a launch error:
+        the window stays open, the loop says DISCONNECTED, and the backoff keeps
+        trying until somebody starts one.
         """
         if not await self._attach_monitor():
             self._begin_redial()
@@ -3562,7 +3641,7 @@ class GuiView:
             link = await self._dial(host, port, target.token)
         except Exception as exc:  # noqa: BLE001 - a dial fails in the transport's own ways
             self._close_tunnel()
-            self._park_disconnected(MONITOR_RETRY.format(peer=peer, reason=exc))
+            self._park_disconnected(self._dial_failure(peer, exc))
             return False
         was = self._monitor_server_id
         self._monitor_server_id = link.server_id
@@ -3571,7 +3650,7 @@ class GuiView:
         try:
             await self._retarget_monitor()
         except Exception as exc:  # noqa: BLE001 - the link died inside the handshake
-            self._park_disconnected(MONITOR_RETRY.format(peer=peer, reason=exc))
+            self._park_disconnected(self._dial_failure(peer, exc))
             return False
         # The watcher is a thread on the FAR machine and there is none after a
         # reconnect. Re-armed off the ARMED switch rather than off what the
@@ -3581,12 +3660,28 @@ class GuiView:
         switch.watch_clipboard(self._automation.os_armed)
         self._automation.set_loop_state(LoopState.IDLE, f"monitor link up ({peer})")
         self._monitor_failure = ""
+        self._exited_said = False
         self._push_link()
         self.notify(MONITOR_UP.format(peer=peer))
         if was is not None and was != link.server_id:
             self.notify(MONITOR_RESTARTED.format(peer=peer), severity="warning", timeout=8)
         self._schedule(previous.close())
         return True
+
+    def _dial_failure(self, peer: str, exc: BaseException) -> str:
+        """Why the dial did not land - plus, for a child of ours, that it is gone.
+
+        The transport's own sentence says the socket refused; it cannot say
+        WHY, and for a monitor this app started the why is usually "the process
+        exited". So :data:`LOCAL_MONITOR_EXITED` is appended when the launcher
+        says the child is not running any more - which also names the thing to
+        do about it, because relaunching is a button on the Monitor tab and not
+        something the backoff can do on the user's behalf (§10.1).
+        """
+        reason = MONITOR_RETRY.format(peer=peer, reason=exc)
+        if not self._local_launched or self._launcher.alive():
+            return reason
+        return f"{reason} - {LOCAL_MONITOR_EXITED.format(code=self._launcher.exit_code())}"
 
     def _monitor_dropped(self, peer: str) -> None:
         """``on_disconnect``: the link went away for a reason nobody asked for.
@@ -3613,7 +3708,14 @@ class GuiView:
         fresh = self._automation.loop_state is not LoopState.DISCONNECTED
         self._automation.set_loop_state(LoopState.DISCONNECTED, reason)
         self._push_link()
-        if fresh:
+        # ...and one exception to "once per outage": the child we started has
+        # DIED, which is a new fact about a link that was already down and the
+        # only one the user has to act on. Once per child, never per attempt.
+        exited = self._local_launched and LOCAL_MONITOR_EXITED.format(
+            code=self._launcher.exit_code()
+        ) in reason
+        if fresh or (exited and not self._exited_said):
+            self._exited_said = bool(exited)
             self.notify(reason, severity="warning", timeout=8)
 
     def _begin_redial(self) -> None:
@@ -3660,13 +3762,18 @@ class GuiView:
 
         The send-gate line is deliberately re-derived rather than reset: a
         rebuild does not un-paste the outbound the gate is holding for.
+
+        The busy/idle rows are plain resting lines now. They used to be able to
+        say "ticked but not captured", which took the service's finish CHECKLIST
+        and the machine's captures - and both of those are the monitor's since
+        §10.5, with no field on :class:`Watched` between them. What survives the
+        distinction is the STALE row below: an empty ``active_detectors`` is
+        exactly "nothing will ever produce a verdict here", and that is the half
+        the user has to act on.
         """
-        signals = self.live_preset().finish_signals
-        profile = self.profile_for(self._automation.live_slot)
         self.paint_detection(TemplateKind.SEND_READY, self._automation.send_gate_line())
-        for name, kind in (("busy", TemplateKind.BUSY), ("idle", TemplateKind.IDLE)):
-            ticked_but_blind = name in signals and not profile.has(kind)
-            self.paint_detection(kind, PROBE_UNCAPTURED if ticked_but_blind else PROBE_RESTING)
+        for kind in (TemplateKind.BUSY, TemplateKind.IDLE):
+            self.paint_detection(kind, PROBE_RESTING)
         self.paint_detection(TemplateKind.COPY, COPY_RESTING)
         self.paint_stale(stale_line)
         self._push_sidebar()  # the heading names the window these lines are about
@@ -3972,8 +4079,9 @@ class GuiView:
         """
         window = self._selected_window
         slot = _WINDOW_SLOTS[window]
-        service = self._service_for(slot)
-        preset = self._config.services.get(service)
+        watched = self._watched[slot]
+        service = watched.service or ""
+        preset = self._preset_for(slot) if service else None
         budget_divisor = self._config.general.chars_per_token
         cal = self._automation.calibration(slot)
         region = cal.chat_region
@@ -3990,24 +4098,24 @@ class GuiView:
             remote=self._remote_target,
             remote_lines=self._remote_lines(),
             can_connect=self._remote is not None,
-            services=_service_options(self._config),
-            service=service,
+            # READ-ONLY since §10.5: the service is the monitor's, and there is
+            # nothing here to pick from. One line saying which one it settled on
+            # and where that came from, so a user reading a budget knows whose
+            # budget it is - and the door under it says where to change it.
+            service=f"{preset.label} ({service}){SERVICE_FROM_MONITOR}"
+            if preset and service
+            else SERVICE_UNWATCHED,
             # Both units, and characters first: these two numbers are the
             # preset's CONFIGURED values (what a user edits in the service editor
             # or config.toml, both of which are in characters), and the token
             # estimate beside each is what says whether the budget is big enough.
             service_label=(
-                f"{preset.label} "
                 f"· {fmt_budget(preset.max_paste_chars, budget_divisor)} per paste "
                 f"· {fmt_budget(preset.total_context_chars, budget_divisor)} context"
             )
-            if preset
+            if preset and service
             else "",
             profile_note=f"appearance: {self.profile_for(slot).describe()}{PROFILE_HINT}",
-            # The picker is locked while a session owns the services: BOTH
-            # windows' budgets are baked in at bootstrap (the sub-agent's with
-            # the session spec), so neither preset may move mid-session.
-            locked=not self._awaiting_new_session,
             window=window,
             region=f"{region.describe()} · chatbot window" if region is not None else REGION_UNSET,
             slot_note=self._slot_note(slot),
@@ -4095,28 +4203,38 @@ class GuiView:
         )
 
     # == services and profiles =================================================
-
-    @staticmethod
-    def _initial_services(config: Config) -> dict[str, str]:
-        master = config.general.service
-        if master not in config.services:
-            master = next(iter(sorted(config.services)))
-        sub = config.general.subagent_service
-        return {
-            MASTER_WINDOW: master,
-            SUBAGENT_WINDOW: sub if sub in config.services else master,
-        }
+    # None of this reads ``[services.*]`` or ``general.service`` any more. Which
+    # service a window drives, and every preset field the brain acts on, is the
+    # MONITOR's answer (§10.5) - held per slot in ``_watched`` and turned into
+    # the automation's vocabulary by ``preset_from_watched``.
 
     def _service_for(self, slot: AgentSlot) -> str:
-        window = next(win for win, known in _WINDOW_SLOTS.items() if known is slot)
-        key = self._automation.service_of(window)
-        return key if key in self._config.services else self._config.general.service
+        """The service key the monitor says it is driving for ``slot``, or ""."""
+        return self._watched[slot].service or ""
 
     def _preset_for(self, slot: AgentSlot) -> ServicePreset:
-        return self._config.services.get(self._service_for(slot)) or self._config.preset()
+        """``slot``'s whole preset, built from the monitor's answer about it.
+
+        The alarm knobs are folded in from this host's config, because the
+        uh-oh sound plays on the machine the USER is at and that is this one
+        (:func:`preset_from_watched`).
+        """
+        return preset_from_watched(self._watched[slot], alerts=self._config.preset())
 
     def _profile(self, key: str) -> ServiceProfile:
-        """A service's captured appearances, read off disk once per app run."""
+        """A service's captured appearances, read off disk once per app run.
+
+        The one thing on this side that still reads the profile store, and it is
+        a KNOWN gap rather than a design (§10.3's layering line stops one module
+        short of it): ``AutomationHost.profile_for`` and the delegation
+        readiness rules want a per-KIND answer, and the monitor's only answer is
+        :attr:`Watched.profiled` - one boolean. So the pair below still asks
+        this machine's store, which is right for a local child and stale for a
+        remote monitor. An empty key answers an empty profile rather than
+        reading a directory called "".
+        """
+        if not key:
+            return ServiceProfile(key="")
         profile = self._profiles.get(key)
         if profile is None:
             profile = load_profile(self._profile_root, key)
@@ -4134,37 +4252,6 @@ class GuiView:
         interacting with AgentClip. The HANDLE is OS state both shells snap
         focus back to, so it is kept below."""
         self._automation.set_own_window(foreground_window())
-
-
-class OpenCalibration(Protocol):
-    """How a calibration window is put on screen, and how its close comes back.
-
-    A Protocol rather than the function below so this module stays importable
-    with no ``gui`` extra installed and drivable with no toolkit at all: the
-    default implementation imports pywebview, and a suite injects a recorder.
-    """
-
-    def __call__(self, runner: CalibrationRunner, on_closed: Callable[[], None]) -> None: ...
-
-
-def _open_calibration_window(runner: CalibrationRunner, on_closed: Callable[[], None]) -> None:
-    """Create the second window on the pump this process is already running.
-
-    ``webview.start()`` may only be called ONCE per process and it is this
-    shell's main thread that called it, so the calibration window is created and
-    left for the running pump to pick up - which is exactly what
-    :func:`~agentclip.shell.monitor_ui.open_calibration_window` does and
-    deliberately all it does. ``closed`` is subscribed here rather than inside
-    that function because who cares that the window went away is the caller: a
-    standalone ``agentclip --calibrate`` run has nothing to tell.
-
-    Imported inside the function because the ``gui`` extra is optional and
-    importing this module must stay free (``chat/shell.py``).
-    """
-    import webview
-
-    window = open_calibration_window(webview, runner)
-    window.events.closed += on_closed
 
 
 def _no_config(config: Config) -> None:

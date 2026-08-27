@@ -46,7 +46,7 @@ from agentclip.shell.app.engine_launch import (
     is_missing_engine,
 )
 from agentclip.shell.app.link import Link, LocalLink, McpStatusLine, SkillReport
-from agentclip.shell.app.monitor_launch import LaunchLocal
+from agentclip.shell.app.monitor_launch import LaunchLocal, SubprocessLauncher
 from agentclip.shell.app.remote_link import LINK_VERSION, RemoteLinkClient
 from agentclip.shell.app.sizes import fmt_tokens
 
@@ -1039,15 +1039,15 @@ def main(argv: list[str] | None = None) -> int:
             # Deliberately handed over resolved rather than as the raw string:
             # ``main`` is where a bad target - and an ``@name`` that names
             # nothing - is refused, so nothing below this line can be given one.
-            #
-            # ``LaunchLocal`` is flattened to ``None`` here because view.py still
-            # reads ``None`` as "build a local monitor"; §10.2 teaches it the
-            # sentinel and this line becomes a plain pass-through. Until it
-            # does, ``--monitor none`` lands on that same ``None`` and therefore
-            # behaves like ``local`` - the new value is one phase ahead of the
-            # view that will honour it.
-            # §10.2 replaces this
-            monitor_target=None if isinstance(monitor_target, LaunchLocal) else monitor_target,
+            # All three values reach the shell as they are since §10.2: a
+            # ``MonitorTarget`` to dial, ``LaunchLocal`` to start one here first,
+            # or ``None`` for a window with no screen.
+            monitor_target=monitor_target,
+            # ...and the one thing only a launch can decide about the middle
+            # case: how a monitor process is actually spawned. The real one, so
+            # ``agentclip`` with no flags comes up watching this PC's screen
+            # through a child of its own (ui-monitor.md §10.1).
+            launcher=SubprocessLauncher(),
         )
     finally:
         # The hand-back, over what is LIVE rather than what the launch started

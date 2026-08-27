@@ -22,13 +22,14 @@ from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any, Protocol
 
-from agentclip.config import Config, MonitorTarget
+from agentclip.config import Config
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.shell.app.link import Link, SkillReport
+from agentclip.shell.app.monitor_launch import LocalMonitorLauncher, SubprocessLauncher
 from agentclip.shell.chat.remote import RemoteConnect
 from agentclip.shell.chat.runner import GuiRunner
-from agentclip.shell.chat.view import McpStatusSource
+from agentclip.shell.chat.view import McpStatusSource, MonitorLaunch
 from agentclip.shell.webview.assets import package_asset_dir, page_url
 
 WINDOW_TITLE = "AgentClip"
@@ -184,7 +185,8 @@ def run_gui(
     on_config_change: Callable[[Config], None] | None = None,
     host: Any = None,
     remote: RemoteConnect | None = None,
-    monitor_target: MonitorTarget | tuple[str, int] | None = None,
+    monitor_target: MonitorLaunch = None,
+    launcher: LocalMonitorLauncher | None = None,
 ) -> int:
     """Open the window, run the GUI loop, return an exit code when it closes.
 
@@ -210,12 +212,15 @@ def run_gui(
     broken. ``host`` is what the session runs on TODAY, read only for the
     sidebar's link indicator.
 
-    ``monitor_target`` is ``--monitor host:port``: the machine whose SCREEN this
-    window drives, when it is not this one (docs/design/ui-monitor.md §6.5).
-    ``None`` - every caller but a ``--monitor`` launch - is local mode, where
-    the window watches the screen it is drawn on. It is a launch fact for the
-    same reason the two above are, and it is GUI-only: the deprecated TUI never
-    takes one.
+    ``monitor_target`` is ``--monitor``: WHICH monitor process this window
+    drives a screen through (docs/design/ui-monitor.md §10.1). A
+    :class:`MonitorTarget` is one already running somewhere; a
+    :class:`LaunchLocal` is "start one on this PC and dial it", which is what
+    the absent flag means; ``None`` is ``--monitor none``, a window with no
+    screen until the Monitor tab gives it one. ``launcher`` is how the middle
+    case is carried out - injected for the reason every OS-touching seam in this
+    shell is, so a suite drives the whole story with no process; the default is
+    the real :class:`SubprocessLauncher`.
 
     Order matters and is the design's (gui.md section 2). The window is created
     with the ``js_api`` object first, because pywebview injects the API into the
@@ -256,6 +261,7 @@ def run_gui(
         remote=remote,
         on_config_change=on_config_change,
         monitor_target=monitor_target,
+        launcher=launcher if launcher is not None else SubprocessLauncher(),
     )
     width, height = initial_window_size(*primary_screen_size(webview))
     with asset_dir() as assets:

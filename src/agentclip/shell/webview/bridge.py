@@ -397,10 +397,11 @@ class JsCalls(Protocol):
     def force_ingest(self) -> None: ...
     def reinstruct(self) -> None: ...
     def retry_insert(self) -> None: ...
-    def set_service(self, key: str) -> None: ...
-    # F2, the titlebar's button and both sidebar doors: open the calibration
-    # window (``monitor_ui/``). One method, because everything that surface
-    # decides it decides over there - this side only opens it and brackets it.
+    # F2, the titlebar's **monitor UI** button and both sidebar doors: say where
+    # calibration lives (``agentclip-monitor``'s own window). One method,
+    # because there is one answer - this window hosts none of those surfaces
+    # (ui-monitor.md §10.2). ``set_service`` left this list with them: the
+    # service is the MONITOR's, and the sidebar's picker is a read-only line.
     def open_calibration(self) -> None: ...
     # The window tabs. Both are pure view-side navigation - no controller call
     # is made for either - but they still cross here, because the page is where
@@ -536,18 +537,15 @@ class JsApi:
         again."""
         self._safely(self._calls.retry_insert)
 
-    def service(self, key: str = "") -> None:
-        """The sidebar's service picker - it edits the SELECTED window."""
-        self._safely(lambda: self._calls.set_service(key))
-
     def calibrate(self) -> None:
-        """F2, the titlebar's "calibrate" button and both sidebar doors: open
-        the calibration window.
+        """F2, the titlebar's **monitor UI** button and both sidebar doors.
 
         One call for four affordances because they all ask for one thing - the
-        window where the pixels are (ui-monitor.md 2.6). Nothing comes back
-        through here: a chat region drawn over there arrives as a ``sidebar``
-        repaint, and a preset saved over there as the ordinary config adoption.
+        window where the pixels are - and since ui-monitor.md §10.2 they all get
+        one answer: that window belongs to the monitor PROCESS, and this one
+        neither opens it nor hosts it. Nothing comes back through here either: a
+        chat region drawn over there arrives as the monitor's next ``watched()``
+        answer, not as a call into this shell.
         """
         self._safely(self._calls.open_calibration)
 

@@ -442,6 +442,14 @@ def _suggest_name(spec: str) -> str:
 
 MODE_DIRECT = "direct"  # host, port, token: dial the monitor's own address
 MODE_SSH = "ssh"  # a saved SSH target, then its loopback over a direct-tcpip channel
+# ...and the third (ui-monitor.md §10.2): launch an ``agentclip-monitor`` on
+# THIS PC and dial it. It has no fields at all - the port is picked at spawn and
+# the token is the shared file both processes read - which is the whole of why
+# "local" is a mode here rather than the absence of one: it is still a dial, to
+# still a monitor process, over still a socket. It just starts the process too.
+MODE_LOCAL = "local"
+#: Every mode the form accepts, so ``set_fields`` has one list to check against.
+MONITOR_MODES = (MODE_DIRECT, MODE_SSH, MODE_LOCAL)
 
 MONITOR_MISSING_HOST = "name the machine the monitor is running on"
 MONITOR_MISSING_VIA = "pick the saved SSH target the monitor sits behind"
@@ -459,7 +467,6 @@ MONITOR_BAD_TOKEN = f"a monitor token is {TOKEN_CHARS} characters; this one is {
 MONITOR_CONNECT_FIRST = (
     "connect the Executor to {name} first - the Monitor tab rides that same connection"
 )
-MONITOR_LOCAL_AGAIN = "watching this machine's screen again"
 
 
 class MonitorDialog:
@@ -488,7 +495,7 @@ class MonitorDialog:
         # how to reach, and inventing a second place to describe one would be
         # inventing a second place to get it wrong.
         self.ssh_targets = list(ssh_targets)
-        self.mode = mode if mode in (MODE_DIRECT, MODE_SSH) else MODE_DIRECT
+        self.mode = mode if mode in MONITOR_MODES else MODE_DIRECT
         self.host = host
         self.port = port
         self.token = token
@@ -526,7 +533,7 @@ class MonitorDialog:
             return
 
     def set_fields(self, mode: str, host: str, port: str, token: str, via: str) -> None:
-        self.mode = mode if mode in (MODE_DIRECT, MODE_SSH) else MODE_DIRECT
+        self.mode = mode if mode in MONITOR_MODES else MODE_DIRECT
         self.host = host.strip()
         self.port = port.strip()
         self.token = token.strip()
@@ -570,7 +577,15 @@ class MonitorDialog:
         )
 
     def validate(self) -> str:
-        """Why the dial cannot start yet, or ""."""
+        """Why the dial cannot start yet, or "".
+
+        Local mode is always ready: there is no address to get wrong, because
+        the launcher picks the port and the token comes off the shared file
+        (§10.1). A validation that asked for anything here would be asking the
+        user to describe a machine they are standing at.
+        """
+        if self.mode == MODE_LOCAL:
+            return ""
         if self.mode == MODE_SSH:
             if not self.via:
                 return MONITOR_MISSING_VIA
@@ -701,11 +716,12 @@ __all__ = [
     "MISSING_ROOT",
     "MISSING_TARGET",
     "MODE_DIRECT",
+    "MODE_LOCAL",
     "MODE_SSH",
     "MONITOR_BAD_PORT",
     "MONITOR_BAD_TOKEN",
     "MONITOR_CONNECT_FIRST",
-    "MONITOR_LOCAL_AGAIN",
+    "MONITOR_MODES",
     "MONITOR_MISSING_HOST",
     "MONITOR_MISSING_VIA",
     "NO_RULESET",

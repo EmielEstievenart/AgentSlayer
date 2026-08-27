@@ -171,7 +171,6 @@
     "(paste, send, generate, copy).";
   // What the picker's <option> list currently says, so a repaint that changes
   // nothing does not rebuild a <select> the user may have open.
-  var serviceOptions = "";
 
   // The run panel's two depths, both of them tui/widgets/run_panel.py's:
   // RUN_TAIL_LINES is what the pane SHOWS (a compiler's last error plus its
@@ -1565,18 +1564,23 @@
 
   /* The titlebar's MONITOR badge. Three states from Python (view.py:
      _push_link); the words are the big ones and the fill is the state, so
-     "connected or not" is answered before the address is read. */
+     "connected or not" is answered before the address is read. Since
+     ui-monitor.md 10.2 there is no "this PC" state: watching this machine's
+     screen is a link to a monitor PROCESS like any other, whose peer is simply
+     called "local". `none` is the new one, and it is RED - a Chat UI with no
+     monitor can drive nothing, and the fix is one click away on the Monitor
+     tab. */
   function paintMonitorLink(event) {
-    var state = event.state || "local";
+    var state = event.state || "none";
     el.monitorLink.hidden = false;
-    el.monitorLink.className = "pill" + (state === "up" ? " ok" : state === "down" ? " warn" : "");
-    if (state === "local") {
-      el.monitorLink.textContent = "MONITOR: this PC";
-    } else if (state === "up") {
-      el.monitorLink.textContent = "MONITOR CONNECTED \u00b7 " + event.peer;
-    } else {
+    el.monitorLink.className = "pill" + (state === "up" ? " ok" : " warn");
+    if (state === "up") {
+      el.monitorLink.textContent = "MONITOR CONNECTED · " + event.peer;
+    } else if (state === "down") {
       el.monitorLink.textContent =
-        "MONITOR DOWN \u00b7 " + event.peer + " \u00b7 " + (event.reason || "");
+        "MONITOR DOWN · " + event.peer + " · " + (event.reason || "");
+    } else {
+      el.monitorLink.textContent = "NO MONITOR · attach or launch one";
     }
     el.monitorLink.title = event.reason || "";
   }
@@ -1625,21 +1629,12 @@
     var win = windowName(event.window);
     el.sideServiceTitle.textContent = win ? "SERVICE · " + win : "SERVICE";
     el.sideWindowTitle.textContent = win ? "CHAT WINDOW · " + win : "CHAT WINDOW";
-    var options = JSON.stringify(event.services || []);
-    if (options !== serviceOptions) {
-      serviceOptions = options;
-      el.serviceSelect.innerHTML = "";
-      (event.services || []).forEach(function (pair) {
-        var option = document.createElement("option");
-        option.value = pair[0];
-        option.textContent = pair[1];
-        el.serviceSelect.appendChild(option);
-      });
-    }
-    if (event.service) el.serviceSelect.value = event.service;
-    // Locked while a session owns the services: the master's budget is baked
-    // into its Engine at bootstrap, so the preset may not move mid-session.
-    el.serviceSelect.disabled = Boolean(event.locked);
+    // READ-ONLY since ui-monitor.md 10.5. This was a picker; the service is
+    // the MONITOR's now - which one each window drives, and every budget under
+    // it, is decided in that process's own window - so all that is left here is
+    // the line saying what it settled on, worded on the Python side like every
+    // other sentence in this column.
+    el.serviceName.textContent = event.service || "";
   }
 
   function paintMcp(event) {
@@ -1885,7 +1880,7 @@
   function monFields() {
     api(
       "monitor_fields",
-      el.monModeSsh.checked ? "ssh" : "direct",
+      el.monModeLocal.checked ? "local" : el.monModeSsh.checked ? "ssh" : "direct",
       el.monHost.value,
       el.monPort.value,
       el.monToken.value,
@@ -1953,14 +1948,22 @@
     el.connTabMonitor.classList.add("on");
 
     var ssh = event.mode === "ssh";
+    var local = event.mode === "local";
     el.monModeSsh.checked = ssh;
-    el.monModeDirect.checked = !ssh;
+    el.monModeLocal.checked = local;
+    el.monModeDirect.checked = !ssh && !local;
     el.monViaRow.hidden = !ssh;
+    // Local mode has no address at all: the port is picked at spawn and the
+    // token is the file both processes read (ui-monitor.md 10.1). So the whole
+    // "how to reach it" half is hidden rather than disabled - there is nothing
+    // to fill in, and an empty form the user must not touch is worse than none.
+    el.monAddress.hidden = local;
     // Via SSH the host box means "as seen from THAT machine", which is a
     // different question with the same answer shape - so the label changes and
     // the placeholder stops suggesting a LAN address.
     el.monHostTitle.textContent = ssh ? "Monitor host, as seen from that machine" : "Monitor host";
     el.monHost.placeholder = ssh ? "127.0.0.1" : "e.g. 192.168.1.40";
+    el.monLocalNote.hidden = !local;
 
     var form = event.phase === "form";
     el.monForm.hidden = !form;
@@ -1976,7 +1979,7 @@
     el.monFailure.hidden = !event.failure;
     el.monAttachedLine.textContent = event.attached
       ? "attached: " + event.attached
-      : "watching this machine's screen";
+      : "no monitor attached";
 
     el.monSave.hidden = !event.can_save;
     if (event.can_save && document.activeElement !== el.monSaveName) {
@@ -1986,7 +1989,8 @@
 
     el.monAttach.hidden = event.phase === "done";
     el.monAttach.disabled = Boolean(event.busy);
-    el.monAttach.textContent = event.phase === "failed" ? "Retry" : "Attach";
+    el.monAttach.textContent =
+      event.phase === "failed" ? "Retry" : local ? "Launch a local monitor" : "Attach";
     el.monEdit.hidden = event.phase !== "failed";
     // Disconnect is about the LINK and Close is about the dialog: a monitor
     // that is attached can be let go of without ending the session, and the two
@@ -1995,7 +1999,7 @@
     el.monDetach.disabled = Boolean(event.busy);
     el.monClose.disabled = Boolean(event.busy);
     el.monHint.textContent = MON_HINTS[event.phase] || "";
-    if (opening) {
+    if (opening && !local) {
       window.setTimeout(function () {
         el.monHost.focus();
       }, 0);
@@ -2286,7 +2290,7 @@
       foot: "help",
       what: "this help", run: function () { openHelp(); } },
     { keys: ["F2"], on: ["F2"], mods: "", hot: true, section: "App",
-      what: "calibrate: what each service LOOKS like, where its chat window is, and what the tool is recognising right now (opens a second window)",
+      what: "where calibration lives: what each service LOOKS like, where its chat window is, and what the tool is recognising right now - all of it in the agentclip-monitor window",
       run: function () { api("calibrate"); } },
     { keys: ["F3"], on: ["F3"], mods: "", hot: true, section: "App",
       foot: "sidebar",
@@ -2881,6 +2885,9 @@
       monSaved: id("mon-saved"),
       monModeDirect: id("mon-mode-direct"),
       monModeSsh: id("mon-mode-ssh"),
+      monModeLocal: id("mon-mode-local"),
+      monAddress: id("mon-address"),
+      monLocalNote: id("mon-local-note"),
       monViaRow: id("mon-via-row"),
       monVia: id("mon-via"),
       monHostTitle: id("mon-host-title"),
@@ -2905,7 +2912,7 @@
       connClose: id("conn-close"),
       mcpBlock: id("mcp-block"),
       mcpRows: id("mcp-rows"),
-      serviceSelect: id("service-select"),
+      serviceName: id("service-name"),
       sideServiceLabel: id("side-service-label"),
       sideProfileNote: id("side-profile-note"),
       sideServiceTitle: id("side-service-title"),
@@ -3044,17 +3051,13 @@
     // picker except paintSidebar, and setting .value programmatically fires no
     // change event - which is the whole of the TUI's _reported_service dance,
     // for free (Sidebar.show_service).
-    el.serviceSelect.addEventListener("change", function () {
-      api("service", el.serviceSelect.value);
-    });
-    // -- the calibration window's three doors -------------------------------
+    // -- the Monitor UI's three doors ---------------------------------------
     // F2, the titlebar's button and the sidebar's two buttons all ask for one
-    // thing: the window where the pixels are (ui-monitor.md 2.6). Both sidebar
+    // thing: the window where the pixels are. Since ui-monitor.md 10.2 that
+    // window belongs to the monitor PROCESS and this one opens nothing, so all
+    // four affordances get the same sentence back as a toast. The sidebar
     // buttons keep their old words because they still name what the user goes
-    // there to do - the surface behind them moved, the errand did not. Nothing
-    // waits here: a chat region drawn over there comes back as a `sidebar`
-    // repaint, and a second press is refused on the far side rather than
-    // queued.
+    // there to do - the surface behind them moved, the errand did not.
     el.setRegion.addEventListener("click", function () {
       api("calibrate");
     });
@@ -3113,13 +3116,15 @@
     [el.monHost, el.monPort, el.monToken].forEach(function (input) {
       input.addEventListener("input", monFields);
     });
-    [el.monModeDirect, el.monModeSsh].forEach(function (radio) {
+    [el.monModeDirect, el.monModeSsh, el.monModeLocal].forEach(function (radio) {
       radio.addEventListener("change", function () {
         monFields();
         // The mode decides which fields mean anything, so this ONE control
         // repaints rather than waiting for the next event - the alternative is
         // a Via-SSH form still showing a "Monitor host" label.
         el.monViaRow.hidden = !el.monModeSsh.checked;
+        el.monAddress.hidden = el.monModeLocal.checked;
+        el.monLocalNote.hidden = !el.monModeLocal.checked;
       });
     });
     el.monVia.addEventListener("change", monFields);

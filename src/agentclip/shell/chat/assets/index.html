@@ -22,10 +22,13 @@
         <span class="pill" id="phase">no session</span>
         <span class="pill" id="loop">IDLE</span>
         <span class="pill" id="service"></span>
-        <!-- Whose SCREEN this window drives, and whether the line to it is up
-             (ui-monitor.md 9.2). Painted from the monitor_link event: dim for
-             this PC, solid green for a remote monitor on the line, solid red
-             for one that is not - dialling, redialling or refused. -->
+        <!-- WHICH monitor this window drives a screen through, and whether the
+             line to it is up (ui-monitor.md 9.2, 10.2). Painted from the
+             monitor_link event: green for a monitor on the line - "local" for a
+             child this app launched, its address otherwise - and red both for
+             one that is not (dialling, redialling, refused) and for none at
+             all. There is no "this PC" reading any more: this window hosts no
+             monitor, so local IS a link. -->
         <span class="pill" id="monitor-link" hidden></span>
         <span class="spacer"></span>
         <span class="version" id="version"></span>
@@ -46,19 +49,21 @@
           docs
         </button>
 
-        <!-- The CALIBRATION WINDOW's door (docs/design/ui-monitor.md 2.6): the
-             service editor, the ELEMENTS column, the chat-region picker and
-             /identify, in a window of their own over the machine the pixels are
-             on. A button AND F2, unlike the docs one: F2 has opened this
-             surface since the TUI, and a second window nobody can see the door
-             to is a second window nobody opens. -->
+        <!-- The MONITOR UI's door (docs/design/ui-monitor.md 10.2): the service
+             editor, the ELEMENTS column, the chat-region picker and /identify
+             are surfaces of the agentclip-monitor PROCESS's own window - the
+             child this app launched here, or the one running where the browser
+             is. This window opens none of them, so the button says where they
+             live. A button AND F2, unlike the docs one: F2 has asked for this
+             surface since the TUI. The id is unchanged on purpose - it is the
+             same door, onto a window that moved. -->
         <button
           id="calibrate-open"
           class="chrome-btn"
           type="button"
-          title="Calibrate: what each service looks like, and where its chat window is (F2)"
+          title="Where calibration lives: the agentclip-monitor window (F2)"
         >
-          calibrate
+          monitor UI
         </button>
 
         <!-- The "your move" banner the automation raises when a payload is
@@ -223,13 +228,15 @@
                the LIVE one instead - a different pointer, and the two part
                company for the whole of a delegation. -->
           <div class="side-title" id="side-service-title">SERVICE</div>
-          <select id="service-select"></select>
+          <!-- READ-ONLY since ui-monitor.md 10.5: a line, not a picker. Which
+               service each window drives is the MONITOR's answer - it owns the
+               [services.*] tables, the captures and the chat region - and this
+               window reads it back rather than sending one. -->
+          <div class="side-status" id="service-name"></div>
           <div class="side-status" id="side-service-label"></div>
           <div class="side-status" id="side-profile-note"></div>
-          <!-- The calibration window's discoverable door; F2 and the
-               titlebar's button are the same call. Not locked with the picker
-               above it: what a session freezes is WHICH preset drives it, not
-               whether its sizes can be edited for the next one. -->
+          <!-- The Monitor UI's discoverable door; F2 and the titlebar's button
+               are the same call, and all three answer with the same sentence. -->
           <button id="edit-services" type="button">Edit services...</button>
 
           <div class="side-title" id="side-window-title">CHAT WINDOW</div>
@@ -395,6 +402,10 @@
                 <div class="side-title">How to reach it</div>
                 <div class="mon-modes">
                   <label
+                    ><input type="radio" name="mon-mode" id="mon-mode-local" value="local" />
+                    Local - launch a monitor on this PC</label
+                  >
+                  <label
                     ><input type="radio" name="mon-mode" id="mon-mode-direct" value="direct" />
                     Direct</label
                   >
@@ -404,21 +415,31 @@
                   >
                 </div>
 
-                <div id="mon-via-row" hidden>
-                  <div class="side-title">Saved SSH target</div>
-                  <select id="mon-via"></select>
-                </div>
+                <!-- Local mode asks for nothing: the port is picked at spawn
+                     and the token is the file both processes read
+                     (ui-monitor.md 10.1), so the whole address half is hidden
+                     rather than shown empty. -->
+                <div id="mon-address">
+                  <div id="mon-via-row" hidden>
+                    <div class="side-title">Saved SSH target</div>
+                    <select id="mon-via"></select>
+                  </div>
 
-                <div class="side-title" id="mon-host-title">Monitor host</div>
-                <input id="mon-host" type="text" placeholder="e.g. 192.168.1.40" />
-                <div class="side-title">Port</div>
-                <input id="mon-port" type="text" placeholder="7777" />
-                <!-- Optional, because a monitor started with --no-token has
-                     none. Length-checked when it is there: a token that is the
-                     wrong length is a paste that went wrong, and saying so here
-                     costs one refused handshake less. -->
-                <div class="side-title">Token</div>
-                <input id="mon-token" type="password" placeholder="from the Serve panel" />
+                  <div class="side-title" id="mon-host-title">Monitor host</div>
+                  <input id="mon-host" type="text" placeholder="e.g. 192.168.1.40" />
+                  <div class="side-title">Port</div>
+                  <input id="mon-port" type="text" placeholder="7777" />
+                  <!-- Optional, because a monitor started with --no-token has
+                       none. Length-checked when it is there: a token that is the
+                       wrong length is a paste that went wrong, and saying so here
+                       costs one refused handshake less. -->
+                  <div class="side-title">Token</div>
+                  <input id="mon-token" type="password" placeholder="from the Serve panel" />
+                </div>
+                <div class="side-status" id="mon-local-note" hidden>
+                  starts agentclip-monitor here, with its own window - that
+                  window is where calibration lives
+                </div>
                 <div class="conn-error" id="mon-error"></div>
               </div>
             </div>

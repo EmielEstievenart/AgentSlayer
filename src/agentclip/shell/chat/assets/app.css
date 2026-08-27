@@ -1377,7 +1377,6 @@ button:not(:disabled) {
   font-size: 11px;
 }
 
-.sidebar select,
 .sidebar button {
   width: 100%;
   margin: 2px 0 6px;
@@ -1385,17 +1384,12 @@ button:not(:disabled) {
   font-size: 12.5px;
 }
 
-.sidebar select {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  background: var(--bg);
+/* The SERVICE block's first line, which used to be a <select>. Read-only since
+   ui-monitor.md 10.5 - the service is the monitor's - so it is a name rather
+   than a control, and it reads as one: the same weight as the transcript's own
+   text, above the dim budget line that qualifies it. */
+#service-name {
   color: var(--text);
-  font-family: inherit;
-}
-
-.sidebar select:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
 }
 
 /* The STATE rail: the active row is marked and reversed, LOOP_TRANSITIONS's
@@ -1710,13 +1704,16 @@ button:not(:disabled) {
   font-weight: 600;
 }
 
-/* The Direct / Via-SSH radio pair. A row rather than a select, because there
-   are exactly two and which one is chosen changes which fields below mean
-   anything. */
+/* The Local / Direct / Via-SSH radio group. A column since the third arrived
+   (ui-monitor.md 10.2): "Local - launch a monitor on this PC" is a sentence
+   rather than a word, and three of these on one row wrap into something that
+   reads like six options. Which one is chosen changes which fields below mean
+   anything - and in local mode there are none at all. */
 .mon-modes {
   display: flex;
-  gap: 18px;
-  margin-bottom: 4px;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
 }
 
 /* The forget control on a saved-monitor row. Beside the row rather than inside

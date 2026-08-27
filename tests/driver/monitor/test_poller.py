@@ -71,7 +71,9 @@ def _sighting_at(kind: TemplateKind, x: int, y: int) -> Sighting:
     test: it takes the origin off the match and the size off the template, and
     a stand-in for either would be a stand-in for the thing being asserted.
     """
-    template = Template.build(RegionImage(SIGHTING_W, SIGHTING_H, bytes(SIGHTING_W * SIGHTING_H * 4)))
+    template = Template.build(
+        RegionImage(SIGHTING_W, SIGHTING_H, bytes(SIGHTING_W * SIGHTING_H * 4))
+    )
     return Sighting(kind=kind, template=template, match=RegionMatch(x, y, 0.0), at=0.0)
 
 

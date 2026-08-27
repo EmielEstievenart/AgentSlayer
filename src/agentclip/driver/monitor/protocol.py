@@ -89,6 +89,24 @@ class ElementClick(Enum):
 
 
 @dataclass(frozen=True, slots=True)
+class Watched:
+    """What the monitor settled on after its last ``configure`` (§9.1).
+
+    * ``service`` - the profile KEY the spec named; None before any configure.
+    * ``region`` - the box actually watched: the spec's, or the one this
+      monitor's machine remembered for the service. None when neither exists.
+    * ``profiled`` - whether THIS machine has a captured appearance for that
+      key. False is the split-mode trap made visible: a brain driving
+      ``claude`` against a monitor calibrated for ``zai`` gets every element
+      verdict as NOT_CALIBRATED and nothing else says why.
+    """
+
+    service: str | None
+    region: ScreenRegion | None
+    profiled: bool
+
+
+@dataclass(frozen=True, slots=True)
 class Located:
     """One search's whole answer: where, whether there were several, how close.
 
@@ -250,17 +268,16 @@ class UIMonitor(Protocol):
         configured but idle (``latest`` stops advancing)."""
         ...
 
-    async def configured_region(self) -> ScreenRegion | None:
-        """The rectangle this monitor is ACTUALLY watching after the last
-        ``configure``: the spec's own box, or - when the spec carried none -
-        the one this monitor's machine remembered for the service (§9.1's
-        region store). ``None`` when neither exists.
+    async def watched(self) -> Watched:
+        """What the last ``configure`` settled on: the service key, the box
+        actually watched (the spec's, or the store's - §9.1), and whether this
+        machine has a profile for that key.
 
-        The brain has to ask, because the store is on the monitor's disk: a
-        Chat UI on another machine holds no rectangle of its own, and every
-        recipe that says "no chat window is drawn" is reading the brain's
-        calibration, not the monitor's. Adopting this answer is how the two
-        stop disagreeing.
+        The brain has to ask, because both the store and the profile are on
+        the monitor's disk: a Chat UI on another machine holds no rectangle of
+        its own, every recipe that says "no chat window is drawn" is reading
+        the brain's calibration, and a service key that names nothing over
+        there is otherwise a silent NOT_CALIBRATED on every click.
         """
         ...
 

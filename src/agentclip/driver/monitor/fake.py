@@ -56,6 +56,7 @@ from agentclip.driver.monitor.protocol import (
     Tick,
     TickHook,
     UIMonitor,
+    Watched,
 )
 from agentclip.driver.screen.busy import BusyProbe
 from agentclip.driver.screen.capture import CaptureError, RegionImage
@@ -106,6 +107,9 @@ class FakeUIMonitor:
         # to BEHAVE like a far monitor: the brain has no box, the monitor's
         # machine remembers one, and ``configured_region`` hands it back.
         self.fills_from_store = False
+        # What ``watching`` says about this machine's appearances. True by
+        # default - a double is calibrated unless a story says otherwise.
+        self.profiled = True
         # THE generation: bumped by every ``configure``, stamped into ticks,
         # and what makes one a ghost. Public because a test writes scenarios in
         # terms of it ("...and now a delegation starts").
@@ -167,9 +171,12 @@ class FakeUIMonitor:
         """The local tier's region-store read, answered from :attr:`saved_regions`."""
         return self.saved_regions.get(service)
 
-    async def configured_region(self) -> ScreenRegion | None:
-        self.calls.append(("configured_region", ()))
-        return self.spec.region if self.spec is not None else None
+    async def watched(self) -> Watched:
+        self.calls.append(("watched", ()))
+        spec = self.spec
+        if spec is None:
+            return Watched(None, None, False)
+        return Watched(spec.service, spec.region, self.profiled)
 
     async def suspend(self) -> None:
         self.suspends += 1

@@ -62,6 +62,12 @@ LISTENING_ATTACHED = "listening on {address} — attached: {peer}"
 #: What choosing a non-loopback address means, said before Start is pressed.
 #: The same sentence ``--bind``'s help and ``BindRefused`` carry (§5): picking
 #: one of these IS the opt-in, spelled as a click instead of as a flag.
+#: The page fills both holes: {driving} from the state, {selected} from its
+#: own service picker.
+SERVICE_MISMATCH = (
+    "the Chat UI is driving '{driving}' but this window is calibrated for"
+    " '{selected}' - select the same service on both sides"
+)
 REMOTE_WARNING = (
     "off loopback this port is reachable by anything on that network, and it is"
     " a channel to this machine's mouse, keyboard and clipboard - use a"
@@ -201,6 +207,13 @@ class ServePanel:
             # seeing from across the room.
             "link": "off" if server is None else ("attached" if peer else "waiting"),
             "peer": peer or "",
+            # Which SERVICE the attached Chat UI is driving - the key its last
+            # configure named, resolved against THIS machine's profiles and
+            # region store. Shown on the badge, and compared by the page with
+            # its own selection: a Chat UI driving 'claude' against a window
+            # calibrated for 'zai' is the one mismatch nothing else surfaces.
+            "driving": self._driving(),
+            "mismatch": SERVICE_MISMATCH,
             "address": self._address,
             "port": self._port,
             "interfaces": [
@@ -229,6 +242,11 @@ class ServePanel:
             "token": self._token,
             "token_path": str(token_path(self._config_dir)),
         }
+
+    def _driving(self) -> str | None:
+        """The service key the last ``configure`` named, if any."""
+        spec = getattr(self._monitor, "spec", None)
+        return None if spec is None else str(spec.service)
 
     def push(self) -> None:
         """Send the panel's state to the page. Safe from any thread."""

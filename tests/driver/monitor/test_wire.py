@@ -25,7 +25,7 @@ from typing import Any
 
 import pytest
 
-from agentclip.driver.monitor.protocol import ElementClick, Located, MonitorSpec, Tick
+from agentclip.driver.monitor.protocol import ElementClick, Located, MonitorSpec, Tick, Watched
 from agentclip.driver.monitor.wire import (
     ERROR_KINDS,
     MONITOR_WIRE_VERSION,
@@ -200,8 +200,15 @@ def test_a_failed_capture_tick_round_trips() -> None:
     """A frame that failed searched nothing, so the map is empty - and empty is
     not the same as absent-field."""
     blind = Tick(
-        seq=1, generation=1, at=0.0, captured=False,
-        busy=None, idle=None, stale=None, sightings={}, active_detectors=(),
+        seq=1,
+        generation=1,
+        at=0.0,
+        captured=False,
+        busy=None,
+        idle=None,
+        stale=None,
+        sightings={},
+        active_detectors=(),
     )
     assert decode_tick(encode_tick(blind)) == blind
 
@@ -232,7 +239,7 @@ CALLS: dict[str, dict[str, Any]] = {
     "locate": {"kind": COPY, "exclude_kinds": (CHATBOX, TemplateKind.SEND_READY)},
     "click_element": {"kind": COPY, "settle_s": None},
     "hover_scan": {"kind": COPY},
-    "configured_region": {},
+    "watched": {},
     "snap_to_bottom": {"action": "wheel"},
 }
 
@@ -257,7 +264,7 @@ RETURNS: dict[str, Any] = {
     "click_element": ElementClick.AMBIGUOUS,
     "hover_scan": REGION,
     "snap_to_bottom": None,
-    "configured_region": REGION,
+    "watched": Watched(service="svc", region=REGION, profiled=True),
 }
 
 

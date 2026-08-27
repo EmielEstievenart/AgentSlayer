@@ -78,9 +78,7 @@ def lowest_match_scored(
     best: tuple[Template, RegionMatch] | None = None
     best_miss: float | None = None
     for template in templates:
-        match, miss = find(
-            template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher
-        )
+        match, miss = find(template, scene, tolerance=tolerance, max_diff=max_diff, matcher=matcher)
         if miss is not None and (best_miss is None or miss < best_miss):
             best_miss = miss
         if match is None:

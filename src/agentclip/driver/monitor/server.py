@@ -178,9 +178,7 @@ class _Session:
                 )
             )
             return False
-        await self._send(
-            hello_ack_frame(self._server_id, self._monitor.clipboard_kind)
-        )
+        await self._send(hello_ack_frame(self._server_id, self._monitor.clipboard_kind))
         return True
 
     def _attach(self) -> None:
@@ -494,9 +492,7 @@ class MonitorServer:
 
     # -- accepting -------------------------------------------------------------
 
-    async def _on_connect(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
+    async def _on_connect(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         if self._session is not None:
             # Checked and claimed without an await in between, so two
             # simultaneous dials cannot both win the slot.
@@ -527,8 +523,7 @@ class MonitorServer:
         frame = error_frame(
             None,
             "busy",
-            f"this monitor already has a brain attached from {held_by}"
-            " - one brain at a time",
+            f"this monitor already has a brain attached from {held_by} - one brain at a time",
         )
         with contextlib.suppress(OSError, ConnectionError):
             writer.write(encode_line(frame).encode("utf-8"))
@@ -553,8 +548,6 @@ async def serve(
     is the secret every hello must carry, and is REQUIRED once the bind leaves
     loopback.
     """
-    server = MonitorServer(
-        monitor, host=host, port=port, allow_remote=allow_remote, token=token
-    )
+    server = MonitorServer(monitor, host=host, port=port, allow_remote=allow_remote, token=token)
     await server.start()
     return server

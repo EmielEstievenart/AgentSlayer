@@ -50,6 +50,7 @@ from agentclip.driver.monitor.protocol import (
     Tick,
     TickHook,
     UIMonitor,
+    Watched,
 )
 from agentclip.driver.screen.capture import RegionImage
 from agentclip.driver.screen.detector import ScreenDetector, Sighting
@@ -88,8 +89,8 @@ class IdleMonitor:
         watched, so there is no run for a tick to be a ghost of."""
         return 0
 
-    async def configured_region(self) -> ScreenRegion | None:
-        return None
+    async def watched(self) -> Watched:
+        return Watched(None, None, False)
 
     async def suspend(self) -> None:
         return None
@@ -280,8 +281,8 @@ class SwitchableMonitor:
         self._spec = spec
         return await self._inner.configure(spec)
 
-    async def configured_region(self) -> ScreenRegion | None:
-        return await self._inner.configured_region()
+    async def watched(self) -> Watched:
+        return await self._inner.watched()
 
     async def suspend(self) -> None:
         await self._inner.suspend()

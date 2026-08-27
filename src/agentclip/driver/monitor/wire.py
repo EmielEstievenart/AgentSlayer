@@ -81,7 +81,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from agentclip import __version__
-from agentclip.driver.monitor.protocol import ElementClick, Located, MonitorSpec, Tick
+from agentclip.driver.monitor.protocol import ElementClick, Located, MonitorSpec, Tick, Watched
 from agentclip.driver.screen.busy import BusyProbe, BusyState
 from agentclip.driver.screen.profile import TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
@@ -306,6 +306,11 @@ def _opt_float_at(data: dict[str, Any], key: str, what: str) -> float | None:
     return _as_opt_float(_field(data, key, what), f"{what}.{key}")
 
 
+def _opt_str_at(data: dict[str, Any], key: str, what: str) -> str | None:
+    value = _field(data, key, what)
+    return None if value is None else _as_str(value, f"{what}.{key}")
+
+
 def _bool_at(data: dict[str, Any], key: str, what: str) -> bool:
     return _as_bool(_field(data, key, what), f"{what}.{key}")
 
@@ -378,9 +383,7 @@ def encode_kinds(value: Sequence[TemplateKind]) -> list[str]:
 
 
 def decode_kinds(value: Any, what: str = "kinds") -> tuple[TemplateKind, ...]:
-    return tuple(
-        decode_kind(item, f"{what}[{i}]") for i, item in enumerate(_as_list(value, what))
-    )
+    return tuple(decode_kind(item, f"{what}[{i}]") for i, item in enumerate(_as_list(value, what)))
 
 
 # -- dataclasses ---------------------------------------------------------------
@@ -523,6 +526,23 @@ def decode_spec(value: Any, what: str = "spec") -> MonitorSpec:
     )
 
 
+def encode_watched(value: Watched) -> dict[str, Any]:
+    return {
+        "service": value.service,
+        "region": encode_opt_region(value.region),
+        "profiled": value.profiled,
+    }
+
+
+def decode_watched(value: Any, what: str = "watched") -> Watched:
+    data = _mapping(value, what)
+    return Watched(
+        service=_opt_str_at(data, "service", what),
+        region=decode_opt_region(_field(data, "region", what), f"{what}.region"),
+        profiled=_bool_at(data, "profiled", what),
+    )
+
+
 def encode_located(value: Located) -> dict[str, Any]:
     return {
         "region": encode_opt_region(value.region),
@@ -655,7 +675,7 @@ CLOSE = "close"
 
 _PARAMS: dict[str, tuple[_Param, ...]] = {
     CONFIGURE: (_Param("spec", encode_spec, decode_spec),),
-    "configured_region": (),
+    "watched": (),
     SUSPEND: (),
     RESUME: (),
     # In the table because the Protocol has it, and answered by the server as an
@@ -695,7 +715,7 @@ _PARAMS: dict[str, tuple[_Param, ...]] = {
 
 _RESULTS: dict[str, _Value] = {
     CONFIGURE: _Value(_identity, _as_int),
-    "configured_region": _Value(encode_opt_region, decode_opt_region),
+    "watched": _Value(encode_watched, decode_watched),
     SUSPEND: _Value(_encode_none, _decode_none),
     RESUME: _Value(_encode_none, _decode_none),
     CLOSE: _Value(_encode_none, _decode_none),

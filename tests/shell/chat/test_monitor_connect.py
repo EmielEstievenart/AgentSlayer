@@ -659,3 +659,26 @@ async def test_a_box_remembered_over_there_becomes_the_brains_calibration(
 
     assert tab.view.automation.calibration(live).chat_region == box
     assert "chatbot window" in tab.flush().last("sidebar")["region"]
+
+
+async def test_a_service_the_monitor_has_no_appearance_for_is_said_out_loud(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """The other half of the bug as seen: the monitor's badge is green and its
+    ELEMENTS column sees everything - for the service ITS window selected. The
+    Chat UI drives its own key; if that names nothing over there, every click
+    is NOT_CALIBRATED. Now the DETECTION line and one toast say so."""
+    link = ScriptedLink()
+    link.profiled = False
+    tab = build(project, app_config, tmp_path, Dialler(link))
+    tab.view.start()
+    await settle()
+    tab.view.monitor_open()
+    tab.view.monitor_fields("direct", "10.0.0.5", "7777", TOKEN, "")
+    tab.view.monitor_start()
+    await settle()
+
+    service = tab.view._service_for(tab.view.automation.live_slot)
+    toasts = tab.toasts()
+    assert any("no captured appearance for service '" + service + "'" in t for t in toasts)
+    assert any("10.0.0.5:7777" in t for t in toasts)

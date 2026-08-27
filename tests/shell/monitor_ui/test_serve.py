@@ -156,6 +156,8 @@ async def test_the_panel_comes_up_not_serving(serving: ServeHarness) -> None:
     assert state["status"] == NOT_SERVING
     assert state["serving"] is False
     assert (state["link"], state["peer"]) == ("off", "")
+    assert state["driving"] is None
+    assert "{driving}" in state["mismatch"] and "{selected}" in state["mismatch"]
     assert state["port"] == DEFAULT_PORT
     assert state["address"] == "127.0.0.1"
 

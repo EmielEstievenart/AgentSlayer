@@ -57,6 +57,7 @@ from agentclip.driver.monitor.protocol import (
     Tick,
     TickHook,
     UIMonitor,
+    Watched,
 )
 from agentclip.driver.monitor.regions import load_region, save_region
 from agentclip.driver.monitor.search import element_rects, lowest_match, lowest_match_scored
@@ -220,6 +221,7 @@ class LocalUIMonitor:
         self._clip_hooks: list[ClipHook] = []
         # -- the poller ---------------------------------------------------------
         self._spec: MonitorSpec | None = None
+        self._watched = Watched(None, None, False)
         # The current run's stop flag - replaced per run rather than cleared, so
         # a cancelled loop's flag stays set forever and that loop can only end.
         self._stop = threading.Event()
@@ -303,9 +305,12 @@ class LocalUIMonitor:
             self._stale_arm_streak = 0
             self._changed_streak = 0
         region = spec.region
+        # Resolved before the region check, so ``watching`` can say "no
+        # appearance for this key here" even for a spec with no box.
+        profile = self._profile_for(spec.service)
+        self._watched = Watched(spec.service, region, profile is not None)
         if region is None:
             return generation
-        profile = self._profile_for(spec.service)
         if profile is None:
             return generation
         detector = build_detector(
@@ -372,10 +377,8 @@ class LocalUIMonitor:
                 _log.warning("could not remember the chat region for %s", spec.service)
         return spec
 
-    async def configured_region(self) -> ScreenRegion | None:
-        """The box ``configure`` settled on - the spec's, or the store's."""
-        spec = self._spec
-        return spec.region if spec is not None else None
+    async def watched(self) -> Watched:
+        return self._watched
 
     async def suspend(self) -> None:
         """Stop polling without bumping the generation.

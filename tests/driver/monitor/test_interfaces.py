@@ -26,9 +26,7 @@ class FakeAddr:
         self.address = address
 
 
-def answering(
-    monkeypatch: pytest.MonkeyPatch, addresses: dict[str, list[FakeAddr]]
-) -> None:
+def answering(monkeypatch: pytest.MonkeyPatch, addresses: dict[str, list[FakeAddr]]) -> None:
     monkeypatch.setattr(psutil, "net_if_addrs", lambda: addresses)
 
 

@@ -122,9 +122,7 @@ def roll_arm_streak(previous: int, stale: StaleProbe | None, *, min_diff: float)
     """
     if stale is None:
         return previous
-    big_delta = (
-        stale_verdict(stale) is False and stale.diff is not None and stale.diff >= min_diff
-    )
+    big_delta = stale_verdict(stale) is False and stale.diff is not None and stale.diff >= min_diff
     return previous + 1 if big_delta else 0
 
 

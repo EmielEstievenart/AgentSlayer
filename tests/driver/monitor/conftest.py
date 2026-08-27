@@ -67,9 +67,7 @@ def frame() -> RegionImage:
     return RegionImage(2, 2, bytes(4 * 4))
 
 
-async def await_until(
-    predicate: Callable[[], bool], what: str, timeout: float = TIMEOUT_S
-) -> None:
+async def await_until(predicate: Callable[[], bool], what: str, timeout: float = TIMEOUT_S) -> None:
     """Wait for something the POLLER thread will do, without blocking the event
     loop a parked ``observe`` is going to be woken through."""
     deadline = time.monotonic() + timeout
@@ -408,8 +406,6 @@ def compose_with(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], None]:
     """
 
     def use(detector: object) -> None:
-        monkeypatch.setattr(
-            local_module, "build_detector", lambda *_args, **_kwargs: detector
-        )
+        monkeypatch.setattr(local_module, "build_detector", lambda *_args, **_kwargs: detector)
 
     return use

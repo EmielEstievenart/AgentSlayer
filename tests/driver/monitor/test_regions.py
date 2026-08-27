@@ -120,7 +120,7 @@ async def test_a_region_less_spec_falls_back_to_what_was_drawn_here(
         assert live.spec is not None
         assert live.spec.region == CHAT
         # ...and the brain can ASK for it, which is the whole point over a wire.
-        assert await live.configured_region() == CHAT
+        assert (await live.watched()).region == CHAT
     finally:
         await live.close()
 
@@ -138,7 +138,7 @@ async def test_the_brain_wins_when_it_has_an_opinion(tmp_path: Path) -> None:
 
 
 async def test_a_service_with_nothing_saved_stays_region_less(tmp_path: Path) -> None:
-    """"Nothing is calibrated" has to survive the store, or the monitor would
+    """ "Nothing is calibrated" has to survive the store, or the monitor would
     start watching a rectangle it made up."""
     save_region(tmp_path, "other", OTHER)
     live = monitor(tmp_path)
@@ -187,7 +187,7 @@ async def test_the_fake_fills_a_region_less_spec_from_its_store_too() -> None:
     fake.fills_from_store = True
     fake.saved_regions["svc"] = CHAT
     await fake.configure(spec(region=None, service="svc"))
-    assert await fake.configured_region() == CHAT
+    assert (await fake.watched()).region == CHAT
     await fake.configure(spec(region=OTHER, service="svc"))
-    assert await fake.configured_region() == OTHER
+    assert (await fake.watched()).region == OTHER
     assert fake.saved_regions["svc"] == OTHER

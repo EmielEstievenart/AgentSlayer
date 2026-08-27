@@ -86,7 +86,7 @@ from agentclip.driver.automation.loop_state import (
 from agentclip.driver.automation.ops import ElementClick
 from agentclip.driver.clip.base import ClipboardProvider, ClipboardUnavailable
 from agentclip.driver.monitor.local import LocalUIMonitor
-from agentclip.driver.monitor.protocol import MonitorSpec, UIMonitor
+from agentclip.driver.monitor.protocol import MonitorSpec, UIMonitor, Watched
 from agentclip.driver.monitor.remote import RemoteUIMonitor
 from agentclip.driver.monitor.switchable import SwitchableMonitor
 from agentclip.driver.screen.capture import RegionImage
@@ -326,9 +326,7 @@ CALIBRATION_OPEN = "the calibration window is already open"
 # overlay over the browser being calibrated (ui-monitor.md §2.6), and in split
 # mode that browser is on another machine - so there is nothing here to draw a
 # box around and the door is closed rather than opened onto the wrong screen.
-CALIBRATION_REMOTE = (
-    "calibration runs on the monitor's machine: run agentclip-monitor there"
-)
+CALIBRATION_REMOTE = "calibration runs on the monitor's machine: run agentclip-monitor there"
 
 # == the monitor link (--monitor host:port, ui-monitor.md §6.5) ================
 # Split mode's four sentences. Each one is a moment the user cannot see for
@@ -336,6 +334,16 @@ CALIBRATION_REMOTE = (
 # that came up, dropped, refused a dial or came back as a DIFFERENT process is
 # invisible unless it is said out loud.
 MONITOR_DIALLING = "dialling"
+# The service key this window drives names nothing on the monitor's machine.
+# Two sentences for one fact: the DETECTION line is the standing one, the toast
+# says what to do about it - and it names both machines, because the fix is on
+# one of them and the user is looking at the other.
+MONITOR_UNPROFILED = "the monitor has no captured appearance for '{service}'"
+MONITOR_UNPROFILED_TOAST = (
+    "the monitor at {peer} has no captured appearance for service '{service}' -"
+    " in its Monitor UI select '{service}' and capture it, or select here the"
+    " service it is calibrated for (its badge says which)"
+)
 MONITOR_UP = "monitor link up: {peer}"
 MONITOR_LOST = "monitor link lost - redialling {peer}"
 MONITOR_RETRY = "cannot reach the monitor at {peer}: {reason}"
@@ -501,7 +509,7 @@ class ShellMonitor(MonitorLike, Protocol):
 
     async def close(self) -> None: ...
 
-    async def configured_region(self) -> ScreenRegion | None: ...
+    async def watched(self) -> Watched: ...
 
     @property
     def detector(self) -> ScreenDetector | None: ...
@@ -871,9 +879,7 @@ class GuiView:
         # than broken.
         self._host = host
         self._remote = remote
-        self._remote_target = (
-            str(getattr(host, "target", "")) if config.remote.is_remote() else ""
-        )
+        self._remote_target = str(getattr(host, "target", "")) if config.remote.is_remote() else ""
         # The dialog's model while it is up, and None the rest of the time - the
         # service editor's arrangement (``chat/remote.py`` holds every decision).
         self._dialog: ConnectDialog | None = None
@@ -887,6 +893,7 @@ class GuiView:
         # dialog can show on its FORM what the toast said once and scrolled
         # away - the field the user has to fix is right there.
         self._monitor_failure = ""
+        self._unprofiled_said: tuple[str, str] | None = None
         # The RemoteTarget that was actually dialled, for the save offer. Held
         # rather than re-parsed: what the user typed and what the config layer
         # resolved it to are not the same string.
@@ -1417,9 +1424,7 @@ class GuiView:
             return
         # The note belongs to the finishing run's transcript, whichever window
         # is focused by the time this lands.
-        self._events[window].append(
-            LogEvent(datetime.now().strftime("%H:%M:%S"), note)
-        )
+        self._events[window].append(LogEvent(datetime.now().strftime("%H:%M:%S"), note))
         self._bridge.send("transcript", window=window, kind="note", text=note, ok=ok)
         if window == SUBAGENT_WINDOW:
             for run in reversed(self._sub_runs):
@@ -2211,7 +2216,7 @@ class GuiView:
         self._dialog.set_fields(target, root)
 
     def connect_start(self) -> None:
-        """"Connect", and "Retry" - the same press, because a retry IS a fresh
+        """ "Connect", and "Retry" - the same press, because a retry IS a fresh
         attempt at the same values.
 
         The brief's §3.8 distinguishes retrying a failed ROOT check (which could
@@ -2238,7 +2243,7 @@ class GuiView:
         self._schedule(self._connect_flow(dialog.target, dialog.root))
 
     def connect_edit(self) -> None:
-        """"Edit": back to the form with the attempted values still in it -
+        """ "Edit": back to the form with the attempted values still in it -
         the fix for the single most common real failure, a typo'd root."""
         if self._dialog is None:
             return
@@ -2246,7 +2251,7 @@ class GuiView:
         self._push_connect()
 
     def connect_cancel(self) -> None:
-        """"Cancel"/"Close": drop the dialog. Never kills a connect in flight -
+        """ "Cancel"/"Close": drop the dialog. Never kills a connect in flight -
         the prompts are what a user cancels, and each of them returning "give
         up" is what ends an attempt (``PasswordPrompt``'s own contract)."""
         if self._connecting:
@@ -2259,7 +2264,7 @@ class GuiView:
         self._start_controller()
 
     def connect_save(self, name: str) -> None:
-        """"Save this target": one ``[remote.<name>]`` table, global file only.
+        """ "Save this target": one ``[remote.<name>]`` table, global file only.
 
         gui.md §4 ruling 1. Nothing secret goes with it - see
         ``config.save_remote_target``, which writes four keys and no password.
@@ -2325,7 +2330,7 @@ class GuiView:
         self._monitor_dialog.set_fields(mode, host, port, token, via)
 
     def monitor_start(self) -> None:
-        """"Attach", and "Retry" - one press, because a retry IS a fresh dial."""
+        """ "Attach", and "Retry" - one press, because a retry IS a fresh dial."""
         dialog = self._monitor_dialog
         if dialog is None:
             return
@@ -2340,14 +2345,14 @@ class GuiView:
         self._schedule(self._monitor_flow(dialog.target()))
 
     def monitor_edit(self) -> None:
-        """"Edit": back to the form with what was attempted still in it."""
+        """ "Edit": back to the form with what was attempted still in it."""
         if self._monitor_dialog is None:
             return
         self._monitor_dialog.edit()
         self._push_monitor()
 
     def monitor_cancel(self) -> None:
-        """"Close": drop the tab. Never cancels a dial in flight - the round
+        """ "Close": drop the tab. Never cancels a dial in flight - the round
         trip is one call and the link it makes has nowhere else to go."""
         if self._monitor_dialling:
             self.notify(MONITOR_DIAL_BUSY, severity="warning")
@@ -2356,7 +2361,7 @@ class GuiView:
         self._push_monitor()
 
     def monitor_save(self, name: str) -> None:
-        """"Save this monitor": one ``[monitor.<name>]`` table, global file only.
+        """ "Save this monitor": one ``[monitor.<name>]`` table, global file only.
 
         Unlike its SSH sibling this one DOES write a secret - the token, if the
         form has one. Stated rather than hidden (``config.save_monitor_target``):
@@ -2390,9 +2395,7 @@ class GuiView:
             monitor=replace(
                 self._config.monitor,
                 targets={
-                    key: value
-                    for key, value in self._config.monitor.targets.items()
-                    if key != name
+                    key: value for key, value in self._config.monitor.targets.items() if key != name
                 },
             ),
         )
@@ -3400,16 +3403,30 @@ class GuiView:
         # lives in its store (§9.1) - gets the monitor's answer and adopts it,
         # or every recipe keeps saying "no chat window is drawn" over a link
         # whose far end can see the window perfectly well.
-        watched = await self._monitor.configured_region()
-        if watched != spec.region:
-            self._automation.set_calibration(self._automation.live_slot, watched)
-            spec = replace(spec, region=watched)
+        watched = await self._monitor.watched()
+        if watched.region != spec.region:
+            self._automation.set_calibration(self._automation.live_slot, watched.region)
+            spec = replace(spec, region=watched.region)
             self._push_sidebar()
         self._automation.forget_verdicts()
         detector = self._monitor.detector
         active = detector.active_detectors if detector is not None else ()
         self._automation.active_detectors = active
-        if spec.region is None:
+        peer = self._monitor_peer()
+        if peer and not watched.profiled:
+            # The split-mode trap, said where it bites: the key this window
+            # drives names no appearance on the monitor's machine, so every
+            # click over there is NOT_CALIBRATED and nothing else explains it.
+            self._paint_detection(MONITOR_UNPROFILED.format(service=spec.service))
+            said = (peer, spec.service)
+            if self._unprofiled_said != said:
+                self._unprofiled_said = said
+                self.notify(
+                    MONITOR_UNPROFILED_TOAST.format(peer=peer, service=spec.service),
+                    severity="warning",
+                    timeout=12,
+                )
+        elif spec.region is None:
             self._paint_detection(STALE_UNSET)
         elif not active:
             # The service's checklist is empty, or asks only for appearances it
@@ -3739,7 +3756,11 @@ class GuiView:
         the muscle memory transfers - recorded in gui.md §2.
         """
         if self._awaiting_new_session:
-            return "task", "Describe the task · Enter starts the session · Shift+Enter newline", True
+            return (
+                "task",
+                "Describe the task · Enter starts the session · Shift+Enter newline",
+                True,
+            )
         if view is None or not view.session_active:
             return "idle", "no session", False
         if view.awaiting_answer:
@@ -3927,9 +3948,7 @@ class GuiView:
                 {
                     "state": state.name,
                     "label": _LOOP_LABEL[state],
-                    "mark": "active"
-                    if state is active
-                    else ("legal" if state in legal else "dim"),
+                    "mark": "active" if state is active else ("legal" if state in legal else "dim"),
                 }
                 for state in _LOOP_ORDER
             ],
@@ -4030,9 +4049,7 @@ class GuiView:
         if not statuses:
             return 0, None
         connected = sum(1 for s in statuses if getattr(s, "state", "") == "connected")
-        enabled = sum(
-            1 for s in statuses if getattr(s, "state", "") not in ("disabled", "invalid")
-        )
+        enabled = sum(1 for s in statuses if getattr(s, "state", "") not in ("disabled", "invalid"))
         return connected, enabled
 
     def _mcp_rows(self) -> Sequence[Any]:
@@ -4068,8 +4085,11 @@ class GuiView:
         self._bridge.send(
             "mcp",
             rows=[
-                {"name": str(getattr(s, "name", "")), "state": str(getattr(s, "state", "")),
-                 "line": _mcp_line(s)}
+                {
+                    "name": str(getattr(s, "name", "")),
+                    "state": str(getattr(s, "state", "")),
+                    "line": _mcp_line(s),
+                }
                 for s in statuses
             ],
         )

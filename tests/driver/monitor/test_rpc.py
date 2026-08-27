@@ -442,8 +442,9 @@ async def test_a_disconnect_stops_the_clipboard_watcher_it_started(
     await server.disconnect()
 
     await await_until(
-        lambda: not any(t.name == "agentclip-clipwatch" and t.is_alive()
-                        for t in threading.enumerate()),
+        lambda: (
+            not any(t.name == "agentclip-clipwatch" and t.is_alive() for t in threading.enumerate())
+        ),
         "the watcher thread to stop",
     )
 
@@ -535,7 +536,7 @@ async def test_a_non_loopback_bind_needs_the_opt_in(wire: Callable[..., Wiring])
     MonitorServer(wiring.monitor, port=0)
 
 
-async def test_configured_region_is_the_far_monitors_answer(
+async def test_watched_is_the_far_monitors_answer(
     wire: Callable[..., Wiring], listen: Listen, dial: Dial
 ) -> None:
     """A brain with no rectangle asks, and gets the one the monitor's machine
@@ -543,6 +544,8 @@ async def test_configured_region_is_the_far_monitors_answer(
     chat window is."""
     wiring = wire()
     _server, client = await linked(wiring, listen, dial)
-    assert await client.configured_region() is None
+    assert (await client.watched()).region is None
     await client.configure(spec(region=CHAT))
-    assert await client.configured_region() == CHAT
+    watched = await client.watched()
+    assert watched.region == CHAT
+    assert watched.service == spec(region=CHAT).service

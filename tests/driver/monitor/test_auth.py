@@ -170,9 +170,7 @@ async def test_no_token_is_refused_by_a_server_that_has_one(
     assert caught.value.kind == "unauthorized"
 
 
-async def test_the_refusal_comes_before_the_ack(
-    monitor: FakeUIMonitor, listen: Listen
-) -> None:
+async def test_the_refusal_comes_before_the_ack(monitor: FakeUIMonitor, listen: Listen) -> None:
     """The property the client cannot see, and the reason the check sits where
     it does: an unauthorised peer learns neither the monitor's ``server_id`` nor
     which clipboard backend the machine has, because the ack is never sent."""

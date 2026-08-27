@@ -43,6 +43,7 @@ from agentclip.driver.monitor.protocol import (
     Tick,
     TickHook,
     UIMonitor,
+    Watched,
 )
 from agentclip.driver.monitor.wire import (
     LINE_LIMIT,
@@ -161,9 +162,7 @@ class RemoteUIMonitor:
     # == connecting ============================================================
 
     @classmethod
-    async def connect(
-        cls, host: str, port: int, *, token: str | None = None
-    ) -> RemoteUIMonitor:
+    async def connect(cls, host: str, port: int, *, token: str | None = None) -> RemoteUIMonitor:
         """Dial a monitor and complete the handshake.
 
         ``token`` is §5's shared secret, as the monitor printed it on the machine
@@ -250,9 +249,9 @@ class RemoteUIMonitor:
         self._generation = generation
         return generation
 
-    async def configured_region(self) -> ScreenRegion | None:
-        answer = await self._call("configured_region")
-        assert answer is None or isinstance(answer, ScreenRegion)
+    async def watched(self) -> Watched:
+        answer = await self._call("watched")
+        assert isinstance(answer, Watched)
         return answer
 
     async def suspend(self) -> None:

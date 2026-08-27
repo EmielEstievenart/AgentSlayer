@@ -354,7 +354,9 @@ async def _run(args: argparse.Namespace, monitor: LocalUIMonitor) -> int:
         print(f"agentclip-monitor: {exc}", file=sys.stderr)
         return 2
     except OSError as exc:
-        print(f"agentclip-monitor: cannot listen on {args.bind}:{args.port}: {exc}", file=sys.stderr)
+        print(
+            f"agentclip-monitor: cannot listen on {args.bind}:{args.port}: {exc}", file=sys.stderr
+        )
         return 2
     # stderr, not stdout: nothing here speaks a protocol on the standard
     # streams, but a launcher that captures one of them should get the port

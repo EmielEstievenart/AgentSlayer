@@ -101,6 +101,7 @@ def test_the_page_draws_the_serve_panel_and_can_reach_all_four_of_its_verbs() ->
         "serve-toggle",
         "serve-status",
         "link-badge",
+        "serve-mismatch",
         "serve-warning",
         "serve-error",
         "serve-token",
@@ -396,7 +397,7 @@ def test_the_link_badge_is_painted_from_the_serve_event_in_three_colours() -> No
     a header badge whose FILL is the state, painted off the event's `link`."""
     js = asset("app.js")
     css = asset("app.css")
-    assert 'paintLink(event.link || "off", event.peer || "")' in js
+    assert 'paintLink(event.link || "off", event.peer || "", event.driving || "")' in js
     for state in ("off", "waiting", "attached"):
         assert f"{state}:" in js, state
     assert ".link-badge.waiting" in css and ".link-badge.attached" in css

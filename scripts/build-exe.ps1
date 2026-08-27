@@ -120,7 +120,16 @@ try {
         Write-Step 'Cleaning build\ and dist\'
         foreach ($dir in 'build', 'dist') {
             $path = Join-Path $Root $dir
-            if (Test-Path $path) { Remove-Item $path -Recurse -Force }
+            if (-not (Test-Path $path)) { continue }
+            try {
+                Remove-Item $path -Recurse -Force -ErrorAction Stop
+            } catch {
+                # The folder itself is somebody's current directory (a terminal
+                # or an Explorer window sitting in dist\). Its CONTENTS can still
+                # go, and that is all a clean build needs.
+                Write-Host "    $dir\ is held open by another process - emptying it instead"
+                Get-ChildItem $path -Force | Remove-Item -Recurse -Force
+            }
         }
     }
 

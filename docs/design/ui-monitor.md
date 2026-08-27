@@ -1849,3 +1849,33 @@ preset field — and the brain reads back what it needs.
   session builder needs come from `Watched` too.
 * Send-gate tick budgets (`SEND_ARM_*`, `SEND_GATE_*`) become the monitor's
   constants; the spec no longer carries them.
+
+**As built — the MONITOR side (2026-08-27).** Everything above that lives under
+`driver/monitor/` and `shell/monitor_ui/` has landed; the Chat UI half (the
+bullets about `live_preset()`, the read-only sidebar picker and the brain
+calling `watch(live_slot)`) is §10.2's work and is still to come, so
+`shell/chat/view.py` does not compile against this API yet.
+
+* `Watched` is `service`, `region`, `profiled`, `label`, `generation` and the
+  eleven preset fields, all defaulted after the first three so
+  `EMPTY_WATCHED` is one object. `watched_from(spec, profiled=, generation=)`
+  builds it; `spec_from_preset(preset, region, service=)` builds the spec.
+* `MonitorSpec` grew the same preset half rather than the monitor taking a
+  second `preset_for` callback: one callable then answers the whole of "what is
+  this window", and two seams could have named two different services.
+* `UIMonitor.watch(slot: AgentSlot) -> Watched` is on the Protocol;
+  `configure(spec)` stays as the in-process door. `AgentSlot` is
+  `driver/screen/slot.py`'s — a slot is a drawn box, which is below this layer,
+  so no new enum was needed.
+* Monitor wire **v3**, breaking: `configure` left `_PARAMS`/`_RESULTS`/`VERBS`
+  and `watch` (param `slot`, a string) took its place; `encode_spec` /
+  `decode_spec` are gone. `RemoteUIMonitor.configure` raises `MonitorCallError`
+  carrying `CONFIGURE_IS_LOCAL`.
+* `LocalUIMonitor(spec_for=…)` / `set_spec_for(…)`. Headless it comes from
+  `driver/monitor/__main__.spec_for_config`; with a window the Monitor UI's
+  view installs its own `spec_for` at construction, and a `watch` for the slot
+  the window is not showing switches the window and repaints it.
+* `SEND_ARM_*` / `SEND_GATE_*` now live in `driver/monitor/beats.py`;
+  `driver/automation/finish.py` re-exports them at the address its suites
+  already name. The Monitor UI imports no `driver/automation` module at all any
+  more, and `tests/test_layering.py` dropped that allowance.

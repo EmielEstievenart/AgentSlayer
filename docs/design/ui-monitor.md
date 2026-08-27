@@ -2071,6 +2071,60 @@ Wire **v4** (`MONITOR_WIRE_VERSION = 4`):
   from `driver.screen` only `profile.TemplateKind`, `region`, `slot`, `focus`
   (the explicit allowlist loses `profile_store`).
 
+**AS BUILT — the monitor side** (2026-08-27). Wire **v4** is live;
+`MONITOR_WIRE_VERSION = 4` and the handshake gates on it, so a v3 monitor and a
+v4 brain refuse each other by name rather than disagreeing about a field.
+
+* `Watched.captured: tuple[TemplateKind, ...] = ()`, filled by
+  `watched_from(spec, *, profiled, generation, captured=())`. The kinds are
+  passed in **beside** the spec rather than read out of it: which appearances
+  exist is a fact about the pictures on this machine, and the spec is a fact
+  about the row in the config. `LocalUIMonitor.configure` fills it from the
+  profile it already resolves before the region check
+  (`() if profile is None else profile.captured`), so `profiled` and `captured`
+  can never disagree — an unprofiled service captures nothing.
+  `EMPTY_WATCHED.captured` is `()`.
+* `Located.target: ScreenRegion | None = None` — the 1x1 rectangle a click
+  should land on, `click_point_region(region, *profile.click_point(kind))`
+  computed in `LocalUIMonitor._locate_now` (and in the hover walk) through one
+  new helper, `LocalUIMonitor._aim`. `None` iff `region` is None.
+  `click_element` now *reads* `located.target` instead of recomputing it, so the
+  find and the press are aimed by one reading of the profile. Defaulted rather
+  than required so that every "nothing there" answer stays
+  `Located(None, False, None)`.
+* `hover_scan(kind) -> Located` on the Protocol, the local monitor, the fake,
+  the remote client and both halves of `SwitchableMonitor`. `ambiguous` is
+  always False and `best_miss` always None: a walk stops at the first frame the
+  thing is on, so it has neither counted a second one nor judged a candidate it
+  could report a diff for. `_RESULTS["hover_scan"]` is `encode_located` /
+  `decode_located`.
+* Wire: `captured` rides as a list of kind VALUES (`encode_kinds`), and its
+  decode (`_captured_at`) is the one tolerant reader on this wire — an absent
+  list reads as `()` and a name this build has no `TemplateKind` for is dropped.
+  The version gate pins the shape of the wire, not the enum inside it, and "no,
+  I have not got one of those" is the honest answer about a kind this side
+  cannot name. Every other field stays strict. `Located.target` rides as an
+  optional region beside `region`.
+* `FakeUIMonitor` stages both: `captured: dict[str, tuple[TemplateKind, ...]]`
+  keyed by service (like `saved_regions`), with a key nobody staged following
+  `profiled` — every kind when the double is calibrated, none when it is not, so
+  `captured["claude"] = ()` still means "profiled, no pictures";
+  `click_points: dict[TemplateKind, tuple[int, int]]` (empty = the centre), and
+  `locate`/`hover_scan` fill `target` under whatever `answers` scripted unless
+  the suite wrote one itself. Helpers: `captured_for(service)`, `aim(kind, rect)`.
+* Tests: `tests/driver/monitor/test_wire.py` (round-trip tables, the tolerant
+  `captured` decode, the version is four), `test_rpc.py` (`captured` and an
+  aimed `target` across a real socket, a hover scan crossing as a `Located`),
+  `test_verbs.py` (a profile with a click point → `located.target` is that
+  pixel; every hover-scan refusal is an empty `Located`), `test_watch.py`
+  (local and fake staging).
+
+Not in this note: the brain-side replacements above (`captured_for`,
+`live_profile`'s removal, the recipes' new refusals) and the layering-test
+change, which land with the `shell.chat` / `driver.automation` half.
+`driver/automation/machine.py`'s `MonitorLike.hover_scan` still declares
+`ScreenRegion | None` and is the one seam mypy flags until that half lands.
+
 ### 11.4 F2 — what the monitor sees
 
 A sidebar block **MONITOR SEES**, hidden by default, toggled by `F2` (the key

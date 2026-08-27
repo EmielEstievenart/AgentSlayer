@@ -53,6 +53,9 @@ CHAT = ScreenRegion(1000, 500, 400, 300)
 # size, and a located rectangle is the size of the image that matched.
 HIT = RegionMatch(30, 40, 0.0)
 HIT_RECT = ScreenRegion(1030, 540, 20, 16)
+# The one pixel a click on that rectangle lands on with nobody's click point
+# adjusted: dead centre, as the 1x1 rectangle every click in the app takes.
+HIT_TARGET = ScreenRegion(1030 + 10, 540 + 8, 1, 1)
 ELSEWHERE = RegionMatch(30, 200, 0.0)
 ELSEWHERE_RECT = ScreenRegion(1030, 700, 20, 16)
 
@@ -168,8 +171,38 @@ async def test_locate_answers_where_the_lowest_one_is(wire: Callable[..., Wiring
 
     found = await wiring.monitor.locate(COPY)
 
-    assert found == Located(HIT_RECT, False, None)
+    assert found == Located(HIT_RECT, False, None, HIT_TARGET)
     assert ops.captures == [CHAT]
+
+
+async def test_locate_aims_at_the_services_own_click_point(
+    wire: Callable[..., Wiring],
+) -> None:
+    """§11.3: the ONE pixel to click comes back with the rectangle.
+
+    The brain holds no appearances any more, so it cannot apply a click point
+    itself - and the middle of a control is only the right pixel until a service
+    draws one whose middle is a label. 25%/75% of the 20x16 match, the same
+    arithmetic ``click_element`` does with the same profile.
+    """
+    ops = ScriptedOps(lowest=((HIT, 0.9),), all_matches=([HIT],))
+    aimed = profile_with(COPY)
+    aimed.set_click_point(COPY, 25, 75)
+    wiring = await configured(wire, ops, profile=aimed)
+
+    found = await wiring.monitor.locate(COPY)
+
+    assert found.region == HIT_RECT
+    assert found.target == ScreenRegion(1030 + 5, 540 + 11, 1, 1)
+
+
+async def test_a_located_miss_has_nothing_to_aim_at(wire: Callable[..., Wiring]) -> None:
+    """``target`` is None if and only if ``region`` is - the invariant every
+    caller that clicks leans on."""
+    ops = ScriptedOps(lowest=((None, 0.31),))
+    wiring = await configured(wire, ops)
+
+    assert (await wiring.monitor.locate(COPY)).target is None
 
 
 async def test_locate_flags_two_of_one_kind_and_still_says_where(
@@ -406,7 +439,13 @@ async def test_hover_scan_walks_the_cursor_up_and_stops_at_the_first_hit(
     ops = ScriptedOps(lowest=((None, None), (None, None), (HIT, None)))
     wiring = await configured(wire, ops)
 
-    assert await wiring.monitor.hover_scan(COPY) == HIT_RECT
+    found = await wiring.monitor.hover_scan(COPY)
+
+    # A ``Located``, so the click after a hover is aimed by the same point as
+    # the click after a static search - and the two fields a walk cannot answer
+    # are the empty ones: it stops at the first sight of the thing, so it never
+    # counts a second and judges nothing it could report a diff for.
+    assert found == Located(HIT_RECT, False, None, HIT_TARGET)
     assert ops.moves == stops[:3]
     assert ops.captures == [CHAT, CHAT, CHAT], "a stop looked without moving first"
 
@@ -417,7 +456,7 @@ async def test_hover_scan_walks_the_whole_region_before_giving_up(
     ops = ScriptedOps(lowest=((None, 0.6),))
     wiring = await configured(wire, ops)
 
-    assert await wiring.monitor.hover_scan(COPY) is None
+    assert await wiring.monitor.hover_scan(COPY) == Located(None, False, None)
     assert ops.moves == hover_scan_points(CHAT)
 
 
@@ -429,7 +468,7 @@ async def test_hover_scan_stops_dead_when_the_cursor_cannot_be_moved(
     ops = ScriptedOps(lowest=((HIT, None),), move_ok=False)
     wiring = await configured(wire, ops)
 
-    assert await wiring.monitor.hover_scan(COPY) is None
+    assert await wiring.monitor.hover_scan(COPY) == Located(None, False, None)
     assert len(ops.moves) == 1
     assert ops.captures == []
 
@@ -440,7 +479,7 @@ async def test_hover_scan_stops_dead_when_a_capture_fails(
     ops = ScriptedOps(lowest=((HIT, None),), capture_error=True)
     wiring = await configured(wire, ops)
 
-    assert await wiring.monitor.hover_scan(COPY) is None
+    assert await wiring.monitor.hover_scan(COPY) == Located(None, False, None)
     assert len(ops.captures) == 1
 
 
@@ -460,7 +499,7 @@ async def test_hover_scan_moves_nothing_with_nothing_to_look_for(
     ops = ScriptedOps(lowest=((HIT, None),))
     wiring = await configured(wire, ops, **kwargs)  # type: ignore[arg-type]
 
-    assert await wiring.monitor.hover_scan(COPY) is None, what
+    assert await wiring.monitor.hover_scan(COPY) == Located(None, False, None), what
     assert ops.moves == []
 
 

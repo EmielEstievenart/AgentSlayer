@@ -58,6 +58,9 @@ COPY = TemplateKind.COPY
 CHAT = ScreenRegion(1000, 500, 400, 300)
 HIT = RegionMatch(30, 40, 0.0)
 HIT_RECT = ScreenRegion(1030, 540, 20, 16)
+# Where a click on that match lands with nobody's click point adjusted: the
+# centre pixel, as ``Located.target`` carries it.
+HIT_TARGET = ScreenRegion(1040, 548, 1, 1)
 ELSEWHERE = RegionMatch(30, 200, 0.0)
 ELSEWHERE_RECT = ScreenRegion(1030, 700, 20, 16)
 
@@ -189,6 +192,39 @@ async def test_watch_answers_with_the_whole_service_the_monitor_chose(
     assert watched.max_paste_chars == spec().max_paste_chars
     assert watched.delivery == spec().delivery
     assert watched.snap_back == spec().snap_back
+
+
+async def test_watch_says_which_appearances_the_far_machine_has(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """§11.3: which kinds are captured is an answer only the far side can give.
+
+    The brain holds no templates at all now, so "is there a copy button?" used
+    to be a read of its own profile store - empty on every machine but the one
+    the pictures were taken on, which is how a fully calibrated desktop came to
+    refuse every click.
+    """
+    wiring = wire(profile=profile_with(COPY, TemplateKind.NEW_CHAT), service="claude")
+    _server, client = await linked(wiring, listen, dial)
+
+    watched = await targeted(wiring, client, region=CHAT, service="claude")
+
+    assert watched.profiled is True
+    assert watched.captured == (COPY, TemplateKind.NEW_CHAT)
+
+
+async def test_a_service_with_no_pictures_over_there_captures_nothing(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """The split-mode trap, in the field the brain now gates on: a monitor
+    calibrated for another service answers an empty tuple, and every element
+    verdict the brain makes off it is a refusal with a reason."""
+    wiring = wire(profile=profile_with(COPY), service="zai")
+    _server, client = await linked(wiring, listen, dial)
+
+    watched = await targeted(wiring, client, region=CHAT, service="claude")
+
+    assert (watched.profiled, watched.captured) == (False, ())
 
 
 async def test_watch_names_the_window_and_the_monitor_picks_the_service(
@@ -346,10 +382,48 @@ async def test_locate_and_click_element_marshal_both_ways(
     await targeted(wiring, client, region=CHAT, finish_signals=())
     await quiet(wiring, ops)
 
-    assert await client.locate(COPY) == Located(region=HIT_RECT, ambiguous=False, best_miss=None)
+    assert await client.locate(COPY) == Located(
+        region=HIT_RECT, ambiguous=False, best_miss=None, target=HIT_TARGET
+    )
     assert await client.click_element(COPY) is ElementClick.CLICKED
     assert ops.captures == [CHAT, CHAT], "the verbs searched something else"
-    assert [region for region, _settle in ops.clicks] == [ScreenRegion(1040, 548, 1, 1)]
+    assert [region for region, _settle in ops.clicks] == [HIT_TARGET]
+
+
+async def test_the_click_point_is_applied_on_the_far_side(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """§11.3: ``target`` crosses already aimed.
+
+    A click point is a percentage kept beside the picture it belongs to, and the
+    pictures never leave the monitor - so a brain that had the rectangle and not
+    the point would press the middle of whatever the service drew there.
+    """
+    ops = ScriptedOps(lowest=((HIT, None),), all_matches=([HIT],))
+    aimed = profile_with(COPY)
+    aimed.set_click_point(COPY, 25, 75)
+    wiring = wire(ops=ops, profile=aimed)
+    _server, client = await linked(wiring, listen, dial)
+    await targeted(wiring, client, region=CHAT, finish_signals=())
+    await quiet(wiring, ops)
+
+    assert (await client.locate(COPY)).target == ScreenRegion(1035, 551, 1, 1)
+
+
+async def test_a_hover_scan_crosses_as_a_located_with_its_target(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """The slow verb answers the same shape as the fast one, so the copy click
+    after a hover is aimed by the same pixel as the one after a static search."""
+    ops = ScriptedOps(lowest=((None, None), (HIT, None)))
+    wiring = wire(ops=ops, profile=profile_with(COPY))
+    _server, client = await linked(wiring, listen, dial)
+    await targeted(wiring, client, region=CHAT, finish_signals=())
+    await quiet(wiring, ops)
+
+    assert await client.hover_scan(COPY) == Located(
+        region=HIT_RECT, ambiguous=False, best_miss=None, target=HIT_TARGET
+    )
 
 
 async def test_an_ambiguous_element_is_refused_across_the_wire(
@@ -379,7 +453,9 @@ async def test_a_miss_crosses_as_a_miss_with_its_diagnosis(
     await targeted(wiring, client, region=CHAT, finish_signals=())
     await quiet(wiring, ops)
 
-    assert await client.locate(COPY) == Located(region=None, ambiguous=False, best_miss=0.31)
+    assert await client.locate(COPY) == Located(
+        region=None, ambiguous=False, best_miss=0.31, target=None
+    )
     assert await client.click_element(COPY) is ElementClick.MISMATCH
     assert ops.clicks == [], "a miss was clicked anyway"
 

@@ -72,7 +72,7 @@ async def test_before_the_first_dial_every_action_is_nothing_happened() -> None:
     assert await monitor.find_all(TemplateKind.COPY) == ()
     assert (await monitor.locate(TemplateKind.COPY)).region is None
     assert await monitor.click_element(TemplateKind.COPY) is ElementClick.MISMATCH
-    assert await monitor.hover_scan(TemplateKind.COPY) is None
+    assert (await monitor.hover_scan(TemplateKind.COPY)).region is None
     assert await monitor.snap_to_bottom("wheel") is None
     assert monitor.watch_clipboard(True) is False
 

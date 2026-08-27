@@ -322,7 +322,16 @@ class LocalUIMonitor:
         # Resolved before the region check, so ``watching`` can say "no
         # appearance for this key here" even for a spec with no box.
         profile = self._profile_for(spec.service)
-        self._watched = watched_from(spec, profiled=profile is not None, generation=generation)
+        # ``captured`` beside ``profiled``: §11.3's rule is that the brain owns
+        # no templates, so which appearances exist for this service is an answer
+        # only this side can give, and it rides in the same value the region and
+        # the preset do.
+        self._watched = watched_from(
+            spec,
+            profiled=profile is not None,
+            generation=generation,
+            captured=() if profile is None else profile.captured,
+        )
         if region is None:
             return generation
         if profile is None:
@@ -1196,7 +1205,7 @@ class LocalUIMonitor:
             tolerance=spec.tolerance,
             matcher=matcher,
         )
-        return Located(rect, len(rects) > 1, None)
+        return Located(rect, len(rects) > 1, None, self._aim(profile, kind, rect))
 
     async def click_element(
         self, kind: TemplateKind, *, settle_s: float | None = None
@@ -1222,28 +1231,34 @@ class LocalUIMonitor:
             # picking one is a coin toss whose loser is a chat that gets clicked
             # on behalf of the other.
             return ElementClick.AMBIGUOUS
-        target = click_point_region(located.region, *profile.click_point(kind))
+        target = located.target
+        if target is None:
+            # Unreachable while ``Located`` keeps its invariant (a target for
+            # every region), and a refusal rather than an assert because the one
+            # thing this verb may never do is click a pixel nobody aimed at.
+            return ElementClick.MISMATCH
         settle = ELEMENT_CLICK_SETTLE_S if settle_s is None else settle_s
         clicked = await self.click(target, settle_s=settle)
         return ElementClick.CLICKED if clicked else ElementClick.NOT_CLICKED
 
-    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None:
+    async def hover_scan(self, kind: TemplateKind) -> Located:
         ctx = self._search_context()
         if ctx is None:
-            return None
+            return Located(None, False, None)
         spec, region, profile = ctx
         templates = profile.variants(kind)
         if not templates:
-            return None
-        return await asyncio.to_thread(self._hover_scan_now, spec, region, kind, templates)
+            return Located(None, False, None)
+        return await asyncio.to_thread(self._hover_scan_now, spec, region, profile, kind, templates)
 
     def _hover_scan_now(
         self,
         spec: MonitorSpec,
         region: ScreenRegion,
+        profile: ServiceProfile,
         kind: TemplateKind,
         templates: tuple[Template, ...],
-    ) -> ScreenRegion | None:
+    ) -> Located:
         """Move, settle, capture, search - and stop at the first frame it is on.
 
         Blocking by design: three OS calls and a pause per stop. The pause is
@@ -1260,12 +1275,12 @@ class LocalUIMonitor:
         matcher = self._matcher(spec)
         for x, y in hover_scan_points(region):
             if not self._ops.move_cursor(x, y):
-                return None
+                return Located(None, False, None)
             time.sleep(self._ops.hover_step_delay())
             try:
                 scene = self._capture(region)
             except CaptureError:
-                return None
+                return Located(None, False, None)
             found = lowest_match(
                 self._ops.lowest_match,
                 templates,
@@ -1275,8 +1290,26 @@ class LocalUIMonitor:
                 matcher=matcher,
             )
             if found is not None:
-                return match_rect(region, found[0], found[1])
-        return None
+                rect = match_rect(region, found[0], found[1])
+                # No second search for a count: the walk stops at the first
+                # frame the thing is on, so "were there several?" is a question
+                # this verb has not looked hard enough to answer. False rather
+                # than unknown, because the caller that hover-scans has already
+                # failed to find it statically and is about to click the one
+                # thing it did find.
+                return Located(rect, False, None, self._aim(profile, kind, rect))
+        return Located(None, False, None)
+
+    @staticmethod
+    def _aim(profile: ServiceProfile, kind: TemplateKind, rect: ScreenRegion) -> ScreenRegion:
+        """The one pixel a click on ``rect`` lands on, per §11.3.
+
+        The service's click point applied here rather than by the caller,
+        because the percentages live in the profile and the profile lives on
+        this machine: a brain that had to do this arithmetic would need the
+        appearances the whole wave took away from it.
+        """
+        return click_point_region(rect, *profile.click_point(kind))
 
     async def snap_to_bottom(self, action: str) -> None:
         with self._tick_lock:

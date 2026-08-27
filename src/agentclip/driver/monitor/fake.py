@@ -65,8 +65,8 @@ from agentclip.driver.screen.busy import BusyProbe
 from agentclip.driver.screen.capture import CaptureError, RegionImage
 from agentclip.driver.screen.detector import ScreenDetector, Sighting
 from agentclip.driver.screen.presence import PresenceTracker
-from agentclip.driver.screen.profile import TemplateKind
-from agentclip.driver.screen.region import ScreenRegion
+from agentclip.driver.screen.profile import DEFAULT_CLICK_PERCENT, TemplateKind
+from agentclip.driver.screen.region import ScreenRegion, click_point_region
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleProbe, StaleTracker
 
@@ -137,6 +137,19 @@ class FakeUIMonitor:
         # What ``watching`` says about this machine's appearances. True by
         # default - a double is calibrated unless a story says otherwise.
         self.profiled = True
+        # WHICH appearances, per service key (§11.3's ``Watched.captured``).
+        # Staged the way :attr:`saved_regions` is - ``captured["claude"] =
+        # (TemplateKind.COPY,)`` is a suite saying "the monitor over there has a
+        # copy button and nothing else". A key nobody staged follows
+        # :attr:`profiled`: every kind when the double is calibrated, none when
+        # it is not, so a story that does not care keeps saying nothing and a
+        # story that stages ``()`` really does mean "profiled, but no pictures".
+        self.captured: dict[str, tuple[TemplateKind, ...]] = {}
+        # Where a click on a found element lands, per kind, as x%/y% of the
+        # matched rectangle - the double's half of ``ServiceProfile.click_point``
+        # (``Located.target``). Empty means the centre, which is what an
+        # unadjusted profile means too.
+        self.click_points: dict[TemplateKind, tuple[int, int]] = {}
         # -- the monitor's own targets (§10.5) ---------------------------------
         # What ``watch(slot)`` runs. A dict a suite may edit in place ("and the
         # sub-agent window is a different service"), rather than a callable,
@@ -209,6 +222,31 @@ class FakeUIMonitor:
         """The local tier's region-store read, answered from :attr:`saved_regions`."""
         return self.saved_regions.get(service)
 
+    def captured_for(self, service: str) -> tuple[TemplateKind, ...]:
+        """What the real one reads off its profile: the kinds held for ``service``."""
+        staged = self.captured.get(service)
+        if staged is not None:
+            return staged
+        return tuple(TemplateKind) if self.profiled else ()
+
+    def aim(self, kind: TemplateKind, rect: ScreenRegion) -> ScreenRegion:
+        """``Located.target`` for a match on ``rect`` - the real one's ``_aim``."""
+        point = self.click_points.get(kind, (DEFAULT_CLICK_PERCENT, DEFAULT_CLICK_PERCENT))
+        return click_point_region(rect, *point)
+
+    def _aimed(self, kind: TemplateKind, found: Located) -> Located:
+        """One search's answer with its click point filled in.
+
+        Applied to whatever :attr:`answers` scripted as well as to the empty
+        answer, because a suite states where a thing WAS SEEN and the aiming is
+        the monitor's own arithmetic - a scripted ``Located`` with a region and
+        no target is the same omission as a profile with no click point, and
+        both mean the centre. A target the suite DID write is left alone.
+        """
+        if found.region is None or found.target is not None:
+            return found
+        return dataclasses.replace(found, target=self.aim(kind, found.region))
+
     def set_spec_for(self, spec_for: SpecFor | None) -> None:
         """Install (or forget) a live source of targets, as the real one takes
         one - this is the seam the Monitor UI's window hangs its ``_spec`` on."""
@@ -236,7 +274,12 @@ class FakeUIMonitor:
         spec = self.spec
         if spec is None:
             return EMPTY_WATCHED
-        return watched_from(spec, profiled=self.profiled, generation=self.generations)
+        return watched_from(
+            spec,
+            profiled=self.profiled,
+            generation=self.generations,
+            captured=self.captured_for(spec.service),
+        )
 
     async def suspend(self) -> None:
         self.suspends += 1
@@ -406,15 +449,17 @@ class FakeUIMonitor:
     async def locate(
         self, kind: TemplateKind, *, exclude_kinds: tuple[TemplateKind, ...] = ()
     ) -> Located:
-        return self._answer("locate", (kind, exclude_kinds), lambda: Located(None, False, None))
+        found = self._answer("locate", (kind, exclude_kinds), lambda: Located(None, False, None))
+        return self._aimed(kind, found)
 
     async def click_element(
         self, kind: TemplateKind, *, settle_s: float | None = None
     ) -> ElementClick:
         return self._answer("click_element", (kind, settle_s), lambda: ElementClick.MISMATCH)
 
-    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None:
-        return self._answer("hover_scan", (kind,), lambda: None)
+    async def hover_scan(self, kind: TemplateKind) -> Located:
+        found = self._answer("hover_scan", (kind,), lambda: Located(None, False, None))
+        return self._aimed(kind, found)
 
     async def snap_to_bottom(self, action: str) -> None:
         self._answer("snap_to_bottom", (action,), lambda: None)

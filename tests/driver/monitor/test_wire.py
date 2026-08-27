@@ -110,7 +110,12 @@ WATCHED = Watched(
     attachment_note=False,
     require_fenced_reply=True,
     extra_instructions="mind the ]( sequences",
+    captured=(COPY, CHATBOX),
 )
+
+# The one pixel a click on ``REGION`` would land on, as ``Located.target``
+# carries it: a 1x1 rectangle, because that is what every click here takes.
+TARGET = ScreenRegion(-1000, 300, 1, 1)
 
 TICK = Tick(
     seq=7,
@@ -204,16 +209,52 @@ def test_the_spec_is_not_on_this_wire_at_all() -> None:
 @pytest.mark.parametrize(
     "located",
     [
-        Located(region=REGION, ambiguous=False, best_miss=None),
-        Located(region=REGION, ambiguous=True, best_miss=None),
+        Located(region=REGION, ambiguous=False, best_miss=None, target=TARGET),
+        Located(region=REGION, ambiguous=True, best_miss=None, target=TARGET),
         Located(region=None, ambiguous=False, best_miss=0.42),
         Located(region=None, ambiguous=False, best_miss=None),
     ],
 )
 def test_a_located_round_trips(located: Located) -> None:
-    """All four shapes, because the whole point of the three fields is that a
-    caller with only ``region`` cannot tell the failures apart."""
+    """All four shapes, because the whole point of the four fields is that a
+    caller with only ``region`` cannot tell the failures apart - and a caller
+    with only ``region`` does not know which pixel to press."""
     assert decode_located(encode_located(located)) == located
+
+
+def test_the_click_target_is_on_the_wire_rather_than_recomputed() -> None:
+    """§11.3: the click point is applied on the machine that holds the pictures.
+
+    Asserted as a field on the frame, because the failure this replaces was a
+    brain doing the arithmetic against its own empty profile store - which is
+    silent, and lands the press in the middle of a control the service labelled
+    there.
+    """
+    frame = encode_located(Located(REGION, False, None, TARGET))
+    assert frame["target"] == {"left": -1000, "top": 300, "width": 1, "height": 1}
+
+
+def test_a_watched_carries_which_appearances_the_monitor_has() -> None:
+    """The kinds ride as their own values, and an empty tuple is a value:
+    "profiled, nothing captured" is the answer that refuses every click."""
+    frame = encode_watched(WATCHED)
+    assert frame["captured"] == ["copy", "chatbox-ongoing"]
+    assert decode_watched(encode_watched(EMPTY_WATCHED)).captured == ()
+
+
+def test_a_captured_kind_this_build_has_never_heard_of_is_dropped() -> None:
+    """The one tolerant decode on this wire (see ``_captured_at``): the version
+    gate pins the SHAPE, not the enum inside it, so a monitor a release ahead
+    may hold an appearance this brain cannot name - and "no, I have not got one
+    of those" is the honest answer to a question about a kind that does not
+    exist here, not a dead connection."""
+    frame = {**encode_watched(WATCHED), "captured": ["copy", "hologram", 7]}
+    assert decode_watched(frame).captured == (COPY,)
+
+
+def test_a_watched_with_no_captured_list_at_all_reads_as_nothing_captured() -> None:
+    frame = {key: value for key, value in encode_watched(WATCHED).items() if key != "captured"}
+    assert decode_watched(frame).captured == ()
 
 
 def test_a_tick_round_trips_whole() -> None:
@@ -294,9 +335,9 @@ RETURNS: dict[str, Any] = {
     "write_clipboard": None,
     "watch_clipboard": True,
     "find_all": (REGION, ScreenRegion(0, 0, 4, 4)),
-    "locate": Located(region=REGION, ambiguous=True, best_miss=None),
+    "locate": Located(region=REGION, ambiguous=True, best_miss=None, target=TARGET),
     "click_element": ElementClick.AMBIGUOUS,
-    "hover_scan": REGION,
+    "hover_scan": Located(region=REGION, ambiguous=False, best_miss=None, target=TARGET),
     "snap_to_bottom": None,
     "watched": WATCHED,
 }
@@ -391,15 +432,17 @@ def test_a_hello_with_a_non_string_token_is_refused() -> None:
         read_hello({key: value for key, value in hello_frame().items() if key != "token"})
 
 
-def test_the_wire_version_is_the_monitors_own_and_is_three() -> None:
+def test_the_wire_version_is_the_monitors_own_and_is_four() -> None:
     """1 -> 2 when the hello grew a token (§5); 2 -> 3 when ``configure`` left
-    the verb table and ``watch`` took its place (§10.5). Asserted as a NUMBER on
-    purpose: the two installs gate on it, and a silent bump is a silent refusal
-    of every monitor that was not upgraded with the brain."""
-    assert MONITOR_WIRE_VERSION == 3
-    assert OURS.wire == 3
-    assert hello_frame()["version"] == 3
-    assert hello_ack_frame("srv-1", None)["version"] == 3
+    the verb table and ``watch`` took its place (§10.5); 3 -> 4 when the brain
+    stopped holding templates and ``captured`` and ``target`` became the
+    monitor's answers (§11.3). Asserted as a NUMBER on purpose: the two installs
+    gate on it, and a silent bump is a silent refusal of every monitor that was
+    not upgraded with the brain."""
+    assert MONITOR_WIRE_VERSION == 4
+    assert OURS.wire == 4
+    assert hello_frame()["version"] == 4
+    assert hello_ack_frame("srv-1", None)["version"] == 4
 
 
 def test_unauthorized_is_an_error_kind_that_belongs_to_the_connection() -> None:

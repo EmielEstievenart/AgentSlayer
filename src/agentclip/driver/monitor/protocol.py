@@ -121,6 +121,13 @@ class Watched:
       key. False is the split-mode trap made visible: a brain driving
       ``claude`` against a monitor calibrated for ``zai`` gets every element
       verdict as NOT_CALIBRATED and nothing else says why.
+    * ``captured`` - WHICH appearances, kind by kind (§11.3). ``profiled`` says
+      the monitor has *something* for the key; this says whether it has a copy
+      button, a new-chat button, a chat box. It is here because the brain owns
+      no templates any more: "may I ask for a new chat?" used to be a read of
+      the brain's own profile store, which on any machine but the one the
+      pictures were taken on answered no. Empty for an unprofiled service, and
+      empty is a refusal every recipe makes before it calls.
     * ``generation`` - the run this answer describes, i.e. the stamp its ticks
       carry. It is what makes ``watched()`` re-readable without a round trip
       per tick: a brain compares the generation on an arriving tick with the one
@@ -146,6 +153,7 @@ class Watched:
     profiled: bool
     label: str = ""
     generation: int = 0
+    captured: tuple[TemplateKind, ...] = ()
     # -- the preset the brain acts on (§10.5) ------------------------------
     delivery: str = DEFAULT_DELIVERY
     auto_submit: bool = False
@@ -170,9 +178,10 @@ EMPTY_WATCHED = Watched(service=None, region=None, profiled=False)
 
 @dataclass(frozen=True, slots=True)
 class Located:
-    """One search's whole answer: where, whether there were several, how close.
+    """One search's whole answer: where, where to click, whether there were
+    several, how close.
 
-    Three fields because a caller that has only the first one cannot tell the
+    Four fields because a caller that has only the first one cannot tell the
     two failures apart, and they call for opposite things:
 
     * ``region`` - where the BOTTOM-MOST match of the kind is, in absolute
@@ -192,11 +201,20 @@ class Located:
       capture has drifted and wants recapturing, nothing judged at all says the
       thing simply was not on the frame. Only ever set on a miss - a hit needs
       no diagnosis.
+    * ``target`` - the ONE pixel a click on this match should land on: the
+      service's own click point (a per-image percentage the user set in the
+      Monitor UI) applied to ``region``, as the 1x1 rectangle every click in
+      the app takes. None if and only if ``region`` is None. It is computed
+      here, on the machine that holds the pictures, because a click point is
+      part of an appearance and §11.3 leaves the brain none: a caller that
+      clicks a rectangle's middle instead aims at whatever the service drew
+      there.
     """
 
     region: ScreenRegion | None
     ambiguous: bool
     best_miss: float | None
+    target: ScreenRegion | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,12 +392,24 @@ def spec_from_preset(
     )
 
 
-def watched_from(spec: MonitorSpec, *, profiled: bool, generation: int) -> Watched:
+def watched_from(
+    spec: MonitorSpec,
+    *,
+    profiled: bool,
+    generation: int,
+    captured: tuple[TemplateKind, ...] = (),
+) -> Watched:
     """The answer a monitor gives for the spec it just settled on.
 
     Written once because two monitors build it - the real one and the double -
     and a double whose ``watched()`` dropped a preset field would be a suite
     passing against nothing.
+
+    ``captured`` comes from beside the spec rather than out of it: it is a fact
+    about the pictures on this machine (``ServiceProfile.captured``), and the
+    spec is a fact about the row in the config. ``profiled`` is the same fact
+    narrowed to a yes/no, so the two always move together - an unprofiled
+    service captures nothing.
     """
     return Watched(
         service=spec.service,
@@ -387,6 +417,7 @@ def watched_from(spec: MonitorSpec, *, profiled: bool, generation: int) -> Watch
         profiled=profiled,
         label=spec.label,
         generation=generation,
+        captured=captured,
         delivery=spec.delivery,
         auto_submit=spec.auto_submit,
         scroll_action=spec.scroll_action,
@@ -590,9 +621,18 @@ class UIMonitor(Protocol):
         """
         ...
 
-    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None:
+    async def hover_scan(self, kind: TemplateKind) -> Located:
         """Walk the real cursor up the configured region and stop at the FIRST
-        frame ``kind`` appears in - or None if it never does.
+        frame ``kind`` appears in - or a :class:`Located` with no region if it
+        never does.
+
+        A ``Located`` rather than a rectangle so that the click which follows a
+        hover is aimed by the same point as the click which follows a static
+        search (§11.3): ``target`` is set, and the other two fields are the
+        answers a walk cannot give - it stops at the first frame it sees the
+        thing in, so it never counts a second one (``ambiguous`` is always
+        False) and it judges no candidate it could report a diff for
+        (``best_miss`` is always None).
 
         Some chats only render a response's copy button while the pointer is
         over that response, so the cheap static capture finds nothing there no

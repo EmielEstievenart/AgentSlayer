@@ -179,8 +179,8 @@ class IdleMonitor:
     ) -> ElementClick:
         return ElementClick.MISMATCH
 
-    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None:
-        return None
+    async def hover_scan(self, kind: TemplateKind) -> Located:
+        return Located(None, False, None)
 
     async def snap_to_bottom(self, action: str) -> None:
         return None
@@ -432,7 +432,7 @@ class SwitchableMonitor:
     ) -> ElementClick:
         return await self._inner.click_element(kind, settle_s=settle_s)
 
-    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None:
+    async def hover_scan(self, kind: TemplateKind) -> Located:
         return await self._inner.hover_scan(kind)
 
     async def snap_to_bottom(self, action: str) -> None:

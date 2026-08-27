@@ -29,16 +29,17 @@ from agentclip.driver.monitor.fake import FakeUIMonitor
 from agentclip.driver.monitor.local import LocalUIMonitor
 from agentclip.driver.monitor.protocol import (
     EMPTY_WATCHED,
+    Located,
     MonitorSpec,
     spec_from_preset,
     watched_from,
 )
 from agentclip.driver.monitor.regions import save_region
-from agentclip.driver.screen.profile import ServiceProfile
+from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 
-from .conftest import spec
+from .conftest import profile_with, spec
 
 CHAT = ScreenRegion(-120, 40, 800, 600)
 OTHER = ScreenRegion(10, 20, 300, 400)
@@ -132,6 +133,20 @@ def test_watched_is_built_from_the_spec_and_says_which_run_it_describes() -> Non
     assert (built.profiled, built.generation) == (True, 7)
     assert built.max_paste_chars == 9_000
     assert built.extra_instructions == "mind the ]( sequences"
+
+
+def test_the_captured_kinds_come_from_beside_the_spec() -> None:
+    """§11.3: which appearances exist is a fact about the PICTURES on this
+    machine, and the spec is a fact about the row in the config - so it is
+    passed in beside it rather than read out of it. Empty by default, which is
+    what an unprofiled service captures."""
+    kinds = (TemplateKind.COPY, TemplateKind.NEW_CHAT)
+    built = watched_from(
+        spec_from_preset(PRESET, CHAT), profiled=True, generation=1, captured=kinds
+    )
+    assert built.captured == kinds
+    assert watched_from(spec_from_preset(PRESET), profiled=False, generation=1).captured == ()
+    assert EMPTY_WATCHED.captured == ()
 
 
 # == the headless monitor's own spec_for =======================================
@@ -250,6 +265,38 @@ async def test_the_window_may_replace_the_spec_source_after_construction() -> No
         await live.close()
 
 
+async def test_watch_says_which_appearances_this_machine_holds() -> None:
+    """§11.3: the brain owns no templates, so the kinds ride in ``Watched``.
+
+    No region drawn on purpose - a monitor with pictures AND a box starts a poll
+    thread, and what is under test here is the answer, not the loop. The profile
+    is resolved before the region check for exactly that reason: "no appearance
+    for this key here" is an answer even for a spec with no box.
+    """
+    held = profile_with(TemplateKind.COPY, TemplateKind.NEW_CHAT, key="zai")
+    live = LocalUIMonitor(
+        profile_for=lambda key: held if key == "zai" else None,
+        spec_for=lambda _slot: spec_from_preset(PRESET),
+    )
+    try:
+        watched = await live.watch(AgentSlot.MASTER)
+        assert watched.profiled is True
+        assert watched.captured == (TemplateKind.COPY, TemplateKind.NEW_CHAT)
+    finally:
+        await live.close()
+
+
+async def test_an_unprofiled_service_captures_nothing() -> None:
+    """``profiled`` and ``captured`` are the same fact at two widths, so they
+    can never disagree: no profile means no kinds."""
+    live = monitor(spec_for=lambda _slot: spec_from_preset(PRESET, CHAT))
+    try:
+        watched = await live.watch(AgentSlot.MASTER)
+        assert (watched.profiled, watched.captured) == (False, ())
+    finally:
+        await live.close()
+
+
 async def test_an_unprofiled_service_says_so_rather_than_going_quiet() -> None:
     """The split-mode trap made visible: a brain driving a service this machine
     has no captures for gets NOT_CALIBRATED on every click, and this is the only
@@ -296,6 +343,64 @@ async def test_the_fakes_watched_carries_the_preset_and_the_generation() -> None
     assert watched.require_fenced_reply is True
     assert watched.profiled is False
     assert watched.generation == fake.generations == 1
+
+
+async def test_the_fake_stages_captured_kinds_per_service() -> None:
+    """The double's half of §11.3, staged the way its regions are: one
+    assignment says "the monitor over there has a copy button and nothing
+    else"."""
+    fake = FakeUIMonitor()
+    fake.specs_for[AgentSlot.MASTER] = spec(service="claude")
+    fake.captured["claude"] = (TemplateKind.COPY,)
+
+    assert (await fake.watch(AgentSlot.MASTER)).captured == (TemplateKind.COPY,)
+
+
+async def test_the_fake_captures_everything_until_a_suite_says_otherwise() -> None:
+    """A double is calibrated unless a story says otherwise - the same default
+    ``profiled`` has, because they are the same fact. An unprofiled double
+    captures nothing, and a service staged as ``()`` is the third case: pictures
+    for the key, none for any kind the brain asks about."""
+    fake = FakeUIMonitor()
+    assert (await fake.watch(AgentSlot.MASTER)).captured == tuple(TemplateKind)
+
+    fake.profiled = False
+    assert (await fake.watch(AgentSlot.MASTER)).captured == ()
+
+    fake.profiled = True
+    fake.captured["fake"] = ()
+    assert (await fake.watch(AgentSlot.MASTER)).captured == ()
+
+
+async def test_the_fake_aims_a_scripted_search_at_the_click_point() -> None:
+    """``Located.target`` is the monitor's arithmetic, so the double does it
+    too: a suite states where the thing was SEEN, and the centre - or whatever
+    ``click_points`` says - is filled in under it."""
+    fake = FakeUIMonitor()
+    seen = ScreenRegion(100, 200, 20, 16)
+    fake.answers["locate"] = Located(seen, False, None)
+    fake.answers["hover_scan"] = Located(seen, False, None)
+
+    assert (await fake.locate(TemplateKind.COPY)).target == ScreenRegion(110, 208, 1, 1)
+    assert (await fake.hover_scan(TemplateKind.COPY)).target == ScreenRegion(110, 208, 1, 1)
+
+    fake.click_points[TemplateKind.COPY] = (0, 100)
+    assert (await fake.locate(TemplateKind.COPY)).target == ScreenRegion(100, 215, 1, 1)
+
+
+async def test_the_fakes_empty_search_has_nothing_to_aim_at() -> None:
+    """None if and only if there is no region - the invariant every caller that
+    clicks leans on, kept by the double as well as by the real one."""
+    fake = FakeUIMonitor()
+    assert await fake.locate(TemplateKind.COPY) == Located(None, False, None)
+    assert await fake.hover_scan(TemplateKind.COPY) == Located(None, False, None)
+
+
+async def test_a_target_a_suite_wrote_itself_is_left_alone() -> None:
+    fake = FakeUIMonitor()
+    aimed = ScreenRegion(1, 2, 1, 1)
+    fake.answers["locate"] = Located(ScreenRegion(100, 200, 20, 16), False, None, aimed)
+    assert (await fake.locate(TemplateKind.COPY)).target == aimed
 
 
 async def test_an_installed_spec_for_wins_over_the_fakes_dict() -> None:

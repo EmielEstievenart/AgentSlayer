@@ -409,9 +409,9 @@ class RemoteUIMonitor:
         assert isinstance(answer, ElementClick)
         return answer
 
-    async def hover_scan(self, kind: TemplateKind) -> ScreenRegion | None:
+    async def hover_scan(self, kind: TemplateKind) -> Located:
         answer = await self._call("hover_scan", kind=kind)
-        assert answer is None or isinstance(answer, ScreenRegion)
+        assert isinstance(answer, Located)
         return answer
 
     async def snap_to_bottom(self, action: str) -> None:

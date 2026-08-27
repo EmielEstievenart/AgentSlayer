@@ -1,4 +1,4 @@
-"""The wire vocabulary of the brain<->monitor link - monitor protocol version 3.
+"""The wire vocabulary of the brain<->monitor link - monitor protocol version 4.
 
 The one place the two halves of docs/design/ui-monitor.md §6.5 agree on what a
 message looks like. Both ends import it: :mod:`agentclip.driver.monitor.server`,
@@ -25,9 +25,9 @@ schedules: a monitor VM is redeployed when the calibration surface changes, an
 SSH target when the engine does, and a shared integer would make each of those
 a forced upgrade of the other.
 
-Frame vocabulary (v3)
+Frame vocabulary (v4)
 ---------------------
-``{"type":"hello","version":3,"package":"0.1.0","token":"<32 hex>"|null}``
+``{"type":"hello","version":4,"package":"0.1.0","token":"<32 hex>"|null}``
     The client's first line. Nothing else may precede it. ``token`` is §5's
     shared secret (:mod:`agentclip.driver.monitor.auth`) and **null is a real
     value**: a monitor started with ``--no-token`` accepts it, and one started
@@ -40,8 +40,15 @@ Frame vocabulary (v3)
     definition - a v2 brain's first act after the handshake would be a call the
     v3 server has never heard of - so the two halves have to be upgraded
     together, and the version gate is what says so in one sentence instead of
-    with a ``bad_request`` on the first retarget.
-``{"type":"hello_ack","version":3,"package":"0.1.0","server_id":"<uuid4>",
+    with a ``bad_request`` on the first retarget. **4 is §11.3**: the brain
+    stopped holding templates at all, so ``Watched`` grew ``captured`` (which
+    appearances the monitor has, kind by kind) and ``Located`` grew ``target``
+    (the one pixel to click, the service's click point already applied). Both
+    are answers only the machine with the pictures can give, and a v3 monitor
+    gives neither - a brain that took its silence for "nothing is calibrated"
+    would refuse every click on a perfectly calibrated desktop, which is
+    exactly the failure this wave was opened by.
+``{"type":"hello_ack","version":4,"package":"0.1.0","server_id":"<uuid4>",
 "clipboard_kind":"copykitten"|null}``
     The server's reply. ``server_id`` identifies the PROCESS (a monitor is
     long-lived and survives every brain that dials it, §2.8, so a redial wants
@@ -94,7 +101,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
-MONITOR_WIRE_VERSION = 3
+MONITOR_WIRE_VERSION = 4
 
 #: Per-line ceiling for both ends' stream readers. asyncio's default is 64 KiB,
 #: and a ``write_clipboard`` carrying a long reply is bigger than that on a
@@ -104,7 +111,7 @@ LINE_LIMIT = 16 * 1024 * 1024
 
 
 class WireError(Exception):
-    """A line, frame or value that is not valid monitor protocol v3.
+    """A line, frame or value that is not valid monitor protocol v4.
 
     Raised by every decoder here and by nothing else. Both ends treat it as
     fatal for the frame it was raised on: the server answers the offending call
@@ -150,7 +157,7 @@ class WireVersionError(WireError):
         self.ours = ours
 
 
-# The frame types of v3, and the error kinds an ``error`` frame may carry.
+# The frame types of v4, and the error kinds an ``error`` frame may carry.
 FRAME_TYPES: tuple[str, ...] = (
     "hello",
     "hello_ack",
@@ -324,6 +331,33 @@ def _bool_at(data: dict[str, Any], key: str, what: str) -> bool:
 
 def _strs_at(data: dict[str, Any], key: str, what: str) -> tuple[str, ...]:
     return _as_strs(_field(data, key, what), f"{what}.{key}")
+
+
+def _captured_at(data: dict[str, Any], what: str) -> tuple[TemplateKind, ...]:
+    """``Watched.captured``, decoded as tolerantly as this wire ever decodes.
+
+    The one field here that is read rather than refused, both ways: an absent
+    list reads as "nothing captured", and a name this build has no
+    :class:`TemplateKind` for is dropped instead of failing the frame. The
+    version handshake pins the SHAPE of the wire, not the enum inside it - a
+    monitor a release ahead can hold an appearance kind this brain has never
+    heard of, and the honest answer to "have you got one of those?" from a
+    brain that cannot even name it is no, not a dead connection. Every other
+    field is strict on purpose: losing one silently would compose a turn
+    against the wrong service.
+    """
+    value = data.get("captured")
+    if value is None:
+        return ()
+    kinds: list[TemplateKind] = []
+    for item in _as_list(value, f"{what}.captured"):
+        if not isinstance(item, str):
+            continue
+        try:
+            kinds.append(TemplateKind(item))
+        except ValueError:
+            continue
+    return tuple(kinds)
 
 
 # -- enums ---------------------------------------------------------------------
@@ -519,6 +553,7 @@ def encode_watched(value: Watched) -> dict[str, Any]:
         "region": encode_opt_region(value.region),
         "profiled": value.profiled,
         "generation": value.generation,
+        "captured": encode_kinds(value.captured),
         "delivery": value.delivery,
         "auto_submit": value.auto_submit,
         "scroll_action": value.scroll_action,
@@ -542,6 +577,7 @@ def decode_watched(value: Any, what: str = "watched") -> Watched:
         profiled=_bool_at(data, "profiled", what),
         label=_str_at(data, "label", what),
         generation=_int_at(data, "generation", what),
+        captured=_captured_at(data, what),
         delivery=_str_at(data, "delivery", what),
         auto_submit=_bool_at(data, "auto_submit", what),
         scroll_action=_str_at(data, "scroll_action", what),
@@ -562,6 +598,7 @@ def encode_located(value: Located) -> dict[str, Any]:
         "region": encode_opt_region(value.region),
         "ambiguous": value.ambiguous,
         "best_miss": value.best_miss,
+        "target": encode_opt_region(value.target),
     }
 
 
@@ -571,6 +608,7 @@ def decode_located(value: Any, what: str = "located") -> Located:
         region=decode_opt_region(_field(data, "region", what), f"{what}.region"),
         ambiguous=_bool_at(data, "ambiguous", what),
         best_miss=_opt_float_at(data, "best_miss", what),
+        target=decode_opt_region(_field(data, "target", what), f"{what}.target"),
     )
 
 
@@ -752,7 +790,7 @@ _RESULTS: dict[str, _Value] = {
     "find_all": _Value(encode_regions, decode_regions),
     "locate": _Value(encode_located, decode_located),
     "click_element": _Value(encode_element_click, decode_element_click),
-    "hover_scan": _Value(encode_opt_region, decode_opt_region),
+    "hover_scan": _Value(encode_located, decode_located),
     "snap_to_bottom": _Value(_encode_none, _decode_none),
 }
 
@@ -870,7 +908,7 @@ class HelloAck:
 
 
 def frame_type(frame: dict[str, Any]) -> str:
-    """The frame's ``type``, checked against the v3 vocabulary."""
+    """The frame's ``type``, checked against the v4 vocabulary."""
     kind = _str_at(frame, "type", "frame")
     if kind not in FRAME_TYPES:
         raise WireError(f"unknown frame type {kind!r}")

@@ -597,9 +597,10 @@ class DialledMonitor(UIMonitor, Protocol):
     def on_disconnect(self, hook: Callable[[], None]) -> Callable[[], None]: ...
 
 
-# How a host:port becomes a monitor. Injected exactly as ``open_calibration``
-# is, and for the same reason: the real one opens a TCP connection, and a suite
-# must be able to run the whole connect/disconnect/redial story without one.
+# How a host:port becomes a monitor. Injected for the reason every OS-touching
+# seam in this shell is: the real one opens a TCP connection, and a suite must
+# be able to run the whole connect/disconnect/redial story without one - and,
+# since §10.2, the whole LAUNCH story too (``launcher``, its sibling).
 MonitorDial = Callable[[str, int, str], Awaitable[DialledMonitor]]
 
 

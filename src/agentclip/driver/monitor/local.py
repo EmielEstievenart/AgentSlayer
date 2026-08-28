@@ -342,9 +342,9 @@ class LocalUIMonitor:
             captured=() if profile is None else profile.captured,
         )
         if region is None:
-            return generation
+            return self._idle(generation)
         if profile is None:
-            return generation
+            return self._idle(generation)
         detector = build_detector(
             region,
             profile,
@@ -355,11 +355,70 @@ class LocalUIMonitor:
             clock=self._clock,
         )
         # Nothing to feed and nothing to look for: a poll loop would be pure
-        # cost, so the monitor stays configured and idle (``latest`` never
-        # advances) rather than burning a capture every half second.
+        # cost, so the monitor stays configured and idle rather than burning a
+        # capture every half second.
         if not detector.watching:
-            return generation
+            return self._idle(generation)
         self._start(self._compose(detector, region, generation, stop), stop)
+        return generation
+
+    def _idle(self, generation: int) -> int:
+        """Configured onto something there is nothing to poll for: say so, once.
+
+        The bump has to cross even when no frame ever will (§11.10). A brain
+        learns of a new generation from the STAMP on an arriving tick and from
+        nothing else - which was fine while every configure started a poller,
+        and silently wrong the moment one did not: a service picked, a preset
+        edited or a region cleared in the Monitor UI bumped a counter nobody
+        downstream would ever be told about, and the Chat UI went on describing
+        the run before it until something unrelated produced a frame.
+
+        So the one thing this run will ever have to say is said immediately: an
+        honest empty reading - nothing captured, nothing searched, no detector
+        active - carrying the new generation. Everything that reads it reads it
+        correctly. ``active_detectors=()`` is exactly what a consumer's "never
+        going to get a verdict" branch is for (§2.2), and the empty sighting map
+        is a frame that searched nothing, which is what happened.
+
+        It rides the ordinary tick path because that is where every consumer
+        already is - the server forwards it, the switch relays it, the Chat UI
+        compares the stamp on it - but it is marked ``notice`` so the two things
+        a tick is otherwise ALLOWED to do it does not: it never becomes
+        ``latest`` (this run has no reading to be the latest of, and a readout
+        painted from an empty one would blank rows a frame nobody captured is no
+        evidence about), and it never answers a parked :meth:`observe` (that
+        wait is for a frame; no frame was taken, and §4.2's rule that only a
+        real, later capture may resolve one is exactly as true here).
+
+        A configure that DOES start a poller says nothing here: its first real
+        tick carries the same generation within one poll interval, and a notice
+        racing it could only be the emptier of the two answers.
+
+        Published from a thread of its own, for §4.4's reason and no other: a
+        subscriber is called outside the lock precisely so that a slow one
+        delays the next tick rather than the ``configure`` retargeting away from
+        it, and this ``configure`` is on the event loop. Publishing inline would
+        hand every tick hook in the process - a page repaint, a wire write - the
+        one thread the whole app is waiting on. A momentary thread also keeps
+        the promise the hooks are written against: a tick arrives from off the
+        loop. Ordering needs no lock: a notice overtaken by the next retarget is
+        a ghost, and ``_deliver`` drops it on its stamp like any other.
+        """
+        notice = Tick(
+            seq=self._next_seq(),
+            generation=generation,
+            at=self._clock(),
+            captured=False,
+            busy=None,
+            idle=None,
+            stale=None,
+            sightings={},
+            active_detectors=(),
+            notice=True,
+        )
+        threading.Thread(
+            target=self._deliver, args=(notice,), name="agentclip-notice", daemon=True
+        ).start()
         return generation
 
     @property
@@ -775,10 +834,19 @@ class LocalUIMonitor:
         with self._tick_lock:
             if tick.generation != self._generation:
                 return
-            self._latest = tick
-            due = [waiter for waiter in self._waiters if waiter.armed < tick.seq]
-            if due:
-                self._waiters = [waiter for waiter in self._waiters if waiter.armed >= tick.seq]
+            # A NOTICE is not an observation (§11.10): it announces a run that
+            # has nothing to poll, so there is no reading for it to be the
+            # latest of, and a wait for the next FRAME is not answered by one
+            # that was never captured. The subscribers still get it - the
+            # generation on it is the whole point.
+            due: list[_Waiter] = []
+            if not tick.notice:
+                self._latest = tick
+                due = [waiter for waiter in self._waiters if waiter.armed < tick.seq]
+                if due:
+                    self._waiters = [
+                        waiter for waiter in self._waiters if waiter.armed >= tick.seq
+                    ]
             hooks = tuple(self._hooks)
         for waiter in due:
             waiter.resolve(tick)

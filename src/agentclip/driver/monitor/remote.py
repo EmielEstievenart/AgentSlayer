@@ -582,15 +582,22 @@ class RemoteUIMonitor:
             future.set_exception(MonitorCallError(error.kind, error.message))
 
     def _tick_arrived(self, tick: Tick) -> None:
-        self._latest = tick
         # The far monitor's generation is the only one there is: a configure
-        # bumped it there, and a tick is what tells us the bump landed.
+        # bumped it there, and a tick is what tells us the bump landed - which
+        # is the whole of what a NOTICE carries (§11.10). So a notice updates
+        # exactly that and reaches the subscribers, and does neither of the two
+        # things an observation does: it is not a reading, so it cannot be the
+        # ``latest`` one, and no frame was captured for it to answer a parked
+        # ``observe`` with. Enforced here as well as at the far end because the
+        # far end's own waiters are not ours.
         self._generation = tick.generation
-        ready = [waiter for waiter in self._waiters if tick.seq > waiter.armed]
-        for waiter in ready:
-            self._waiters.remove(waiter)
-            if not waiter.future.done():
-                waiter.future.set_result(tick)
+        if not tick.notice:
+            self._latest = tick
+            ready = [waiter for waiter in self._waiters if tick.seq > waiter.armed]
+            for waiter in ready:
+                self._waiters.remove(waiter)
+                if not waiter.future.done():
+                    waiter.future.set_result(tick)
         for hook in tuple(self._hooks):
             self._safely(hook, tick)
 

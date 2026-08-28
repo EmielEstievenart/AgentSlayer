@@ -2504,6 +2504,72 @@ the loader's bounds spelled again, as `STABLE_MIN/MAX` are), and the Chat UI's
 **MONITOR SEES** settings line grows a sixth clause, `submit delay 1.2s`.
 `save_services` writes the key only when it has moved off the built-in.
 
+### 11.9 The engine reads the monitor's service — **AS BUILT** (2026-08-28)
+
+The last room in the house still reading its own `[services.*]` table. §10.5
+turned the service round for everything the automation ACTS on — a paste's
+weight, whether Enter may be pressed, how the harvest reaches the newest reply —
+and `preset_from_watched` fed all of it to `driver/automation`. The ENGINE half
+never moved: `shell/app/controller.py` looked its preset up in
+`self._config.services`, `engine/link/factory.py` built the `Composer` from
+`cfg.preset()`/`cfg.caps()`, and `Engine` read `self._config.preset()` on every
+budget, fence and instructions decision. So the seven fields a brain composes
+with — `max_paste_chars`, `total_context_chars`, `wrap_blocks_in_fence`,
+`attachment_note`, `require_fenced_reply`, `extra_instructions`,
+`edit_by_lines` — came off the machine the USER sits at, for a chat somebody
+else's machine is driving. The report was one sentence: *"I changed paste size
+in the monitor and it has no effect, not even when connecting a new GUI."*
+
+**The seam is a question, not a value.** `protocol/preset.py` adds
+`LivePreset`: a `ServicePreset` fallback plus an optional
+`PresetSource = Callable[[], ServicePreset | None]`, and the two methods it
+replaces — `preset()` and `caps()`, mirroring `Config`'s — asked fresh every
+time. Nothing below the shell holds a preset any more:
+
+* `Composer(presets, tool_catalog, ...)` — the `preset`/`caps` pair is gone from
+  its constructor; every render re-asks, so the budget a payload is fitted to is
+  the budget in force at that moment.
+* `Engine._preset()` / `Engine._limits()` — `[limits]` is re-resolved per read,
+  because half of it is a fraction of the paste budget (`resolve_limits`), and
+  the engine keeps `config.limits` as the user WROTE it to resolve from.
+  `_sync_ctx()` at the top of `_build_plan` points the session's one
+  `ToolContext` at the current limits and caps, so the tools follow too — a
+  budget raised mid-session widens the very next `read_file`.
+* `EngineBuilder(get_preset=...)` → `cli.make_engine_factory(get_preset=...)`.
+  The builder makes one `LivePreset(cfg.preset(), get_preset)` per session and
+  hands the same object to the registry sizing, the composer and the engine.
+* `SessionController(preset_source=...)` snapshots it at session start for the
+  labels it puts in front of the user ("paste into …", the exported log's
+  header), which is the one place a per-session freeze is right.
+
+**Where the answer comes from.** `GuiView.engine_preset()` —
+`preset_from_watched(self._watched[live_slot], alerts=self._config.preset())`,
+with the alarm knobs still host-side per §10.5, and `None` when the monitor has
+not named a service (`EMPTY_WATCHED` carries a zero budget nothing could be
+composed against). `GuiRunner` hands that bound method up through
+`run_gui(on_preset_source=...)` to the cell `cli.main` owns beside `live_config`,
+because the factory is built before the window that can answer exists.
+
+**The fallback is the other half of the design.** A source that is absent — or
+answers `None` — falls through to `Config.preset()`, exactly as before this
+seam: a CLI or headless launch, a Chat UI started idle (§11.1), and a remote
+session, where the engine runs on the target and this callable does not cross
+the link (nothing on the engine wire changed). `general.service` survives for
+precisely that fallback and nothing else.
+
+**One field is deliberately not live.** `edit_by_lines` decides a CATALOG, and a
+catalog is what the bootstrap TAUGHT the model, so `_sized_registry` reads it
+once per session; a toggle flipped mid-session reaches the next session. Every
+other field governs the next composed turn.
+
+Tests: `tests/engine/test_live_preset.py` (the budget the payload is fitted to,
+a budget moved mid-session reaching the next turn with its caps, the fence rule,
+the instructions, the catalog, and both no-source fallbacks) and
+`tests/shell/chat/test_monitor_preset.py` (the same story from `Watched`, plus
+the alarm staying this machine's). The Chat UI harness wires
+`get_preset=view.engine_preset` the way `cli.main` does, so every GUI suite runs
+the real arrangement.
+
 ### 11.10 Settings apply on change, and the bump always crosses — **AS BUILT** (2026-08-28)
 
 Two bugs with one symptom: *"I changed a setting in the monitor and the Chat UI

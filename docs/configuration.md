@@ -96,7 +96,9 @@ resolves them out of *its* config, and the Chat UI reads back what it settled on
 why it says `· from the monitor`. In local mode both processes read the same
 file and nothing changes for you. Attached to a monitor somewhere else, these
 two keys in *your* config say nothing at all: change the service in that
-machine's **Monitor UI**.
+machine's **Monitor UI**. The one time they still decide something here is a Chat
+UI with **no monitor attached** (an idle start): with nobody to ask, a session
+falls back to this machine's `service` and its `[services.*]` row.
 
 ### [clipboard]
 
@@ -134,7 +136,7 @@ machine's **Monitor UI**.
 | `max_grep_matches` | `200` | Per grep |
 | `command_timeout_s` | `120` | Command wall clock |
 
-**`0` means auto**, and it is the default for the two keys above: they are worked out from the service's `max_paste_chars` when a session starts, because the right value for them depends on the budget you are actually pasting into. Write a number to override; anything you write wins at every budget.
+**`0` means auto**, and it is the default for the two keys above: they are worked out from the service's `max_paste_chars`, because the right value for them depends on the budget you are actually pasting into — and re-worked out whenever that budget moves, so raising a paste size in the Monitor UI widens the next turn's results too. Write a number to override; anything you write wins at every budget.
 
 - `max_result_chars` auto = **half the paste budget**. That is 6,000 at the 12,000-char presets — exactly what AgentClip used to hard-code, so nothing changes for a default setup — and 48,000 on a 96,000-char preset, where a fixed 6,000 used to throw away seven eighths of the room you had paid for.
 - `max_command_output_chars` auto = **512,000**, and it is not a display cap at all. It is how much output a tool hands to AgentClip in the first place — a memory guard, set to the same size the recovery cache below stops at. Output past it really is gone, and the result says so in as many words (`[truncated: showing last N of M output lines]`).
@@ -207,6 +209,18 @@ Chat UI reads back the budgets, fences and instructions it needs. Edit them in
 the **Monitor UI**'s service editor, which writes them to the global config.toml
 of the machine it is running on.
 
+**This includes what the agent composes with.** The paste budget the engine
+enforces, the per-result caps that hang off it, `wrap_blocks_in_fence`,
+`attachment_note`, `require_fenced_reply`, `extra_instructions` and
+`edit_by_lines` are read from the **monitor's** table, live — raise a budget in
+the Monitor UI mid-session and the *next* payload is composed against the new
+number, with no restart and no new session. (`edit_by_lines` is the one
+exception to "next payload": it decides the tool catalog the bootstrap teaches,
+so a change to it lands on the next session.) Your own machine's `[services.*]`
+rows are consulted for exactly two things: the alarm keys `alert_sound` and
+`alert_repeat_seconds`, which play a sound where *you* are sitting, and the
+fallback for a Chat UI with no monitor attached.
+
 **Every change applies as you make it** — the moment a box holds a legal value
 or a tick moves, it is saved to that config.toml and handed to the running
 monitor, and a connected Chat UI follows within a tick: its sidebar, its
@@ -248,8 +262,8 @@ Built-ins can be edited but not deleted. Fields (all editable in the **Monitor U
 | `tolerance` | `24` | Pixel-match slack, 0–64 |
 | `require_fenced_reply` | `false` | Refuse unfenced replies that carry tool calls |
 | `extra_instructions` | `""` | Service-specific bootstrap text, armed with `r` |
-| `alert_sound` | `false` | Play the two-tone alert when the loop needs you (manual copy/insert) |
-| `alert_repeat_seconds` | `0` | 0 = alert once; N = repeat every N seconds while still waiting |
+| `alert_sound` | `false` | Play the two-tone alert when the loop needs you (manual copy/insert). Read from **your** machine's table, not the monitor's — the sound plays where you are sitting |
+| `alert_repeat_seconds` | `0` | 0 = alert once; N = repeat every N seconds while still waiting. Yours too, for the same reason |
 | `edit_by_lines` | `false` | Add `replace_lines` (edit by line range) to the catalog and teach `read_file` its `numbered` gutter. For a host that cannot echo code back verbatim — M365 Copilot rewrites lambdas, so a find/replace edit can never match there. Costs ~900 chars of bootstrap |
 
 **Debugging delivery.** When a paste lands somewhere odd, set `snap_back = false` (or untick "focus back after send" in the Monitor UI): AgentClip stops taking the foreground back after its own auto-sends and auto-copies, so the browser keeps focus and you can watch where the clicks actually go. The beep you hear when the loop stalls and needs you is `alert_sound` ("beep when it stalls", same block) — it is off by default, and `alert_repeat_seconds` is how often it nags.

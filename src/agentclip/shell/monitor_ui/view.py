@@ -227,6 +227,11 @@ class CalibrationView:
         # propagation, and a brain over the wire learns of the edit through
         # the next ``watch``/``watched`` (10.5). The seam stays for tests.
         self._on_config_change = on_config_change if on_config_change is not None else _no_config
+        # Whether the LAST apply-on-change write failed (§11.10). The whole of
+        # what stops an unwritable config.toml from toasting once per keystroke,
+        # and it is a latch rather than a counter so a write that starts working
+        # again re-arms the complaint for the next time it does not.
+        self._save_failed = False
         # How a drawn rectangle reaches the brain. The chat regions are the one
         # piece of calibration with NO persistent home today - they live in
         # ``AutomationController._slots`` for the life of a process and are
@@ -658,6 +663,7 @@ class CalibrationView:
         if self._editor is None:
             return
         self._editor.set_form({k: str(v) for k, v in dict(fields).items()})
+        self._apply_edits()
         self._push_editor()
 
     def svc_detection(self, state: dict[str, Any]) -> None:
@@ -671,12 +677,14 @@ class CalibrationView:
             stream=bool(state.get("stream")),
             auto_submit=bool(state.get("auto_submit")),
         )
+        self._apply_edits()
         self._push_editor()
 
     def svc_edit_by_lines(self, on: bool) -> None:
         if self._editor is None:
             return
         self._editor.set_edit_by_lines(on)
+        self._apply_edits()
         self._push_editor()
 
     def svc_after_delivery(self, state: dict[str, Any]) -> None:
@@ -687,30 +695,35 @@ class CalibrationView:
             snap_back=bool(state.get("snap_back")),
             alert_sound=bool(state.get("alert_sound")),
         )
+        self._apply_edits()
         self._push_editor()
 
     def svc_scroll(self, action: str) -> None:
         if self._editor is None:
             return
         self._editor.set_scroll(action)
+        self._apply_edits()
         self._push_editor()
 
     def svc_matcher(self, matcher: str) -> None:
         if self._editor is None:
             return
         self._editor.set_matcher(matcher)
+        self._apply_edits()
         self._push_editor()
 
     def svc_tolerance(self, value: int) -> None:
         if self._editor is None:
             return
         self._editor.set_tolerance(value)
+        self._apply_edits()
         self._push_editor()
 
     def svc_add(self) -> None:
         if self._editor is None:
             return
         self._editor.add()
+        self._apply_edits()
         # The editor lands ON the service it just created, so the dropdown now
         # shows it - and §11.6's rule is that the dropdown IS what is watched.
         self._follow_editor()
@@ -720,12 +733,14 @@ class CalibrationView:
         if self._editor is None:
             return
         self._editor.reset()
+        self._apply_edits()
         self._push_editor()
 
     def svc_delete(self) -> None:
         if self._editor is None:
             return
         self._editor.delete()
+        self._apply_edits()
         # Same rule as ``svc_add``, from the other direction: a delete drops the
         # editor onto the next key, and a window left watching the service that
         # no longer exists is the mismatch §11.6 ended.
@@ -829,12 +844,42 @@ class CalibrationView:
             return
         self._schedule(self._svc_close())
 
-    async def _svc_close(self) -> None:
-        """Apply what validated, then leave.
+    def _apply_edits(self) -> None:
+        """The setter just landed a legal value: save it and run it, now (§11.10).
 
-        Two independent kinds of change come back and the propagation runs for
-        either: the presets table, which is ours to write to config.toml, and
-        captured appearances the editor already wrote or deleted on disk.
+        The editor used to be a modal whose whole point was the moment it
+        closed - and this window is not a modal. It is the monitor's own face,
+        it stays open for the process's life, and closing it closes the
+        PROCESS's window: a setting that applied on close therefore applied
+        never, as far as an attached Chat UI was concerned, until the operator
+        shut the panel they were watching the effect in.
+
+        So every ``svc_*`` setter comes through here, and the guard is a
+        comparison rather than a dirty flag: ``self._config.services`` is by
+        construction the table that was last written and adopted, so a keystroke
+        that changed nothing legal (an invalid candidate is never committed to
+        the working copy - ``service_editor.py:_revalidate``), a radio re-picked
+        at its current value, or a setter that refused, all compare equal and
+        write nothing at all. Which is what makes this cheap enough to do on
+        every call and leaves nothing for a debounce to decide.
+        """
+        editor = self._editor
+        if editor is None:
+            return
+        services = dict(editor.services)
+        if services == self._config.services:
+            return
+        self._save(services, quiet=True)
+
+    async def _svc_close(self) -> None:
+        """Leave - and apply anything :meth:`_apply_edits` could not.
+
+        Since §11.10 the presets are already on disk and already on the poller:
+        every setter applied as it was pressed, so the ordinary close writes
+        nothing. What is still handled here is the two things that are only
+        knowable now: an appearance the editor wrote or deleted on disk (never
+        derivable from the presets table), and the theoretical table that never
+        went through a setter.
 
         Then the WINDOW closes, which is where this parts company with the chat
         GUI's modal: a calibration window with its editor closed would be an
@@ -850,15 +895,26 @@ class CalibrationView:
         self._editor = None
         self._bridge.send("editor", open=False)
         if result.edits is not None:
-            self._save(result.edits.services)
+            services = result.edits.services
+            if services is None:
+                self._save(None)  # appearances only
+            elif services != self._config.services:
+                self._save(services)
         self._on_exit()
 
-    def _save(self, services: dict[str, ServicePreset] | None) -> None:
+    def _save(self, services: dict[str, ServicePreset] | None, *, quiet: bool = False) -> None:
         """Persist an edited preset table and adopt it here.
 
         Every way the write can fail degrades to a toast and an adoption that
         still happened: the user's edit is real for this process even when the
         file it should outlive it in could not be written.
+
+        ``quiet`` is the apply-on-change path (§11.10): a keystroke is not an
+        event worth a toast, and "service presets saved" once per character
+        would bury every other message the window has. The FAILURE is still
+        said - once per run of failures, so an unwritable config.toml is one
+        sentence rather than one per keystroke, and a write that starts working
+        again re-arms it.
         """
         if services is None:
             self._adopt_config(self._config)
@@ -869,9 +925,15 @@ class CalibrationView:
             save_services(services, self._global_config_path)
         except OSError as exc:
             saved = False
-            self.notify(f"could not save the service presets: {exc}", severity="error", timeout=8)
+            if not quiet or not self._save_failed:
+                self.notify(
+                    f"could not save the service presets: {exc}", severity="error", timeout=8
+                )
+            self._save_failed = True
+        else:
+            self._save_failed = False
         self._adopt_config(replace(self._config, services=services))
-        if saved:
+        if saved and not quiet:
             self.notify("service presets saved", timeout=4)
 
     def _adopt_config(self, config: Config) -> None:

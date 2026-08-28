@@ -31,6 +31,7 @@ from agentclip.driver.monitor.protocol import (
     EMPTY_WATCHED,
     Located,
     MonitorSpec,
+    Tick,
     spec_from_preset,
     watched_from,
 )
@@ -39,7 +40,7 @@ from agentclip.driver.screen.profile import ServiceProfile, TemplateKind
 from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 
-from .conftest import profile_with, spec
+from .conftest import await_until, profile_with, spec
 
 CHAT = ScreenRegion(-120, 40, 800, 600)
 OTHER = ScreenRegion(10, 20, 300, 400)
@@ -228,6 +229,38 @@ async def test_watch_configures_from_the_monitors_own_spec_for() -> None:
         # ...and the same answer is re-readable without a retarget, which is how
         # a brain re-reads after a tick carrying a generation it has not seen.
         assert await live.watched() == watched
+    finally:
+        await live.close()
+
+
+async def test_a_watch_with_nothing_to_poll_still_tells_a_subscriber() -> None:
+    """ui-monitor.md 11.10. A brain learns of a retarget from the STAMP on an
+    arriving tick and from nothing else, so a configure that starts no poller
+    used to bump a counter nobody downstream was ever told about - which is
+    every settings edit in the Monitor UI over a window with no region, no
+    captured appearance or an empty checklist.
+
+    One notice instead: the new generation, and an honest nothing beside it.
+    """
+    live = monitor(spec_for=lambda _slot: spec_from_preset(PRESET, CHAT))  # unprofiled
+    seen: list[Tick] = []
+    live.subscribe(seen.append)
+    try:
+        watched = await live.watch(AgentSlot.MASTER)
+        assert live.poller is None, "this test is about the case with no poll loop"
+        await await_until(lambda: bool(seen), "the notice to be published")
+
+        assert [tick.generation for tick in seen] == [watched.generation]
+        notice = seen[0]
+        assert notice.notice is True
+        assert (notice.captured, notice.active_detectors, dict(notice.sightings)) == (
+            False,
+            (),
+            {},
+        )
+        # A notice is not an observation: there is no reading here to be the
+        # latest one, and nothing that could answer a wait for the next frame.
+        assert live.latest is None
     finally:
         await live.close()
 

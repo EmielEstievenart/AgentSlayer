@@ -229,6 +229,42 @@ async def test_the_settings_changing_repaints_even_with_the_screen_still(
     assert "auto-submit on" in sees(harness)["settings"]  # type: ignore[operator]
 
 
+# == a bump with no frame behind it ===========================================
+
+
+async def test_a_settings_change_with_no_probes_still_reaches_the_block(
+    harness: Harness,
+) -> None:
+    """ui-monitor.md 11.10: the bump always crosses.
+
+    A setting edited in the Monitor UI over a window there is nothing to poll
+    for - no region drawn, no appearance captured, an empty checklist - saves,
+    retargets and produces no frame at all. The monitor says so once instead: a
+    NOTICE, carrying the new generation and no probe, no sighting and no active
+    detector. That is the whole of what this window needs to ask again.
+    """
+    await watching(harness, captured=(TemplateKind.COPY,), auto_submit=False)
+    harness.flush().clear()
+    harness.scheduled.clear()
+
+    # The operator ticks "press Enter for me" over there.
+    target = replace(harness.monitor.specs_for[AgentSlot.MASTER], auto_submit=True)
+    harness.monitor.specs_for = dict.fromkeys(AgentSlot, target)
+    harness.monitor.retarget(target)
+    notice = replace(harness.monitor.make_tick(captured=False, active_detectors=()), notice=True)
+    harness.monitor.feed(notice)
+
+    assert harness.scheduled == ["GuiView._reread_watched"]
+    # ...and exactly once: the stamp is claimed on the tick thread, so a second
+    # notice under the same generation does not queue a second read of the same
+    # answer.
+    harness.monitor.feed(replace(notice, seq=notice.seq + 1))
+    assert harness.scheduled == ["GuiView._reread_watched"]
+
+    await harness.view._reread_watched()
+    assert "auto-submit on" in sees(harness)["settings"]  # type: ignore[operator]
+
+
 # == no monitor at all ========================================================
 
 

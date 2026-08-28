@@ -32,7 +32,7 @@ import pytest
 
 from agentclip.driver.clip.fake import FakeClipboard
 from agentclip.driver.monitor.local import LocalUIMonitor
-from agentclip.driver.monitor.protocol import ElementClick, Located, UIMonitor, Watched
+from agentclip.driver.monitor.protocol import ElementClick, Located, Tick, UIMonitor, Watched
 from agentclip.driver.monitor.remote import (
     CONFIGURE_IS_LOCAL,
     MonitorCallError,
@@ -322,8 +322,11 @@ async def test_a_tick_backlog_is_dropped_to_the_latest(
     monitor: LocalUIMonitor = wiring.monitor
     _server, client = await linked(wiring, listen, dial)
     await targeted(wiring, client, region=None)
+    # Observations only: the ``watch`` above configured a monitor with nothing
+    # to poll, and that publishes one NOTICE of its own (ui-monitor.md 11.10),
+    # which is a statement about the run rather than a tick in this backlog.
     seen: list[int] = []
-    client.subscribe(lambda tick: seen.append(tick.seq))
+    client.subscribe(lambda tick: None if tick.notice else seen.append(tick.seq))
 
     stamps = [monitor.stamp() for _ in range(3)]
     for tick in stamps:
@@ -342,13 +345,40 @@ async def test_a_ghost_never_crosses(
     monitor: LocalUIMonitor = wiring.monitor
     _server, client = await linked(wiring, listen, dial)
     generation = (await targeted(wiring, client, region=None)).generation
-    seen: list[int] = []
-    client.subscribe(lambda tick: seen.append(tick.generation))
+    seen: list[int] = []  # observations only - see the backlog test above
+    client.subscribe(lambda tick: None if tick.notice else seen.append(tick.generation))
 
     monitor.feed(monitor.stamp(generation=generation - 1))
     monitor.feed(monitor.stamp())
     await await_until(lambda: seen == [generation], "only the live tick to cross")
     assert client.latest is not None and client.latest.generation == generation
+
+
+async def test_a_retarget_with_nothing_to_poll_crosses_as_a_notice(
+    wire: Callable[..., Wiring], listen: Listen, dial: Dial
+) -> None:
+    """ui-monitor.md 11.10, end to end over a real socket.
+
+    The settings edit that used to go nowhere: the operator changes a preset in
+    the Monitor UI for a window there is no frame to capture for, the monitor
+    saves and retargets, and no poll loop starts. The generation still has to
+    reach the brain on the other end of the wire, because re-reading ``watched``
+    is the ONLY thing that makes this window's picture right - and a tick is the
+    only thing that tells it to.
+    """
+    wiring = wire()
+    _server, client = await linked(wiring, listen, dial)
+    seen: list[Tick] = []
+    client.subscribe(seen.append)
+
+    watched = await targeted(wiring, client, region=None)
+
+    await await_until(lambda: bool(seen), "the notice to cross the wire")
+    assert [tick.generation for tick in seen] == [watched.generation]
+    assert seen[0].notice is True
+    assert client.generation == watched.generation
+    # Not an observation, on this side either: the flag survived the crossing.
+    assert client.latest is None
 
 
 # == the pixel verdicts ========================================================

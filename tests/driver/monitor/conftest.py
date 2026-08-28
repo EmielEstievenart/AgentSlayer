@@ -303,7 +303,14 @@ class Wiring:
     def __init__(self, monitor: LocalUIMonitor, captured: list[ScreenRegion]) -> None:
         self.monitor = monitor
         self.captured = captured
+        # OBSERVATIONS only. A notice (ui-monitor.md 11.10 - the tick a
+        # ``configure`` publishes for its own sake when it started no poller)
+        # is a statement about the RUN, not about the screen, and every
+        # assertion in these files that counts ticks is counting what the
+        # poller saw. They are kept apart rather than filtered at each use so
+        # that "the poller published nothing" stays spellable as ``== []``.
         self.ticks: list[Tick] = []
+        self.notices: list[Tick] = []
         self.clips: list[str] = []
         # Every publication in the order the poller made it: ``("tick", seq)``
         # for a subscriber call and ``("frame", seq_of_the_tick_it_follows)``
@@ -363,6 +370,9 @@ def wire() -> Iterator[Callable[..., Wiring]]:
         wiring = Wiring(monitor, captured)
 
         def on_tick(tick: Tick) -> None:
+            if tick.notice:
+                wiring.notices.append(tick)
+                return
             wiring.ticks.append(tick)
             wiring.published.append(("tick", tick.seq))
 
@@ -379,7 +389,7 @@ def wire() -> Iterator[Callable[..., Wiring]]:
 
     for wiring in built:
         asyncio.run(wiring.monitor.close())
-    for name in ("agentclip-detector", "agentclip-clipwatch"):
+    for name in ("agentclip-detector", "agentclip-clipwatch", "agentclip-notice"):
         for leftover in [t for t in threading.enumerate() if t.name == name]:
             leftover.join(timeout=TIMEOUT_S)
             assert not leftover.is_alive(), f"a {name} thread outlived its test"

@@ -275,6 +275,23 @@ class Tick:
     # The poll loop always fills both in.
     stale_arm_streak: int = 0
     changed_streak: int = 0
+    # A NOTICE rather than an observation (docs/design/ui-monitor.md 11.10).
+    # True on the one tick a ``configure`` publishes for its own sake, when it
+    # started no poller: nothing was captured, nothing was searched and no
+    # detector is active, and the whole of what it carries is ``generation``.
+    # It exists because a brain learns of a retarget from the STAMP on an
+    # arriving tick and from nothing else - so a service picked or a preset
+    # edited in the Monitor UI over a window with no region, no captured
+    # appearance or an empty checklist would otherwise bump a counter nobody
+    # downstream was ever told about.
+    #
+    # Exactly two readers, both of them a monitor's own publish step: a notice
+    # never becomes ``latest`` (the run it announces has no reading to be the
+    # latest OF) and never resolves an :meth:`UIMonitor.observe` (that wait is
+    # for a frame, and no frame was taken). Every ordinary subscriber gets it
+    # unfiltered, because what it says - this generation, nothing seen - is
+    # true.
+    notice: bool = False
 
     def searched(self, kind: TemplateKind) -> bool:
         return kind in self.sightings

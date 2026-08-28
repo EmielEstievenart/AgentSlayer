@@ -383,9 +383,14 @@ class SwitchableMonitor:
         return unsubscribe
 
     def _tick_arrived(self, tick: Tick) -> None:
-        waiters, self._waiters = self._waiters, []
-        for waiter in waiters:
-            _resolve(waiter, tick)
+        # A notice announces a run with nothing to poll (§11.10) - no frame was
+        # captured, so it relays to the subscribers (the generation on it is why
+        # it exists) and leaves the parked waits alone: an ``observe`` here is
+        # waiting for the first tick a monitor actually takes.
+        if not tick.notice:
+            waiters, self._waiters = self._waiters, []
+            for waiter in waiters:
+                _resolve(waiter, tick)
         for hook in tuple(self._hooks):
             _safely(hook, tick)
 

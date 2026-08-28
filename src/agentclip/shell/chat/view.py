@@ -3591,6 +3591,13 @@ class GuiView:
         self._adopt_watched(self._automation.live_slot, watched)
         self._push_sidebar()
         self._push_status()
+        # And F2, which is the block this answer changed the MOST: its rows and
+        # its settings line are read straight off ``Watched``, and the push the
+        # arriving tick already made was made against the previous one. Cheap to
+        # repeat - :meth:`_push_monitor_sees` sends nothing when the payload has
+        # not moved - and the alternative is a settings edit in the Monitor UI
+        # that the block claiming to say what the monitor sees never shows.
+        self._push_monitor_sees()
 
     # == the monitor link (split mode) =========================================
     # Everything ``--monitor host:port`` adds, and nothing else in this file

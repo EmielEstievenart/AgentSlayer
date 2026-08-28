@@ -655,11 +655,89 @@ def test_a_capture_claims_the_overlay_before_the_task_runs(calib: CalibHarness) 
     assert len(calib.scheduled) == scheduled  # the second press started nothing
 
 
+def test_a_setter_saves_and_retargets_without_waiting_for_the_close(
+    calib: CalibHarness,
+) -> None:
+    """§11.10. This window is the monitor's own face and stays open for the
+    process's life, so a setting that applied on close applied never as far as
+    an attached Chat UI was concerned."""
+    view = calib.view
+    view.start()
+    key = view.config.general.service
+    calib.scheduled.clear()
+    calib.flush().clear()
+
+    view.svc_tolerance(31)
+
+    # ...on disk, in the file this window loads at startup...
+    saved = load_config(Path.cwd(), global_config_path=calib.global_config_path)
+    assert saved.services[key].tolerance == 31
+    # ...adopted here...
+    assert view.config.services[key].tolerance == 31
+    assert calib.configs and calib.configs[-1].services[key].tolerance == 31
+    # ...and on the poller, which is what bumps the generation an attached brain
+    # re-reads ``watched()`` on.
+    assert calib.scheduled == ["CalibrationView._configure"]
+    # A keystroke is not an event worth a toast.
+    assert calib.flush().of_type("toast") == []
+
+
+def test_a_setter_that_lands_nothing_legal_writes_nothing(calib: CalibHarness) -> None:
+    """An invalid candidate is never committed to the working copy, so the
+    comparison ``_apply_edits`` guards on finds nothing to write."""
+    view = calib.view
+    view.start()
+    calib.scheduled.clear()
+
+    edit(view, max="not a number")
+
+    assert not calib.global_config_path.exists()
+    assert calib.scheduled == []
+    assert calib.configs == []
+
+
+def test_a_setter_re_picked_at_its_current_value_is_not_a_write(
+    calib: CalibHarness,
+) -> None:
+    view = calib.view
+    view.start()
+    view.svc_tolerance(31)
+    calib.scheduled.clear()
+    calib.configs.clear()
+
+    view.svc_tolerance(31)
+
+    assert calib.scheduled == []
+    assert calib.configs == []
+
+
+async def test_closing_after_a_setter_writes_nothing_new(calib: CalibHarness) -> None:
+    """The presets are already on disk and already on the poller, so the
+    ordinary close is a close and nothing else."""
+    view = calib.view
+    view.start()
+    edit(view, label="Edited")
+    calib.scheduled.clear()
+    calib.configs.clear()
+    stamp = calib.global_config_path.read_bytes()
+
+    await view._svc_close()
+
+    assert calib.exits == 1
+    assert calib.global_config_path.read_bytes() == stamp
+    assert calib.configs == []
+    assert calib.scheduled == []
+
+
 async def test_closing_saves_the_presets_hands_them_on_and_closes_the_window(
     calib: CalibHarness,
 ) -> None:
     """The one path that parts company with the chat GUI's modal: the editor
-    closing IS the window closing, so the apply and the exit are one door."""
+    closing IS the window closing.
+
+    Since §11.10 the apply happened at the keystroke rather than here, so what
+    this pins is the END STATE a close leaves behind - saved, handed on, gone -
+    which is the promise, not which of the two moments wrote it."""
     view = calib.view
     view.start()
     edit(view, label="Edited")
@@ -715,19 +793,41 @@ async def test_an_unwritable_config_still_adopts_the_edit(
     outlive it in could not be written."""
     view = calib.view
     view.start()
-    edit(view, label="Edited")
     monkeypatch.setattr(
         f"{VIEW}.save_services",
         lambda services, path: (_ for _ in ()).throw(OSError("read-only")),
     )
     calib.flush().clear()
 
-    await view._svc_close()
+    edit(view, label="Edited")
     assert view.config.services[view.config.general.service].label == "Edited"
     assert any(
         event["severity"] == "error" and "could not save" in event["message"]
         for event in calib.flush().of_type("toast")
     )
+
+
+async def test_an_unwritable_config_is_one_complaint_not_one_per_keystroke(
+    calib: CalibHarness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§11.10: applying on change means the failing write happens per character,
+    and a toast per character would bury every other message the window has."""
+    view = calib.view
+    view.start()
+    monkeypatch.setattr(
+        f"{VIEW}.save_services",
+        lambda services, path: (_ for _ in ()).throw(OSError("read-only")),
+    )
+    calib.flush().clear()
+
+    edit(view, label="E")
+    edit(view, label="Ed")
+    edit(view, label="Edi")
+
+    errors = [
+        event for event in calib.flush().of_type("toast") if event["severity"] == "error"
+    ]
+    assert len(errors) == 1
 
 
 def test_the_close_button_takes_the_editors_door(calib: CalibHarness) -> None:

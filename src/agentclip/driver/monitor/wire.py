@@ -85,7 +85,10 @@ Frame vocabulary (v5)
 ``{"type":"tick","tick":{...}}``
     One :class:`~agentclip.driver.monitor.protocol.Tick`, pushed. Unsolicited:
     the monitor polls on its own (§2.1) and the client's reader task is where
-    they land.
+    they land. A tick with ``"notice":true`` is the one a ``configure`` that
+    started no poller publishes for its own sake (§11.10): it carries a
+    generation and nothing else, and the client hands it to the subscribers
+    without letting it become ``latest`` or answer an ``observe``.
 ``{"type":"clip","text":"..."}``
     One clipboard capture the monitor's watcher accepted (§2.11).
 
@@ -650,6 +653,7 @@ def encode_tick(value: Tick) -> dict[str, Any]:
         "active_detectors": list(value.active_detectors),
         "stale_arm_streak": value.stale_arm_streak,
         "changed_streak": value.changed_streak,
+        "notice": value.notice,
     }
 
 
@@ -680,6 +684,7 @@ def decode_tick(value: Any, what: str = "tick") -> Tick:
         active_detectors=_strs_at(data, "active_detectors", what),
         stale_arm_streak=_int_at(data, "stale_arm_streak", what),
         changed_streak=_int_at(data, "changed_streak", what),
+        notice=_bool_at(data, "notice", what),
     )
 
 

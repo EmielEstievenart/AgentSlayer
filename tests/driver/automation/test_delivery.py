@@ -28,6 +28,7 @@ provider refuses it (the TUI's OSC-52 escape).
 
 from __future__ import annotations
 
+import time
 from dataclasses import replace
 from typing import Any
 
@@ -253,7 +254,15 @@ class RecordingAlarm(AttentionAlarm):
 
 def _preset(**overrides: Any) -> ServicePreset:
     base = ServicePreset(
-        key="fake", label="Fake", max_paste_chars=10_000, total_context_chars=100_000
+        key="fake",
+        label="Fake",
+        max_paste_chars=10_000,
+        total_context_chars=100_000,
+        # The beat before the auto-submit Enter is a PRESET field now (§11.8),
+        # so shrinking it is a fact about the service under test rather than a
+        # constant to monkeypatch: zero here, and the one story that is about
+        # the wait names its own number.
+        submit_delay_s=0.0,
     )
     return replace(base, **overrides) if overrides else base
 
@@ -274,7 +283,6 @@ def quick_beats(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(beats, "FOCUS_CLICK_GAP_S", 0.0)
     monkeypatch.setattr(beats, "PASTE_SETTLE_DELAY", 0.0)
     monkeypatch.setattr(beats, "SNAP_BACK_SETTLE_S", 0.0)
-    monkeypatch.setattr(beats, "SUBMIT_SETTLE_S", 0.0)
     monkeypatch.setattr(beats, "STREAM_CHUNK_SETTLE_S", 0.0)
     # Small enough that a readable payload is several chunks, big enough that a
     # short one is exactly one.
@@ -668,6 +676,30 @@ async def test_auto_submit_taps_enter_after_a_paste_that_landed(
     # evidence says the send actually landed.
     assert delivery.loop_state is LoopState.WAIT_SEND
     assert _flash(view) == (AUTO_SEND_FLASH_TEXT, False)
+
+
+async def test_the_tap_waits_the_watched_services_own_beat(
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor
+) -> None:
+    """§11.8: how long a composer takes to swallow a paste is a fact about the
+    PAGE, so the wait before the Enter is the service's ``submit_delay_s`` and
+    not a constant. Timed rather than monkeypatched, because the thing being
+    asserted IS that the number in the preset is the number that is slept - a
+    stubbed sleep would pass over a delivery that read the old constant."""
+    host.preset = _preset(auto_submit=True, submit_delay_s=0.25)
+
+    started = time.perf_counter()
+    await delivery.copy_outbound(PAYLOAD)
+    elapsed = time.perf_counter() - started
+
+    assert machine.events == [*FOCUS, "paste", "enter"]
+    assert elapsed >= 0.2
+    # ...and the same delivery against a service that asked for none is not
+    # paying that quarter second, which is what makes the number the preset's.
+    host.preset = _preset(auto_submit=True, submit_delay_s=0.0)
+    started = time.perf_counter()
+    await delivery.copy_outbound(PAYLOAD)
+    assert time.perf_counter() - started < 0.2
 
 
 async def test_no_tap_without_the_opt_in(

@@ -101,6 +101,7 @@ WATCHED = Watched(
     generation=9,
     delivery="stream",
     auto_submit=True,
+    submit_delay_s=3.5,
     scroll_action="end",
     snap_back=False,
     hover_scan=True,
@@ -460,7 +461,10 @@ def test_the_wire_version_is_the_monitors_own_and_is_four() -> None:
     """1 -> 2 when the hello grew a token (§5); 2 -> 3 when ``configure`` left
     the verb table and ``watch`` took its place (§10.5); 3 -> 4 when the brain
     stopped holding templates and ``captured`` and ``target`` became the
-    monitor's answers (§11.3). Asserted as a NUMBER on purpose: the two installs
+    monitor's answers (§11.3); 4 -> 5 when ``Watched`` grew ``submit_delay_s``,
+    the per-service beat before the auto-submit Enter (§11.8) - a field the
+    brain READS on every delivery, so an end that does not send it is not a
+    peer this one can drive. Asserted as a NUMBER on purpose: the two installs
     gate on it, and a silent bump is a silent refusal of every monitor that was
     not upgraded with the brain.
 
@@ -470,10 +474,10 @@ def test_the_wire_version_is_the_monitors_own_and_is_four() -> None:
     field and refuses an unknown verb with one ``bad_request`` the Chat UI
     swallows, and no frame about a click, a capture or a clipboard changed
     shape."""
-    assert MONITOR_WIRE_VERSION == 4
-    assert OURS.wire == 4
-    assert hello_frame()["version"] == 4
-    assert hello_ack_frame("srv-1", None)["version"] == 4
+    assert MONITOR_WIRE_VERSION == 5
+    assert OURS.wire == 5
+    assert hello_frame()["version"] == 5
+    assert hello_ack_frame("srv-1", None)["version"] == 5
 
 
 def test_unauthorized_is_an_error_kind_that_belongs_to_the_connection() -> None:

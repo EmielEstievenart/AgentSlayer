@@ -21,6 +21,7 @@ from agentclip.config import (
     DEFAULT_MATCHER,
     DEFAULT_SCROLL_ACTION,
     DEFAULT_STABLE_SECONDS,
+    DEFAULT_SUBMIT_DELAY_S,
     DEFAULT_THEME,
     DEFAULT_TOLERANCE,
     DELIVERY_MODES,
@@ -666,6 +667,109 @@ def test_a_retired_preset_key_is_simply_ignored(project: Path, global_path: Path
     cfg = load_config(project, global_config_path=global_path)
     assert cfg.services["claude"].auto_submit is True
     assert not hasattr(cfg.services["claude"], "capture_prose")
+
+
+# -- submit_delay_s (the beat before the auto-submit Enter, ui-monitor.md 11.8) -
+
+
+def test_every_builtin_ships_the_shared_submit_delay_default() -> None:
+    """1.2 s is what every host got while the beat was a constant, so nobody's
+    delivery changes pace on the release that made it a setting."""
+    assert DEFAULT_SUBMIT_DELAY_S == 1.2
+    for key, preset in default_services().items():
+        assert preset.submit_delay_s == DEFAULT_SUBMIT_DELAY_S, key
+    assert ServicePreset("k", "K", 1_000, 5_000).submit_delay_s == DEFAULT_SUBMIT_DELAY_S
+
+
+def test_load_config_reads_submit_delay_override(project: Path, global_path: Path) -> None:
+    global_path.write_text("[services.claude]\nsubmit_delay_s = 3.5\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].submit_delay_s == 3.5
+    # untouched fields keep the built-in default
+    assert cfg.services["claude"].max_paste_chars == default_services()["claude"].max_paste_chars
+    assert not cfg.warnings
+
+
+def test_load_config_accepts_both_submit_delay_bounds(project: Path, global_path: Path) -> None:
+    """Zero is a real setting - "tap Enter the moment the paste returns" - which
+    is why the floor is not the stale window's 0.5. Whole numbers land as floats,
+    exactly as ``stable_seconds`` does."""
+    for value in ("0", "0.0", "10", "10.0"):
+        global_path.write_text(
+            f"[services.claude]\nsubmit_delay_s = {value}\n", encoding="utf-8"
+        )
+        cfg = load_config(project, global_config_path=global_path)
+        assert cfg.services["claude"].submit_delay_s == float(value)
+        assert isinstance(cfg.services["claude"].submit_delay_s, float)
+        assert not cfg.warnings
+
+
+@pytest.mark.parametrize("value", ["-0.1", "10.5", "60"])
+def test_load_config_rejects_out_of_range_submit_delay(
+    project: Path, global_path: Path, value: str
+) -> None:
+    global_path.write_text(f"[services.claude]\nsubmit_delay_s = {value}\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].submit_delay_s == DEFAULT_SUBMIT_DELAY_S
+    assert any("submit_delay_s" in w and "outside" in w for w in cfg.warnings)
+
+
+@pytest.mark.parametrize("value", ['"soon"', "true"])
+def test_load_config_rejects_a_non_numeric_submit_delay(
+    project: Path, global_path: Path, value: str
+) -> None:
+    """Booleans are ints in Python and must be refused explicitly, exactly as
+    the stale window refuses them."""
+    global_path.write_text(f"[services.claude]\nsubmit_delay_s = {value}\n", encoding="utf-8")
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].submit_delay_s == DEFAULT_SUBMIT_DELAY_S
+    assert any("submit_delay_s" in w and "must be a number" in w for w in cfg.warnings)
+
+
+def test_save_then_load_round_trips_an_edited_submit_delay(
+    project: Path, global_path: Path
+) -> None:
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], submit_delay_s=4.0)
+
+    save_services(services, global_path)
+    raw = tomllib.loads(global_path.read_text(encoding="utf-8"))
+    assert raw["services"]["claude"]["submit_delay_s"] == 4.0
+
+    cfg2 = load_config(project, global_config_path=global_path)
+    assert cfg2.services["claude"].submit_delay_s == 4.0
+    assert not cfg2.warnings
+
+
+def test_save_services_writes_submit_delay_only_when_it_differs(
+    project: Path, global_path: Path
+) -> None:
+    """It was a constant before it was a setting: a file whose user never moved
+    it must stay byte-for-byte what earlier versions wrote."""
+    cfg = load_config(project, global_config_path=global_path)
+    services = dict(cfg.services)
+    services["claude"] = replace(services["claude"], max_paste_chars=30_000)
+    save_services(services, global_path)
+    written = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
+    assert "submit_delay_s" not in written
+
+    # ...and 0.0 is a MOVE, not an absence: the falsy value has to be written.
+    services["claude"] = replace(services["claude"], submit_delay_s=0.0)
+    save_services(services, global_path)
+    written = tomllib.loads(global_path.read_text(encoding="utf-8"))["services"]["claude"]
+    assert written["submit_delay_s"] == 0.0
+
+
+def test_a_bad_submit_delay_does_not_poison_the_rest_of_the_preset(
+    project: Path, global_path: Path
+) -> None:
+    global_path.write_text(
+        "[services.claude]\nmax_paste_chars = 30000\nsubmit_delay_s = 99\n", encoding="utf-8"
+    )
+    cfg = load_config(project, global_config_path=global_path)
+    assert cfg.services["claude"].max_paste_chars == 30_000
+    assert cfg.services["claude"].submit_delay_s == DEFAULT_SUBMIT_DELAY_S
 
 
 # -- edit_by_lines (the ranged-edit mode, protocol.md 3.1) ---------------------

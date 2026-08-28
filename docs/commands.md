@@ -52,7 +52,7 @@ exception: a printable character never fires a shortcut mid-sentence.)
 | Key | Does |
 |---|---|
 | `F1` / `?` | This help sheet (`Esc` or `F1` closes it) |
-| `F2` | Hide/show **MONITOR SEES** in the sidebar: which appearances the monitor holds for this service, which of them are on screen right now, and the settings it sent this window to drive from (auto-submit, delivery, paste budget, hover scan, snap back). Read-only — the captures and the settings are made in the Monitor UI |
+| `F2` | Hide/show **MONITOR SEES** in the sidebar: which appearances the monitor holds for this service, which of them are on screen right now, and the settings it sent this window to drive from (auto-submit, delivery, paste budget, hover scan, snap back, Enter delay). Read-only — the captures and the settings are made in the Monitor UI |
 | `F3` | Hide/show the sidebar |
 | `F4` | Appearance (theme) — a connected monitor follows: the Monitor UI on the other machine wears the same palette, on attach and whenever you change it |
 | `F5` | ARM / DISARM the tool (same as `/armed`). Disarmed it still watches and shows everything, but never clicks, pastes or reads your clipboard |
@@ -155,6 +155,12 @@ ssh -N -L 7777:127.0.0.1:7777 you@the-vm     # then: agentclip --monitor 127.0.0
 **Keys in the Monitor UI:** `Esc` closes the modal if one is up, otherwise closes
 the window. That is the whole list — everything else on that window is a control
 you click, and it is specified by `docs/design/ui-briefs/monitor-ui.md`.
+
+**Nothing there waits for a close.** Every setting in the service editor applies
+the moment you change it: saved to that machine's global config.toml, run by the
+monitor, and picked up by a connected Chat UI within a tick — its sidebar and
+its `F2` **MONITOR SEES** block included. Closing the window is only closing the
+window.
 
 | Control | Does |
 |---|---|

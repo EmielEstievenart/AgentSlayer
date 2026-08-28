@@ -40,6 +40,7 @@ from typing import Protocol
 from agentclip.config import (
     DEFAULT_DELIVERY,
     DEFAULT_SCROLL_ACTION,
+    DEFAULT_SUBMIT_DELAY_S,
     ServicePreset,
 )
 from agentclip.driver.screen.busy import BusyProbe
@@ -157,6 +158,7 @@ class Watched:
     # -- the preset the brain acts on (§10.5) ------------------------------
     delivery: str = DEFAULT_DELIVERY
     auto_submit: bool = False
+    submit_delay_s: float = DEFAULT_SUBMIT_DELAY_S
     scroll_action: str = DEFAULT_SCROLL_ACTION
     snap_back: bool = True
     hover_scan: bool = False
@@ -338,6 +340,7 @@ class MonitorSpec:
     snap_back: bool = True
     delivery: str = DEFAULT_DELIVERY
     auto_submit: bool = False
+    submit_delay_s: float = DEFAULT_SUBMIT_DELAY_S
     max_paste_chars: int = 0
     total_context_chars: int = 0
     wrap_blocks_in_fence: bool = True
@@ -382,6 +385,7 @@ def spec_from_preset(
         snap_back=preset.snap_back,
         delivery=preset.delivery,
         auto_submit=preset.auto_submit,
+        submit_delay_s=preset.submit_delay_s,
         max_paste_chars=preset.max_paste_chars,
         total_context_chars=preset.total_context_chars,
         wrap_blocks_in_fence=preset.wrap_blocks_in_fence,
@@ -420,6 +424,7 @@ def watched_from(
         captured=captured,
         delivery=spec.delivery,
         auto_submit=spec.auto_submit,
+        submit_delay_s=spec.submit_delay_s,
         scroll_action=spec.scroll_action,
         snap_back=spec.snap_back,
         hover_scan=spec.hover_scan,

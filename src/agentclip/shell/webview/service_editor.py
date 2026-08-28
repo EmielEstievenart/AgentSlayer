@@ -49,6 +49,7 @@ from typing import Any
 from agentclip.config import (
     BUILTIN_SERVICE_KEYS,
     DEFAULT_STABLE_SECONDS,
+    DEFAULT_SUBMIT_DELAY_S,
     DELIVERY_PASTE,
     DELIVERY_STREAM,
     FINISH_SIGNALS,
@@ -102,6 +103,12 @@ _SLUG_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 # silently rewritten the next time the app starts.
 STABLE_MIN = 0.5
 STABLE_MAX = 60.0
+
+# The auto-submit beat's bounds, which are the loader's in the same way
+# (``_take_float(..., 0.0, 10.0)``). Zero is legal and means "press Enter the
+# moment the paste returns"; ten is a composer nobody should have to wait for.
+SUBMIT_DELAY_MIN = 0.0
+SUBMIT_DELAY_MAX = 10.0
 
 # == the words ================================================================
 # ``shell/tui/screens/service_editor.py``'s display strings, spelled again here for
@@ -169,6 +176,14 @@ ALERT_SOUND_TITLE = (
 ALERT_REPEAT_TITLE = (
     "How often the alert repeats while the loop is still waiting, in seconds. "
     "0 says it once."
+)
+# The auto-submit beat, in the same voice: a number the user only goes looking
+# for after watching a prompt sit in the box unsent, so the sentence says what
+# the wait is FOR rather than what it is called (ui-monitor.md §11.8).
+SUBMIT_DELAY_TITLE = (
+    "How long the pasted box is given to settle before \"press Enter after "
+    "auto-paste\" taps Enter, in seconds (0-10). Raise it for a chat that turns "
+    "a big paste into an attachment and drops an Enter that arrives too early."
 )
 # The alert-repeat bounds, which are ``config.py``'s loader's: a value this
 # editor accepts must never be silently rewritten the next time the app starts.
@@ -510,6 +525,7 @@ class ServiceEditor:
                 "snap_back": SNAP_BACK_TITLE,
                 "alert_sound": ALERT_SOUND_TITLE,
                 "alert_repeat": ALERT_REPEAT_TITLE,
+                "submit_delay": SUBMIT_DELAY_TITLE,
             },
             "hover_scan": shown.hover_scan,
             "require_fenced": shown.require_fenced_reply,
@@ -593,6 +609,10 @@ class ServiceEditor:
                 # universal default, and "add a service" should stay a
                 # four-field job for anyone who never touches the detector.
                 "stable": str(DEFAULT_STABLE_SECONDS),
+                # Pre-filled for the same reason: the beat before the auto-submit
+                # Enter has a universal default, and a blank box would say the
+                # new service sends instantly when it would not.
+                "delay": str(DEFAULT_SUBMIT_DELAY_S),
                 # Pre-filled for the same reason, and from the defaults preset
                 # rather than a literal: the box must show what "Add service"
                 # would really file, exactly as the toggles do.
@@ -607,6 +627,7 @@ class ServiceEditor:
                 "max": str(preset.max_paste_chars),
                 "total": str(preset.total_context_chars),
                 "stable": str(preset.stable_seconds),
+                "delay": str(preset.submit_delay_s),
                 "repeat": str(preset.alert_repeat_seconds),
                 "extra": preset.extra_instructions,
             }
@@ -676,7 +697,7 @@ class ServiceEditor:
         which control fired), and here it is forced anyway: ``max <= total`` is
         a cross-field rule, so a per-field validator could not exist.
         """
-        for name in ("key", "label", "max", "total", "stable", "repeat", "extra"):
+        for name in ("key", "label", "max", "total", "stable", "delay", "repeat", "extra"):
             if name in fields:
                 self._form[name] = str(fields[name])
         self._reload = False
@@ -696,6 +717,7 @@ class ServiceEditor:
         max_text = self._form.get("max", "").strip()
         total_text = self._form.get("total", "").strip()
         stable_text = self._form.get("stable", "").strip()
+        delay_text = self._form.get("delay", "").strip()
         repeat_text = self._form.get("repeat", "").strip()
         # Stripped as the TUI strips it: the box holds newlines, and a trailing
         # one from a stray Enter is not guidance the model needs shipped.
@@ -747,6 +769,16 @@ class ServiceEditor:
                 if not (STABLE_MIN <= stable_val <= STABLE_MAX):
                     error = "stale seconds must be between 0.5 and 60"
 
+        delay_val: float | None = None
+        if error is None:
+            try:
+                delay_val = float(delay_text)
+            except ValueError:
+                error = "Enter delay must be a number"
+            else:
+                if not (SUBMIT_DELAY_MIN <= delay_val <= SUBMIT_DELAY_MAX):
+                    error = "Enter delay must be between 0 and 10 seconds"
+
         repeat_val: int | None = None
         if error is None:
             # Blank means zero rather than an error, exactly as the TUI reads
@@ -773,6 +805,7 @@ class ServiceEditor:
             and max_val is not None
             and total_val is not None
             and stable_val is not None
+            and delay_val is not None
             and repeat_val is not None
         )
         if is_new:
@@ -782,6 +815,7 @@ class ServiceEditor:
                 max_paste_chars=max_val,
                 total_context_chars=total_val,
                 stable_seconds=stable_val,
+                submit_delay_s=delay_val,
                 extra_instructions=extra_text,
                 alert_repeat_seconds=repeat_val,
             )
@@ -792,6 +826,7 @@ class ServiceEditor:
                 max_paste_chars=max_val,
                 total_context_chars=total_val,
                 stable_seconds=stable_val,
+                submit_delay_s=delay_val,
                 extra_instructions=extra_text,
                 alert_repeat_seconds=repeat_val,
             )
@@ -1217,6 +1252,9 @@ __all__: Sequence[str] = [
     "SNAP_BACK_TITLE",
     "STABLE_MAX",
     "STABLE_MIN",
+    "SUBMIT_DELAY_MAX",
+    "SUBMIT_DELAY_MIN",
+    "SUBMIT_DELAY_TITLE",
     "STREAM_DELIVERY_LABEL",
     "TEMPLATES_NONE",
     "TEMPLATE_UNSET",

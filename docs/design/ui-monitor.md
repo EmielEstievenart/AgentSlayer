@@ -2480,3 +2480,111 @@ sent, nothing generated, nothing finished and the auto-copy never armed: the
 the synthetic keys carry their scan code (`MapVirtualKeyW`) alongside the
 virtual key, because a VK-only event reaches the page as a keydown with an
 empty `code`, which some composers ignore.
+
+**The beat is a setting** (2026-08-28, wire **v5**). 1.2 s is right for a tab
+building an attachment chip out of 20k characters and absurd for a plain
+textarea, and which of those the browser is showing is a fact about the
+service — so `submit_delay_s: float` joins the `[services.*]` row the monitor
+owns, defaulting to `config.DEFAULT_SUBMIT_DELAY_S = 1.2` (which is what
+`beats.SUBMIT_SETTLE_S` now points at, so the constant stays the documented
+default rather than a second number to keep in step) and clamped to 0–10 by the
+loader. It crosses on `Watched` exactly as `snap_back` does — `MonitorSpec` →
+`spec_from_preset` → `watched_from` → the wire → `preset_from_watched` — and
+`auto_insert.deliver` sleeps `ctx.live_preset().submit_delay_s` instead of the
+constant. `submit()`, the sidebar's **Press Enter**, is unchanged: it still
+waits `PASTE_SETTLE_DELAY` after its own click and nothing more, because the
+paste it is rescuing landed some time ago and the composer has had it.
+
+`MONITOR_WIRE_VERSION` goes **4 → 5**. Additive on the frame, but the brain
+READS the field on every auto-submit, so a v4 monitor that never sends it is
+not a peer this brain can drive — the same call §11.3 made, and the three exes
+ship together. The Monitor UI's service editor grows one text box, **Enter
+delay after paste (s)**, beside the stale window (`SUBMIT_DELAY_MIN/MAX` are
+the loader's bounds spelled again, as `STABLE_MIN/MAX` are), and the Chat UI's
+**MONITOR SEES** settings line grows a sixth clause, `submit delay 1.2s`.
+`save_services` writes the key only when it has moved off the built-in.
+
+### 11.10 Settings apply on change, and the bump always crosses — **AS BUILT** (2026-08-28)
+
+Two bugs with one symptom: *"I changed a setting in the monitor and the Chat UI
+went on doing the old thing."*
+
+**The first was the commit model.** The service editor's was inherited whole
+from the Textual modal it grew out of (`ui-briefs/service-editor.md` §3.2):
+every keystroke revalidated and wrote into a WORKING COPY, and the working copy
+reached `config.toml` and the poller when the editor CLOSED. That is right for
+a modal you dismiss to get back to your work. It is wrong here, because §9.1
+made this editor the monitor's own face: the window stays open for the
+process's life, and `svc_close` closes the WINDOW. A setting that applied on
+close therefore applied *never*, as far as an attached brain was concerned,
+until the operator shut the panel they were watching the effect in.
+
+So it applies on change. `CalibrationView._apply_edits` sits between every
+`svc_*` setter and its repaint, and does the whole of what closing used to:
+`save_services` to the global `config.toml`, `_adopt_config`, `_push_calibration`,
+`_retarget`. Three things keep it honest and cheap enough to run on every
+keystroke:
+
+* **the guard is a comparison, not a dirty flag.** `self._config.services` is
+  by construction the table last written and adopted, so a setter that landed
+  nothing (an invalid candidate is never committed to the working copy —
+  `service_editor.py:_revalidate`), a radio re-picked at its current value, or a
+  setter that refused, all compare equal and write nothing at all. That is also
+  why there is no debounce: there is nothing for one to decide;
+* **quiet.** "service presets saved" once per character would bury every other
+  message the window has. The *failure* is still said, once per run of failures
+  (`_save_failed`), so an unwritable `config.toml` is one sentence and not one
+  per keystroke;
+* **`_svc_close` is now a close.** It still handles the two things only it can
+  know — an appearance written or deleted on disk, and the theoretical table
+  that never went through a setter — and writes nothing when the presets already
+  match what was adopted.
+
+The file is the one this process loads at startup: `monitor_ui/__main__.py`
+passes `global_config_path(args)` to both `load_project_config` and the window,
+and `None` on both sides means `config.default_global_config_path()`.
+
+**The second was that a generation bump could reach nobody.** A brain learns of
+a retarget from the STAMP on an arriving tick and from nothing else (§10.5) —
+which is fine while every `configure` starts a poller, and silently wrong the
+moment one does not. `LocalUIMonitor.configure` returns early, with the counter
+already bumped and no poll loop, in three cases: no region drawn, no captured
+appearance for the service, and a detector with nothing to feed and nothing to
+look for. Exactly the states an operator is in while they *calibrate*. Every
+edit made there bumped a counter nobody downstream was ever told about.
+
+So a `configure` that starts no poller publishes one **notice**: an ordinary
+`Tick` with `notice=True`, carrying the new generation and an honest nothing
+beside it — `captured=False`, no probe, no sighting, `active_detectors=()`
+(which is already every consumer's "never going to get a verdict" branch, §2.2).
+It rides the ordinary tick path because that is where every consumer already is:
+the server forwards it, `SwitchableMonitor` relays it, and the Chat UI's
+`_on_monitor_tick` compares the stamp on it exactly as it does on a real one.
+
+The flag buys two exemptions, and it is read in exactly the three places that
+publish: a notice never becomes `latest` (this run has no reading to be the
+latest *of*, and a readout painted from an empty one would blank rows a frame
+nobody captured is no evidence about) and never resolves a parked `observe()`
+(that wait is for a frame; §4.2's rule that only a real, later capture may
+answer one is as true here). `local.py:_deliver`, `remote.py:_tick_arrived` and
+`switchable.py:_tick_arrived` each enforce both — the far end's waiters are not
+ours, so the flag has to survive the crossing, and it does:
+`encode_tick`/`decode_tick` carry `"notice"` (additive under the same **v5**
+§11.8 already claimed).
+
+It is published from a momentary `agentclip-notice` thread, for §4.4's reason
+and no other: subscribers are called outside the lock precisely so a slow one
+delays the next tick rather than the `configure` retargeting away from it, and
+this `configure` is on the event loop. Ordering needs no lock — a notice
+overtaken by the next retarget is a ghost, and `_deliver` drops it on its stamp
+like any other. A `configure` that DOES start a poller says nothing: its first
+real tick carries the same generation within one poll interval.
+
+**What the Chat UI does with it**, unchanged except for one line:
+`_on_monitor_tick` sees a generation it has not seen, claims it on the tick
+thread and schedules `_reread_watched`, which adopts the answer and repaints the
+sidebar, the status line and — new here — **MONITOR SEES**. That block's rows
+and settings line are read straight off `Watched`, and the push the arriving
+tick already made was made against the previous one, so without it the block
+claiming to say what the monitor sees was the one thing a settings edit never
+reached. Everything derived from `live_preset()` follows from the same adopt.

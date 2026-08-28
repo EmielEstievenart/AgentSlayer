@@ -144,6 +144,11 @@
               <input id="svc-total" type="text" placeholder="e.g. 500000" />
               <div class="side-title">Stale (seconds unchanged)</div>
               <input id="svc-stable" type="text" placeholder="e.g. 2.0" />
+              <!-- The beat between the auto-paste and the auto-submit Enter.
+                   Beside the stale window because both are seconds the browser
+                   is given, and the title says what raising it buys. -->
+              <div class="side-title">Enter delay after paste (s)</div>
+              <input id="svc-submit-delay" type="text" placeholder="e.g. 1.2" />
               <div class="side-title">AFTER DELIVERY</div>
               <label class="svc-check" id="svc-snap-back-row"
                 ><input type="checkbox" id="svc-snap-back" /><span

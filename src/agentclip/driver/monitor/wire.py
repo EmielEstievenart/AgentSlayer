@@ -25,9 +25,9 @@ schedules: a monitor VM is redeployed when the calibration surface changes, an
 SSH target when the engine does, and a shared integer would make each of those
 a forced upgrade of the other.
 
-Frame vocabulary (v4)
+Frame vocabulary (v5)
 ---------------------
-``{"type":"hello","version":4,"package":"0.1.0","token":"<32 hex>"|null,
+``{"type":"hello","version":5,"package":"0.1.0","token":"<32 hex>"|null,
 "theme":"<name>"|null (optional)}``
     The client's first line. Nothing else may precede it. ``token`` is §5's
     shared secret (:mod:`agentclip.driver.monitor.auth`) and **null is a real
@@ -59,7 +59,7 @@ Frame vocabulary (v4)
     ``bad_request`` the Chat UI swallows (chat/view.py's
     ``_tell_monitor_theme``). Nothing about a click, a capture or a clipboard
     changes shape, which is what a version gate is for.
-``{"type":"hello_ack","version":4,"package":"0.1.0","server_id":"<uuid4>",
+``{"type":"hello_ack","version":5,"package":"0.1.0","server_id":"<uuid4>",
 "clipboard_kind":"copykitten"|null}``
     The server's reply. ``server_id`` identifies the PROCESS (a monitor is
     long-lived and survives every brain that dials it, §2.8, so a redial wants
@@ -112,7 +112,7 @@ from agentclip.driver.screen.region import ScreenRegion
 from agentclip.driver.screen.slot import AgentSlot
 from agentclip.driver.screen.stale import StaleProbe, StaleState
 
-MONITOR_WIRE_VERSION = 4
+MONITOR_WIRE_VERSION = 5
 
 #: Per-line ceiling for both ends' stream readers. asyncio's default is 64 KiB,
 #: and a ``write_clipboard`` carrying a long reply is bigger than that on a
@@ -122,7 +122,7 @@ LINE_LIMIT = 16 * 1024 * 1024
 
 
 class WireError(Exception):
-    """A line, frame or value that is not valid monitor protocol v4.
+    """A line, frame or value that is not valid monitor protocol v5.
 
     Raised by every decoder here and by nothing else. Both ends treat it as
     fatal for the frame it was raised on: the server answers the offending call
@@ -168,7 +168,7 @@ class WireVersionError(WireError):
         self.ours = ours
 
 
-# The frame types of v4, and the error kinds an ``error`` frame may carry.
+# The frame types of v5, and the error kinds an ``error`` frame may carry.
 FRAME_TYPES: tuple[str, ...] = (
     "hello",
     "hello_ack",
@@ -567,6 +567,7 @@ def encode_watched(value: Watched) -> dict[str, Any]:
         "captured": encode_kinds(value.captured),
         "delivery": value.delivery,
         "auto_submit": value.auto_submit,
+        "submit_delay_s": value.submit_delay_s,
         "scroll_action": value.scroll_action,
         "snap_back": value.snap_back,
         "hover_scan": value.hover_scan,
@@ -591,6 +592,7 @@ def decode_watched(value: Any, what: str = "watched") -> Watched:
         captured=_captured_at(data, what),
         delivery=_str_at(data, "delivery", what),
         auto_submit=_bool_at(data, "auto_submit", what),
+        submit_delay_s=_float_at(data, "submit_delay_s", what),
         scroll_action=_str_at(data, "scroll_action", what),
         snap_back=_bool_at(data, "snap_back", what),
         hover_scan=_bool_at(data, "hover_scan", what),
@@ -932,7 +934,7 @@ class HelloAck:
 
 
 def frame_type(frame: dict[str, Any]) -> str:
-    """The frame's ``type``, checked against the v4 vocabulary."""
+    """The frame's ``type``, checked against the v5 vocabulary."""
     kind = _str_at(frame, "type", "frame")
     if kind not in FRAME_TYPES:
         raise WireError(f"unknown frame type {kind!r}")

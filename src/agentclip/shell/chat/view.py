@@ -485,14 +485,15 @@ def sees_rows(watched: Watched, tick: Tick | None) -> list[dict[str, str]]:
 
 
 def sees_settings(watched: Watched) -> str:
-    """The five settings the brain DRIVES from, in the monitor's words (§11.4).
+    """The six settings the brain DRIVES from, in the monitor's words (§11.4).
 
-    Not every field of :class:`Watched` - the five whose value explains a
+    Not every field of :class:`Watched` - the six whose value explains a
     behaviour the user can see happen or not happen: a prompt that was pasted
     but not sent, a paste that arrived in pieces, a copy click that walked the
-    window first, a scroll position that came back. Each of those is a support
-    question whose answer is one of these words, and until this block they were
-    on a machine the user was not looking at.
+    window first, a scroll position that came back, an Enter that went out
+    before the composer had finished swallowing the paste (§11.8). Each of
+    those is a support question whose answer is one of these words, and until
+    this block they were on a machine the user was not looking at.
     """
     return (
         f"auto-submit {_on_off(watched.auto_submit)}"
@@ -500,6 +501,7 @@ def sees_settings(watched: Watched) -> str:
         f" · paste ≤ {watched.max_paste_chars:,} chars"
         f" · hover scan {_on_off(watched.hover_scan)}"
         f" · snap back {_on_off(watched.snap_back)}"
+        f" · submit delay {watched.submit_delay_s:.1f}s"
     )
 
 
@@ -535,6 +537,7 @@ def preset_from_watched(watched: Watched, *, alerts: ServicePreset) -> ServicePr
         delivery=watched.delivery,
         scroll_action=watched.scroll_action,
         auto_submit=watched.auto_submit,
+        submit_delay_s=watched.submit_delay_s,
         require_fenced_reply=watched.require_fenced_reply,
         extra_instructions=watched.extra_instructions,
         edit_by_lines=watched.edit_by_lines,

@@ -9,6 +9,8 @@ re-exports them under the names its suites already reach for.
 
 from __future__ import annotations
 
+from agentclip.config import DEFAULT_SUBMIT_DELAY_S
+
 # How long the delivery waits for the browser to actually TAKE the foreground
 # after the focus click, and the beat between two askings
 # (``AutomationController._await_browser_activation``).
@@ -85,7 +87,14 @@ SNAP_BACK_SETTLE_S = 0.15
 # built from the whole payload and a 20k-char paste takes a busy tab most of
 # that. The delivery is already seconds long by then, and an Enter that never
 # takes costs far more than one that waits. Tests shrink it.
-SUBMIT_SETTLE_S = 1.2
+#
+# It is a SETTING now (``ServicePreset.submit_delay_s``, ui-monitor.md §11.8):
+# the delivery reads the WATCHED SERVICE's number, and this constant is the
+# default that number starts at - defined in ``config.py`` beside the rest of
+# the preset defaults and re-spelled here, where the rest of the cadence lives.
+# ``ScreenOps.submit_settle`` still answers it, for a caller with no preset in
+# its hand.
+SUBMIT_SETTLE_S = DEFAULT_SUBMIT_DELAY_S
 # Beat between the bursts of a streamed delivery (ServicePreset.delivery), so a
 # chat box that reflows and re-measures after every paste is not handed the next
 # one mid-repaint. Only between chunks: the last one is followed by the settle

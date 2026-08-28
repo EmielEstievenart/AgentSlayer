@@ -205,8 +205,18 @@ it. Like `[general] service` above, these are read by the **monitor** — the
 process that can see the screen owns its whole service configuration, and the
 Chat UI reads back the budgets, fences and instructions it needs. Edit them in
 the **Monitor UI**'s service editor, which writes them to the global config.toml
-of the machine it is running on. Built-ins (key · paste budget · context
-estimate):
+of the machine it is running on.
+
+**Every change applies as you make it** — the moment a box holds a legal value
+or a tick moves, it is saved to that config.toml and handed to the running
+monitor, and a connected Chat UI follows within a tick: its sidebar, its
+`F2` **MONITOR SEES** block and the settings the automation drives from all
+re-read from the monitor. There is no Apply and no Save; closing the editor
+closes the window, and nothing is waiting on it. A value the editor will not
+accept (it says why, under the field) is simply not written — the last legal
+one stays in force.
+
+Built-ins (key · paste budget · context estimate):
 
 | Key | Budget | Context | | Key | Budget | Context |
 |---|---|---|---|---|---|---|
@@ -228,6 +238,7 @@ Built-ins can be edited but not deleted. Fields (all editable in the **Monitor U
 | `attachment_note` | `true` | Mention attachments in the bootstrap |
 | `delivery` | `"paste"` | `paste` \| `stream` (typed keystrokes) |
 | `auto_submit` | `false` | May AgentClip press Enter after delivering |
+| `submit_delay_s` | `1.2` | Seconds between the auto-paste and that Enter, 0-10. Raise it for a composer that turns a big paste into an attachment and drops an Enter that arrives mid-build; 0 sends at once |
 | `snap_back` | `true` | Return focus to AgentClip after an auto-send or auto-copy (`false` = debug aid: the browser keeps focus) |
 | `finish_signals` | `["stale"]` | Which detectors may declare a reply finished: `busy`, `idle`, `stale`. Empty = never auto-detect |
 | `stable_seconds` | `2.0` | Stillness window for the stale detector, 0.5–60 |

@@ -98,6 +98,11 @@ def default_specs() -> dict[AgentSlot, MonitorSpec]:
             tolerance=24,
             matcher="anchors",
             label=f"fake ({slot.label})",
+            # No beat before the auto-submit Enter. The real default is 1.2 s of
+            # real ``asyncio.sleep``, and a double whose every auto-submit story
+            # cost that would be a suite paying seconds for a wait it is not
+            # about; a suite that IS about the wait sets it.
+            submit_delay_s=0.0,
         )
         for slot in AgentSlot
     }

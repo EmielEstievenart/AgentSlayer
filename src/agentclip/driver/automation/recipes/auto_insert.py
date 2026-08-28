@@ -154,7 +154,14 @@ async def deliver(ctx: RecipeContext, text: str, *, clipboard_ok: bool) -> Outco
             # user's. Still WAIT_SEND, and deliberately so - the tap is an
             # attempt, not a fact, and the send gate's evidence stays the only
             # thing that moves the loop on, exactly as for a human Enter.
-            await asyncio.sleep(beats.SUBMIT_SETTLE_S)
+            #
+            # The beat before it is the WATCHED SERVICE's (§11.8): how long a
+            # composer takes to render and re-measure what was just dropped into
+            # it is a fact about that page - ChatGPT builds an attachment chip
+            # out of a big paste and ignores an Enter that lands mid-build,
+            # a plain textarea is ready at once - so it is a per-service number
+            # the monitor owns and sends over on ``Watched``, not a constant.
+            await asyncio.sleep(ctx.live_preset().submit_delay_s)
             auto_sent = await ctx.monitor.send_enter()
             ctx.log_harness(
                 KIND_GATE,

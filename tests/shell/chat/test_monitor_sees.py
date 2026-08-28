@@ -165,16 +165,19 @@ async def test_the_rows_describe_the_window_the_user_selected(harness: Harness) 
         ("max_paste_chars", 12_000, "paste ≤ 12,000 chars"),
         ("hover_scan", True, "hover scan on"),
         ("snap_back", False, "snap back off"),
+        ("submit_delay_s", 2.5, "submit delay 2.5s"),
+        ("submit_delay_s", 0.0, "submit delay 0.0s"),
     ],
 )
 async def test_the_settings_line_reports_what_the_monitor_sent(
     harness: Harness, field: str, value: object, expected: str
 ) -> None:
-    """Five settings, and each one is the answer to a support question a user
+    """Six settings, and each one is the answer to a support question a user
     cannot otherwise ask: why was my prompt not sent, why did the paste arrive
-    in pieces, why did the window scroll. All five are the MONITOR's to
-    configure (§10.5) and reach this window inside ``Watched``, so this is the
-    only place the user can read them at all."""
+    in pieces, why did the window scroll, why did the Enter go out before the
+    composer had swallowed the paste. All six are the MONITOR's to configure
+    (§10.5) and reach this window inside ``Watched``, so this is the only place
+    the user can read them at all."""
     await watching(harness, captured=(), **{field: value})
 
     assert expected in sees(harness)["settings"]  # type: ignore[operator]

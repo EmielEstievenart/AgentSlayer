@@ -118,6 +118,15 @@ DEFAULT_GUI_THEME = "dark"
 # differs: a service that pauses mid-answer needs a longer stillness window.
 DEFAULT_STABLE_SECONDS = 2.0
 
+# The beat between the auto-paste landing and the opt-in auto-submit Enter, in
+# seconds. Per service because it is a fact about the COMPOSER: a page that
+# turns a big paste into an attachment chip builds that chip asynchronously,
+# disables its send control while it does, and drops an Enter that arrives
+# meanwhile on the floor (ui-monitor.md §11.8) - so the prompt sits in the box
+# unsent. 1.2 s is what every host got before the knob existed, and it is the
+# number ``driver/monitor/beats.SUBMIT_SETTLE_S`` now points at.
+DEFAULT_SUBMIT_DELAY_S = 1.2
+
 # Which finish detectors a service is allowed to run, in the canonical order the
 # poller builds (and posts) them in - the same order shell/tui/screens/main.py relies
 # on to know which message closes a tick:
@@ -238,6 +247,13 @@ class ServicePreset:
     # always leaves to the user, and a synthetic Enter into the wrong widget is
     # a sent half-thought. The send gate still verifies the send either way.
     auto_submit: bool = False
+    # How long the pasted chat box is given to render and re-measure what was
+    # just dropped into it before ``auto_submit`` taps Enter, in seconds (0-10).
+    # Per service because the wait is a fact about the COMPOSER, not about the
+    # payload: ChatGPT builds an attachment chip out of a big paste and ignores
+    # an Enter that lands mid-build, while a plain textarea is ready the moment
+    # the Ctrl+V returns. 0 is legal and means "send immediately".
+    submit_delay_s: float = DEFAULT_SUBMIT_DELAY_S
     # Refuse a reply that carries CALL blocks but arrived with no code fence
     # around them, and ask for a fenced resend instead (protocol.md 1.4
     # tolerance #15).
@@ -1329,6 +1345,15 @@ def load_config(
             auto_submit=_take_bool(
                 table, "auto_submit", base.auto_submit if base else False, ctx, warnings
             ),
+            submit_delay_s=_take_float(
+                table,
+                "submit_delay_s",
+                base.submit_delay_s if base else DEFAULT_SUBMIT_DELAY_S,
+                0.0,
+                10.0,
+                ctx,
+                warnings,
+            ),
             require_fenced_reply=_take_bool(
                 table,
                 "require_fenced_reply",
@@ -1586,6 +1611,11 @@ def save_services(services: dict[str, ServicePreset], path: Path | None = None) 
             services_table[key]["scroll_action"] = preset.scroll_action
         if preset.auto_submit != (base.auto_submit if base else False):
             services_table[key]["auto_submit"] = preset.auto_submit
+        # The beat before that Enter, same rule again: the number was a constant
+        # before it was a setting, so a file whose user never met a composer
+        # that needs a longer one keeps saying nothing about it.
+        if preset.submit_delay_s != (base.submit_delay_s if base else DEFAULT_SUBMIT_DELAY_S):
+            services_table[key]["submit_delay_s"] = preset.submit_delay_s
         # Newest of all, same write-only-when-moved rule: a user who never met
         # a host that corrupts unfenced replies gets a file that never mentions
         # the gate.

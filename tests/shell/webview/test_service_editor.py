@@ -188,6 +188,9 @@ def test_the_picker_lists_every_key_alphabetically_then_the_add_row(
         ("stable", "soon", "stale seconds must be a number"),
         ("stable", "0.4", "stale seconds must be between 0.5 and 60"),
         ("stable", "60.1", "stale seconds must be between 0.5 and 60"),
+        ("delay", "soon", "Enter delay must be a number"),
+        ("delay", "-0.1", "Enter delay must be between 0 and 10 seconds"),
+        ("delay", "10.1", "Enter delay must be between 0 and 10 seconds"),
     ],
 )
 def test_each_field_reports_its_own_first_problem(
@@ -212,6 +215,31 @@ def test_the_bounds_are_the_ones_the_loader_enforces(editor: ServiceEditor) -> N
         edit(editor, stable=accepted)
         assert editor.error == ""
         assert editor.services["chatgpt"].stable_seconds == float(accepted)
+    # Same rule for the auto-submit beat, whose floor is a real 0: "tap Enter
+    # the moment the paste returns" is a setting, not a blank.
+    for accepted in ("0", "1.2", "10"):
+        edit(editor, delay=accepted)
+        assert editor.error == ""
+        assert editor.services["chatgpt"].submit_delay_s == float(accepted)
+
+
+def test_the_submit_delay_is_shown_and_saved_like_every_other_number(
+    editor: ServiceEditor, config: Config
+) -> None:
+    """§11.8's beat, end to end through this model: the box shows what the
+    preset holds, a legal edit writes through live, and what ``close`` hands
+    back is what a save would file - the setting is only worth having if the
+    number the user typed is the number the monitor waits."""
+    assert form_of(editor)["delay"] == str(config.services["chatgpt"].submit_delay_s)
+
+    edit(editor, delay="0")
+
+    assert editor.error == ""
+    assert editor.services["chatgpt"].submit_delay_s == 0.0
+    assert editor.dirty
+    result = asyncio.run(editor.close())
+    assert result.edits is not None and result.edits.services is not None
+    assert result.edits.services["chatgpt"].submit_delay_s == 0.0
 
 
 def test_extra_instructions_have_no_validation_at_all(editor: ServiceEditor) -> None:
@@ -228,11 +256,19 @@ def test_extra_instructions_have_no_validation_at_all(editor: ServiceEditor) -> 
 def test_a_valid_candidate_is_written_straight_into_the_working_copy(
     editor: ServiceEditor,
 ) -> None:
-    edit(editor, label="ChatGPT, renamed", max="7000", total="123456", stable="3.5")
+    edit(
+        editor,
+        label="ChatGPT, renamed",
+        max="7000",
+        total="123456",
+        stable="3.5",
+        delay="0.4",
+    )
     preset = editor.services["chatgpt"]
     assert preset.label == "ChatGPT, renamed"
     assert (preset.max_paste_chars, preset.total_context_chars) == (7000, 123456)
     assert preset.stable_seconds == 3.5
+    assert preset.submit_delay_s == 0.4
     assert editor.dirty
 
 
@@ -429,7 +465,7 @@ def new_candidate(editor: ServiceEditor, key: str = "acme") -> None:
     editor.select(NEW_SENTINEL)
     editor.set_form(
         {"key": key, "label": "Acme chat", "max": "5000", "total": "50000",
-         "stable": "2.0", "extra": ""}
+         "stable": "2.0", "delay": "1.2", "extra": ""}
     )
 
 
@@ -988,7 +1024,7 @@ def test_the_saved_table_round_trips_and_writes_only_what_differs(
     editor.select(NEW_SENTINEL)
     editor.set_form(
         {"key": "acme", "label": "Acme chat", "max": "5000", "total": "50000",
-         "stable": "2.0", "extra": "mind the ]("}
+         "stable": "2.0", "delay": "1.2", "extra": "mind the ]("}
     )
     editor.add()
     editor.set_tolerance(40)

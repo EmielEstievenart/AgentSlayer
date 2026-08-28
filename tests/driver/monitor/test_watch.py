@@ -61,6 +61,7 @@ PRESET = ServicePreset(
     tolerance=12,
     scroll_action="end",
     auto_submit=True,
+    submit_delay_s=4.5,
     require_fenced_reply=True,
     extra_instructions="mind the ]( sequences",
     snap_back=False,
@@ -106,6 +107,7 @@ def test_a_preset_becomes_a_spec_field_for_field() -> None:
     assert built.snap_back is False
     assert built.delivery == "stream"
     assert built.auto_submit is True
+    assert built.submit_delay_s == 4.5
     assert built.max_paste_chars == 9_000
     assert built.total_context_chars == 250_000
     assert built.wrap_blocks_in_fence is False
@@ -132,6 +134,7 @@ def test_watched_is_built_from_the_spec_and_says_which_run_it_describes() -> Non
     assert (built.service, built.label, built.region) == ("zai", "Z.ai chat", CHAT)
     assert (built.profiled, built.generation) == (True, 7)
     assert built.max_paste_chars == 9_000
+    assert built.submit_delay_s == 4.5
     assert built.extra_instructions == "mind the ]( sequences"
 
 

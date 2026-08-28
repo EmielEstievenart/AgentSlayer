@@ -2894,6 +2894,8 @@
       flash: id("flash"),
       flashText: id("flash-text"),
       retryInsert: id("retry-insert"),
+      pressEnter: id("press-enter"),
+      copyAgain: id("copy-again"),
       docsOpen: id("docs-open"),
       sidebar: id("sidebar"),
       rail: id("rail"),
@@ -3082,6 +3084,15 @@
     el.retryInsert.addEventListener("click", function (ev) {
       ev.stopPropagation();
       api("retry_insert");
+    });
+    // The sidebar's two nudges (ui-monitor.md 11.8). No key goes with either:
+    // both are "do the thing the automation should have done", which is a
+    // deliberate click after looking at the browser, not a reflex.
+    el.pressEnter.addEventListener("click", function () {
+      api("press_enter");
+    });
+    el.copyAgain.addEventListener("click", function () {
+      api("copy_again");
     });
     // The titlebar's one button. No key goes with it: every F-key is taken and
     // a bare letter belongs to the main screen's shortcuts, so the button IS

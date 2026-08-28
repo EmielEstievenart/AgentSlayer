@@ -76,7 +76,16 @@ PASTE_SETTLE_DELAY = 0.6
 SNAP_BACK_SETTLE_S = 0.15
 # Beat between the paste and the opt-in auto-submit Enter, for the box to render
 # and re-measure what was just dropped into it before it is sent.
-SUBMIT_SETTLE_S = 0.15
+#
+# Raised from 150ms to 1.2s: a composer that turns a big paste into an
+# attachment chip (ChatGPT's "Pasted text") does that ASYNCHRONOUSLY, disables
+# its send control while it does, and drops an Enter that arrives meanwhile on
+# the floor - the prompt then sits in the box unsent, which is exactly what the
+# users of a streamed delivery were seeing. Over a second because the chip is
+# built from the whole payload and a 20k-char paste takes a busy tab most of
+# that. The delivery is already seconds long by then, and an Enter that never
+# takes costs far more than one that waits. Tests shrink it.
+SUBMIT_SETTLE_S = 1.2
 # Beat between the bursts of a streamed delivery (ServicePreset.delivery), so a
 # chat box that reflows and re-measures after every paste is not handed the next
 # one mid-repaint. Only between chunks: the last one is followed by the settle

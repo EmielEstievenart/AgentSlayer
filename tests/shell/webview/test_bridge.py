@@ -214,6 +214,12 @@ class Calls:
     def retry_insert(self) -> None:
         self._note(("retry_insert",))
 
+    def press_enter(self) -> None:
+        self._note(("press_enter",))
+
+    def copy_again(self) -> None:
+        self._note(("copy_again",))
+
     def set_service(self, key: str) -> None:
         self._note(("set_service", key))
 
@@ -269,6 +275,8 @@ def test_every_key_action_reaches_the_binding_the_tui_makes() -> None:
     api.ingest()
     api.reinstruct()
     api.retry_insert()
+    api.press_enter()
+    api.copy_again()
     api.window("m1-s1")
     api.next_window()
     api.end_session()
@@ -281,6 +289,8 @@ def test_every_key_action_reaches_the_binding_the_tui_makes() -> None:
         ("force_ingest",),
         ("reinstruct",),
         ("retry_insert",),
+        ("press_enter",),
+        ("copy_again",),
         # ``service`` used to sit here. It left with ui-monitor.md §10.5: the
         # service is the MONITOR's, the sidebar shows a read-only line, and a
         # verb that could send a key from this side would be a control quietly

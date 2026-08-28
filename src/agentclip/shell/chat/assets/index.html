@@ -235,6 +235,16 @@
           <div class="side-status" id="side-region"></div>
           <div class="side-status" id="side-slot-note"></div>
 
+          <!-- The two NUDGES (ui-monitor.md 11.8): the auto-submit the page
+               dropped, and the auto-copy that never fired, each done again by
+               hand. Both act on the browser through the monitor, so both are
+               refused while disarmed (F5) and while the harvest is driving the
+               mouse - the controller says which. -->
+          <div class="side-nudge">
+            <button id="press-enter" type="button" title="Tap Enter in the chat box - for a prompt that was pasted but never sent">Press Enter</button>
+            <button id="copy-again" type="button" title="Run the auto-copy now - for a reply the detectors never saw finish">Copy again</button>
+          </div>
+
           <!-- The heading names the LIVE window, which parts company with what
                the user is reading for the whole of a delegation. Only the
                detector machinery writes the five lines under it. -->

@@ -1219,3 +1219,73 @@ async def test_a_re_delivery_is_refused_while_the_auto_copy_flow_runs(
 
     assert delivery.may_redeliver() is False
     assert _said(view, "driving the mouse")
+
+
+# -- the sidebar's two nudges (ui-monitor.md §11.8) -----------------------------
+
+
+async def test_press_enter_focuses_the_box_and_taps_enter(
+    delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
+) -> None:
+    """The auto-submit's last step, done again by hand: the same focus pair as a
+    delivery, then Enter and nothing else - no paste, the payload is already in
+    the box."""
+    await delivery.copy_outbound(PAYLOAD)
+    machine.events.clear()
+
+    await delivery.press_enter()
+
+    assert machine.events == [*FOCUS, "enter"]
+    assert any("Enter tapped from the sidebar" in e.text for e in delivery.harness_log)
+    assert _flash(view) == (AUTO_SEND_FLASH_TEXT, False)
+
+
+async def test_press_enter_refuses_while_disarmed(
+    delivery: AutomationController, machine: ScriptedMonitor, view: FakeAutomationView
+) -> None:
+    delivery.set_os_armed(False)
+
+    await delivery.press_enter()
+
+    assert machine.events == []
+    assert _said(view, "disarmed")
+
+
+async def test_press_enter_types_nothing_when_the_box_is_not_on_screen(
+    delivery: AutomationController, host: FakeHost, machine: ScriptedMonitor, view: FakeAutomationView
+) -> None:
+    """Un-aimed keys go to whatever has focus, so an Enter with no verified click
+    in front of it is the one thing this door must never send."""
+    host.on_screen.clear()
+
+    await delivery.press_enter()
+
+    assert machine.events == []
+    assert _said(view, "the chat box was not found on screen")
+
+
+async def test_copy_again_runs_the_harvest_now(
+    delivery: AutomationController,
+) -> None:
+    """The nudge runs the AUTO_COPY recipe, whatever the loop was waiting for:
+    here the harvest finds no copy button on the fake screen and lands where a
+    fired-but-empty harvest lands, MANUAL_COPY - the point is that it RAN."""
+    await delivery.copy_outbound(PAYLOAD)
+    assert delivery.loop_state is LoopState.WAIT_SEND
+
+    await delivery.copy_again()
+
+    assert delivery.loop_state is LoopState.MANUAL_COPY
+    assert any("run from the sidebar" in e.text for e in delivery.harness_log)
+
+
+async def test_copy_again_refuses_while_disarmed(
+    delivery: AutomationController, view: FakeAutomationView
+) -> None:
+    await delivery.copy_outbound(PAYLOAD)
+    delivery.set_os_armed(False)
+
+    await delivery.copy_again()
+
+    assert delivery.loop_state is LoopState.WAIT_SEND
+    assert _said(view, "disarmed")

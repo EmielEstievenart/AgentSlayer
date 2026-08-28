@@ -228,6 +228,52 @@ async def deliver(ctx: RecipeContext, text: str, *, clipboard_ok: bool) -> Outco
     return outcome
 
 
+async def submit(ctx: RecipeContext) -> bool:
+    """Tap Enter in the chat box, on the user's say-so: the sidebar's PRESS
+    ENTER button (ui-monitor.md §11.8).
+
+    The auto-submit's own last step (``deliver``), done again from the top -
+    focus the chat box, wait for the browser to take the foreground, then the
+    Enter - for the prompt that :func:`deliver` pasted and whose auto-submit
+    the page dropped (a composer still building its attachment chip, a send
+    control that was disabled for the beat). Un-aimed in the same way: the
+    click puts the caret where the payload already sits, and Enter goes to
+    whatever the focus click focused, which is why the click is verified
+    before anything is typed. True only when the Enter was typed.
+    """
+    if not ctx.os_armed:
+        ctx.view.notify(
+            "disarmed - AgentClip may not type: press F5 to arm, or press Enter in "
+            "the chat yourself",
+            severity="warning",
+        )
+        return False
+    target = await chatbox.verified_target(ctx)
+    if target is None:
+        ctx.view.notify(
+            "the chat box was not found on screen - nothing was clicked, so no Enter "
+            "was typed: press it in the chat yourself",
+            severity="warning",
+        )
+        ctx.log_harness(KIND_GATE, "press Enter refused: the chat box is not on screen")
+        return False
+    if not await _click_after_response(ctx, target):
+        ctx.log_harness(KIND_GATE, "press Enter refused: the focus click did not land")
+        return False
+    await acts.await_browser_activation(ctx)
+    await asyncio.sleep(beats.PASTE_SETTLE_DELAY)
+    sent = await ctx.monitor.send_enter()
+    ctx.log_harness(
+        KIND_GATE,
+        "Enter tapped from the sidebar"
+        if sent
+        else "the sidebar's Enter could not be typed - the send is yours",
+    )
+    if sent:
+        ctx.view.show_paste_flash(AUTO_SEND_FLASH_TEXT)
+    return sent
+
+
 async def _click_after_response(ctx: RecipeContext, target: ScreenRegion) -> bool:
     """Poke the chat box at ``target`` so the browser has focus and the paste
     lands without alt-tab. True only when the click landed.

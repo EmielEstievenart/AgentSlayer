@@ -1988,7 +1988,7 @@ above that lives under `driver/monitor/` and `shell/monitor_ui/`.
 
 ## 11. Wave 4 — the brain knows no pixels; the GUI starts idle (2026-08-27)
 
-> **Status:** BUILT 2026-08-27 (0896c63, ca1355c, 4bd7c1f, bddcab8); each sub-section carries its "as built" note.
+> **Status:** BUILT 2026-08-27 (0896c63, ca1355c, 4bd7c1f, bddcab8), §11.8 2026-08-28; each sub-section carries its "as built" note.
 
 ### 11.0 Why
 
@@ -2447,3 +2447,36 @@ does — keeping the last one it was told after the brain has gone.
   connected sends `set_theme`, F4 with the link down sends nothing.
 * **Docs.** `docs/commands.md`'s `F4` and `/theme` rows say a connected monitor
   follows.
+
+### 11.8 The two nudges: Press Enter, Copy again — **AS BUILT** (2026-08-28)
+
+Two buttons under the sidebar's CHAT WINDOW block, for the two things the
+automation should have done and the user watched not happen:
+
+* **Press Enter** — `AutomationController.press_enter` →
+  `recipes/auto_insert.submit`. The auto-submit's own last step, from the top:
+  the verified chat-box click (the same pair `deliver` makes), the activation
+  wait, `PASTE_SETTLE_DELAY`, then `monitor.send_enter()`. No paste — the
+  prompt is already in the box. Un-aimed keys go to whatever has focus, so an
+  Enter with no verified click in front of it is never sent: no box on screen
+  means no keystroke, said on a toast and in the harness log.
+* **Copy again** — `AutomationController.copy_again`. With the loop running
+  it is a MOVE to `AUTO_COPY` (the recipe is the harvest and brings its own
+  bracket); without one `run_auto_copy_flow` is driven here. It runs whatever
+  the loop was waiting for, so a finish the detectors never saw still gets its
+  harvest.
+
+Both go through `may_redeliver`: refused while disarmed (F5) and while the
+harvest is driving the mouse. Wired page → `JsApi` → `JsCalls`/`GuiRunner` →
+`GuiView` exactly as the paste flash's **Retry insert** is. No key goes with
+either — both are a deliberate click after looking at the browser.
+
+**Why the first one was needed.** `SUBMIT_SETTLE_S` was 150 ms. A composer
+that turns a big paste into an attachment chip (ChatGPT's "Pasted text") does
+that asynchronously and drops an Enter that arrives meanwhile, so a streamed
+delivery ended with the prompt in the box, unsent — and, since nothing was
+sent, nothing generated, nothing finished and the auto-copy never armed: the
+"auto-copy doesn't work" report was the same bug. The beat is 1.2 s now, and
+the synthetic keys carry their scan code (`MapVirtualKeyW`) alongside the
+virtual key, because a VK-only event reaches the page as a keydown with an
+empty `code`, which some composers ignore.

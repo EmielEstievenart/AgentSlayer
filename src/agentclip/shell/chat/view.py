@@ -3096,6 +3096,17 @@ class GuiView:
         """
         self._schedule(self._automation.retry_insert())
 
+    def press_enter(self) -> None:
+        """The sidebar's PRESS ENTER (ui-monitor.md §11.8): tap Enter in the
+        chat box now, for the auto-submit the page dropped. Scheduled like the
+        retry above; the refusals are the controller's."""
+        self._schedule(self._automation.press_enter())
+
+    def copy_again(self) -> None:
+        """The sidebar's COPY AGAIN (§11.8): run the auto-copy harvest now, for
+        the finish the detectors never saw. Scheduled like the retry above."""
+        self._schedule(self._automation.copy_again())
+
     # == no calibration door ==================================================
     # Everything made of PIXELS is the MONITOR PROCESS's (ui-monitor.md §10.2):
     # the service editor, the ELEMENTS column, the chat-region picker and

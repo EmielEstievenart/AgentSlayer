@@ -79,6 +79,7 @@ _MOUSEEVENTF_ABSOLUTE = 0x8000
 _MOUSEEVENTF_VIRTUALDESK = 0x4000
 _ABSOLUTE_RANGE = 65535
 _KEYEVENTF_KEYUP = 0x0002
+_MAPVK_VK_TO_VSC = 0
 _VK_MENU = 0x12  # the ALT key
 _VK_CONTROL = 0x11
 _VK_V = 0x56
@@ -257,6 +258,13 @@ def _send_keys(events: Sequence[tuple[int, int]]) -> bool:
     for event, (key, flags) in zip(burst, events, strict=True):
         event.type = _INPUT_KEYBOARD
         event.union.ki.wVk = key
+        # The hardware scan code alongside the virtual key. A VK-only event is
+        # legal, but a browser turns it into a keydown whose ``code`` is empty
+        # and some composers key their Enter handling off exactly that field -
+        # the tap is then "typed" as far as the OS is concerned and ignored by
+        # the page. MapVirtualKey answers 0 for keys with no scan code, which
+        # is the same as not setting it.
+        event.union.ki.wScan = user32.MapVirtualKeyW(key, _MAPVK_VK_TO_VSC)
         event.union.ki.dwFlags = flags
     sent = user32.SendInput(len(events), burst, ctypes.sizeof(input_struct))
     return int(sent) == len(events)

@@ -362,6 +362,12 @@ class GuiRunner:
     def retry_insert(self) -> None:
         self.schedule_call(self.view.retry_insert)
 
+    def press_enter(self) -> None:
+        self.schedule_call(self.view.press_enter)
+
+    def copy_again(self) -> None:
+        self.schedule_call(self.view.copy_again)
+
     def select_window(self, window: str) -> None:
         self.schedule_call(self.view.select_window, window)
 

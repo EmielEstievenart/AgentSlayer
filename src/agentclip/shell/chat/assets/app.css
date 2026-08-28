@@ -1384,6 +1384,21 @@ button:not(:disabled) {
   font-size: 12.5px;
 }
 
+/* The two nudges under CHAT WINDOW (ui-monitor.md 11.8), side by side: a pair
+   of small doors, not two full-width calls to action - the sidebar's other
+   buttons open a dialog, these poke the browser once. */
+.side-nudge {
+  display: flex;
+  gap: 6px;
+  margin-top: 4px;
+}
+.side-nudge button {
+  flex: 1 1 0;
+  margin: 2px 0 6px;
+  padding: 5px 6px;
+  font-size: 12px;
+}
+
 /* The SERVICE block's first line, which used to be a <select>. Read-only since
    ui-monitor.md 10.5 - the service is the monitor's - so it is a name rather
    than a control, and it reads as one: the same weight as the transcript's own

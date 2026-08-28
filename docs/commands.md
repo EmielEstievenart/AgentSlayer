@@ -79,6 +79,12 @@ keys `y` / `n` / `a` above live here too.
 | `l` | Export the whole chat log to a file (raw blocks and payloads, for debugging) |
 | `x` | Expand/collapse the last collapsed output |
 
+**Sidebar nudges** (under CHAT WINDOW, no key): **Press Enter** taps Enter
+in the chat box through the monitor — for a prompt that was pasted but never
+sent (the page dropped the auto-submit). **Copy again** runs the auto-copy
+harvest now — for a reply the detectors never saw finish. Both need the tool
+armed (`F5`) and the chat box on screen; a refusal says why on a toast.
+
 The key strip along the bottom carries the ones worth remembering, and fades a
 key that cannot fire yet (a turn has to finish, a gate has to open, a session
 has to start). A key the current setup rules out entirely — `w` with no

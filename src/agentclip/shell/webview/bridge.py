@@ -401,6 +401,8 @@ class JsCalls(Protocol):
     def force_ingest(self) -> None: ...
     def reinstruct(self) -> None: ...
     def retry_insert(self) -> None: ...
+    def press_enter(self) -> None: ...
+    def copy_again(self) -> None: ...
     # ``open_calibration`` left this list with the doors it served (F2, the
     # titlebar's **monitor UI** button and both sidebar doors): ui-monitor.md
     # §11.2 deleted them rather than re-pointing them, so there is no affordance
@@ -539,6 +541,15 @@ class JsApi:
         """The paste flash's button: run the click-and-paste that did not land
         again."""
         self._safely(self._calls.retry_insert)
+
+    def press_enter(self) -> None:
+        """The sidebar's nudge: tap Enter in the chat box now (the auto-submit
+        the page dropped)."""
+        self._safely(self._calls.press_enter)
+
+    def copy_again(self) -> None:
+        """The sidebar's other nudge: run the auto-copy harvest now."""
+        self._safely(self._calls.copy_again)
 
     def window(self, key: str = "") -> None:
         """A window tab was clicked: show that window and point the sidebar at

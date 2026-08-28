@@ -282,6 +282,8 @@ def test_every_key_action_marshals_onto_the_loop_too(
         "force_ingest",
         "reinstruct",
         "retry_insert",
+        "press_enter",
+        "copy_again",
     ):
         setattr(runner.view, name, spy(name))
     try:
@@ -294,11 +296,13 @@ def test_every_key_action_marshals_onto_the_loop_too(
                 runner.js_api.ingest(),
                 runner.js_api.reinstruct(),
                 runner.js_api.retry_insert(),
+                runner.js_api.press_enter(),
+                runner.js_api.copy_again(),
             )
         )
         caller.start()
         caller.join()
-        wait_for(lambda: len(seen) == 7, "every key action to land on the loop")
+        wait_for(lambda: len(seen) == 9, "every key action to land on the loop")
         assert seen == [
             "set_os_armed",
             "cycle_permission_mode",
@@ -307,6 +311,8 @@ def test_every_key_action_marshals_onto_the_loop_too(
             "force_ingest",
             "reinstruct",
             "retry_insert",
+            "press_enter",
+            "copy_again",
         ]
     finally:
         runner.stop()

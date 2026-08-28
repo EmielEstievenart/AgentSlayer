@@ -50,7 +50,7 @@ from agentclip.driver.automation.finish import (
     SendGate,
 )
 from agentclip.driver.automation.flow import ELEMENT_CLICK_SETTLE_S
-from agentclip.driver.automation.harness_log import HarnessEntry
+from agentclip.driver.automation.harness_log import KIND_COPY, HarnessEntry
 from agentclip.driver.automation.host import AutomationHost, NullHost
 from agentclip.driver.automation.loop_state import LoopState
 from agentclip.driver.automation.machine import (
@@ -508,6 +508,33 @@ class AutomationController:
         # rail says what the automation is DOING, and what it is about to do is
         # the auto insert over again.
         await self._insert(text, "the insert is being retried from the sidebar")
+
+    async def press_enter(self) -> None:
+        """The sidebar's PRESS ENTER: tap Enter in the chat box now
+        (ui-monitor.md §11.8). For the auto-submit the page dropped - the
+        prompt is in the box, unsent - and it goes through the same two
+        refusals as a redelivery, because it types into the browser."""
+        if not self.may_redeliver():
+            return
+        await auto_insert.submit(self._ctx)
+
+    async def copy_again(self) -> None:
+        """The sidebar's COPY AGAIN: run the harvest now, whatever the loop is
+        waiting for (ui-monitor.md §11.8). The auto-copy that never fired -
+        a finish the detectors did not see, a first click the page ignored -
+        started by hand: with a loop running it is MOVED to AUTO_COPY (the
+        recipe brings its own bracket), without one the flow is driven here."""
+        if not self.may_redeliver():
+            return
+        if self.loop_state is LoopState.DISCONNECTED:
+            self._view.notify("no monitor is attached - nothing to copy from", severity="warning")
+            return
+        reason = "the auto-copy is being run from the sidebar"
+        if self._loop_task is not None and not self._loop_task.done():
+            self.set_loop_state(LoopState.AUTO_COPY, reason)
+            return
+        self.log_harness(KIND_COPY, reason)
+        await self.run_auto_copy_flow()
 
     async def _insert(self, text: str, reason: str) -> None:
         """Post one payload and let the loop insert it - or insert it here."""

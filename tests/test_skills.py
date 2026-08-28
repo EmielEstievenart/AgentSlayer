@@ -23,6 +23,7 @@ from agentclip.executor.tools.skills import (
     skill_search_roots,
 )
 from agentclip.protocol.composer import Composer
+from agentclip.protocol.preset import LivePreset
 from agentclip.protocol.types import ToolCall
 
 GREET_SKILL = """\
@@ -523,7 +524,7 @@ def _engine_with_skills(project: Path, skills: list[Skill]) -> Engine:
     session = SessionStore(project, service=cfg.general.service)
     backups = BackupStore(session.session_dir)
     composer = Composer(
-        cfg.preset(), cfg.caps(), registry.render_catalog(), project.name, "TestOS", CHAT_NAME
+        LivePreset(cfg.preset()), registry.render_catalog(), project.name, "TestOS", CHAT_NAME
     )
     return Engine(cfg, registry, workspace, session, backups, composer, CHAT_NAME)
 

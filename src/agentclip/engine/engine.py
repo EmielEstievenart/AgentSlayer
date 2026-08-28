@@ -32,7 +32,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Literal
 
-from agentclip.config import Config, resolve_limits
+from agentclip.config import Config, LimitsConfig, ServicePreset, resolve_limits
 from agentclip.engine.approval import (
     DENY_VERDICTS,
     EDITS_RULE,
@@ -58,6 +58,7 @@ from agentclip.executor.tools.sandbox import SandboxViolation, Workspace
 from agentclip.protocol.composer import BudgetExceeded, Composer
 from agentclip.protocol.names import normalize_chat_name
 from agentclip.protocol.parser import normalize, normalized_hash, parse_reply
+from agentclip.protocol.preset import LivePreset
 from agentclip.protocol.types import (
     Outbound,
     ParsedReply,
@@ -347,20 +348,29 @@ class Engine:
         role: Literal["master", "subagent"] = "master",
         host: Host | None = None,
         build_warnings: Sequence[str] = (),
+        presets: LivePreset | None = None,
     ) -> None:
         # THE ONE PLACE `[limits]` stops being a wish and becomes numbers. Two of
         # its keys default to config.AUTO_LIMIT because the right value for them
-        # is a fraction of the paste budget, and the budget is a per-SESSION
-        # fact: the preset is chosen when a session starts, and a sub-agent runs
-        # on its own preset, so no loader could have known it. Here both halves
-        # are finally in hand, so they are married once - and the resolved config
-        # is what gets stored, so `self._config.limits` is the only version
-        # anything downstream can reach and no consumer needs an `or default` of
-        # its own. (Everything that reads limits does so through this object or
-        # through the ToolContext built from it a few lines below.)
-        config = replace(
-            config, limits=resolve_limits(config.limits, config.preset().max_paste_chars)
-        )
+        # is a fraction of the paste budget, and no loader could have known that
+        # budget: it is the SERVICE's, and the service is the monitor's answer,
+        # which can still change while this session runs (§11.9). So the
+        # marriage is re-done per read (:meth:`_limits`) rather than once here,
+        # and `self._config.limits` stays what it always was - resolved numbers,
+        # never a sentinel, so no consumer needs an `or default` of its own.
+        # WHICH service this session composes against, and it is a question
+        # rather than a value: the monitor owns the preset and can change it
+        # mid-session (docs/design/ui-monitor.md §11.9). No provider - a CLI or
+        # headless launch, a remote engine, an idle window - means the local
+        # `[services.*]` table, read exactly as it always was.
+        self._presets = presets if presets is not None else LivePreset(config.preset())
+        # The `[limits]` block as the user WROTE it, sentinels and all: the
+        # resolution below answers them from the paste budget, so it has to be
+        # re-done whenever that budget moves (see :meth:`_limits`) and a
+        # re-resolution of already-resolved limits would freeze the first budget
+        # in forever.
+        self._raw_limits = config.limits
+        config = replace(config, limits=self._limits())
         self._config = config
         self._role = role
         # One-line facts about how this session was ASSEMBLED that the user
@@ -400,7 +410,7 @@ class Engine:
         self._ctx = ToolContext(
             workspace=workspace,
             limits=config.limits,
-            caps=config.caps(),
+            caps=self._presets.caps(),
             host=self._host,
             backup_hook=self._backup_hook,
             cancel_event=self._cancel,
@@ -446,6 +456,41 @@ class Engine:
         self._instructions_armed = False
         # Watchers of the plan as it executes; see set_progress_hook.
         self._progress_hook: ProgressHook | None = None
+
+    # -- the live service ------------------------------------------------------
+
+    def _preset(self) -> ServicePreset:
+        """The service this session is composing FOR, asked fresh every time.
+
+        Never cached in a field: the monitor owns the ``[services.*]`` table and
+        pushes a new one over ``Watched`` whenever the user edits it, so a
+        budget raised mid-session has to govern the very next payload
+        (docs/design/ui-monitor.md §11.9). With no monitor behind the provider
+        this is the local config's preset and the answer never changes.
+        """
+        return self._presets.preset()
+
+    def _limits(self) -> LimitsConfig:
+        """``[limits]``, with every AUTO sentinel answered by the CURRENT budget.
+
+        Re-derived rather than stored for :meth:`_preset`'s reason: half of this
+        block is a fraction of the paste budget, so a budget the monitor moved
+        has to move `max_result_chars` with it or the next turn would fit its
+        results to a number the service no longer allows.
+        """
+        return resolve_limits(self._raw_limits, self._preset().max_paste_chars)
+
+    def _sync_ctx(self) -> None:
+        """Point the tool context at the live service before a plan runs.
+
+        The context is built once per session and handed to every handler, and
+        two of its fields - the resolved limits and the budget caps - are
+        budget-shaped. This is where they catch up with a monitor's edit; the
+        object itself is never rebound, because ``chunk_cache`` is shared with
+        the handlers by IDENTITY (see above).
+        """
+        self._ctx.limits = self._limits()
+        self._ctx.caps = self._presets.caps()
 
     # -- watching a turn execute ---------------------------------------------
 
@@ -589,7 +634,7 @@ class Engine:
         flattened = next((w for w in reply.warnings if w.kind == "flattened_reply"), None)
         if flattened is not None:
             return self._flattened_ingest(text, flattened)
-        if self._config.preset().require_fenced_reply and reply.calls and not reply.saw_fence:
+        if self._preset().require_fenced_reply and reply.calls and not reply.saw_fence:
             # Scope, deliberate on both sides (protocol.md 1.4 #15):
             #
             # - only replies carrying AT LEAST ONE CALL are gated. A zero-call
@@ -916,15 +961,15 @@ class Engine:
         return StatusSnapshot(
             phase=self._phase,
             turn=self._turn,
-            service_key=self._config.general.service,
-            budget_chars=self._config.preset().max_paste_chars,
+            service_key=self._preset().key or self._config.general.service,
+            budget_chars=self._preset().max_paste_chars,
             auto_accept_edits=self._policy.auto_accept_edits,
             yolo=self._policy.yolo,
             mode=self._policy.mode,
             unattended=self._policy.unattended,
             session_dir=self._session.session_dir,
             last_outbound_chars=self._last_outbound_chars,
-            has_extra_instructions=bool(self._config.preset().extra_instructions.strip()),
+            has_extra_instructions=bool(self._preset().extra_instructions.strip()),
             instructions_armed=self._instructions_armed,
         )
 
@@ -997,7 +1042,7 @@ class Engine:
         """
         if self._phase is Phase.IDLE:
             return "no-session"
-        if not self._config.preset().extra_instructions.strip():
+        if not self._preset().extra_instructions.strip():
             return "no-instructions"
         self._instructions_armed = not self._instructions_armed
         self._session.append_event("extra_instructions", armed=self._instructions_armed)
@@ -1006,6 +1051,8 @@ class Engine:
     # -- planning ----------------------------------------------------------------
 
     def _build_plan(self, reply: ParsedReply) -> list[_Planned]:
+        # Every turn starts by re-asking what the service allows now (§11.9).
+        self._sync_ctx()
         plan: list[_Planned] = []
         # Ranged edits accepted so far, per file, in reply order: what the
         # bottom-to-top and non-overlap rules are checked against. Rebuilt every
@@ -1563,7 +1610,7 @@ class Engine:
         if not self._instructions_armed:
             return []
         self._instructions_armed = False
-        text = self._config.preset().extra_instructions.strip()
+        text = self._preset().extra_instructions.strip()
         return [f"note: {_INSTRUCTIONS_NOTE_PREFIX} {text}"] if text else []
 
     def _compose_results(
@@ -1584,7 +1631,7 @@ class Engine:
         """
         minted = self._mint_chunks(results)
         markers = {entry.call_id: entry.marker for entry in minted}
-        capped = fit_results(results, self._config.limits.max_result_chars, markers)
+        capped = fit_results(results, self._limits().max_result_chars, markers)
         next_turn = self._turn + 1
         try:
             outbound = self._composer.results(next_turn, capped, notes, markers)
@@ -1592,7 +1639,7 @@ class Engine:
             # The composer's line-boundary fitting could not get under budget
             # (e.g. a single enormous line). Cut harder, mid-line if needed.
             self._session.append_event("error", detail=f"results over budget, refitting: {exc}")
-            budget = self._config.preset().max_paste_chars
+            budget = self._preset().max_paste_chars
             per_result = max(120, (budget - 600) // max(len(capped), 1) - 150)
             outbound = self._composer.results(
                 next_turn, fit_results(capped, per_result, markers), notes, markers
@@ -1620,7 +1667,7 @@ class Engine:
         never reused, which is why the ids in a session are not consecutive.
         """
         chunk_chars = chunk_chars_for(
-            self._config.preset().max_paste_chars, self._config.limits.max_result_chars
+            self._preset().max_paste_chars, self._limits().max_result_chars
         )
         minted: list[CachedChunks] = []
         for result in results:

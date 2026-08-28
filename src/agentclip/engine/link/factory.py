@@ -47,6 +47,7 @@ from agentclip.executor.tools.skills import (
 )
 from agentclip.protocol.composer import Composer
 from agentclip.protocol.names import generate_chat_name
+from agentclip.protocol.preset import LivePreset, PresetSource
 from agentclip.protocol.spec import render_spec
 
 Role = Literal["master", "subagent"]
@@ -151,9 +152,18 @@ class EngineBuilder:
     typically passes something like ``lambda: app.app_config`` so the builder
     always reads whatever Config is currently live.
 
-    The sidebar's service picker may select a different preset than the config
-    default, so the builder rebuilds a Config with that service active - the
-    engine reads its budget/caps from config.preset().
+    ``get_preset`` is the OTHER live read, and the sharper one: the service a
+    session composes against belongs to the MONITOR, not to this machine's
+    ``[services.*]`` table (docs/design/ui-monitor.md §10.5). The shell hands
+    down a callable answering "the service the monitor is driving right now, or
+    None", every engine built here reads through it, and every read is fresh -
+    so a paste budget raised in the Monitor UI mid-session reaches the next
+    composed turn. ``None`` (a CLI or headless launch, a remote engine, a window
+    with no monitor attached) falls back to ``config.preset()``, which is what
+    this builder always did - see :class:`~agentclip.protocol.preset.LivePreset`.
+    The registry and the MCP sizing below are the one part that cannot be live:
+    a catalog is what the bootstrap TAUGHT the model, so it is built from the
+    answer at session start and a later edit reaches the next session.
 
     Each session gets a fresh chat name, which the bootstrap teaches the model
     and every reply must echo back. ``chat_name`` pins it (tests need a fixed
@@ -185,6 +195,7 @@ class EngineBuilder:
 
     __slots__ = (
         "_get_config",
+        "_get_preset",
         "_project_root",
         "_chat_name",
         "_host",
@@ -206,12 +217,14 @@ class EngineBuilder:
         project_root: Path,
         chat_name: str | None = None,
         *,
+        get_preset: PresetSource | None = None,
         os_name: str | None = None,
         data_root: Path | None = None,
         home: Path | None = None,
         mcp_enabled: bool = True,
     ) -> None:
         self._get_config = get_config
+        self._get_preset = get_preset
         self._project_root = project_root
         self._chat_name = chat_name
         # Skills are discovered once per builder from the same folders Claude
@@ -250,9 +263,10 @@ class EngineBuilder:
         cfg = self._get_config()
         if req.service != cfg.general.service and req.service in cfg.services:
             cfg = replace(cfg, general=replace(cfg.general, service=req.service))
+        presets = LivePreset(cfg.preset(), self._get_preset)
         registry, build_warnings = _sized_registry(
             self._mcp(),
-            cfg,
+            presets,
             self._skills,
             req,
             self._project_root.name,
@@ -287,8 +301,7 @@ class EngineBuilder:
         )
         backups = BackupStore(session.session_dir, host=self._host)
         composer = Composer(
-            cfg.preset(),
-            cfg.caps(),
+            presets,
             registry.render_catalog(),
             self._project_root.name,
             self._os_name,
@@ -306,6 +319,7 @@ class EngineBuilder:
             role=req.role,
             host=self._host,
             build_warnings=build_warnings,
+            presets=presets,
         )
 
     # -- what this builder found beside the project ---------------------------
@@ -416,6 +430,7 @@ def make_engine_builder(
     project_root: Path,
     chat_name: str | None = None,
     *,
+    get_preset: PresetSource | None = None,
     os_name: str | None = None,
     data_root: Path | None = None,
     home: Path | None = None,
@@ -426,6 +441,7 @@ def make_engine_builder(
         get_config,
         project_root,
         chat_name,
+        get_preset=get_preset,
         os_name=os_name,
         data_root=data_root,
         home=home,
@@ -435,7 +451,7 @@ def make_engine_builder(
 
 def _sized_registry(
     manager: McpManager | None,
-    cfg: Config,
+    presets: LivePreset,
     skills: Sequence[Skill],
     req: EngineRequest,
     workdir_name: str,
@@ -456,12 +472,15 @@ def _sized_registry(
     and the second return value carries the one-line warning the controller
     surfaces (Engine.build_warnings).
     """
-    max_skill_chars = cfg.preset().max_paste_chars // 6
+    max_skill_chars = presets.preset().max_paste_chars // 6
     # The ranged-edit mode is a fact about the SERVICE, so it is read here, from
-    # the config this build is for, and nothing downstream has to be told: a
+    # the preset this build is for, and nothing downstream has to be told: a
     # remote session builds its registry through this same function on the
-    # engine's side of the link, so SSH gets it for free.
-    edit_by_lines = cfg.preset().edit_by_lines
+    # engine's side of the link, so SSH gets it for free. Read ONCE, unlike the
+    # composer's budget: this decides a CATALOG, and a catalog is what the
+    # bootstrap taught the model - a toggle flipped mid-session reaches the next
+    # session, not the next turn (§11.9).
+    edit_by_lines = presets.preset().edit_by_lines
     base = default_registry(
         skills,
         max_skill_listing_chars=max_skill_chars,
@@ -487,10 +506,10 @@ def _sized_registry(
     if any(s.state in ("pending", "connecting") for s in manager.statuses()):
         manager.wait_ready(0.5)
 
-    preset = cfg.preset()
+    preset = presets.preset()
     spec_free = render_spec(
         preset,
-        cfg.caps(),
+        presets.caps(),
         base.render_catalog(),
         workdir_name,
         session_os,
@@ -525,7 +544,7 @@ def _sized_registry(
         )
         spec_with = render_spec(
             preset,
-            cfg.caps(),
+            presets.caps(),
             candidate.render_catalog(),
             workdir_name,
             session_os,

@@ -1095,6 +1095,10 @@ class GuiView:
             # Same trick, same reason: `/skills` before a session must name the
             # folders of whichever machine the NEXT session is built on.
             skills=self._skill_rows,
+            # ...and the service a session runs on is the MONITOR's answer
+            # (§11.9), so the controller asks rather than reading the local
+            # `[services.*]` table its Config carries.
+            preset_source=self.engine_preset,
         )
 
     # == lifecycle =============================================================
@@ -4376,6 +4380,27 @@ class GuiView:
         (:func:`preset_from_watched`).
         """
         return preset_from_watched(self._watched[slot], alerts=self._config.preset())
+
+    def engine_preset(self) -> ServicePreset | None:
+        """The service the ENGINE should compose against, or None (§11.9).
+
+        :meth:`live_preset`'s sibling, and the difference is the ``None``. The
+        recipes always want a preset - an empty one describes a window nothing
+        is being driven in, which is exactly what their guards read. The engine
+        wants the monitor's answer ONLY when there is one: a window with no
+        monitor attached (an idle start, §11.1) would otherwise compose against
+        ``EMPTY_WATCHED``, whose paste budget is zero and whose bootstrap could
+        never fit. So "the monitor has not named a service" is reported as
+        nothing at all, and the engine falls back to this machine's
+        ``[services.*]`` table (:class:`~agentclip.protocol.preset.LivePreset`).
+
+        Read through on every call, never cached: that is what makes a budget
+        edited in the Monitor UI mid-session reach the next composed turn.
+        """
+        watched = self._watched[self._automation.live_slot]
+        if not watched.service or watched.max_paste_chars <= 0:
+            return None
+        return preset_from_watched(watched, alerts=self._config.preset())
 
     # == small helpers =========================================================
 

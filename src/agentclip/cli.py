@@ -17,6 +17,7 @@ from agentclip import __version__
 from agentclip.config import (
     Config,
     MonitorTarget,
+    ServicePreset,
     default_remote_state_dir,
     load_config,
 )
@@ -39,6 +40,7 @@ from agentclip.executor.hosts.connect import (
 )
 from agentclip.executor.hosts.local import LocalHost
 from agentclip.executor.mcp.types import McpServerStatus
+from agentclip.protocol.preset import PresetSource
 from agentclip.shell.app.engine_launch import (
     classify_launch_failure,
     engine_command,
@@ -111,6 +113,7 @@ def make_engine_factory(
     project_root: Path,
     chat_name: str | None = None,
     *,
+    get_preset: PresetSource | None = None,
     os_name: str | None = None,
     data_root: Path | None = None,
     home: Path | None = None,
@@ -124,6 +127,11 @@ def make_engine_factory(
     because an engine is still exactly what it builds - the link is how the
     caller reaches it.
 
+    ``get_preset`` is the one argument that is not simply forwarded prose: it is
+    how the SERVICE stops being this machine's answer (docs/design/ui-monitor.md
+    §11.9). See the builder's docstring; ``None`` keeps the old behaviour of
+    reading the local ``[services.*]`` table.
+
     There is no ``host=`` any more (remote-executor.md §2.8, increment 5): the
     engine this builds runs here, on this machine, and a session on another one
     is :func:`make_remote_link_factory`'s job - an engine over there, reached
@@ -134,6 +142,7 @@ def make_engine_factory(
             get_config,
             project_root,
             chat_name,
+            get_preset=get_preset,
             os_name=os_name,
             data_root=data_root,
             home=home,
@@ -952,9 +961,25 @@ def main(argv: list[str] | None = None) -> int:
     from agentclip.shell.chat.shell import run_gui
 
     live_config = [config]
+    # ...and the same arrangement for the SERVICE, which is not this machine's
+    # to answer at all (docs/design/ui-monitor.md §11.9). The window fills this
+    # cell with its own "what is the monitor driving right now?" as soon as it
+    # exists (``on_preset_source``); until then - and for ever in a window that
+    # never attaches a monitor - it answers None and every engine built below
+    # falls back to the local ``[services.*]`` table exactly as it used to.
+    live_preset: list[PresetSource | None] = [None]
+
+    def current_preset() -> ServicePreset | None:
+        source = live_preset[0]
+        return source() if source is not None else None
+
+    def adopt_preset_source(source: PresetSource) -> None:
+        live_preset[0] = source
+
     gui_factory = make_engine_factory(
         lambda: live_config[0],
         launch.project_root,
+        get_preset=current_preset,
         os_name=launch.os_name,
         data_root=(launch.data_root if launch.data_root != launch.project_root else None),
         home=launch.home,
@@ -1032,6 +1057,7 @@ def main(argv: list[str] | None = None) -> int:
             launch,
             provider=provider,
             on_config_change=adopt_config,
+            on_preset_source=adopt_preset_source,
             engine_factory=gui_factory,
             mcp_manager=_mcp_source(gui_factory),
             # Ungated, where the MCP source is not: a project with no skills

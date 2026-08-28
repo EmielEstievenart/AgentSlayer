@@ -25,6 +25,7 @@ from typing import Any, Protocol
 from agentclip.config import Config
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
+from agentclip.protocol.preset import PresetSource
 from agentclip.shell.app.link import Link, SkillReport
 from agentclip.shell.app.monitor_launch import LocalMonitorLauncher, SubprocessLauncher
 from agentclip.shell.chat.remote import RemoteConnect
@@ -183,6 +184,7 @@ def run_gui(
     mcp_manager: McpStatusSource | None = None,
     skills: Callable[[], SkillReport] | None = None,
     on_config_change: Callable[[Config], None] | None = None,
+    on_preset_source: Callable[[PresetSource], None] | None = None,
     host: Any = None,
     remote: RemoteConnect | None = None,
     monitor_target: MonitorLaunch = None,
@@ -202,6 +204,15 @@ def run_gui(
     and the engine factory - built above this call, over a closure cli.py owns -
     has to read it for the next session. The TUI's equivalent is that its
     closure reads the attribute its editor reassigns.
+
+    ``on_preset_source`` is the way back for the THIRD, and it hands over a
+    question rather than an answer: which service a session composes against
+    belongs to the monitor (docs/design/ui-monitor.md §11.9), only this window
+    knows what the monitor last said, and the engine factory was built above
+    this call. So the runner hands ``cli.main`` the window's own "what is the
+    monitor driving right now?", and every engine built afterwards reads through
+    it. A caller that passes nothing (every test harness, and any embedder) gets
+    the old behaviour: engines read this machine's ``[services.*]`` table.
 
     ``remote`` is the way back for the OTHER one, and the bigger of the two:
     which machine the session runs on. It carries the two command-line facts the
@@ -260,6 +271,7 @@ def run_gui(
         host=host,
         remote=remote,
         on_config_change=on_config_change,
+        on_preset_source=on_preset_source,
         monitor_target=monitor_target,
         launcher=launcher if launcher is not None else SubprocessLauncher(),
     )

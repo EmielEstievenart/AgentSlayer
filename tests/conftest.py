@@ -24,6 +24,7 @@ from agentclip.engine.store.session import SessionStore
 from agentclip.executor.tools.registry import ToolRegistry, default_registry
 from agentclip.executor.tools.sandbox import Workspace
 from agentclip.protocol.composer import Composer
+from agentclip.protocol.preset import LivePreset
 
 UTILS_PY = '''"""Utility helpers."""
 
@@ -272,28 +273,37 @@ def make_engine(project: Path, registry: ToolRegistry) -> EngineFactory:
     project (e.g. to point [permission] elsewhere) before building. Pass
     ``tools=`` to swap the registry (e.g. for a fake slow tool) and ``role=``
     to build a sub-agent engine (pair it with a sub-agent registry).
+
+    ``presets=`` is the monitor's seat (docs/design/ui-monitor.md §11.9): one
+    :class:`~agentclip.protocol.preset.LivePreset` shared by the composer and
+    the engine, so a test can move the service under a running session the way
+    a Monitor UI edit does. Omitted, it is the local config's preset and nothing
+    ever changes - which is the monitor-less fallback every headless caller gets.
     """
 
     def factory(
         config: Config | None = None,
         tools: ToolRegistry | None = None,
         role: Literal["master", "subagent"] = "master",
+        presets: LivePreset | None = None,
     ) -> Engine:
         cfg = config or load_config(project, global_config_path=project / "no-such-global.toml")
         reg = tools or registry
+        live = presets if presets is not None else LivePreset(cfg.preset())
         workspace = Workspace(project, cfg.excluded_names())
         session = SessionStore(project, service=cfg.general.service)
         backups = BackupStore(session.session_dir)
         composer = Composer(
-            cfg.preset(),
-            cfg.caps(),
+            live,
             reg.render_catalog(),
             project.name,
             "TestOS",
             CHAT_NAME,
             role=role,
         )
-        return Engine(cfg, reg, workspace, session, backups, composer, CHAT_NAME, role=role)
+        return Engine(
+            cfg, reg, workspace, session, backups, composer, CHAT_NAME, role=role, presets=live
+        )
 
     return factory
 

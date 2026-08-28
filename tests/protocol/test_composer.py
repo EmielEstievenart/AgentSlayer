@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from agentclip.config import ServicePreset, caps_for_budget
+from agentclip.config import ServicePreset
 from agentclip.protocol.composer import (
     TRUNCATION_MARKER,
     BudgetExceeded,
@@ -15,6 +15,7 @@ from agentclip.protocol.composer import (
     wrap_in_fence,
 )
 from agentclip.protocol.parser import normalized_hash
+from agentclip.protocol.preset import LivePreset
 from agentclip.protocol.types import ToolResult
 
 CHAT_NAME = "amber-falcon"
@@ -40,9 +41,7 @@ def make_composer(
         attachment_note=attach,
         extra_instructions=extra,
     )
-    return Composer(
-        preset, caps_for_budget(budget), catalog, "AgentClip", "Windows 11", CHAT_NAME
-    )
+    return Composer(LivePreset(preset), catalog, "AgentClip", "Windows 11", CHAT_NAME)
 
 
 def representative_catalog(target: int = 4_200) -> str:

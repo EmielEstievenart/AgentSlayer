@@ -80,6 +80,7 @@ from agentclip.engine.engine import (
 from agentclip.engine.link.factory import EngineRequest
 from agentclip.protocol.composer import BudgetExceeded
 from agentclip.protocol.parser import peek_chat_name
+from agentclip.protocol.preset import PresetSource
 from agentclip.protocol.types import Outbound, ParsedReply, ResultStatus, ToolCall
 from agentclip.shell.app.commands import command_list, help_text, lookup
 from agentclip.shell.app.link import Link, McpStatusLine, NoSkills, SkillLine, SkillReport
@@ -456,6 +457,7 @@ class SessionController:
         view: ChatView,
         mcp_statuses: Callable[[], Sequence[McpStatusLine]] | None = None,
         skills: Callable[[], SkillReport] | None = None,
+        preset_source: PresetSource | None = None,
     ) -> None:
         self._config = config
         self._engine_factory = engine_factory
@@ -476,6 +478,15 @@ class SessionController:
         # reads. ``None`` means the caller has no library to report, which the
         # command renders as "no skills found".
         self._skills = skills
+        # Which SERVICE a session runs on: the monitor's answer, asked rather
+        # than read out of this machine's `[services.*]` table
+        # (docs/design/ui-monitor.md §11.9). The engine reads through the same
+        # question; what this controller wants out of it is the label and the
+        # budget it puts in front of the user ("paste into ...", the exported
+        # log's header), and those must name the service the pixels really
+        # belong to. ``None`` - no monitor, or a front-end that has none - keeps
+        # the old read of the local config.
+        self._preset_source = preset_source
 
         self._link: Link | None = None
         self._chat_name: str | None = None  # this session's agreed chat name
@@ -1911,7 +1922,14 @@ class SessionController:
             title=_short_title(spec.task),
             chat_name=link.chat_name,
         )
-        self._preset = self._config.services.get(spec.service, self._config.preset())
+        # The service this session is really running on, snapshotted for the
+        # session's labels: the monitor's if it named one, this host's table
+        # otherwise (§11.9). A snapshot rather than a live read because
+        # ``_SessionContext`` saves and restores it around a delegation - the
+        # ENGINE is the half that has to see a mid-session change, and it does.
+        self._preset = self._live_preset() or self._config.services.get(
+            spec.service, self._config.preset()
+        )
         # Frozen here for the same reason the master's preset is: the sub-agent
         # window's picker is locked for the whole session, so a delegation
         # started at turn 30 must build its Engine from the service the user had
@@ -1948,6 +1966,10 @@ class SessionController:
             f"paste into {self._preset.label}",
             timeout=8,
         )
+
+    def _live_preset(self) -> ServicePreset | None:
+        """What the monitor says the live window's service is, or None (§11.9)."""
+        return self._preset_source() if self._preset_source is not None else None
 
     # -- ingest -> review -> execute -----------------------------------------
 

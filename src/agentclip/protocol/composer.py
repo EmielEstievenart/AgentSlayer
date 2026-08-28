@@ -51,7 +51,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
-from agentclip.config import BudgetCaps, ServicePreset
+from agentclip.protocol.preset import LivePreset
 from agentclip.protocol.spec import SECTION_TASK_HEADER, render_spec
 from agentclip.protocol.types import Outbound, ToolResult
 
@@ -225,16 +225,18 @@ class Composer:
 
     def __init__(
         self,
-        preset: ServicePreset,
-        caps: BudgetCaps,
+        presets: LivePreset,
         tool_catalog: str,
         workdir_name: str,
         os_name: str,
         chat_name: str,
         role: Literal["master", "subagent"] = "master",
     ) -> None:
-        self._preset = preset
-        self._caps = caps
+        # NOT a preset: the service is the monitor's, and it can change under a
+        # running session (docs/design/ui-monitor.md §11.9). Every render below
+        # asks again, so a budget edited in the Monitor UI mid-session governs
+        # the very next payload this composer produces.
+        self._presets = presets
         self._tool_catalog = tool_catalog
         self._workdir_name = workdir_name
         self._os_name = os_name
@@ -276,8 +278,8 @@ class Composer:
            silently - which is the failure the fence is actually for.
         """
         spec_text = render_spec(
-            self._preset,
-            self._caps,
+            self._presets.preset(),
+            self._presets.caps(),
             self._tool_catalog,
             self._workdir_name,
             self._os_name,
@@ -345,7 +347,7 @@ class Composer:
         keeps only the ids whose marker it can see in what was actually rendered.
         A caller who passes nothing gets exactly the old behaviour.
         """
-        budget = self._preset.max_paste_chars
+        budget = self._presets.preset().max_paste_chars
         bodies = [self._result_body(r) for r in results]
         marks = [(markers or {}).get(r.call_id, TRUNCATION_MARKER) for r in results]
         payload = self._render_results(turn, results, bodies, notes)
@@ -384,7 +386,7 @@ class Composer:
         # over and is held to the budget exactly. The reported budget in the
         # exception stays the preset's, because that is the number the user set
         # and the one they would go and change.
-        budget = self._preset.max_paste_chars
+        budget = self._presets.preset().max_paste_chars
         limit = int(budget * (1 + BOOTSTRAP_BUDGET_SLACK)) if kind == "bootstrap" else budget
         if len(payload) > limit:
             raise BudgetExceeded(len(payload), budget)

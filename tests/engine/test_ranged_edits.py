@@ -19,6 +19,7 @@ from agentclip.engine.engine import Engine, NewTurn, Send
 from agentclip.engine.numbered import describe_ranges, surviving_numbered_lines
 from agentclip.executor.tools.registry import default_registry
 from agentclip.protocol.composer import Composer
+from agentclip.protocol.preset import LivePreset
 from agentclip.protocol.types import ToolResult
 
 from ..conftest import CHAT_NAME, write_permissions
@@ -285,7 +286,7 @@ def test_only_the_lines_that_survived_truncation_count(project: Path, make_engin
 
 def test_surviving_numbered_lines_reads_the_composed_payload() -> None:
     composer = Composer(
-        Config().preset(), Config().caps(), "catalog", "proj", "TestOS", CHAT_NAME
+        LivePreset(Config().preset()), "catalog", "proj", "TestOS", CHAT_NAME
     )
     body = "f.py lines 1-2 of 9\n1| alpha\n2| bravo"
     payload = composer.results(
@@ -299,7 +300,7 @@ def test_a_gutter_shaped_source_line_is_read_as_its_own_gutter() -> None:
     """A file whose content looks like a gutter is exactly the ambiguity an
     anchored pattern removes: 50 is the served text, 12 is the line number."""
     composer = Composer(
-        Config().preset(), Config().caps(), "catalog", "proj", "TestOS", CHAT_NAME
+        LivePreset(Config().preset()), "catalog", "proj", "TestOS", CHAT_NAME
     )
     payload = composer.results(
         3, [ToolResult(1, "ok", "f.py lines 12-12 of 99\n12| 50| x")]

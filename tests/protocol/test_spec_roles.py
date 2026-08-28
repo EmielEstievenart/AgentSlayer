@@ -5,6 +5,7 @@ from __future__ import annotations
 from agentclip.config import ServicePreset, caps_for_budget
 from agentclip.protocol import spec
 from agentclip.protocol.composer import Composer
+from agentclip.protocol.preset import LivePreset
 
 CATALOG = "read_file(path, start, end)\n  Read a file; 1-based inclusive range.\n"
 CHAT_NAME = "amber-falcon"
@@ -83,8 +84,7 @@ def test_no_unsubstituted_placeholders_in_either_role() -> None:
 def test_composer_role_reaches_the_bootstrap() -> None:
     preset = ServicePreset("test", "Test preset", 12_000, 240_000)
     composer = Composer(
-        preset,
-        caps_for_budget(12_000),
+        LivePreset(preset),
         CATALOG,
         "AgentClip",
         "TestOS",
@@ -100,8 +100,6 @@ def test_composer_role_reaches_the_bootstrap() -> None:
 
 def test_composer_defaults_to_the_master_brief() -> None:
     preset = ServicePreset("test", "Test preset", 12_000, 240_000)
-    composer = Composer(
-        preset, caps_for_budget(12_000), CATALOG, "AgentClip", "TestOS", CHAT_NAME
-    )
+    composer = Composer(LivePreset(preset), CATALOG, "AgentClip", "TestOS", CHAT_NAME)
     assert composer.role == "master"
     assert "You are a sub-agent" not in composer.bootstrap("t").chunks[0]

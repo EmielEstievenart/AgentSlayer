@@ -55,6 +55,7 @@ from typing import Any
 from agentclip.config import Config
 from agentclip.driver.clip.base import ClipboardProvider
 from agentclip.engine.link.factory import EngineRequest
+from agentclip.protocol.preset import PresetSource
 from agentclip.shell.app.link import Link, SkillReport
 from agentclip.shell.app.monitor_launch import LocalMonitorLauncher
 from agentclip.shell.chat.remote import RemoteConnect
@@ -85,6 +86,7 @@ class GuiRunner:
         remote: RemoteConnect | None = None,
         on_close: Callable[[], None] | None = None,
         on_config_change: Callable[[Config], None] | None = None,
+        on_preset_source: Callable[[PresetSource], None] | None = None,
         monitor_target: MonitorLaunch = None,
         launcher: LocalMonitorLauncher | None = None,
     ) -> None:
@@ -118,6 +120,13 @@ class GuiRunner:
             monitor_target=monitor_target,
             launcher=launcher,
         )
+        # The window's answer to "which service is the monitor driving?", handed
+        # UP to whoever built the engine factory (docs/design/ui-monitor.md
+        # §11.9). It has to happen here, right after the view exists: the
+        # factory was built before this window was, and the question can only be
+        # answered by the object that adopts the monitor's ``Watched``.
+        if on_preset_source is not None:
+            on_preset_source(self.view.engine_preset)
         self.js_api = JsApi(self)
 
     # -- the window's side ----------------------------------------------------

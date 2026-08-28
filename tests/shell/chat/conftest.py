@@ -256,11 +256,19 @@ def harness(project: Path, app_config: Config, tmp_path: Path) -> Harness:
     provider = select_provider("manual")
     monitor = fake_monitor(app_config, provider)
     launcher = FakeLauncher()
+    # The factory asks the WINDOW which service the monitor is driving, exactly
+    # as cli.main wires it (docs/design/ui-monitor.md §11.9) - hence the cell:
+    # the factory is built before the view that answers it exists.
+    seat: dict[str, GuiView] = {}
     view = GuiView(
         bridge,
         config=app_config,
         provider=provider,
-        engine_factory=make_engine_factory(lambda: app_config, project),
+        engine_factory=make_engine_factory(
+            lambda: app_config,
+            project,
+            get_preset=lambda: seat["view"].engine_preset() if seat else None,
+        ),
         project_root=project,
         monitor_target=LaunchLocal(),
         launcher=launcher,
@@ -268,6 +276,7 @@ def harness(project: Path, app_config: Config, tmp_path: Path) -> Harness:
         schedule=lambda coro: holder["h"].schedule(coro),
         on_exit=lambda: holder["h"].on_exit(),
     )
+    seat["view"] = view
     attach(view, monitor, launcher)
     # The attach paints (a sidebar, five detection lines); a suite reading "what
     # did start() say" must not find them in front of its own events.

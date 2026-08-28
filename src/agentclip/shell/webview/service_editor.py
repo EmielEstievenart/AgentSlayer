@@ -25,7 +25,11 @@ capture coroutine onto the GUI's loop, and draw.
   in "+ add new" mode, where there is no key to file anything under and the
   page disables them while still SHOWING what the press would create.
 
-**Captures are the exception to "applies on close"**: the profile store IS the
+**Since ui-monitor.md §11.10 every valid edit is APPLIED AT ONCE** by the
+Monitor UI (saved, run, and pushed to an attached Chat UI on the next tick):
+the "applies on close" the brief's §3.2 describes is superseded, and closing
+the editor only closes the window. Captures were already immediate: the
+profile store IS the
 working copy for appearances, so a capture writes its PNG and a clear/forget
 deletes immediately, and :attr:`profiles_changed` is how the caller is told
 (it cannot diff for something that already happened on disk).

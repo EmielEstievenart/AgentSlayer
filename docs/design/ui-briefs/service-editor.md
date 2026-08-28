@@ -238,6 +238,11 @@ string when the candidate is fully valid.
 
 ### 3.2 Dirty / apply state
 
+> **Superseded 2026-08-28 (`ui-monitor.md` §11.10):** every valid edit is
+> saved, applied to the running monitor and pushed to an attached Chat UI the
+> moment it is made; closing the editor only closes the window. The dirty /
+> apply-on-close mechanics below are history.
+
 Two different commit models depending on whether an existing service or a
 new one is being edited:
 

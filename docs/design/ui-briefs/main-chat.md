@@ -200,8 +200,11 @@ the controller last `focus_session_view`'d, never "whichever tab is on
 screen" (delegation is single-flight):
 - `add_user(text)` — user task / follow-up / ask_user answer, rendered as
   Markdown, `.ev-user` styling.
+- `add_say(text)` — one `===CLIP:SAY` block: what the model said TO the
+  user, rendered as Markdown, `.ev-say`. Shown in reply order against the
+  tool calls around it (protocol.md §1.2).
 - `add_prose(text)` — LLM prose outside CLIP blocks, rendered as Markdown,
-  `.ev-prose`.
+  `.ev-prose` — an aside, not the model's message.
 - `add_call(call: ToolCall)` — one tool call. `ToolCall` (`protocol/types.py:80`)
   = `{id: int, tool: str, params: dict[str,str], raw: str, original_id:
   str|None, issues: tuple[ParseIssue,...]}`. The transcript widget derives its

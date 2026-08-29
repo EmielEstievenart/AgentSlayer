@@ -22,6 +22,7 @@
       "issues": []
     }
   ],
+  "says": [],
   "prose": [
     "I'll fix the date parsing and run the tests to verify."
   ],

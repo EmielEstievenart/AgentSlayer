@@ -127,6 +127,7 @@ def test_the_gui_view_implements_every_method_of_every_port(port: type) -> None:
 async def test_every_transcript_add_produces_its_own_event(harness: Harness) -> None:
     view = harness.view
     await view.add_user("do **the** thing")
+    await view.add_say("here is **why**")
     await view.add_prose("here is why")
     await view.add_call(call("run_command", command="pytest -q"))
     await view.add_note("chat name: amber-falcon")
@@ -136,6 +137,7 @@ async def test_every_transcript_add_produces_its_own_event(harness: Harness) -> 
     events = harness.flush().of_type("transcript")
     assert [event["kind"] for event in events] == [
         "user",
+        "say",
         "prose",
         "call",
         "note",
@@ -143,14 +145,18 @@ async def test_every_transcript_add_produces_its_own_event(harness: Harness) -> 
         "outbound",
     ]
     assert events[0]["text"] == "do **the** thing"  # markdown is the page's to render
-    assert events[2]["summary"] == "▶ call 1 run_command pytest -q"
-    assert events[2]["raw"].startswith("CALL run_command")
-    assert events[5]["payload"] == "payload"
-    assert events[5]["turn"] == 2
+    # A SAY is the model addressing the user; the label is the same, the kind is
+    # not - the page styles a message and an aside differently.
+    assert events[1]["text"] == "here is **why**"
+    assert events[1]["label"] == "assistant"
+    assert events[3]["summary"] == "▶ call 1 run_command pytest -q"
+    assert events[3]["raw"].startswith("CALL run_command")
+    assert events[6]["payload"] == "payload"
+    assert events[6]["turn"] == 2
     # The size crosses ALREADY RENDERED, in tokens: the divisor behind it is
     # configuration and the page never learns it (``shell/app/sizes.py``).
-    assert events[5]["size"] == "~2 tokens"
-    assert events[5]["note"] == "→ results (~2 tokens)"
+    assert events[6]["size"] == "~2 tokens"
+    assert events[6]["note"] == "→ results (~2 tokens)"
 
 
 async def test_an_ingested_reply_is_bracketed_so_the_page_can_reveal_it(harness: Harness) -> None:

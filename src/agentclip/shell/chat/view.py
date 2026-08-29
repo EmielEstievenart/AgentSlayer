@@ -1358,6 +1358,10 @@ class GuiView:
         self._record("you", text)
         self._send_transcript(kind="user", text=text, label="you")
 
+    async def add_say(self, text: str) -> None:
+        self._record("assistant", text)
+        self._send_transcript(kind="say", text=text, label="assistant")
+
     async def add_prose(self, text: str) -> None:
         self._record("assistant", text)
         self._send_transcript(kind="prose", text=text, label="assistant")

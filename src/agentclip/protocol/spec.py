@@ -10,7 +10,7 @@ Layout per docs/design/protocol.md section 2:
 
     1 ROLE                  (workdir + OS substituted)
     2 TRANSPORT WARNINGS    (chat name; attachment note conditional on preset)
-    3 HOW TO EMIT CALLS     (grammar + chat-name echo; fence conditional)
+    3 HOW TO EMIT CALLS     (CALL and SAY grammar, chat-name echo; fence conditional)
     4 TOOL CATALOG          (passed in, header from here)
     5 RULES OF ENGAGEMENT   (max_calls substituted from the budget caps)
     - EXTRA INSTRUCTIONS    (unnumbered, only when the preset carries some)
@@ -56,13 +56,17 @@ wrong, say so, or use ask_user."""
 # exists to prevent is a first reply that summarises the protocol instead of
 # working - but the last sentence is load-bearing too: bootstrapped with "hi"
 # the same wording used to force pointless list_dir calls, so a trivial or
-# purely conversational message is explicitly let through as plain prose. No
-# mechanism behind it, just wording; the branch is the model's to take.
+# purely conversational message is explicitly let through. It names the SHAPE
+# of that reply - one SAY block, then EOM - rather than saying "a plain reply":
+# an answer written outside the blocks reaches the user flattened, and one
+# written without an EOM line never reaches them at all. No mechanism behind
+# it, just wording; the branch is the model's to take.
 _ROLE_START = """\
 For a real task, start now: your first reply should already contain CLIP
 calls - use list_dir, glob or grep, read what you need. Never summarise this
 protocol back, ask whether to begin, or ask the user to paste code or run
-commands. A greeting or question needing nothing touched gets a plain reply.
+commands. A greeting or question needing nothing touched gets one SAY block
+and EOM.
 Project root: {workdir_name} on {os_name}."""
 
 _ROLE_SUBAGENT_BEAT = """\
@@ -92,8 +96,7 @@ SECTION 2 - TRANSPORT WARNINGS
 
 This chat's name is {chat_name}. Every message I send carries it, and every
 reply you send must carry it back on its final line - see section 3. Replies
-without the correct chat name are ignored by the relay, so it never mistakes
-text from another chat (or a stray copy-paste) for your work.
+without the correct chat name are ignored by the relay.
 
 {attachment_note}- Every message I send ends with a line
   ===CLIP:EOM turn=N chat={chat_name}===. If that line is missing, my paste
@@ -109,10 +112,16 @@ FENCE_INSTRUCTION = """\
 
 Put ALL CLIP blocks AND the final EOM line inside ONE fenced code block
 opened and closed with ~~~~ (four tildes, alone on a line) - the fence
-closes AFTER the EOM line. Never split them across multiple fences; prose
-goes outside the fence. If a content line starts with 3+ tildes, fence with
+closes AFTER the EOM line. Never split them across multiple fences; nothing
+goes outside it. If a content line starts with 3+ tildes, fence with
 MORE tildes than that line."""
 
+# Section 3 teaches TWO block kinds: CALL, which the executor runs, and SAY,
+# which is the model talking to the user. SAY exists because the alternative is
+# loose prose around the blocks, and prose is what this transport is unkind to:
+# the Chat UI renders a SAY as markdown, and a host that renders an unfenced
+# reply flattens whatever was left outside the fence (protocol.md tolerances
+# #14/#15). So a SAY rides inside the same fence as the calls.
 SECTION_GRAMMAR = """\
 SECTION 3 - HOW TO EMIT CALLS
 
@@ -132,8 +141,8 @@ The space before TAG is required: glued, some chat clients read it as HTML and
 swallow the rest of your reply.
 
 Collision rule: if any line of your content is exactly the tag, use a
-different tag - e.g. EOT2, RAW_A. Check before you write. Worked example,
-writing a file that itself contains a line "EOT":
+different tag - e.g. EOT2, RAW_A. Check before you write. Example, writing a
+file that itself contains a line "EOT":
 
 ===CLIP:CALL id=2 tool=write_file===
 path: notes.txt
@@ -144,6 +153,13 @@ last line
 EOT2
 ===CLIP:END===
 
+Anything for the user goes in a SAY block, as markdown; text outside blocks
+is not shown well:
+
+===CLIP:SAY===
+Fixing `parse_date` now.
+===CLIP:END===
+
 ids are integers starting at 1, unique within one reply. End every reply
 with exactly one line:
 
@@ -151,8 +167,7 @@ with exactly one line:
 
 where N is the number of CALL blocks in your reply and {chat_name} is this
 chat's name, written exactly as shown. A reply whose last line is missing,
-or carries a different chat name, is ignored by the relay - the user then
-has to prompt you again, which costs a round trip.
+or carries a different chat name, is ignored by the relay.
 {fence_instruction}"""
 
 TOOL_CATALOG_HEADER = """\

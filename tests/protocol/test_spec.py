@@ -128,12 +128,35 @@ def test_role_demands_calls_in_the_first_reply() -> None:
     assert "ask the user to paste code or run commands" in flat
 
 
-def test_role_lets_a_trivial_message_get_a_plain_reply() -> None:
+def test_role_lets_a_trivial_message_get_a_say_and_nothing_else() -> None:
     """The push for turn-1 tool calls is aimed at real tasks. Bootstrapped with
     "hi" it used to force pointless orientation calls, so the brief says out
-    loud that a conversational message needs none."""
+    loud that a conversational message needs none - and says what that reply
+    LOOKS like, because an answer written outside the blocks reaches the user
+    flattened and one written without an EOM line never reaches them at all."""
     flat = " ".join(render().split())
-    assert "A greeting or question needing nothing touched gets a plain reply." in flat
+    assert "A greeting or question needing nothing touched gets one SAY block and EOM." in flat
+
+
+def test_grammar_teaches_the_say_block() -> None:
+    """Everything meant for the user is a block, so the Chat UI can render it as
+    markdown instead of showing a flattened aside."""
+    text = render()
+    flat = " ".join(text.split())
+    assert "===CLIP:SAY===" in text
+    assert "Anything for the user goes in a SAY block, as markdown" in flat
+    assert "text outside blocks is not shown well" in flat
+    # The SAY example closes with an END like every other block.
+    say = text.index("===CLIP:SAY===")
+    assert text.index("===CLIP:END===", say) > say
+
+
+def test_the_fence_now_holds_everything() -> None:
+    """A SAY rides inside the same fence as the calls: outside it the host
+    renders it as prose, and prose copy loses line breaks (tolerance #14)."""
+    flat = " ".join(render(fence=True).split())
+    assert "Never split them across multiple fences; nothing goes outside it." in flat
+    assert "prose goes outside the fence" not in flat
 
 
 def test_rules_forbid_delegating_reads_and_commands_to_the_user() -> None:

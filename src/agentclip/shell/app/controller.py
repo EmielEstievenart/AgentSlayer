@@ -2052,9 +2052,19 @@ class SessionController:
         for prose in reply.prose:
             if prose.strip():
                 await self._view.add_prose(prose)
-        for call in reply.calls:
+        # SAY blocks and calls are shown in the order the model wrote them - a
+        # message explaining what it is about to do belongs ABOVE the calls it
+        # explains, which is what SayBlock.after_calls records. Loose prose goes
+        # first regardless: it is off-protocol text with no place in the block
+        # sequence to be ordered against.
+        says = list(reply.says)
+        for index, call in enumerate(reply.calls):
+            while says and says[0].after_calls <= index:
+                await self._view.add_say(says.pop(0).text)
             self._stats.calls[call.tool] += 1
             await self._view.add_call(call)
+        for say in says:
+            await self._view.add_say(say.text)
         if reply.truncated:
             await self._view.add_error(
                 "reply arrived truncated - the model will be told to resend the missing tail"

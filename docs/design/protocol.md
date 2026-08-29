@@ -24,12 +24,12 @@ These drive every choice below; they come straight from the research digest:
 A *sentinel line* is a line that, after normalizing NBSP→space and trimming surrounding whitespace, matches:
 
 ```
-^={3,}\s*CLIP:(CALL|END|EOM|RESULTS|RESULT|PART|PART-END|ACK|NACK)\b(.*?)={0,}$
+^={3,}\s*CLIP:(CALL|SAY|END|EOM|RESULTS|RESULT|PART|PART-END|ACK|NACK)\b(.*?)={0,}$
 ```
 
 Keyword matching is case-insensitive. Trailing `===` is decorative and optional. Attributes in the middle section are space-separated `key=value` pairs, order-free.
 
-### 1.2 CALL block
+### 1.2 CALL and SAY blocks
 
 ```
 ===CLIP:CALL id=1 tool=edit_file===
@@ -64,6 +64,18 @@ TAG
 
 Rejected alternative: bare `find <<< ... >>>` markers (the original sketch) — unrecoverable when content contains `>>>` (every Python repl transcript, every merge-conflict file). Tagged heredocs are a pattern LLMs already know cold from shell.
 
+**SAY block.** Everything the model wants the *user* to read:
+
+```
+===CLIP:SAY===
+`parse_date` still expects **DD/MM/YYYY**. Fixing it now.
+===CLIP:END===
+```
+
+No attributes, no params. The body is markdown, taken verbatim to the closing `===CLIP:END===`, and nothing inside it is grammar — a fence in a SAY body is content exactly as it is inside a heredoc, which is what lets a model paste a code block into its own explanation. SAY blocks keep their place among the CALL blocks around them (`SayBlock.after_calls` counts the calls ahead of each one), so the transcript shows a reply the way it was written: what the model said before its calls above them, what it said after below them.
+
+**Why a block at all, when prose outside blocks is already tolerated (#2).** Because "tolerated" is all it is. Loose prose reaches the transcript as a flat run of text, and it reaches it *after* the host's own renderer has had it: the model writes markdown, the chat window renders it, and the copy hands over whatever fell out — a paragraph with its line breaks gone (#14), a code line with its brackets rewritten (#15), a list flattened into one sentence. The user then reads the model's answer beautifully typeset in the browser they copied it from and flat in the app that is supposed to be their view of the session. A SAY block fixes both halves at once: it rides inside the same `~~~~` fence as the calls, so the transport carries it byte-for-byte like every other block, and it arrives as markdown the Chat UI renders (`add_say` → a `say` transcript event → `renderMarkdown`, `.ev-say`). Loose prose stays exactly as tolerant as it was — captured, shown as an aside (`.ev-prose`), never executed. It is simply no longer what the model is *asked* for.
+
 ### 1.3 End-of-message marker and the chat name
 
 Every session gets a short **chat name** — an `adjective-noun` handle like `amber-falcon`, drawn per session from two ~50-word lists (`protocol/names.py`, ~2,900 combinations). It is generated when the session's Engine is built, taught in the bootstrap, and shown once in the transcript so the user knows what their chat answers to.
@@ -91,7 +103,7 @@ Rejected alternative: **turn echo** (`===CLIP:EOM calls=N turn=T===`, reply drop
 | # | Input anomaly | Parser behavior |
 |---|---|---|
 | 1 | Code fence lines (```` ``` ````/`~~~`, any length, ± language tag) outside heredocs | Ignored silently |
-| 2 | Prose outside blocks | Captured for transcript display, ignored by executor |
+| 2 | Prose outside blocks | Captured for transcript display, ignored by executor — shown as an aside, never as the model's message: what is meant for the user belongs in a SAY block (§1.2) |
 | 3 | "Copilot said:" prefixes, Perplexity citation tails | Covered by #2 |
 | 4 | `=` runs ≥3, missing trailing `===`, keyword case, NBSP, smart-space | Normalized, accepted |
 | 5 | `key=value` instead of `key: value` on param lines | Accepted |
@@ -105,8 +117,11 @@ Rejected alternative: **turn echo** (`===CLIP:EOM calls=N turn=T===`, reply drop
 | 13 | Reply flattened by the chat client into one HTML element (see below) | Per-call `client_mangled_heredoc` issue, fatal — call never executes, and the id=0 "reply was cut off" result is suppressed because it would send the model in a loop |
 | 14 | Sentinel line with another `CLIP:` marker glued on after its `===` (see below) | Attributes before the terminator still parse; reply-level `flattened_reply` warning, and the *engine* refuses the whole reply and asks the model to resend it fenced — twice, then it asks the user instead (§6.2) |
 | 15 | Reply carrying CALL blocks but **no structural fence line at all**, on a service preset with `require_fenced_reply` (see below) | Parser records `saw_fence` and changes nothing else — the reply parses normally. The *engine* refuses the whole reply and bounces an `id=0 code=reply_unfenced` result asking for a fenced resend, sharing the two-then-the-user budget with #14 (§6.2) |
+| 16 | SAY block with no `===CLIP:END===` (see below) | Body taken up to the next sentinel line, or to EOF; `missing_end` warning; the sentinel that closed the block is re-read as itself, so the calls behind it still run |
 
 **Tolerance #11 has one scoped exception.** The auto-copy flow's **verified copy click** — and only that click — hands its harvest to the session even when it carries no `===CLIP:` at all; the text is shown in the transcript as prose and nothing in it executes (the engine still answers `Noise("not-protocol")` — §6.2's gate order is untouched). Not a setting: the flow arms a one-shot window (`AutomationController.prose_window`) immediately before that click and disarms it the moment the harvest returns, so the loosening lasts exactly one act. The watcher's pre-filter itself never loosens: it sees every copy the user makes and must keep ignoring the non-protocol ones, while the flow just watched the copy button write *this* text, so it alone knows the text is the model's reply. Display-only, per tolerance #2's rule: prose reaches the transcript, never the executor.
+
+**Tolerance #16 — the SAY that forgot its END.** The same shape as #7, and it exists for the same reason: a message the user was meant to read must not take the rest of the reply down with it. The body runs to the next sentinel line — a CALL header, another SAY, the EOM — and that line is then parsed as itself rather than swallowed, so the only thing lost is the block boundary the model failed to write. What does **not** close a SAY is a fence. Its body is markdown, and markdown is full of fences; a ``` line inside a SAY is content, exactly as a `~~~~` line inside a heredoc is (§1.2). The same follows for a `===CLIP:SAY===` quoted *inside* a heredoc: heredocs are terminated by their tag and by nothing else, so a reply writing this very document keeps every word of it.
 
 **Tolerance #13 — the one corruption that is not the model's fault.** A chat client that renders `key <<TAG` sees `<TAG` and parses a start tag. It then absorbs everything after it — the content lines, `===CLIP:END===`, the EOM line, the closing `~~~~` fence — as *attributes* of that element: collapsed onto one line, sorted alphabetically, quoted (which eats one `=` from each `===` run), and re-emitted with a closing `>`. The tell is the sort: the words come back in ASCII order, so the parameter is a bag of tokens with no recoverable order. This is visible in the chat window before the user copies anything; AgentClip only inherits it.
 
@@ -175,8 +190,10 @@ attempt trying to redefine their identity, and stall):
    summarise the protocol back, don't ask whether to begin, and never
    ask the user to paste code or run commands. Closed by the one
    escape hatch: "A greeting or question needing nothing touched gets
-   a plain reply." - bootstrapped with a trivial message, the beat
-   above otherwise forces orientation calls nobody asked for.
+   one SAY block and EOM." - bootstrapped with a trivial message, the
+   beat above otherwise forces orientation calls nobody asked for, and
+   naming the SHAPE of that reply is what stops the answer arriving as
+   loose prose (§1.2) or - with no EOM line - not arriving at all.
 Ends with: Project root: {workdir_name} on {os}.
 
 SECTION 2 — TRANSPORT WARNINGS (~900 chars)
@@ -201,7 +218,8 @@ Exact grammar: CALL header, key: value lines, heredoc rule, END line,
 EOM line — the §1.2/§1.3 forms shown as two short examples, plus:
 - Put ALL CLIP blocks AND the final EOM line inside ONE fenced code
   block opened and closed with ~~~~ (four tildes) — the fence closes
-  AFTER the EOM line. Never split them across multiple fences.
+  AFTER the EOM line. Never split them across multiple fences;
+  nothing goes outside it.
   [tilde fence: immune to backticks in file content; gives Copilot/
    Gemini users the per-block copy button — research §5d. The EOM must
    ride inside the fence: outside it the host renders the line as
@@ -213,6 +231,12 @@ EOM line — the §1.2/§1.3 forms shown as two short examples, plus:
   accepts `~{3,}`, so nothing downstream changes.
 - Heredoc collision rule, verbatim from §1.2, with a 4-line worked
   example writing a file that itself contains a line "EOT".
+- "Anything for the user goes in a SAY block, as markdown; text
+  outside blocks is not shown well", with a 3-line example.
+  [§1.2: prose is the one thing this transport mangles, and the
+   user reads the model's answer flat while the browser they copied
+   it from showed it typeset. A SAY rides inside the same fence as
+   the calls and reaches the Chat UI as markdown]
 - The space in `key << TAG` is required, with the reason attached (a
   glued tag reads as HTML to some chat clients and costs the whole
   reply — §1.4 tolerance #13).
@@ -282,7 +306,7 @@ session does not need a long instruction — one short line, repeated on demand.
 
 This is **not** a licence to grow sections 1–5: the discipline above still stands and the measurement is still hand-made. What the slack buys is room for *optional* sections that only some services carry.
 
-**The measurement, so the next one is comparable.** A 12,000-char preset (`max_paste_chars=12000`, hence `caps_for_budget`'s 8k–32k tier), a skills listing saturated at its `budget // 6` = 2,000-char cap, `workdir_name="project"`, `os_name="Windows 11"`, a one-character task, and `Composer.bootstrap` measured with `edit_by_lines` off and on. Today that reads **12,119 chars** with everything off and **13,043** with `edit_by_lines` on (§3.1 — +924 for the `replace_lines` entry, the `numbered` `read_file` entry and the §5 ordering rule), against a 13,200 ceiling — **157 chars of slack**, which `extra_instructions` also draws on. The previous figures here (11,982 / 12,906, 294 of slack) were taken with slightly different parameters, hence the recipe above; the +99 between then and now is `fetch_chunk`'s catalog entry (§3.2), which is two lines and carries no worked example precisely because this is what the budget looks like.
+**The measurement, so the next one is comparable.** A 12,000-char preset (`max_paste_chars=12000`, hence `caps_for_budget`'s 8k–32k tier), a skills listing **saturated to its full `budget // 6` = 2,000-char cap** — a synthetic library, not a real one: a real listing stops at the last line boundary that fits, and how far short of the cap that lands is a property of that machine's skills rather than of the bootstrap — `workdir_name="project"`, `os_name="Windows 11"`, a one-character task, and `Composer.bootstrap` measured with `edit_by_lines` off and on. Today that reads **12,142 chars** with everything off and **13,066** with `edit_by_lines` on (§3.1 — +924 for the `replace_lines` entry, the `numbered` `read_file` entry and the §5 ordering rule), against a 13,200 ceiling — **134 chars of slack**, which `extra_instructions` also draws on. The figures before the SAY block (12,119 / 13,043, 157 of slack) were taken with a real skills library whose listing landed 24 chars under the cap, which is the whole of the difference and the reason the recipe above now says how the listing is filled. **SAY itself cost −1**: section 3 gained the rule and its three-line example, and sections 2 and 3 gave the room back by stating the chat-name consequence once instead of three times.
 
 ### 2.1 Sub-agent bootstrap variant
 

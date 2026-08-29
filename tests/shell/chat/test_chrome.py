@@ -893,6 +893,29 @@ def test_the_run_panel_and_the_refocus_both_stand_off_a_live_selection() -> None
     assert "if (draggedOutText()) return;" in toggle[: toggle.index("});")]
 
 
+def test_a_say_is_rendered_as_markdown_and_styled_apart_from_loose_prose() -> None:
+    """A ===CLIP:SAY block is the model addressing the user, and it is markdown
+    because the protocol says so - so it goes through the same renderer the
+    user's own messages do. Loose prose still shows (tolerance #2), but as an
+    aside: the accent rule belongs to the message, not to the text the model
+    left lying outside its blocks. No JS runner here, so both are pinned in the
+    source the way ``revealReply``'s branch is.
+    """
+    js = (ASSETS / "app.js").read_text(encoding="utf-8")
+    branch = js[js.index('if (event.kind === "user"') :]
+    branch = branch[: branch.index("return;")]
+    assert 'event.kind === "say"' in branch
+    assert "renderMarkdown(event.text)" in branch
+
+    css = (ASSETS / "app.css").read_text(encoding="utf-8")
+    say = css[css.index(".ev-say {") :]
+    assert "border-left: 3px solid var(--accent);" in say[: say.index("}")]
+    prose = css[css.index(".ev-prose {") :]
+    prose = prose[: prose.index("}")]
+    assert "var(--accent)" not in prose  # the aside does not wear the message's rule
+    assert "color: var(--text-dim);" in prose
+
+
 def test_a_transcript_note_keeps_the_line_breaks_the_controller_wrote() -> None:
     """`/skills`, `/mcp` and `/config` all answer with a BLOCK of text - a header
     and one indented row per thing. The node is filled by innerHTML from an

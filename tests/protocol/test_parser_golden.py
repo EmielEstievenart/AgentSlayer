@@ -47,6 +47,7 @@ def to_json(reply: ParsedReply) -> dict[str, object]:
             }
             for call in reply.calls
         ],
+        "says": [{"text": say.text, "after_calls": say.after_calls} for say in reply.says],
         "prose": list(reply.prose),
         "warnings": [_issue_to_json(i) for i in reply.warnings],
         "eom": {
@@ -89,6 +90,7 @@ def test_golden_corpus_is_complete() -> None:
         "025-noise",
         "026-swallowed-call-recovery",
         "027-flattened-eom",
+        "030-say-blocks",
     }
     assert required <= names
     for p in GOLDEN_INPUTS:
@@ -324,6 +326,148 @@ def test_tilde_line_inside_heredoc_is_content_not_a_fence() -> None:
     )
     assert reply.calls[0].params["content"] == "~~~~\nstill content"
     assert not reply.truncated
+
+
+# --- SAY blocks: the model talking to the user -------------------------------
+
+
+def test_say_body_is_markdown_kept_verbatim() -> None:
+    """A SAY body is not grammar, so nothing in it is interpreted - fences
+    included. A model explaining a fix writes ``` blocks, and inside a SAY those
+    are content, exactly as they are inside a heredoc."""
+    reply = parse_reply(
+        "===CLIP:SAY===\n"
+        "## What I found\n"
+        "\n"
+        "```python\n"
+        "x = 1\n"
+        "```\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=0 chat=amber-falcon===\n"
+    )
+    assert [say.text for say in reply.says] == ["## What I found\n\n```python\nx = 1\n```"]
+    assert reply.prose == ()
+    assert reply.warnings == ()
+    # The fences were inside the block, so they say nothing about how the REPLY
+    # was rendered (tolerance #15's structural rule).
+    assert not reply.saw_fence
+
+
+def test_a_say_only_reply_is_a_finished_turn() -> None:
+    """The bootstrap's escape hatch: a greeting needing nothing touched is one
+    SAY block and the EOM line. It carries no calls and is not truncated."""
+    reply = parse_reply(
+        "~~~~\n"
+        "===CLIP:SAY===\n"
+        "Hello - what would you like me to work on?\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=0 chat=amber-falcon===\n"
+        "~~~~\n"
+    )
+    assert reply.kind == "reply"
+    assert reply.calls == ()
+    assert not reply.truncated
+    assert reply.eom.chat == "amber-falcon"
+    assert [say.text for say in reply.says] == ["Hello - what would you like me to work on?"]
+
+
+def test_says_keep_their_place_among_the_calls() -> None:
+    """`after_calls` is how the transcript shows a reply in the order it was
+    written: what the model said BEFORE the calls stays above them."""
+    reply = parse_reply(
+        "===CLIP:SAY===\n"
+        "Reading both files first.\n"
+        "===CLIP:END===\n"
+        "===CLIP:CALL id=1 tool=read_file===\n"
+        "path: a.py\n"
+        "===CLIP:END===\n"
+        "===CLIP:CALL id=2 tool=read_file===\n"
+        "path: b.py\n"
+        "===CLIP:END===\n"
+        "===CLIP:SAY===\n"
+        "Then I will run the tests.\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=2 chat=amber-falcon===\n"
+    )
+    assert [(say.text, say.after_calls) for say in reply.says] == [
+        ("Reading both files first.", 0),
+        ("Then I will run the tests.", 2),
+    ]
+    assert [call.id for call in reply.calls] == [1, 2]
+
+
+def test_say_without_an_end_is_auto_closed_at_the_next_sentinel() -> None:
+    """Tolerance #16: the message still reaches the user and the calls behind it
+    still run - the sentinel that closed the block is re-read as itself."""
+    reply = parse_reply(
+        "===CLIP:SAY===\n"
+        "Fixing the date parsing now.\n"
+        "===CLIP:CALL id=1 tool=read_file===\n"
+        "path: src/utils.py\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
+    )
+    assert [say.text for say in reply.says] == ["Fixing the date parsing now."]
+    assert [(c.id, c.tool, c.params) for c in reply.calls] == [
+        (1, "read_file", {"path": "src/utils.py"})
+    ]
+    assert [w.kind for w in reply.warnings] == ["missing_end"]
+    assert not reply.truncated
+
+
+def test_say_without_an_end_at_eof_keeps_the_body() -> None:
+    reply = parse_reply("===CLIP:SAY===\nhalf a thought\n")
+    assert [say.text for say in reply.says] == ["half a thought"]
+    # Missing END and missing EOM: the truncation flag is the EOM's job here, as
+    # it is for every other reply that stopped early.
+    assert {w.kind for w in reply.warnings} == {"missing_end", "truncation_suspected"}
+    assert reply.truncated
+
+
+def test_a_say_auto_closes_a_call_that_forgot_its_end() -> None:
+    """Same shape as tolerance #7 for a following CALL header: a SAY is a block
+    boundary, so an unterminated call above it closes there."""
+    reply = parse_reply(
+        "===CLIP:CALL id=1 tool=read_file===\n"
+        "path: a.py\n"
+        "===CLIP:SAY===\n"
+        "and here is why\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
+    )
+    assert [(c.id, c.params) for c in reply.calls] == [(1, {"path": "a.py"})]
+    assert [say.text for say in reply.says] == ["and here is why"]
+    assert [w.kind for w in reply.warnings] == ["missing_end"]
+
+
+def test_a_say_sentinel_inside_a_heredoc_is_content() -> None:
+    """Nothing terminates a heredoc but its tag - and nothing opens a block
+    inside one either, or a reply writing this very document would lose half of
+    itself."""
+    reply = parse_reply(
+        "===CLIP:CALL id=1 tool=write_file===\n"
+        "path: docs/protocol.md\n"
+        "content << EOT\n"
+        "===CLIP:SAY===\n"
+        "quoted, not spoken\n"
+        "===CLIP:END===\n"
+        "EOT\n"
+        "===CLIP:END===\n"
+        "===CLIP:EOM calls=1 chat=amber-falcon===\n"
+    )
+    assert reply.says == ()
+    assert reply.calls[0].params["content"] == (
+        "===CLIP:SAY===\nquoted, not spoken\n===CLIP:END==="
+    )
+    assert not reply.truncated
+
+
+def test_an_empty_say_block_is_dropped() -> None:
+    reply = parse_reply(
+        "===CLIP:SAY===\n===CLIP:END===\n===CLIP:EOM calls=0 chat=amber-falcon===\n"
+    )
+    assert reply.says == ()
+    assert reply.kind == "reply"
 
 
 # --- saw_fence: was there a fence at a STRUCTURAL position? ------------------

@@ -610,7 +610,11 @@
       revealReply(win);
       return;
     }
-    if (event.kind === "user" || event.kind === "prose") {
+    // Three kinds render as markdown: what the user typed, what the model SAID
+    // to them (a ===CLIP:SAY block, which is why it is markdown at all), and
+    // the loose text a model left outside its blocks. Only the class differs -
+    // a SAY is the model addressing the user, prose is an aside.
+    if (event.kind === "user" || event.kind === "say" || event.kind === "prose") {
       var label = event.label || (event.kind === "user" ? "you" : "assistant");
       append(
         win,

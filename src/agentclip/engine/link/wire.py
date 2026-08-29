@@ -148,6 +148,7 @@ from agentclip.protocol.types import (
     ParsedReply,
     ParseIssue,
     ResultStatus,
+    SayBlock,
     ToolCall,
     ToolResult,
 )
@@ -546,10 +547,20 @@ def decode_eom_info(value: Any, what: str = "eom") -> EomInfo:
     )
 
 
+def encode_say_block(value: SayBlock) -> dict[str, Any]:
+    return {"text": value.text, "after_calls": value.after_calls}
+
+
+def decode_say_block(value: Any, what: str = "say") -> SayBlock:
+    data = _mapping(value, what)
+    return SayBlock(text=_str_at(data, "text", what), after_calls=_int_at(data, "after_calls", what))
+
+
 def encode_parsed_reply(value: ParsedReply) -> dict[str, Any]:
     return {
         "kind": value.kind,
         "calls": [encode_tool_call(call) for call in value.calls],
+        "says": [encode_say_block(say) for say in value.says],
         "prose": list(value.prose),
         "warnings": [encode_parse_issue(issue) for issue in value.warnings],
         "eom": encode_eom_info(value.eom),
@@ -566,10 +577,17 @@ def encode_parsed_reply(value: ParsedReply) -> dict[str, Any]:
 def decode_parsed_reply(value: Any, what: str = "reply") -> ParsedReply:
     data = _mapping(value, what)
     calls = _as_list(_field(data, "calls", what), f"{what}.calls")
+    # SAY blocks landed after the first engines shipped, and an engine is a
+    # console script the user installs on the target themselves - so a peer that
+    # predates them sends no `says` key at all. Absent means "this parser knew
+    # no SAY", which is exactly an empty tuple; nothing is guessed, so this is
+    # not the kind of forward-read the wire version gate exists to forbid.
+    says = _as_list(data.get("says") or [], f"{what}.says")
     warnings = _as_list(_field(data, "warnings", what), f"{what}.warnings")
     return ParsedReply(
         kind=_literal_at(data, "kind", _REPLY_KINDS, what),
         calls=tuple(decode_tool_call(c, f"{what}.calls[{i}]") for i, c in enumerate(calls)),
+        says=tuple(decode_say_block(s, f"{what}.says[{i}]") for i, s in enumerate(says)),
         prose=_strs_at(data, "prose", what),
         warnings=tuple(
             decode_parse_issue(w, f"{what}.warnings[{i}]") for i, w in enumerate(warnings)

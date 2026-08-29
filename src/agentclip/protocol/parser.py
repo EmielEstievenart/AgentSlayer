@@ -19,6 +19,7 @@ from agentclip.protocol.types import (
     EomInfo,
     ParsedReply,
     ParseIssue,
+    SayBlock,
     ToolCall,
 )
 
@@ -26,7 +27,7 @@ from agentclip.protocol.types import (
 # case-insensitive; trailing `===` is decorative. NOTE: PART-END must precede
 # PART in the alternation or `\b` would happily split "PART-END" after "PART".
 _SENTINEL_RE = re.compile(
-    r"^={3,}\s*CLIP:(CALL|END|EOM|RESULTS|RESULT|PART-END|PART|ACK|NACK|TASK|NOTE)\b(.*?)=*$",
+    r"^={3,}\s*CLIP:(CALL|SAY|END|EOM|RESULTS|RESULT|PART-END|PART|ACK|NACK|TASK|NOTE)\b(.*?)=*$",
     re.IGNORECASE,
 )
 
@@ -206,6 +207,7 @@ class _Parser:
         self.lines = normalized.split("\n")
         self.n = len(self.lines)
         self.calls: list[ToolCall] = []
+        self.says: list[SayBlock] = []
         self.warnings: list[ParseIssue] = []
         self.prose: list[str] = []
         self._cur_prose: list[str] = []
@@ -251,6 +253,9 @@ class _Parser:
             if keyword == "CALL":
                 self._flush_prose()
                 i = self._parse_call(i, attrs)
+            elif keyword == "SAY":
+                self._flush_prose()
+                i = self._parse_say(i)
             elif keyword == "EOM":
                 self._flush_prose()
                 self._handle_eom(i, attrs)
@@ -367,7 +372,7 @@ class _Parser:
                     j += 1
                     closed = True
                     break
-                if kw in ("CALL", "EOM"):
+                if kw in ("CALL", "SAY", "EOM"):
                     # Tolerance #7: missing END auto-closes the block.
                     self.warnings.append(
                         ParseIssue(
@@ -478,6 +483,56 @@ class _Parser:
         )
         return j
 
+    # -- SAY blocks ----------------------------------------------------------
+
+    def _parse_say(self, start: int) -> int:
+        """Parse one SAY block starting at its header line index `start`.
+
+        The body is markdown addressed to the user and nothing in it is
+        grammar, so it is taken verbatim: fences inside it are CONTENT (a SAY
+        explaining a fix is full of ``` blocks) and only a sentinel line ends
+        it. ===CLIP:END=== is the terminator; any other sentinel auto-closes
+        the block where it stands (tolerance #16) and is re-read by the caller,
+        so a model that forgot the END still gets its message through and the
+        calls behind it still run.
+        """
+        j = start + 1
+        stop = self.n
+        closed = False
+        while j < self.n:
+            match = _SENTINEL_RE.match(self.lines[j].strip())
+            if match is None:
+                j += 1
+                continue
+            stop = j
+            if match.group(1).upper() == "END":
+                j += 1
+                closed = True
+            else:
+                self.warnings.append(
+                    ParseIssue(
+                        "missing_end",
+                        start + 1,
+                        f"===CLIP:END=== missing for the SAY block; auto-closed at line {j + 1}",
+                    )
+                )
+            break
+        if j >= self.n and not closed:
+            # EOF with the block still open. Not a truncation flag of its own:
+            # a reply that stopped mid-sentence has no EOM either, and that is
+            # what section 5.2 already gates on.
+            self.warnings.append(
+                ParseIssue(
+                    "missing_end",
+                    start + 1,
+                    "===CLIP:END=== missing for the SAY block; auto-closed at end of input",
+                )
+            )
+        text = "\n".join(self.lines[start + 1 : stop]).strip("\n").rstrip()
+        if text.strip():
+            self.says.append(SayBlock(text=text, after_calls=len(self.calls)))
+        return j
+
     def _find_heredoc_end(self, start: int, tag: str) -> int | None:
         """Index of the first line equal to `tag` after trim. Nothing else
         terminates a heredoc -- not END, not EOM, not a fence."""
@@ -539,6 +594,7 @@ def parse_reply(text: str) -> ParsedReply:
     return ParsedReply(
         kind=kind,  # type: ignore[arg-type]
         calls=tuple(p.calls),
+        says=tuple(p.says),
         prose=tuple(p.prose),
         warnings=tuple(warnings),
         eom=EomInfo(

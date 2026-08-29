@@ -462,13 +462,27 @@ button,
   color: var(--ok);
 }
 
-.ev-prose {
+/* The model talking TO the user: a ===CLIP:SAY block, rendered as markdown.
+   It carries the accent rule the reply is read by. */
+.ev-say {
   padding-left: 12px;
   border-left: 3px solid var(--accent);
 }
 
-.ev-prose .ev-head {
+.ev-say .ev-head {
   color: var(--accent);
+}
+
+/* Text the model left OUTSIDE every block - tolerated, shown, but not what the
+   protocol asked for, so it reads as an aside beside the SAY above it. */
+.ev-prose {
+  padding-left: 12px;
+  border-left: 3px solid var(--line);
+  color: var(--text-dim);
+}
+
+.ev-prose .ev-head {
+  color: var(--text-dim);
 }
 
 .ev-call {

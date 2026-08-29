@@ -18,6 +18,7 @@ PROTOCOL_MARKER = "===CLIP:"
 SENTINEL_KEYWORDS = frozenset(
     {
         "CALL",
+        "SAY",
         "END",
         "EOM",
         "RESULTS",
@@ -90,6 +91,20 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class SayBlock:
+    """One ===CLIP:SAY block: markdown the model addressed to the USER.
+
+    ``after_calls`` is how many CALL blocks stood ahead of it in the reply, and
+    it exists so the transcript can show the reply in the order it was written
+    - "here is what I found", then the calls that follow from it. Nothing
+    executes from a SayBlock; it is the model talking.
+    """
+
+    text: str
+    after_calls: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class EomInfo:
     present: bool
     calls: int | None = None  # the LLM's own count of CALL blocks it sent
@@ -104,7 +119,7 @@ class ParsedReply:
     """Result of parsing one ingested clipboard text.
 
     kind:
-      "reply" - a normal LLM reply (calls and/or prose)
+      "reply" - a normal LLM reply (calls, SAY blocks and/or prose)
       "ack"   - a chunk handshake ===CLIP:ACK k/n===
       "nack"  - ===CLIP:NACK ...=== (reason in nack_reason)
       "noise" - no protocol content found
@@ -112,6 +127,10 @@ class ParsedReply:
 
     kind: Literal["reply", "ack", "nack", "noise"]
     calls: tuple[ToolCall, ...] = ()
+    # What the model said TO the user, in SAY blocks, in reply order. Loose text
+    # outside every block still lands in ``prose`` (tolerance #2) - it is the
+    # model writing outside the protocol, and it renders as an aside.
+    says: tuple[SayBlock, ...] = ()
     prose: tuple[str, ...] = ()
     warnings: tuple[ParseIssue, ...] = ()
     eom: EomInfo = EomInfo(present=False)

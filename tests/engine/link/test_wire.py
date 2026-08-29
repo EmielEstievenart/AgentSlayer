@@ -40,7 +40,14 @@ from agentclip.executor.mcp.types import McpServerState, McpServerStatus
 from agentclip.executor.permissions import PermissionMode
 from agentclip.executor.tools.skills import SkillLine, SkillReport
 from agentclip.protocol.composer import BudgetExceeded
-from agentclip.protocol.types import EomInfo, Outbound, ParsedReply, ParseIssue, ToolCall
+from agentclip.protocol.types import (
+    EomInfo,
+    Outbound,
+    ParsedReply,
+    ParseIssue,
+    SayBlock,
+    ToolCall,
+)
 from agentclip.shell.app.link import Link
 
 # -- sample values -------------------------------------------------------------
@@ -74,6 +81,7 @@ def _reply() -> ParsedReply:
     return ParsedReply(
         kind="reply",
         calls=(_call(),),
+        says=(SayBlock("**Editing** `utils.py` now.", 0), SayBlock("Tests next.", 1)),
         prose=("I will edit the file.", "Then run the tests."),
         warnings=(_issue(),),
         eom=EomInfo(present=True, calls=1, turn=7, chat="brisk-otter"),
@@ -169,6 +177,16 @@ def test_outbound_round_trips_every_chunk() -> None:
 def test_parsed_reply_round_trips() -> None:
     reply = _reply()
     assert wire.decode_parsed_reply(wire.encode_parsed_reply(reply)) == reply
+
+
+def test_a_reply_from_an_engine_that_never_heard_of_say_decodes() -> None:
+    """SAY landed after the first engines shipped, and the engine half is a
+    console script the user installs on the target themselves. A peer without it
+    sends no `says` key at all, which means "this parser knew no SAY" - an empty
+    tuple, not a guess."""
+    encoded = wire.encode_parsed_reply(_reply())
+    del encoded["says"]
+    assert wire.decode_parsed_reply(encoded).says == ()
 
 
 def test_status_round_trips_and_session_dir_survives_as_a_path() -> None:

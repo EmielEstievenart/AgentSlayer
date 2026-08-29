@@ -1,0 +1,27 @@
+~~~~
+===CLIP:SAY===
+## What I found
+
+`parse_date` still expects **DD/MM/YYYY**:
+
+```python
+datetime.strptime(s, "%d/%m/%Y")
+```
+
+- the spec says ISO dates
+- the tests agree
+===CLIP:END===
+===CLIP:CALL id=1 tool=edit_file===
+path: src/utils.py
+find << EOT
+%d/%m/%Y
+EOT
+replace << EOT
+%Y-%m-%d
+EOT
+===CLIP:END===
+===CLIP:SAY===
+Running the tests next.
+===CLIP:END===
+===CLIP:EOM calls=1 chat=amber-falcon===
+~~~~

@@ -132,6 +132,9 @@ class FakeChatView:
     async def add_user(self, text: str) -> None:
         self.events.append(("user", text))
 
+    async def add_say(self, text: str) -> None:
+        self.events.append(("say", text))
+
     async def add_prose(self, text: str) -> None:
         self.events.append(("prose", text))
 

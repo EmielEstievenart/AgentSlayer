@@ -12,6 +12,7 @@
       "issues": []
     }
   ],
+  "says": [],
   "prose": [
     "Sources\n[1] https://docs.python.org/3/library/datetime.html\n[2] https://example.com/datetime-formats"
   ],

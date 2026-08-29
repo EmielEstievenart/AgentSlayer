@@ -139,6 +139,7 @@ def test_ingest_result_round_trips(value: object) -> None:
         Delegate(task="port the parser", context="see docs/design", call_id=4),
         Done(summary="all green", outbound=None, result=""),
         Done(summary="all green", outbound=_outbound(), result="the deliverable"),
+        Done(summary="", outbound=None, result="", waiting=True),
     ],
 )
 def test_step_result_round_trips(value: object) -> None:

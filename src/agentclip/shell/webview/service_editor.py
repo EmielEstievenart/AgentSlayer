@@ -218,9 +218,11 @@ OPENCV_MISSING_FROZEN = (
     "Nothing to install: it has to be built in."
 )
 
-# The footer hint. The TUI says "escape closes"; so does this shell (Esc is the
-# editor's close everywhere), so the sentence carries over whole.
-FOOTER_HINT = "escape closes (applies valid edits) · built-ins: edit or reset, never delete"
+# The footer hint. It used to open with "escape closes (applies valid edits)":
+# the editor is the Monitor UI's own window now, every edit applies as it is
+# made (ui-monitor.md §11.10), and closing is the monitor's title bar, not a
+# key - so the hint says only what is left to say.
+FOOTER_HINT = "edits apply as you make them · built-ins: edit or reset, never delete"
 
 FORGET_TITLE = "Forget the {key} appearance?"
 FORGET_BODY = (

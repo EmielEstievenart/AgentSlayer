@@ -9,7 +9,7 @@ the user in markdown, ``prose`` is whatever it left outside its blocks.
 
 from __future__ import annotations
 
-from agentclip.shell.app.controller import SessionController
+from agentclip.shell.app.controller import WAITING_FOR_USER, SessionController
 
 from .conftest import MASTER_CHAT, FakeChatView, settle, start_session
 
@@ -48,13 +48,13 @@ async def test_says_reach_the_transcript_in_reply_order(
     assert ("prose", "a stray sentence outside every block") in view.events
 
 
-async def test_a_say_only_reply_is_a_turn_like_any_other(
+async def test_a_say_only_reply_waits_for_the_user(
     controller: SessionController, view: FakeChatView
 ) -> None:
     """The bootstrap's escape hatch: a greeting needing nothing touched is one
-    SAY block and the EOM line. It carries no calls, so the engine answers it
-    with the same "every reply must contain at least one call" note a prose-only
-    reply always got - and the message itself still reaches the user."""
+    SAY block and the EOM line. It carries no calls, and it is NOT nagged for
+    that: the model is talking to the user, so nothing is copied out, the
+    transcript says the session is waiting, and the message reaches the user."""
     await start_session(controller, view)
     view.events.clear()
     before = len(view.copied)
@@ -70,4 +70,5 @@ async def test_a_say_only_reply_is_a_turn_like_any_other(
     await settle(view)
 
     assert ("say", "Hello - what would you like me to work on?") in view.events
-    assert len(view.copied) == before + 1  # the nag went out; the turn completed
+    assert ("note", WAITING_FOR_USER) in view.events
+    assert len(view.copied) == before  # nothing to paste back: the user's turn

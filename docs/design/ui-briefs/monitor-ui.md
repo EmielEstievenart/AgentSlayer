@@ -400,8 +400,11 @@ constrained, and today it does neither.
 ### 6.8 Two verbs are declared and unused
 
 `start()` and `close_window()` exist on the js_api and the page never calls
-them. The page's only close door is the editor's `Close (esc)`; there is no
-window-close button in the header at all.
+them. The page has no close door at all any more: the editor's `Close (esc)`
+button was removed once every edit applied on the spot (§11.10) — it closed the
+whole monitor, and read as "save and close". The window's title-bar close is the
+one way out, and `CalibrationView.request_close` still routes it through the
+editor's apply path.
 
 ---
 

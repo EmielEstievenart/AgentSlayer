@@ -709,6 +709,42 @@ def test_call_less_reply_gets_nudge(engine: Engine) -> None:
     assert "no tool calls" in step.outbound.chunks[0]
 
 
+SAY_ONLY_REPLY = """===CLIP:SAY===
+Hi! What would you like me to work on?
+===CLIP:END===
+===CLIP:EOM calls=0 chat=amber-falcon===
+"""
+
+
+def test_a_say_only_reply_parks_the_session_waiting_for_the_user(engine: Engine) -> None:
+    """The bootstrap's own escape hatch ("a greeting or question needing nothing
+    touched gets one SAY block and EOM") must not be answered with the no-calls
+    nag: the model is talking to the user, so the session parks as after
+    task_done - nothing goes out, a follow-up reopens it."""
+    engine.start_task("t")
+    assert isinstance(engine.ingest(SAY_ONLY_REPLY), NewTurn)
+    step = engine.execute()
+    assert isinstance(step, Done)
+    assert step.waiting
+    assert step.outbound is None and step.summary == ""
+    assert engine.status().phase is Phase.DONE
+
+    out = engine.follow_up("please read the README")
+    assert out.kind == "user_answer"
+    assert engine.status().phase is Phase.AWAITING_REPLY
+
+
+def test_a_sub_agent_saying_things_is_still_nagged(make_engine) -> None:  # type: ignore[no-untyped-def]
+    """A sub-agent has no user to wait on: a SAY-only reply from it is a stall,
+    and the nag is the only thing that gets it moving again."""
+    engine = make_engine(role="subagent")
+    engine.start_task("t")
+    assert isinstance(engine.ingest(SAY_ONLY_REPLY), NewTurn)
+    step = engine.execute()
+    assert isinstance(step, Send)
+    assert "no tool calls" in step.outbound.chunks[0]
+
+
 def test_follow_up_task_payload(engine: Engine) -> None:
     engine.start_task("t")
     out = engine.follow_up("also update the docs")

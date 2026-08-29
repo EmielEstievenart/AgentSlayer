@@ -205,8 +205,8 @@ SECTION 5 - RULES OF ENGAGEMENT
 
 _DONE_RULE = """\
 - When the task is complete and verified, send task_done. Until then every
-  reply must contain at least one tool call. After task_done the session is
-  over; do not emit further calls."""
+  reply must contain at least one tool call, unless it is only a SAY waiting
+  on the user. After task_done the session is over; do not emit further calls."""
 
 _DONE_RULE_SUBAGENT = """\
 - When the task is complete and verified, send task_done with `result`

@@ -409,6 +409,32 @@ MONITOR_LOCAL_STARTING = "starting a monitor on this PC - the link comes up when
 # The launch itself refused. Distinct from a dial that failed, because nothing
 # was ever started: no exe beside this one, no permission to spawn, no port.
 MONITOR_LOCAL_FAILED = "could not start a local monitor: {reason}"
+# How long a child this window just spawned is given to bind its port before
+# "cannot reach the monitor" is the truth about it, and the beat between the
+# dials inside that window. The spawn returns the moment the PROCESS exists;
+# the listener comes up some hundreds of milliseconds later (a Python
+# interpreter, pywebview, a socket), and every dial before then refuses. That
+# refusal is the child starting, not the child failing - so a launch waits it
+# out here, where the launcher can also say whether the child is still alive,
+# rather than handing the first refusal to a dialog that would print it as the
+# answer while the redial loop lands the link a second later. Generous rather
+# than tight: a frozen build on a cold disk can take several seconds to import,
+# and a child that has really died is caught by ``alive()`` long before this.
+MONITOR_LOCAL_START_S = 20.0
+MONITOR_LOCAL_START_POLL_S = 0.25
+# How long a child this window just spawned is given to bind its port before
+# "cannot reach the monitor" is the truth about it, and the beat between the
+# dials inside that window. The spawn returns the moment the PROCESS exists;
+# the listener comes up some hundreds of milliseconds later (a Python
+# interpreter, pywebview, a socket), and every dial before then refuses. That
+# refusal is the child starting, not the child failing - so a launch waits it
+# out here, where the launcher can also say whether the child is still alive,
+# rather than handing the first refusal to a dialog that would print it as the
+# answer while the redial loop lands the link a second later. Generous rather
+# than tight: a frozen build on a cold disk can take several seconds to import,
+# and a child that has really died is caught by ``alive()`` long before this.
+MONITOR_LOCAL_START_S = 20.0
+MONITOR_LOCAL_START_POLL_S = 0.25
 # What a launched child is called wherever a peer is shown. The launcher's own
 # name for its target, so the badge, the toasts and the Monitor tab all agree.
 MONITOR_LOCAL_PEER = LOCAL_MONITOR_NAME
@@ -3665,8 +3691,21 @@ class GuiView:
         self._local_launched = True
         self._exited_said = False
         self._monitor_target = launched.target
-        if await self._attach_monitor():
-            return True
+        # The child needs a moment to bind its port, and a dial that refuses in
+        # that moment is the child STARTING, not failing: keep dialling, with
+        # the "starting a monitor" sentence kept on the loop's note, until the
+        # link lands, the child dies, or the start window runs out. Only then
+        # is the last refusal news, and only then does the ordinary redial
+        # backoff take over (``MONITOR_LOCAL_START_S``).
+        clock = asyncio.get_running_loop().time
+        deadline = clock() + MONITOR_LOCAL_START_S
+        while True:
+            if await self._attach_monitor():
+                return True
+            if self._monitor_closing or not self._launcher.alive() or clock() >= deadline:
+                break
+            self._park_disconnected(MONITOR_LOCAL_STARTING)
+            await asyncio.sleep(MONITOR_LOCAL_START_POLL_S)
         self._begin_redial()
         return False
 

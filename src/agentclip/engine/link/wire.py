@@ -1003,6 +1003,7 @@ def encode_step_result(value: StepResult) -> dict[str, Any]:
             "summary": value.summary,
             "outbound": encode_opt_outbound(value.outbound),
             "result": value.result,
+            "waiting": value.waiting,
         }
     raise WireError(f"not a StepResult: {type(value).__name__}")
 
@@ -1028,6 +1029,9 @@ def _decode_done(data: dict[str, Any], what: str) -> StepResult:
         summary=_str_at(data, "summary", what),
         outbound=decode_opt_outbound(_field(data, "outbound", what), f"{what}.outbound"),
         result=_str_at(data, "result", what),
+        # Absent on a peer from before SAY-only replies parked the session:
+        # such a peer never sends a waiting Done, so the default is exact.
+        waiting=bool(data.get("waiting", False)),
     )
 
 

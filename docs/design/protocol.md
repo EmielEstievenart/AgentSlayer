@@ -270,7 +270,8 @@ SECTION 5 — RULES OF ENGAGEMENT (~1,250 chars)
   [truncated: showing lines 1-200 of 1843 - request further ranges].
   Re-request narrower slices instead of assuming you saw everything.
 - When the task is complete and verified, send task_done. Until then
-  every reply must contain at least one tool call.
+  every reply must contain at least one tool call, unless it is only a
+  SAY waiting on the user.
 
 SECTION 6 — THE TASK (~variable)
 ===CLIP:TASK===
@@ -306,7 +307,7 @@ session does not need a long instruction — one short line, repeated on demand.
 
 This is **not** a licence to grow sections 1–5: the discipline above still stands and the measurement is still hand-made. What the slack buys is room for *optional* sections that only some services carry.
 
-**The measurement, so the next one is comparable.** A 12,000-char preset (`max_paste_chars=12000`, hence `caps_for_budget`'s 8k–32k tier), a skills listing **saturated to its full `budget // 6` = 2,000-char cap** — a synthetic library, not a real one: a real listing stops at the last line boundary that fits, and how far short of the cap that lands is a property of that machine's skills rather than of the bootstrap — `workdir_name="project"`, `os_name="Windows 11"`, a one-character task, and `Composer.bootstrap` measured with `edit_by_lines` off and on. Today that reads **12,142 chars** with everything off and **13,066** with `edit_by_lines` on (§3.1 — +924 for the `replace_lines` entry, the `numbered` `read_file` entry and the §5 ordering rule), against a 13,200 ceiling — **134 chars of slack**, which `extra_instructions` also draws on. The figures before the SAY block (12,119 / 13,043, 157 of slack) were taken with a real skills library whose listing landed 24 chars under the cap, which is the whole of the difference and the reason the recipe above now says how the listing is filled. **SAY itself cost −1**: section 3 gained the rule and its three-line example, and sections 2 and 3 gave the room back by stating the chat-name consequence once instead of three times.
+**The measurement, so the next one is comparable.** A 12,000-char preset (`max_paste_chars=12000`, hence `caps_for_budget`'s 8k–32k tier), a skills listing **saturated to its full `budget // 6` = 2,000-char cap** — a synthetic library, not a real one: a real listing stops at the last line boundary that fits, and how far short of the cap that lands is a property of that machine's skills rather than of the bootstrap — `workdir_name="project"`, `os_name="Windows 11"`, a one-character task, and `Composer.bootstrap` measured with `edit_by_lines` off and on. Today that reads **12,187 chars** with everything off and **13,111** with `edit_by_lines` on (§3.1 — +924 for the `replace_lines` entry, the `numbered` `read_file` entry and the §5 ordering rule), against a 13,200 ceiling — **89 chars of slack**, which `extra_instructions` also draws on. (12,142 / 13,066 / 134 before section 5's last rule gained "unless it is only a SAY waiting on the user" — +45, the exception the engine now honours instead of nagging.) The figures before the SAY block (12,119 / 13,043, 157 of slack) were taken with a real skills library whose listing landed 24 chars under the cap, which is the whole of the difference and the reason the recipe above now says how the listing is filled. **SAY itself cost −1**: section 3 gained the rule and its three-line example, and sections 2 and 3 gave the room back by stating the chat-name consequence once instead of three times.
 
 ### 2.1 Sub-agent bootstrap variant
 
@@ -645,6 +646,7 @@ EOT
 - Self-write suppression: every string `render_results` produces gets its normalized hash registered with the watcher *before* the clipboard write.
 - Heredoc tag generation for outbound bodies must scan content and guarantee no collision.
 - `task_done` flips session state to "complete"; watcher keeps running (user may continue) but the TUI must signal completion.
+- A master reply that is **SAY blocks and nothing else** (no calls, not truncated, no `task_done`) is the model talking to the user, not stalling: the Engine parks the session in `DONE` exactly as `task_done` does — nothing is copied out, no summary is recorded — and returns `Done(waiting=True)`; the shell says "waiting for your reply" and the user's next message reopens the session through the ordinary follow-up. Only that shape is let through: a prose-only or empty reply still earns the "every reply must contain at least one tool call" note, and a **sub-agent** is nagged for a SAY-only reply too (it has no user to wait on). This is what makes the bootstrap's "a greeting or question needing nothing touched gets one SAY block and EOM" true rather than a round trip.
 
 **TUI designer must honor:**
 - Watcher pre-filter is the literal substring `===CLIP:`; all parsing happens off the UI thread; detection arrives as a posted message carrying `ParsedReply`.

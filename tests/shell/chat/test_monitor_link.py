@@ -170,6 +170,7 @@ def _instant_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     machine that is restarting) is not a claim a suite can make faster, and the
     schedule itself is pinned by reading the constants, not by sleeping."""
     monkeypatch.setattr(view_module, "MONITOR_BACKOFF_START", 0.0)
+    monkeypatch.setattr(view_module, "MONITOR_LOCAL_START_POLL_S", 0.0)
 
 
 # == the first dial ============================================================
@@ -403,6 +404,51 @@ async def test_the_dial_failures_while_a_child_is_starting_are_quiet(
     toasts = split.toasts()
     assert any(MONITOR_LOCAL_STARTING in toast for toast in toasts)
     assert not any("cannot reach the monitor" in toast for toast in toasts)
+
+
+async def test_a_launch_waits_out_the_child_binding_its_port(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """The refusals while the child boots are the child STARTING, so the launch
+    itself keeps dialling and answers True once the link lands - which is what
+    the Monitor tab's dialog reports. It used to hand the first refusal to the
+    dialog as "cannot reach the monitor" while the redial landed the link a
+    second later: a failure on the form for a monitor that was up."""
+    launcher = FakeLauncher()
+    dial = Dialler(
+        ConnectionRefusedError("not yet"), ConnectionRefusedError("not yet"), ScriptedLink()
+    )
+    split = build_local(project, app_config, tmp_path, dial, launcher)
+
+    # Driven by hand rather than through start(): the launch is the thing under
+    # test, and start() would already have run one.
+    assert await split.view._launch_local_monitor() is True
+    assert len(dial.dialled) == 3
+    assert split.view.automation.loop_state is LoopState.IDLE
+    assert not any("cannot reach the monitor" in toast for toast in split.toasts())
+
+
+async def test_a_launch_stops_waiting_when_the_child_dies(
+    project: Path, app_config: Config, tmp_path: Path
+) -> None:
+    """The start window is for a child that is still coming up. One that has
+    exited gets no more of it: the launch answers False at once and the
+    ordinary redial (and its exit sentence) take over."""
+    launcher = FakeLauncher()
+    dialled: list[tuple[str, int]] = []
+
+    async def dial(host: str, port: int, token: str = "", theme: str = "") -> Any:
+        # The child crashes right after the spawn: the refusal that follows is
+        # the last one the launch should make.
+        dialled.append((host, port))
+        launcher.died(3)
+        raise ConnectionRefusedError("gone")
+
+    split = build_local(project, app_config, tmp_path, dial, launcher)
+
+    assert await split.view._launch_local_monitor() is False
+    assert len(dialled) == 1
+    assert LOCAL_MONITOR_EXITED.format(code=3) in split.view._monitor_failure
 
 
 async def test_a_child_that_died_is_named_in_the_disconnected_reason(

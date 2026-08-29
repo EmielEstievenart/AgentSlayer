@@ -152,9 +152,11 @@ over the SSH connection it already holds, which is easier than:
 ssh -N -L 7777:127.0.0.1:7777 you@the-vm     # then: agentclip --monitor 127.0.0.1:7777
 ```
 
-**Keys in the Monitor UI:** `Esc` closes the modal if one is up, otherwise closes
-the window. That is the whole list — everything else on that window is a control
-you click, and it is specified by `docs/design/ui-briefs/monitor-ui.md`.
+**Keys in the Monitor UI:** `Esc` closes the modal if one is up. That is the
+whole list — everything else on that window is a control you click, and it is
+specified by `docs/design/ui-briefs/monitor-ui.md`. There is no Close button:
+closing the window (its title bar) closes the monitor process, which every Chat
+UI attached to it will notice.
 
 **Nothing there waits for a close.** Every setting in the service editor applies
 the moment you change it: saved to that machine's global config.toml, run by the

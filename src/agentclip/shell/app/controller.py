@@ -133,6 +133,14 @@ def _gone_service_body(key: str) -> str:
     )
 
 
+# What the transcript says under a reply that was SAY blocks and nothing else:
+# the model is waiting on the user, the session is parked, nothing was copied.
+WAITING_FOR_USER = "waiting for your reply"
+
+# What the transcript says under a reply that was SAY blocks and nothing else:
+# the model is waiting on the user, the session is parked, nothing was copied.
+WAITING_FOR_USER = "waiting for your reply"
+
 _EMPTY_RESULT_BODY = (
     "the sub-agent finished without stating a result. Treat the sub-task as "
     "unverified and check anything you depended on it for."
@@ -2230,6 +2238,15 @@ class SessionController:
             await self._refresh_status()
             return
         assert isinstance(step, Done)
+        if step.waiting:
+            # SAY blocks and nothing else: the model is talking to the user,
+            # not finishing. The SAYs are already in the transcript (they were
+            # added with the calls), so all that is owed is the state: the
+            # session sits parked until the user types, exactly like DONE,
+            # minus the "task done" announcement nothing earned.
+            await self._view.add_note(WAITING_FOR_USER)
+            await self._refresh_status()
+            return
         if step.outbound is not None:
             await self._copy_outbound(step.outbound)
             await self._view.add_outbound(step.outbound, "final results copied")

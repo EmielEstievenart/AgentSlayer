@@ -81,13 +81,17 @@ def test_the_page_draws_the_editor_the_column_and_the_two_overlays() -> None:
     fullscreen child processes need a door apiece."""
     html = asset(ENTRY_PAGE)
     js = asset("app.js")
-    for element in ("svc-select", "svc-kinds", "svc-close", "el-rows", "elements-title",
+    for element in ("svc-select", "svc-kinds", "el-rows", "elements-title",
                     "calib-tabs", "calib-region", "scrim", "toasts"):
         assert f'id="{element}"' in html, element
     assert 'api("set_region")' in js
     assert 'api("identify")' in js
     assert 'api("elements", elementsOpen)' in js
-    assert 'api("svc_close")' in js
+    # No close door on the page: the old Close (esc) button shut the whole
+    # monitor. The window's title bar is the way out (close_from_page /
+    # request_close), so the page neither draws nor calls svc_close.
+    assert 'id="svc-close"' not in html
+    assert 'api("svc_close")' not in js
 
 
 def test_the_page_draws_the_serve_panel_and_can_reach_all_four_of_its_verbs() -> None:

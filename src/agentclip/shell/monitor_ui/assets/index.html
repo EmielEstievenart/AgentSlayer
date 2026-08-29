@@ -194,16 +194,18 @@
             </div>
           </div>
 
-          <!-- One footer strip: the hint plus exactly one of add/reset/delete,
-               and the close, which here closes the WINDOW - the editor is this
-               window rather than a modal in it. -->
+          <!-- One footer strip: the hint plus exactly one of add/reset/delete.
+               No close: the editor is this window rather than a modal in it,
+               every edit applies as it is made (ui-monitor.md §11.10), and a
+               "Close" that shut the whole monitor was a trap. The window's own
+               title-bar close is the one door out, and it still runs the
+               editor's apply path (CalibrationView.request_close). -->
           <div class="svc-footer">
             <span class="hint" id="svc-hint"></span>
             <span class="spacer"></span>
             <button id="svc-add" type="button" hidden>Add service</button>
             <button id="svc-reset" type="button" hidden>Reset to default</button>
             <button id="svc-delete" type="button" hidden class="danger">Delete</button>
-            <button id="svc-close" type="button">Close (esc)</button>
           </div>
         </div>
 

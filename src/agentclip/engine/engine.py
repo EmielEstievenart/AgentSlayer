@@ -290,6 +290,11 @@ class Done:
     # task_done's `result` param: a sub-agent's deliverable, handed to the
     # agent that delegated to it. Empty for an ordinary master session.
     result: str = ""
+    # True when nothing was completed at all: the model wrote only SAY blocks
+    # and is waiting for the user to answer them. The session is parked in
+    # DONE exactly as after task_done - a follow-up reopens it - but there is
+    # no summary and nothing to announce as finished.
+    waiting: bool = False
 
 
 StepResult = Send | AskUser | Delegate | Done
@@ -1560,6 +1565,22 @@ class Engine:
             results.insert(0, _truncated_result(reply))
         notes = [f"note: {w.detail}" for w in reply.warnings if w.kind in _NOTE_WARNINGS]
         if not reply.calls and not reply.truncated and exec_.done_summary is None:
+            if reply.says and self._role == "master":
+                # The model said something and asked nothing of the tools: a
+                # greeting, a question back, an answer needing no file touched.
+                # That is a turn FOR THE USER, and the nag below would paste
+                # "every reply must contain at least one call" into a chat
+                # whose model just did what section 1 of the bootstrap told it
+                # to. So the session parks the way task_done parks it - the
+                # user's next message reopens it (protocol.md section 8) - with
+                # nothing copied out and nothing announced as finished. A
+                # sub-agent has no user to wait on, so it keeps the nag.
+                self._plan = []
+                self._reply = None
+                self._exec = None
+                self._session.append_event("waiting", says=len(reply.says))
+                self._set_phase(Phase.DONE)
+                return Done("", None, waiting=True)
             notes.append(
                 "note: your reply contained no tool calls; every reply must contain"
                 " at least one call until task_done."
